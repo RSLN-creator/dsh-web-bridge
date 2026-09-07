@@ -111,3 +111,27 @@ export function flattenOpenAiMessages(messages = []) {
   segs.push('Respond now as the Assistant: reply only with your next reply text to the latest User message.');
   return segs.join('\n\n');
 }
+
+/** Pull image attachments out of OpenAI chat.messages (HTTP front path).
+ *  data: URL 内联解码；https URL 原样透出（由驱动侧决定是否抓取）。 */
+const OPENAI_IMAGE_DATA = /^data:(image\/[\w.+-]+);base64,(.+)$/s;
+export function imagesOfOpenAiMessages(messages = []) {
+  const out = [];
+  for (const m of messages) {
+    if (!m || !Array.isArray(m.content)) continue;
+    for (const b of m.content) {
+      if (!b) continue;
+      let url = null;
+      if (typeof b.image_url === 'string') url = b.image_url;
+      else if (b.image_url && typeof b.image_url.url === 'string') url = b.image_url.url;
+      else if (typeof b.imageUrl === 'string') url = b.imageUrl;
+      else if (b.imageUrl && typeof b.imageUrl.url === 'string') url = b.imageUrl.url;
+      else if (b.type === 'input_image' && typeof b.image_url === 'string') url = b.image_url;
+      if (typeof url !== 'string' || !url) continue;
+      const dm = OPENAI_IMAGE_DATA.exec(url);
+      if (dm) out.push({ name: b.name || 'image.png', contentType: dm[1], data: dm[2] });
+      else if (/^https:\/\//.test(url)) out.push({ name: b.name || 'image.png', contentType: b.mediaType || b.image_url?.media_type || 'image/png', url });
+    }
+  }
+  return out;
+}

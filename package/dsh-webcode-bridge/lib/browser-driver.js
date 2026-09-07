@@ -1,44 +1,47 @@
-// browser-driver.js — in-package browser automation (no extension needed).
+// browser-driver.js — 内置浏览器自动化（无需扩展）。
 //
-// Drives the system Edge (playwright-core + executablePath) against the web
-// AI site with a dedicated persistent profile:
-//   • first use: a headed window opens for a one-time login;
-//   • afterwards: headless, invisible — fill input, auto-send, capture the
-//     site's own SSE response via an init script, stream deltas out.
+// 用系统 Edge（playwright-core + executablePath）以独立持久 profile 驱动内容
+// 服务网页：首次 headed 登录一次，之后 headless——填输入框、自动发送、通过
+// init 脚本捕获站点自身的 SSE 流并吐出增量。
 //
-// The capture init script mirrors extension/content/capture_page.js (XHR +
-// fetch wrap, tee for fetch) and forwards chunks through an exposed binding.
+// 多站点：站点契约（输入框/按钮/捕获路径/解码器）来自 lib/contract.js；
+// 解码器实例从 globalThis.WebCodeStreamDecoders 按站点 decoder 字段选用；
+// 没有稳定网络流的站点（decoder:'dom'，如 Gemini）用页面终态抓取兜底。
+//
+// 思考链与图片：页面捕获 → decoder onThink/onImage → active → runTurn 返回
+// {text, thinking, images}——修复“没有思考链条”“有图说没图”。
 
 import { chromium } from 'playwright-core';
-import { DEEPSEEK, resolveWebModel, DEEPSEEK_WEB_CONTRACT } from './contract.js';
+import { getSite, getContract, resolveWebModel } from './contract.js';
 import { deriveLastRate } from './metrics.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// The decoder is a plain browser-style script that defines a global; load it
-// into this Node process the same way the unit test does.
 const decoderPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'decoder.js');
-// Fallback: repo-relative resolution may differ when installed as a package —
-// accept an explicit path via options.decoderPath.
-function loadDecoderClass(explicitPath) {
+function loadDecoderRegistry(explicitPath) {
   const p = explicitPath || decoderPath;
   const code = fs.readFileSync(p, 'utf8');
   new Function(code)();
-  return globalThis.WebCodeDeepSeekStreamDecoder;
+  return globalThis.WebCodeStreamDecoders;
 }
 
 const SEL = {
-  input: DEEPSEEK_WEB_CONTRACT.inputSelector,
-  sendButton: DEEPSEEK_WEB_CONTRACT.sendButtonSelector,
-  stopButton: DEEPSEEK_WEB_CONTRACT.stopButtonSelector,
+  input: DEEPSEEK_INPUT(),
+  sendButton: "div[role='button']:has(path[d^='M8.3125'])",
+  stopButton: "div[role='button']:has(path[d^='M2 4.88'])",
 };
+function DEEPSEEK_INPUT() { return 'textarea.ds-scroll-area'; }
 
-const CAPTURE_INIT = `
+/** 捕获脚本：按站点 completionPaths 拦截 SSE（XHR drain + fetch tee）。 */
+function captureInit(paths) {
+  const list = JSON.stringify(paths.length ? paths : ['/api/v0/chat/completion']);
+  return `
 (function () {
   if (window.__webcodeCaptureInstalled) return;
   window.__webcodeCaptureInstalled = true;
-  const TARGET = '/api/v0/chat/completion';
+  const TARGETS = ${list};
+  const hit = (u) => TARGETS.some((t) => String(u || '').includes(t));
   const origOpen = XMLHttpRequest.prototype.open;
   const origSend = XMLHttpRequest.prototype.send;
   function emit(id, phase, text) { try { window.__webcodeChunk(id, phase, text || ''); } catch {} }
@@ -49,7 +52,7 @@ const CAPTURE_INIT = `
   };
   XMLHttpRequest.prototype.send = function () {
     const info = this.__wcInfo;
-    if (info && info.method === 'POST' && info.url.includes(TARGET)) {
+    if (info && info.method === 'POST' && hit(info.url)) {
       const id = newId();
       let lastLen = 0;
       const drain = () => {
@@ -71,7 +74,7 @@ const CAPTURE_INIT = `
       try {
         const url = typeof input === 'string' ? input : (input && input.url) || '';
         const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
-        if (method === 'POST' && url.includes(TARGET) && resp.ok && resp.body) {
+        if (method === 'POST' && hit(url) && resp.ok && resp.body) {
           const id = newId();
           emit(id, 'start', '');
           const [forPage, forCapture] = resp.body.tee();
@@ -95,18 +98,43 @@ const CAPTURE_INIT = `
   }
 })();
 `;
+}
+
+/** DOM 兜底抓取（decoder:'dom' 站点）：等回答区稳定后抄全文。 */
+const DOM_CAPTURE = `
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const text = () => {
+    const sels = ['.markdown', '.answer', '[data-message-author-role="assistant"]', '.response-container', 'main'];
+    for (const s of sels) {
+      const nodes = [...document.querySelectorAll(s)];
+      if (nodes.length) return nodes[nodes.length - 1].innerText || '';
+    }
+    return document.body.innerText || '';
+  };
+  let prev = text();
+  let stable = 0;
+  for (let i = 0; i < 240; i++) {
+    await sleep(1000);
+    const cur = text();
+    if (cur === prev) stable++; else stable = 0;
+    prev = cur;
+    if (stable >= 4) break;
+  }
+  return prev;
+})()
+`;
 
 const fillAndSend = (prompt) => {
-  const SEL = {
-    input: 'textarea.ds-scroll-area',
-    sendButton: "div[role='button']:has(path[d^='M8.3125'])",
-  };
   const visible = (el) => { if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
-  const el = [...document.querySelectorAll(SEL.input)].find(visible) || document.querySelector(SEL.input);
+  const el = [...document.querySelectorAll('textarea')].find(visible) || document.querySelector('textarea, [contenteditable="true"]');
   if (!el) return { ok: false, reason: 'input-not-found' };
-  const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-  Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, prompt);
-  el.dispatchEvent(new Event('input', { bubbles: true }));
+  if (el.isContentEditable) { el.textContent = prompt; el.dispatchEvent(new InputEvent('input', { bubbles: true })); }
+  else {
+    const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, prompt);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  }
   el.focus();
   const base = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
   el.dispatchEvent(new KeyboardEvent('keydown', base));
@@ -116,8 +144,14 @@ const fillAndSend = (prompt) => {
 };
 
 export function createBrowserDriver(options = {}) {
+  const siteId = options.siteId ?? 'deepseek';
+  const site = getSite(siteId);
+  const contract = getContract(siteId);
+  if (!site || !contract) throw new Error('webcode driver: unknown siteId ' + siteId);
+  const siteUrl = options.site ?? site.origin + '/';
   const cfg = {
-    site: options.site ?? 'https://chat.deepseek.com/',
+    siteId,
+    site: siteUrl,
     profileDir: options.profileDir,
     executablePath: options.executablePath ?? defaultEdgePath(),
     headless: options.headless !== false,
@@ -126,26 +160,30 @@ export function createBrowserDriver(options = {}) {
     decoderPath: options.decoderPath ?? null,
     logger: options.logger ?? console,
   };
-  const log = (...a) => cfg.logger.log?.('[webcode-driver]', ...a);
-  const warn = (...a) => cfg.logger.warn?.('[webcode-driver]', ...a);
+  const SEL = {
+    input: contract.inputSelector,
+    sendButton: contract.sendButtonSelector,
+    stopButton: contract.stopButtonSelector,
+  };
+  const log = (...a) => cfg.logger.log?.('[webcode-driver:' + siteId + ']', ...a);
+  const warn = (...a) => cfg.logger.warn?.('[webcode-driver:' + siteId + ']', ...a);
 
   let ctx = null;
   let page = null;
   let busy = false;
-  let active = null;   // { captureId, decoder, text, onDelta, resolve, reject }
-  let lastFinished = null; // the entry finishActive() just retired — carries turn timing
-  let Decoder = null;
+  let transitioning = false;
+  let active = null;
+  let lastFinished = null;
+  let Decoders = null;
   let loggedIn = null;
   let selectedModel = null;
   let requestMetadata = null;
   let launching = null;
   let interaction = Promise.resolve();
-  let lastTurn = null; // { sessionId, url, at } — web session the last turn landed in
-  // session-mode store: dshSessionId → { webSessionId, at } — one web
-  // conversation per DSH session, persisted so restarts resume the chat
+  let lastTurn = null;
   let conversations = new Map();
   let storeLoaded = false;
-  const storePath = () => path.join(cfg.profileDir, 'webcode-sessions.json');
+  const storePath = () => path.join(cfg.profileDir, 'webcode-sessions-' + siteId + '.json');
 
   function loadStore() {
     if (storeLoaded) return;
@@ -163,29 +201,18 @@ export function createBrowserDriver(options = {}) {
       fs.writeFileSync(storePath(), JSON.stringify(Object.fromEntries(conversations), null, 2));
     } catch (e) { warn('session store save failed:', e?.message); }
   }
-  function conversationFor(key) {
-    loadStore();
-    return conversations.get(String(key || 'main')) || null;
-  }
+  function conversationFor(key) { loadStore(); return conversations.get(String(key || 'main')) || null; }
   function rememberConversation(key, webSessionId) {
     loadStore();
     conversations.set(String(key || 'main'), { webSessionId, at: Date.now() });
-    // 防止并行 agents / 长期使用让会话槽无限增长：保留最近 128 个。
     if (conversations.size > 128) {
-      let oldestKey = null;
-      let oldestAt = Infinity;
-      for (const [k, v] of conversations) {
-        if (v && v.at < oldestAt) { oldestAt = v.at; oldestKey = k; }
-      }
+      let oldestKey = null; let oldestAt = Infinity;
+      for (const [k, v] of conversations) if (v && v.at < oldestAt) { oldestAt = v.at; oldestKey = k; }
       if (oldestKey) conversations.delete(oldestKey);
     }
     saveStore();
   }
-  function forgetConversation(key) {
-    loadStore();
-    conversations.delete(String(key || 'main'));
-    saveStore();
-  }
+  function forgetConversation(key) { loadStore(); conversations.delete(String(key || 'main')); saveStore(); }
 
   function status() {
     loadStore();
@@ -195,6 +222,7 @@ export function createBrowserDriver(options = {}) {
       loggedIn,
       needLogin: loggedIn === false,
       selectedModel,
+      siteId,
       profileDir: cfg.profileDir,
       lastTurn,
       lastRate: deriveLastRate(lastFinished, selectedModel),
@@ -206,12 +234,9 @@ export function createBrowserDriver(options = {}) {
 
   function defaultEdgePath() {
     for (const c of [
-      // Windows
       'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
       'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-      // macOS
       '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
-      // Linux
       '/usr/bin/microsoft-edge',
       '/usr/bin/microsoft-edge-stable',
       '/usr/bin/microsoft-edge-dev',
@@ -224,20 +249,30 @@ export function createBrowserDriver(options = {}) {
   function onPageCapture(m) {
     if (!active) return;
     if (m.phase === 'start') {
-      if (!active.captureId) {
+      if (!active.captureId && active.decoderKind !== 'dom') {
         active.captureId = m.captureId;
-        active.decoder = new Decoder({
+        const Cls = Decoders?.[active.decoderKind] ?? Decoders?.deepseek;
+        if (!Cls) { warn('no decoder for kind', active.decoderKind); return; }
+        active.decoder = new Cls({
           onDelta: (t) => {
             if (active.firstResponseAt == null) active.firstResponseAt = performance.now();
             active.text += t;
             try { active.onDelta?.(t); } catch {}
           },
-          onThink: () => { if (active.firstThinkAt == null) active.firstThinkAt = performance.now(); },
+          onThink: (t) => {
+            if (active.firstThinkAt == null) active.firstThinkAt = performance.now();
+            active.thinking += t;
+            try { active.onThink?.(t); } catch {}
+          },
+          onImage: (img) => {
+            if (img) active.images.push(img);
+            try { active.onImage?.(img); } catch {}
+          },
         });
       }
       return;
     }
-    if (m.captureId !== active.captureId) return;
+    if (active.captureId && m.captureId !== active.captureId) return;
     if (m.phase === 'chunk' && active.decoder) active.decoder.push(m.text);
     if (m.phase === 'end' && active.decoder) {
       const result = active.decoder.finish();
@@ -267,8 +302,9 @@ export function createBrowserDriver(options = {}) {
       ...(cfg.storageState ? { storageState: cfg.storageState } : {}),
     });
     page = ctx.pages()[0] || (await ctx.newPage());
-    page.on('request', request => {
-      if (request.method() !== 'POST' || !request.url().includes('/api/v0/chat/completion')) return;
+    const paths = site.completionPaths || [];
+    page.on('request', (request) => {
+      if (request.method() !== 'POST' || !paths.some((p) => request.url().includes(p))) return;
       try {
         const body = request.postDataJSON();
         requestMetadata = Object.fromEntries(Object.entries(body).filter(([key, value]) => /model|thinking|search/.test(key) && ['string', 'boolean', 'number'].includes(typeof value)));
@@ -277,14 +313,16 @@ export function createBrowserDriver(options = {}) {
     await page.exposeBinding('__webcodeChunk', (source, captureId, phase, text) => {
       onPageCapture({ captureId, phase, text });
     });
-    await page.addInitScript(CAPTURE_INIT);
+    const init = captureInit(paths);
+    await page.addInitScript(init);
+    try { await page.evaluate(init); } catch { /* 页面尚未可用时忽略 */ }
     log(`launched (${headless ?? cfg.headless ? 'headless' : 'headed'}) profile=${cfg.profileDir}`);
   }
 
   async function ensure() {
     if (launching) return launching;
     if (ctx && page && !page.isClosed()) return;
-    if (!Decoder) Decoder = loadDecoderClass(cfg.decoderPath);
+    if (!Decoders) Decoders = loadDecoderRegistry(cfg.decoderPath);
     launching = launch();
     try { await launching; } finally { launching = null; }
   }
@@ -327,23 +365,12 @@ export function createBrowserDriver(options = {}) {
       await page.waitForSelector(SEL.input, { timeout: 20_000 });
       return true;
     } catch {
-      return false; // likely not logged in (redirected to /sign_in)
+      return false; // likely not logged in
     }
   }
 
-  /**
-   * One web turn. `navigate`:
-   *   'fresh'      → new web conversation (first turn of a session)
-   *   '<chat url>' → existing conversation page (session continuation)
-   * Fills the input, auto-sends, streams the answer via the capture hook.
-   */
-  /**
-   * Upload image attachments through the page's own file input (识图模式).
-   * Files: [{ name, contentType, data(base64) }]. The thumbnails must finish
-   * uploading before the text is sent, so wait for the composer to settle.
-   */
   async function uploadImages(files) {
-    const fi = page.locator("input[type='file']").first();
+    const fi = page.locator(contract.attachSelector || "input[type='file']").first();
     if (!await fi.count()) {
       const err = new Error('ATTACH_UNAVAILABLE: 页面没有可用的文件上传入口');
       err.code = 'ATTACH_UNAVAILABLE';
@@ -355,24 +382,21 @@ export function createBrowserDriver(options = {}) {
       buffer: Buffer.from(String(f.data || ''), 'base64'),
     }));
     await fi.setInputFiles(payloads);
-    // give the site time to render thumbnails / finish its own upload calls
     await page.waitForTimeout(500);
   }
 
-  async function runTurn(message, { navigate, signal, onDelta, model, images } = {}) {
-    if (busy) throw new Error('driver busy');
+  async function runTurn(message, { navigate, signal, onDelta, onThink, onImage, model, images } = {}) {
+    if (busy || transitioning) throw new Error('driver busy');
     busy = true;
     let timer = null;
-    let rebuilt = false; // 续聊目标被删除/不可达时，自动降级到新会话
-    // Register abort handling BEFORE any await: a caller that cancels while
-    // Edge is still cold-starting must not end up sending the prompt anyway.
+    let rebuilt = false;
     if (signal?.aborted) { busy = false; throw abortError(); }
     const throwIfAborted = () => { if (signal?.aborted) throw abortError(); };
     const onAbort = () => {
       const a = finishActive();
       void (async () => {
         try {
-          const stop = page?.locator(SEL.stopButton);
+          const stop = page?.locator(SEL.stopButton || "div[role='button']").first();
           if (stop && await stop.isVisible()) await stop.click({ timeout: 1000 });
         } catch {}
       })();
@@ -388,13 +412,11 @@ export function createBrowserDriver(options = {}) {
         throwIfAborted();
         if (!inputReady) {
           loggedIn = false;
-          const err = new Error('NEED_LOGIN: web AI session missing — open the Web AI panel and log in once');
+          const err = new Error(`NEED_LOGIN: ${site.name} 会话缺失 — 打开 Web AI 面板登录一次`);
           err.code = 'NEED_LOGIN';
           throw err;
         }
       } else {
-        // continue an existing conversation; if it is gone (deleted on the
-        // web side), fall back to a fresh chat so the turn still lands
         let ready = false;
         try {
           const target = String(navigate);
@@ -410,7 +432,7 @@ export function createBrowserDriver(options = {}) {
           warn('conversation page unreachable, falling back to a fresh chat');
           const inputReady = await gotoFreshChat();
           if (!inputReady) {
-            const err = new Error('NEED_LOGIN: web AI session missing — open the Web AI panel and log in once');
+            const err = new Error(`NEED_LOGIN:${site.name} 会话缺失 — 打开 Web AI 面板登录一次`);
             err.code = 'NEED_LOGIN';
             throw err;
           }
@@ -418,18 +440,23 @@ export function createBrowserDriver(options = {}) {
       }
 
       loggedIn = true;
-      const selection = model
-        ? await selectModel(model, { hasImages: Array.isArray(images) && images.length > 0 })
-        : null;
-      const search = page.locator('[aria-pressed]').filter({ hasText: DEEPSEEK_WEB_CONTRACT.searchTogglePattern });
-      if (await search.count() && await search.first().getAttribute('aria-pressed') === 'true') await search.first().click();
+      const selection = model ? await selectModel(model, { hasImages: Array.isArray(images) && images.length > 0 }) : null;
+      if (contract.searchTogglePattern) {
+        const search = page.locator('[aria-pressed]').filter({ hasText: contract.searchTogglePattern });
+        if (await search.count() && await search.first().getAttribute('aria-pressed') === 'true') await search.first().click();
+      }
       throwIfAborted();
       if (Array.isArray(images) && images.length) {
         await uploadImages(images);
         throwIfAborted();
       }
       const done = new Promise((resolve, reject) => {
-        active = { captureId: null, decoder: null, text: '', onDelta, resolve, reject, timer: null, firstThinkAt: null, firstResponseAt: null, t0: null };
+        active = {
+          captureId: null, decoder: null, decoderKind: site.decoder,
+          text: '', thinking: '', images: [],
+          onDelta, onThink, onImage, resolve, reject,
+          timer: null, firstThinkAt: null, firstResponseAt: null, t0: null,
+        };
       });
       timer = setTimeout(() => {
         const a = finishActive();
@@ -440,7 +467,7 @@ export function createBrowserDriver(options = {}) {
 
       done.catch(() => {});
       if (String(message).length > 400_000) {
-        warn(`large prompt: ${String(message).length} chars — the web composer may become slow; consider trimming context`);
+        warn(`large prompt:${String(message).length} chars — the web composer may become slow; consider trimming context`);
       }
       const input = page.locator(SEL.input).first();
       await input.fill(message);
@@ -448,22 +475,22 @@ export function createBrowserDriver(options = {}) {
       if (active) active.t0 = performance.now();
       await input.press('Enter');
 
-      const result = await done;
-      if (model && requestMetadata?.model_type && selection?.strict !== false) {
-        // 真机实测（real-probe-08）确认：网页识图模式在 /api/v0/chat/completion
-        // 上报 model_type:"vision"（并非"基于 V4-Flash 仍上报 default"——那是
-        // 二手调研的错误结论，曾导致此期望被误改成 default 而误报）。三个模式
-        // 的真实上报值：flash→default / deepseek→expert / vision→vision。
-        const expected = DEEPSEEK_WEB_CONTRACT.expectedModelType(model);
+      let result;
+      if (site.decoder === 'dom') {
+        // 无稳定网络流的站点：等页面终态，抄全文（无思考/图片）
+        const text = await page.evaluate(DOM_CAPTURE).catch(() => '');
+        result = { complete: Boolean(text.trim()), text: (text || '').trim(), thinking: '', images: [], reason: text ? undefined : 'dom_capture_empty' };
+        const a = finishActive();
+      } else {
+        result = await done;
+      }
+      if (siteId === 'deepseek' && model && requestMetadata?.model_type && selection?.strict !== false) {
+        const expected = contract.expectedModelType(model);
         if (requestMetadata.model_type !== expected) throw new Error('MODEL_UI_CHANGED: 网页实际模型与所选模型不一致');
       }
       if (!result.complete) throw new Error('web capture ended incomplete: ' + (result.reason || 'unknown'));
       if (!result.text?.trim()) throw new Error('empty response from web AI');
       lastTurn = { sessionId: sessionIdFromUrl(page.url()), url: safeUrl(page.url()), at: Date.now(), rebuilt };
-      // Real phase metrics (ms) from the SSE stream: send → first THINK
-      // fragment → first RESPONSE fragment → stream end. The relay prefers
-      // these over its own coarse estimates. The entry is retired (active
-      // nulled) by the time `done` resolves, so timing lives on lastFinished.
       const endAt = performance.now();
       const fin = lastFinished;
       const t0 = fin?.t0 ?? endAt;
@@ -477,10 +504,15 @@ export function createBrowserDriver(options = {}) {
         thinkingMs,
         responseMs: firstResponseMs != null ? Math.max(1, Math.round(endAt - t0) - firstResponseMs) : null,
       };
-      // Expose the real phase metrics on status() too, so the settings page can
-      // show measured generation speed against any coarse estimate.
       if (fin) Object.assign(fin, { metrics, chars: (result.text || '').length });
-      return { text: result.text, sessionId: lastTurn.sessionId, metrics, rebuilt };
+      return {
+        text: result.text,
+        thinking: result.thinking || '',
+        images: Array.isArray(result.images) ? result.images : [],
+        sessionId: lastTurn.sessionId,
+        metrics,
+        rebuilt,
+      };
     } finally {
       signal?.removeEventListener('abort', onAbort);
       if (active) finishActive();
@@ -489,42 +521,66 @@ export function createBrowserDriver(options = {}) {
     }
   }
 
-  /**
-   * Session-mode turn: one web conversation per key. `fresh` forces a new
-   * conversation (first turn / divergence reset); otherwise the stored
-   * conversation page is reopened and only the incremental message lands.
-   */
-  async function sendTurn(key, message, { fresh = false, signal, onDelta, model, images } = {}) {
+  async function sendTurn(key, message, { fresh = false, signal, onDelta, onThink, onImage, model, images } = {}) {
     const existing = conversationFor(key);
     let navigate = 'fresh';
     if (!fresh && existing?.webSessionId) {
       const root = new URL(cfg.site);
       navigate = root.origin + '/a/chat/s/' + encodeURIComponent(existing.webSessionId);
     }
-    const result = await runTurn(message, { navigate, signal, onDelta, model, images });
+    const result = await runTurn(message, { navigate, signal, onDelta, onThink, onImage, model, images });
     if (result.sessionId) rememberConversation(key, result.sessionId);
-    else if (navigate !== 'fresh') {
-      // continued page but no id in URL — treat as diverged, reset the slot
-      forgetConversation(key);
-    }
+    else if (navigate !== 'fresh') forgetConversation(key);
     return result;
   }
 
-  /** Stateless single turn (OpenAI HTTP front / aux calls): always fresh. */
-  async function sendPrompt(prompt, { signal, onDelta, meta, model } = {}) {
-    return runTurn(prompt, { navigate: 'fresh', signal, onDelta, model: model || meta?.model, images: meta?.images });
+  async function sendPrompt(prompt, { signal, onDelta, onThink, onImage, meta, model } = {}) {
+    return runTurn(prompt, {
+      navigate: 'fresh', signal, onDelta, onThink, onImage,
+      model: model || meta?.model,
+      images: meta?.images,
+    });
   }
 
   async function selectModel(value, { hasImages = false } = {}) {
     const model = resolveWebModel(value);
-    if (model.id === 'vision' && !hasImages) {
+    if (model.siteId !== siteId) throw new Error(`MODEL_SITE_MISMATCH: 模型 ${model.id} 属于站点${model.siteId}，当前驱动为 ${siteId}`);
+    if (model.vision && !hasImages) {
       const err = new Error('VISION_REQUIRES_IMAGE: 识图模式必须附带至少一张图片');
       err.code = 'VISION_REQUIRES_IMAGE';
       throw err;
     }
     const label = new RegExp('^(?:' + model.labels.join('|') + ')$', 'i');
+    // DeepSeek 契约保持原有严格选择逻辑；其余站点用通用标签点击（宽松）。
+    if (siteId === 'deepseek') return selectModelDeepSeek(model, { hasImages, label });
+    return selectModelGeneric(model, { label });
+  }
+
+  async function selectModelGeneric(model, { label }) {
+    let mode = page.getByText(model.labels[0], { exact: true }).filter({ visible: true });
+    if (await mode.count()) {
+      await mode.last().click();
+      await page.keyboard.press('Escape');
+      selectedModel = model.id;
+      return { strict: true };
+    }
+    const trigger = page.getByRole('button', { name: /^(模型|Model|模式|Mode)/i }).first();
+    if (await trigger.count()) {
+      await trigger.click().catch(() => {});
+      const option = page.getByRole('option', { name: label }).or(page.getByRole('menuitem', { name: label }));
+      if (await option.count()) {
+        await option.first().click();
+        selectedModel = model.id;
+        return { strict: true };
+      }
+      await page.keyboard.press('Escape');
+    }
+    selectedModel = null;
+    return { strict: false, fallback: 'default-model' };
+  }
+
+  async function selectModelDeepSeek(model, { hasImages, label }) {
     let mode = page.getByText(model.labels[0], { exact: true });
-    // Conversation pages expose only the selected label until its menu opens.
     if (!await mode.count()) {
       const current = page.getByText(/^(快速模式|专家模式|识图模式)$/).filter({ visible: true });
       if (await current.count()) await current.first().click();
@@ -540,10 +596,7 @@ export function createBrowserDriver(options = {}) {
     if (await native.count()) {
       const option = native.first().locator(`option[value="${model.id}"]`);
       if (!await option.count()) {
-        if (model.id === 'vision' && hasImages) {
-          selectedModel = model.id;
-          return { strict: false, fallback: 'image-attachment' };
-        }
+        if (model.vision && hasImages) { selectedModel = model.id; return { strict: false, fallback: 'image-attachment' }; }
         throw new Error('MODEL_UNAVAILABLE: 当前账号没有目标模型 ' + model.id);
       }
       await native.first().selectOption(model.id);
@@ -551,14 +604,10 @@ export function createBrowserDriver(options = {}) {
       selectedModel = model.id;
       return { strict: true };
     }
-    // 旧版页面没有下拉模型目录，只有深度思考开关；不能把 Vision 伪装成文本模型。
     const thinking = page.getByRole('button', { name: /^深度思考$|^DeepThink(?: \(R1\))?$/i });
     if (await thinking.count()) {
-      if (model.id === 'vision' && hasImages) {
-        selectedModel = model.id;
-        return { strict: false, fallback: 'image-attachment' };
-      }
-      if (model.id === 'vision') throw new Error('MODEL_UNAVAILABLE: 当前网页没有独立 Vision 模型选择器');
+      if (model.vision && hasImages) { selectedModel = model.id; return { strict: false, fallback: 'image-attachment' }; }
+      if (model.vision) throw new Error('MODEL_UNAVAILABLE: 当前网页没有独立 Vision 模型选择器');
       const control = thinking.first();
       const pressed = await control.getAttribute('aria-pressed');
       const state = await control.getAttribute('data-state');
@@ -571,46 +620,36 @@ export function createBrowserDriver(options = {}) {
     }
     const trigger = page.getByRole('button', { name: /^(Flash|Vision|DeepSeek|模型|Model|快速|极速|视觉|深度思考)$/i });
     if (!await trigger.count()) {
-      if (model.id === 'vision' && hasImages) {
-        selectedModel = model.id;
-        return { strict: false, fallback: 'image-attachment' };
-      }
+      if (model.vision && hasImages) { selectedModel = model.id; return { strict: false, fallback: 'image-attachment' }; }
       throw new Error('MODEL_UI_CHANGED: 未找到模型选择器');
     }
     await trigger.first().click();
     const option = page.getByRole('option', { name: label }).or(page.getByRole('menuitem', { name: label }));
     if (!await option.count()) {
-      if (model.id === 'vision' && hasImages) {
-        selectedModel = model.id;
-        return { strict: false, fallback: 'image-attachment' };
-      }
+      if (model.vision && hasImages) { selectedModel = model.id; return { strict: false, fallback: 'image-attachment' }; }
       throw new Error('MODEL_UNAVAILABLE: 当前账号没有目标模型 ' + model.id);
     }
     await option.first().click();
     if (!await page.getByRole('button', { name: label }).count()) throw new Error('模型选择未确认');
     return { strict: true };
-    selectedModel = model.id;
   }
 
   async function diagnostics() {
-    if (!page) return { controls: [], urlPath: null, transport: 'playwright-edge', preview: false };
+    if (!page) return { controls: [], urlPath: null, transport: 'playwright-edge', preview: false, siteId };
     return {
       urlPath: new URL(page.url()).pathname,
       selectedModel,
       requestMetadata,
       transport: 'playwright-edge',
       preview: !page.isClosed?.(),
+      siteId,
       conversationCount: conversations.size,
-      controls: await page.locator('body *').evaluateAll(nodes => nodes.filter(n => /^(快速模式|专家模式|识图模式|深度思考|智能搜索)$/.test((n.textContent || '').trim())).map(n => ({ text: n.textContent.trim(), tag: n.tagName, pressed: n.getAttribute('aria-pressed'), state: n.getAttribute('data-state'), className: n.className, parentClass: n.parentElement?.className })).slice(0, 25)),
+      controls: await page.locator('body *').evaluateAll(nodes => nodes.filter(n => (n.textContent || '').trim().length <= 12).map(n => ({ text: n.textContent.trim(), tag: n.tagName, pressed: n.getAttribute('aria-pressed'), state: n.getAttribute('data-state') })).filter(c => c.text).slice(0, 25)),
     };
   }
 
-  /** Drop one stored conversation (divergence reset); next turn starts fresh. */
-  async function resetConversation(key) {
-    forgetConversation(key);
-  }
+  async function resetConversation(key) { forgetConversation(key); }
 
-  /** The web login token, read inside the logged-in page (mirror seeding). */
   async function getToken() {
     await ensure();
     if (!page) throw new Error('driver page not ready');
@@ -619,74 +658,80 @@ export function createBrowserDriver(options = {}) {
     if (origin !== new URL(cfg.site).origin) {
       await page.goto(cfg.site, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => {});
     }
-    return page.evaluate(() => {
-      const raw = localStorage.getItem('userToken');
+    const key = siteId === 'deepseek' ? 'userToken' : null;
+    if (!key) return null;
+    return page.evaluate((k) => {
+      const raw = localStorage.getItem(k);
       try {
         const j = JSON.parse(raw || 'null');
         if (j && typeof j.value === 'string') return j.value;
       } catch { /* raw string form */ }
       return raw || null;
-    });
+    }, key);
   }
 
-  /** Open a headed window for the one-time login; wait; then go headless. */
   async function openLogin({ onState } = {}) {
-    if (busy) throw new Error('driver busy with a web turn — login refused');
-    try { if (ctx) await ctx.close(); } catch {}
-    ctx = null; page = null;
-    log('opening headed window for login');
-    await launch({ headless: false });
+    if (busy || transitioning) throw new Error('driver busy with a web turn — login refused');
+    transitioning = true;
     try {
-      await page.goto(cfg.site, { waitUntil: 'domcontentloaded', timeout: 45_000 });
-    } catch {}
-    onState?.('waiting-for-login');
-    const t0 = Date.now();
-    for (;;) {
-      await new Promise((r) => setTimeout(r, 1500));
-      if (Date.now() - t0 > cfg.loginTimeoutMs) throw new Error('login wait timed out');
-      try {
-        if (page.isClosed?.()) throw new Error('login window was closed before login completed');
-        const u = new URL(page.url());
-        if (u.pathname === '/sign_in') continue;
-        const input = await page.$(SEL.input);
-        if (input) break;
-      } catch (err) {
-        throw err;
+      try { if (ctx) await ctx.close(); } catch {}
+      ctx = null; page = null;
+      log('opening headed window for login');
+      await launch({ headless: false });
+      try { await page.goto(cfg.site, { waitUntil: 'domcontentloaded', timeout: 45_000 }); } catch {}
+      onState?.('waiting-for-login');
+      const t0 = Date.now();
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 1500));
+        if (Date.now() - t0 > cfg.loginTimeoutMs) throw new Error('login wait timed out');
+        try {
+          if (page.isClosed?.()) throw new Error('login window was closed before login completed');
+          const u = new URL(page.url());
+          if (/sign|login/i.test(u.pathname)) continue;
+          const input = await page.$(SEL.input);
+          if (input) break;
+        } catch (err) {
+          throw err;
+        }
       }
+      log('login detected; switching to headless');
+      try { await ctx.close(); } catch {}
+      ctx = null; page = null;
+      await launch({ headless: true });
+      await gotoFreshChat();
+      onState?.('ready');
+    } finally {
+      transitioning = false;
     }
-    log('login detected; switching to headless');
-    try { await ctx.close(); } catch {}
-    ctx = null; page = null;
-    await launch({ headless: true });
-    await gotoFreshChat();
-    onState?.('ready');
   }
 
-  /** Adopt cookies+localStorage from another Edge profile (session transfer). */
   async function importStorageFromProfile(sourceProfileDir) {
-    if (busy) throw new Error('driver busy with a web turn — session import refused');
-    const cookiesFile = path.join(sourceProfileDir, 'Default', 'Network', 'Cookies');
-    if (!fs.existsSync(cookiesFile)) throw new Error('source profile has no cookies: ' + sourceProfileDir);
-    let tmp = null;
+    if (busy || transitioning) throw new Error('driver busy with a web turn — session import refused');
+    transitioning = true;
     try {
-      tmp = await chromium.launchPersistentContext(sourceProfileDir, {
-        executablePath: cfg.executablePath,
-        headless: true,
-        args: ['--no-first-run', '--disable-blink-features=AutomationControlled'],
-      });
-      cfg.storageState = await tmp.storageState();
+      const cookiesFile = path.join(sourceProfileDir, 'Default', 'Network', 'Cookies');
+      if (!fs.existsSync(cookiesFile)) throw new Error('source profile has no cookies: ' + sourceProfileDir);
+      let tmp = null;
+      try {
+        tmp = await chromium.launchPersistentContext(sourceProfileDir, {
+          executablePath: cfg.executablePath,
+          headless: true,
+          args: ['--no-first-run', '--disable-blink-features=AutomationControlled'],
+        });
+        cfg.storageState = await tmp.storageState();
+      } finally {
+        try { await tmp?.close(); } catch {}
+      }
+      const stale = finishActive();
+      stale?.reject?.(abortError('session import interrupted the web turn'));
+      if (ctx) { try { await ctx.close(); } catch {} ctx = null; page = null; busy = false; active = null; }
+      await launch({ headless: true });
+      const ready = await gotoFreshChat();
+      log('session imported; loggedIn =', ready);
+      return { loggedIn: ready };
     } finally {
-      try { await tmp?.close(); } catch {}
+      transitioning = false;
     }
-    // settle any half-open turn state before tearing the context down so a
-    // pending sendPrompt promise rejects instead of hanging forever
-    const stale = finishActive();
-    stale?.reject?.(abortError('session import interrupted the web turn'));
-    if (ctx) { try { await ctx.close(); } catch {} ctx = null; page = null; busy = false; active = null; }
-    await launch({ headless: true });
-    const ready = await gotoFreshChat();
-    log('session imported; loggedIn =', ready);
-    return { loggedIn: ready };
   }
 
   async function close() {
@@ -695,42 +740,25 @@ export function createBrowserDriver(options = {}) {
     ctx = null; page = null; busy = false; active = null;
   }
 
-  // ---- web-side introspection (conversation sync / naming / preview) ----
-  //
-  // These run INSIDE the logged-in page, so they carry the site's own cookies
-  // and the userToken it keeps in localStorage — no token ever leaves the
-  // page and nothing is pasted by the user.
-
-  /** GET/POST one DeepSeek web-internal API path with the page's own auth.
-   *  apiPath must be a site-relative path — absolute URLs would turn this
-   *  into "fetch anything with the user's Bearer token attached". */
   async function webApi(apiPath, { method = 'GET', body = null, timeoutMs = 20_000 } = {}) {
     if (typeof apiPath !== 'string' || !apiPath.startsWith('/') || apiPath.startsWith('//')) {
       throw new Error('webApi: site-relative path required');
     }
     await ensure();
     if (!page) throw new Error('driver page not ready');
-    // localStorage (the token source) needs the site's real origin — an
-    // about:blank tab has an opaque origin and denies access.
     let origin = '';
     try { origin = new URL(page.url()).origin; } catch {}
     if (origin !== new URL(cfg.site).origin) {
       await page.goto(cfg.site, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => {});
     }
-    return page.evaluate(async ({ apiPath, method, body, timeoutMs }) => {
-      const raw = localStorage.getItem('userToken');
+    return page.evaluate(async ({ apiPath, method, body, timeoutMs, tokenKey }) => {
+      const raw = tokenKey ? localStorage.getItem(tokenKey) : '';
       let token = raw || '';
       try {
         const j = JSON.parse(raw || 'null');
         if (j && typeof j.value === 'string') token = j.value;
       } catch { /* raw string form */ }
-      const headers = {
-        accept: 'application/json',
-        'x-app-version': '20240105.0',
-        'x-client-platform': 'web',
-        'x-client-version': '1.0.0-alpine',
-        'x-client-locale': 'zh_CN',
-      };
+      const headers = { accept: 'application/json' };
       if (token) headers.authorization = 'Bearer ' + token;
       const init = { method, headers, credentials: 'include' };
       if (body !== null && body !== undefined) {
@@ -750,11 +778,11 @@ export function createBrowserDriver(options = {}) {
       } finally {
         clearTimeout(t);
       }
-    }, { apiPath, method, body, timeoutMs });
+    }, { apiPath, method, body, timeoutMs, tokenKey: siteId === 'deepseek' ? 'userToken' : null });
   }
 
-  /** Latest web conversations (title + time + id) — the real-time naming feed. */
   async function listSessions(count = 100) {
+    if (siteId !== 'deepseek') throw new Error('listSessions: 仅 DeepSeek 支持会话目录 API');
     const r = await webApi('/api/v0/chat_session/fetch_page?count=' + Math.min(500, Math.max(1, Number(count) || 100)));
     const data = r.json?.data ?? r.json;
     const biz = data?.biz_data ?? data;
@@ -774,10 +802,8 @@ export function createBrowserDriver(options = {}) {
     };
   }
 
-  /** Full message history of one web conversation (raw, branch-aware fields
-   *  preserved). Main-line selection + branch counting live in
-   *  web-control.mainLineOf so they stay unit-testable. */
   async function fetchHistory(sessionId) {
+    if (siteId !== 'deepseek') throw new Error('fetchHistory: 仅 DeepSeek 支持历史消息 API');
     if (!/^[0-9a-zA-Z-]{8,64}$/.test(String(sessionId || ''))) throw new Error('invalid sessionId');
     const r = await webApi('/api/v0/chat/history_messages?chat_session_id=' + encodeURIComponent(sessionId));
     const data = r.json?.data ?? r.json;
@@ -802,8 +828,6 @@ export function createBrowserDriver(options = {}) {
     };
   }
 
-  /** Match the headless viewport to the panel container so the preview is
-   *  WYSIWYG (clicks map 1:1) instead of a squeezed 640×900. */
   async function syncViewport(width, height) {
     if (!page || page.isClosed?.()) return;
     const w = Math.round(Math.min(1600, Math.max(360, Number(width) || 0)));
@@ -814,19 +838,10 @@ export function createBrowserDriver(options = {}) {
     }
   }
 
-  /**
-   * Bounding box (viewport CSS px) of the chat column — the area RIGHT of the
-   * session sidebar. Two layouts are covered: flex rows (the column is a
-   * narrow ancestor) and overlay/margin sidebars (probe the left gutter with
-   * elementFromPoint). When nothing occupies the gutter (sidebar collapsed)
-   * there is nothing to cut → null = full page.
-   */
   async function chatClipRect() {
     return page.evaluate(() => {
       const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 40 && r.height > 120; };
-      // the composer itself is only ~50px tall — visibility filter applies to
-      // its ANCESTORS, not to the textarea discovery
-      const input = [...document.querySelectorAll('textarea.ds-scroll-area, textarea')].find((e) => { const r = e.getBoundingClientRect(); return r.width > 40 && r.height > 0; });
+      const input = [...document.querySelectorAll('textarea')].find((e) => { const r = e.getBoundingClientRect(); return r.width > 40 && r.height > 0; });
       if (!input) return null;
       const vw = window.innerWidth, vh = window.innerHeight;
       const ir = input.getBoundingClientRect();
@@ -834,7 +849,6 @@ export function createBrowserDriver(options = {}) {
       for (let el = input; el && el !== document.body; el = el.parentElement) {
         const r = el.getBoundingClientRect();
         if (!vis(el)) continue;
-        // a container wide as the viewport spans the sidebar too — stop before it
         if (r.width >= vw * 0.96) break;
         if (!best || r.width > best.w) best = { x: r.x, w: r.width };
       }
@@ -842,7 +856,6 @@ export function createBrowserDriver(options = {}) {
         const x = Math.max(0, Math.round(best.x));
         return { x, y: 0, width: Math.min(vw - x, Math.round(best.w)), height: vh };
       }
-      // overlay/margin layout: whatever sits in the left gutter next to the composer
       const probe = document.elementFromPoint(12, Math.max(12, Math.min(vh - 12, ir.y || 300)));
       if (probe) {
         const pr = probe.getBoundingClientRect();
@@ -854,9 +867,6 @@ export function createBrowserDriver(options = {}) {
     }).catch(() => null);
   }
 
-  /** JPEG screenshot of the driver page — the real-time official-site view.
-   *  With { width, height } the viewport is resized first (panel-size sync);
-   *  the returned clip metadata lets the client map clicks into the page. */
   async function screenshotBase64({ quality = 55, width, height, withMeta = false } = {}) {
     if (!ctx || !page || page.isClosed?.()) return null;
     if (width || height) await syncViewport(width, height);

@@ -9,7 +9,7 @@
 
 import os from 'node:os';
 import fs from 'node:fs';
-import { DEEPSEEK, resolveWebModel } from './providers.js';
+import { DEEPSEEK, resolveWebModel, listAllModels, getSite, SITES, qualifyModelId } from './providers.js';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { createRelay } from './relay.js';
@@ -45,8 +45,9 @@ const DEFAULTS = {
   allowedOrigins: ['http://127.0.0.1:3080', 'http://localhost:3080'],
 };
 
-// Model identifiers select the corresponding mode in the logged-in web UI.
-const WEB_MODELS = DEEPSEEK.models;
+// 模型目录 = 全部内容服务站点的模型（'site:model' 限定 id），DSH 模型选择器
+// 直接可见 GLM/ChatGPT/Kimi/Qwen/豆包/Grok/Claude/Gemini 的模型。
+const WEB_MODELS = listAllModels();
 
 const log = (...a) => console.log('[webcode-bridge]', ...a);
 const warn = (...a) => console.warn('[webcode-bridge]', ...a);
@@ -188,25 +189,36 @@ export function apply(ctx, config = {}) {
   const sessionState = new Map();
   let buildTurn;
   let lastPresetInfo = null;   // the most recent first-turn prompt (settings-page preview)
-  // 全局指令：设置页可追加，持久化在 profile 目录的 webcode-settings.json。
+  // 全局指令：设置页可追加，持久化在 profile 目录的 webcode-settings.json（优先使用宿主 settings 服务）。
   const settingsPath = path.join(cfg.profileDir, 'webcode-settings.json');
-  let extraPrompt = '';
-  try {
-    const saved = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-    if (saved && typeof saved.extraPrompt === 'string') extraPrompt = saved.extraPrompt;
-  } catch { /* first run */ }
-  const settingsStore = {
-    get: () => ({ extraPrompt }),
-    set: (extraPromptNew) => {
-      extraPrompt = typeof extraPromptNew === 'string' ? extraPromptNew.slice(0, 4000) : '';
+  let settingsService = null;
+  try { settingsService = ctx.get('settings') || ctx.settings; } catch {}
+  const defaultConfig = { extraPrompt: '', defaultModel: 'flash', previewRefreshRate: 5000 };
+  const configManager = {
+    get() {
+      if (settingsService) {
+        const ns = settingsService.get('webcode');
+        return { ...defaultConfig, ...(ns || {}) };
+      }
+      try {
+        const data = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+        return { ...defaultConfig, ...data };
+      } catch { return { ...defaultConfig }; }
+    },
+    set(newConfig) {
+      const merged = { ...defaultConfig, ...newConfig };
+      if (settingsService) {
+        settingsService.set('webcode', merged);
+        return merged;
+      }
       try {
         fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
         const tmp = settingsPath + '.tmp-' + process.pid;
-        fs.writeFileSync(tmp, JSON.stringify({ extraPrompt, updatedAt: new Date().toISOString() }), { mode: 0o600 });
+        fs.writeFileSync(tmp, JSON.stringify(merged, null, 2), { mode: 0o600 });
         fs.renameSync(tmp, settingsPath);
       } catch (err) { warn('settings save failed:', err?.message); }
-      return settingsStore.get();
-    },
+      return merged;
+    }
   };
   const llm = resolveLlm(ctx);
   if (!llm) {
@@ -254,38 +266,79 @@ export function apply(ctx, config = {}) {
       const tools = Array.isArray(options.tools) ? options.tools : [];
       const ch = channel();
       const settled = relay
-        .submit(turn.prompt, { signal: options.signal, onDelta: (t) => ch.push({ delta: t }), meta: turn.meta })
-        .then(({ text }) => ch.push({ end: text }))
+        .submit(turn.prompt, {
+          signal: options.signal,
+          onDelta: (t) => ch.push({ delta: t }),
+          onThink: (t) => ch.push({ think: t }),
+          onImage: (img) => ch.push({ image: img }),
+          meta: turn.meta,
+        })
+        .then(({ text, thinking, images }) => ch.push({ end: { text, thinking, images } }))
         .catch((err) => { turn.invalidate?.(); ch.push({ err }); });
 
       if (tools.length === 0) {
         // pure chat: stream deltas as they arrive
-        yield { type: 'block-start', index: 0, blockType: 'text' };
         let acc = '';
+        let thinkAcc = '';
+        let thinkOpen = false;
+        let textOpen = false;
+        let thinkIndex = -1;
+        let textIndex = -1;
+        let nextIndex = 0;
+        const images = [];
+        let end = null;
         for (;;) {
           const ev = await ch.next();
+          if (ev.think) {
+            thinkAcc += ev.think;
+            if (!thinkOpen) { thinkIndex = nextIndex++; yield { type: 'block-start', index: thinkIndex, blockType: 'reasoning' }; thinkOpen = true; }
+            yield { type: 'reasoning-delta', index: thinkIndex, text: ev.think };
+            continue;
+          }
+          if (ev.image) { images.push(ev.image); continue; }
           if (ev.delta) {
             acc += ev.delta;
-            yield { type: 'text-delta', index: 0, text: ev.delta };
+            if (!textOpen) {
+              if (thinkOpen) { yield { type: 'block-end', index: thinkIndex, block: { type: 'reasoning', text: thinkAcc } }; thinkOpen = false; }
+              textIndex = nextIndex++;
+              yield { type: 'block-start', index: textIndex, blockType: 'text' };
+              textOpen = true;
+            }
+            yield { type: 'text-delta', index: textIndex, text: ev.delta };
           } else if (ev.err) {
             throw ev.err;
           } else {
+            end = ev.end ?? null;
             // canonical full text wins; patch the tail if deltas lagged
-            if (ev.end && ev.end !== acc) {
-              if (ev.end.startsWith(acc)) {
-                const rest = ev.end.slice(acc.length);
-                if (rest) { acc = ev.end; yield { type: 'text-delta', index: 0, text: rest }; }
+            const full = end?.text ?? '';
+            if (full && full !== acc) {
+              if (full.startsWith(acc)) {
+                const rest = full.slice(acc.length);
+                if (rest) { acc = full; if (!textOpen) { if (thinkOpen) { yield { type: 'block-end', index: thinkIndex, block: { type: 'reasoning', text: thinkAcc } }; thinkOpen = false; } textIndex = nextIndex++; yield { type: 'block-start', index: textIndex, blockType: 'text' }; textOpen = true; } yield { type: 'text-delta', index: textIndex, text: rest }; }
               } else {
-                acc = ev.end; // diverged: block-end below carries the truth
+                acc = full; // diverged: block-end below carries the truth
               }
             }
             break;
           }
         }
-        if (!acc.trim()) throw new Error('webcode relay: empty response from web AI');
+        if (!acc.trim() && !thinkAcc.trim()) throw new Error('webcode relay: empty response from web AI');
+        const endImages = Array.isArray(end?.images) && end.images.length ? end.images : images;
+        const imageMd = imageMarkdown(endImages);
+        if (imageMd) {
+          acc += imageMd;
+          if (!textOpen) {
+            if (thinkOpen) { yield { type: 'block-end', index: thinkIndex, block: { type: 'reasoning', text: thinkAcc } }; thinkOpen = false; }
+            textIndex = nextIndex++;
+            yield { type: 'block-start', index: textIndex, blockType: 'text' };
+            textOpen = true;
+          }
+          yield { type: 'text-delta', index: textIndex, text: imageMd };
+        }
         turn.commit();
-        yield { type: 'block-end', index: 0, block: { type: 'text', text: acc } };
-        yield { type: 'usage', usage: { inputTokens: estimateTokens(turn.prompt), outputTokens: estimateTokens(acc) } };
+        if (textOpen) yield { type: 'block-end', index: textIndex, block: { type: 'text', text: acc } };
+        if (thinkOpen) yield { type: 'block-end', index: thinkIndex, block: { type: 'reasoning', text: thinkAcc } };
+        yield { type: 'usage', usage: { inputTokens: estimateTokens(turn.prompt), outputTokens: estimateTokens(acc + thinkAcc) } };
         yield { type: 'finish', reason: { kind: 'stop' } };
         await settled;
         return;
@@ -295,12 +348,25 @@ export function apply(ctx, config = {}) {
       let acc = '';
       let textSent = '';
       let textOpen = false;
+      let thinkAcc = '';
+      let thinkOpen = false;
+      let thinkIndex = -1;
+      let textIndex = -1;
+      let nextIndex = 0;
+      const genImages = [];
       let pendingCall = null;
       const callSeq = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
       const callId = i => `call-webcode-${String(options?.sessionId || 'stateless')}-${callSeq}-${i}`;
       const marker = value => value.search(/<\s*(?:tool_call|function|stories)|```|\*\*Calling:|(?:^|\n)\s*\{/i);
       for (;;) {
         const ev = await ch.next();
+        if (ev.think) {
+          thinkAcc += ev.think;
+          if (!thinkOpen) { thinkIndex = nextIndex++; yield { type: 'block-start', index: thinkIndex, blockType: 'reasoning' }; thinkOpen = true; }
+          yield { type: 'reasoning-delta', index: thinkIndex, text: ev.think };
+          continue;
+        }
+        if (ev.image) { genImages.push(ev.image); continue; }
         if (ev.delta) {
           acc += ev.delta;
           const boundary = marker(acc);
@@ -308,9 +374,14 @@ export function apply(ctx, config = {}) {
           const safeEnd = boundary < 0 ? Math.max(0, acc.length - 32) : boundary;
           if (safeEnd > textSent.length && !pendingCall) {
             const delta = acc.slice(textSent.length, safeEnd);
-            if (!textOpen) { textOpen = true; yield { type: 'block-start', index: 0, blockType: 'text' }; }
+            if (!textOpen) {
+              if (thinkOpen) { yield { type: 'block-end', index: thinkIndex, block: { type: 'reasoning', text: thinkAcc } }; thinkOpen = false; }
+              textIndex = nextIndex++;
+              yield { type: 'block-start', index: textIndex, blockType: 'text' };
+              textOpen = true;
+            }
             textSent += delta;
-            yield { type: 'text-delta', index: 0, text: delta };
+            yield { type: 'text-delta', index: textIndex, text: delta };
           }
           if (boundary >= 0 && !pendingCall) {
             const suffix = acc.slice(boundary);
@@ -318,8 +389,8 @@ export function apply(ctx, config = {}) {
               || suffix.match(/"(?:name|tool)"\s*:\s*"([\w.-]+)"/)?.[1];
             const transport = /^<\s*(tool_call|function|stories)|^\*\*Calling:|"mcp_action"\s*:\s*"call"|^\s*\{\s*"tool"/i.test(suffix);
             if (transport && candidate && tools.some(t => t.name === candidate)) {
-              if (textOpen) yield { type: 'block-end', index: 0, block: { type: 'text', text: textSent } };
-              const index = textOpen ? 1 : 0;
+              if (textOpen) yield { type: 'block-end', index: textIndex, block: { type: 'text', text: textSent } };
+              const index = nextIndex++;
               pendingCall = { name: candidate, id: callId(0), index };
               yield { type: 'block-start', index, blockType: 'tool-call' };
               yield { type: 'tool-call-delta', index, id: pendingCall.id, name: candidate, argumentsDelta: '' };
@@ -332,8 +403,9 @@ export function apply(ctx, config = {}) {
         break;
       }
       await settled;
-      const finalText = (end ?? acc) || '';
-      if (!finalText.trim()) throw new Error('webcode relay: empty response from web AI');
+      let finalText = (end?.text ?? acc) || '';
+      const endImages = Array.isArray(end?.images) && end.images.length ? end.images : genImages;
+      if (!finalText.trim() && !thinkAcc.trim()) throw new Error('webcode relay: empty response from web AI');
 
       const { calls } = parseAgentReply(finalText);
       const valid = calls.filter((c) => tools.some((t) => t?.name === c.name));
@@ -343,41 +415,71 @@ export function apply(ctx, config = {}) {
       }
       if (valid.length) {
         turn.commit();
-        if (textOpen && !pendingCall) yield { type: 'block-end', index: 0, block: { type: 'text', text: textSent } };
+        if (thinkOpen) yield { type: 'block-end', index: thinkIndex, block: { type: 'reasoning', text: thinkAcc } };
+        if (textOpen && !pendingCall) {
+          const imageMd = imageMarkdown(endImages);
+          if (imageMd) { textSent += imageMd; yield { type: 'text-delta', index: textIndex, text: imageMd }; }
+          yield { type: 'block-end', index: textIndex, block: { type: 'text', text: textSent } };
+        }
         for (let i = 0; i < valid.length; i++) {
           // id carries the session so harness-side streams / logs can be traced
           // back to the web conversation that produced the call.
           const id = callId(i);
-          const index = i + (textOpen ? 1 : 0);
+          const index = nextIndex++;
           const args = JSON.stringify(valid[i].arguments ?? {});
           if (!(i === 0 && pendingCall)) yield { type: 'block-start', index, blockType: 'tool-call' };
           yield { type: 'tool-call-delta', index, id, ...(i === 0 && pendingCall ? {} : { name: valid[i].name }), argumentsDelta: args };
           yield { type: 'block-end', index, block: { type: 'tool-call', id, name: valid[i].name, arguments: args } };
         }
-        yield { type: 'usage', usage: { inputTokens: estimateTokens(turn.prompt), outputTokens: estimateTokens(finalText) } };
+        yield { type: 'usage', usage: { inputTokens: estimateTokens(turn.prompt), outputTokens: estimateTokens(finalText + thinkAcc) } };
         yield { type: 'finish', reason: { kind: 'tool-calls' } };
         return;
       }
 
-      if (!textOpen) { turn.commit(); yield* emitText(finalText, turn.prompt); return; }
+      if (!textOpen) {
+        turn.commit();
+        if (thinkOpen) yield { type: 'block-end', index: thinkIndex, block: { type: 'reasoning', text: thinkAcc } };
+        const imageMd = imageMarkdown(endImages);
+        const out = imageMd ? finalText + imageMd : finalText;
+        if (!out.trim()) throw new Error('webcode relay: empty response from web AI');
+        yield* emitText(out, turn.prompt);
+        return;
+      }
       if (!finalText.startsWith(textSent)) throw new Error('STREAM_REWRITE: 网页重写了已输出内容');
       turn.commit();
-      if (finalText.length > textSent.length) yield { type: 'text-delta', index: 0, text: finalText.slice(textSent.length) };
-      yield { type: 'block-end', index: 0, block: { type: 'text', text: finalText } };
-      yield { type: 'usage', usage: { inputTokens: estimateTokens(turn.prompt), outputTokens: estimateTokens(finalText) } };
+      const imageMd = imageMarkdown(endImages);
+      if (imageMd) finalText += imageMd;
+      const tail = finalText.slice(textSent.length);
+      if (tail) yield { type: 'text-delta', index: textIndex, text: tail };
+      yield { type: 'block-end', index: textIndex, block: { type: 'text', text: finalText } };
+      if (thinkOpen) yield { type: 'block-end', index: thinkIndex, block: { type: 'reasoning', text: thinkAcc } };
+      yield { type: 'usage', usage: { inputTokens: estimateTokens(turn.prompt), outputTokens: estimateTokens(finalText + thinkAcc) } };
       yield { type: 'finish', reason: { kind: 'stop' } };
     },
   };
   llm.registerAdapter([cfg.providerId], adapter);
 
   /** Valid minimal text chunk sequence. */
-  async function* emitText(text, prompt) {
-    yield { type: 'block-start', index: 0, blockType: 'text' };
-    yield { type: 'text-delta', index: 0, text };
-    yield { type: 'block-end', index: 0, block: { type: 'text', text } };
-    yield { type: 'usage', usage: { inputTokens: estimateTokens(prompt), outputTokens: estimateTokens(text) } };
-    yield { type: 'finish', reason: { kind: 'stop' } };
+async function* emitText(text, prompt) {
+  yield { type: 'block-start', index: 0, blockType: 'text' };
+  yield { type: 'text-delta', index: 0, text };
+  yield { type: 'block-end', index: 0, block: { type: 'text', text } };
+  yield { type: 'usage', usage: { inputTokens: estimateTokens(prompt), outputTokens: estimateTokens(text) } };
+  yield { type: 'finish', reason: { kind: 'stop' } };
+}
+
+/** 网页生成的图片 → markdown（harness 块协议无 image 块，用文本携带）。 */
+function imageMarkdown(images) {
+  const parts = [];
+  for (const img of Array.isArray(images) ? images.slice(0, 6) : []) {
+    if (!img) continue;
+    if (typeof img === 'string') { parts.push(`\n\n![image](${img})`); continue; }
+    if (img.url) parts.push(`\n\n![image](${img.url})`);
+    else if (img.base64) parts.push(`\n\n![image](data:${img.mime || 'image/png'};base64,${img.base64})`);
+    else if (img.pointer) parts.push(`\n\n[图片引用: ${img.pointer}]`);
   }
+  return parts.join('\n');
+}
 
   // ---- relay + in-package browser driver -------------------------------
   // The driver automates the system Edge directly (persistent profile,
@@ -390,6 +492,26 @@ export function apply(ctx, config = {}) {
     requestTimeoutMs: cfg.requestTimeoutMs,
     logger: console,
   });
+
+  // 多站点：每个内容服务一个独立驱动实例（独立 profile，避免登录态串号）。
+  // deepseek 用默认 driver（兼容测试注入与既有 profile）；其余站点按需懒创建。
+  const drivers = new Map();
+  function driverFor(siteId) {
+    if (!siteId || siteId === 'deepseek') return driver;
+    if (!drivers.has(siteId)) {
+      const st = getSite(siteId);
+      if (!st) throw new Error('[webcode-bridge] 未知站点: ' + siteId);
+      drivers.set(siteId, createBrowserDriver({
+        siteId,
+        site: st.origin + '/',
+        profileDir: path.join(cfg.profileDir, 'sites', siteId),
+        headless: cfg.headless !== false,
+        requestTimeoutMs: cfg.requestTimeoutMs,
+        logger: console,
+      }));
+    }
+    return drivers.get(siteId);
+  }
 
   // ---- web-side control plane (sessions / naming / sync / preview) -----
   // Host services are optional: without DSH session services (standalone
@@ -444,28 +566,56 @@ export function apply(ctx, config = {}) {
     // increment lands); stateless turns (OpenAI front, aux) stay fresh.
     executor: (prompt, opts) => {
       const m = opts?.meta || null;
+      // 归一化模型限定 id：meta 可能只带裸 id（OpenAI 前端），补上站点前缀，
+      // 保证 driver 的 selectModel 一定解析到正确站点，不会因跨站点重名串模型。
+      const qualified = qualifyModelId(m?.model, m?.siteId);
       if (m?.sessionKey) {
-        return driver.sendTurn(m.sessionKey, prompt, {
+        return driverFor(m.siteId).sendTurn(m.sessionKey, prompt, {
           fresh: m.fresh === true,
           signal: opts.signal,
           onDelta: opts.onDelta,
-          model: m.model,
+          onThink: opts.onThink,
+          onImage: opts.onImage,
+          model: qualified,
           images: m.images,
         }).catch(async (err) => {
           // a vanished/deleted conversation poisons the stored slot — reset
           // it so the NEXT turn reopens a fresh web chat
-          if (err && !err.code) await driver.resetConversation(m.sessionKey).catch(() => {});
+          if (err && !err.code) await driverFor(m.siteId).resetConversation(m.sessionKey).catch(() => {});
           throw err;
         });
       }
-      return driver.sendPrompt(prompt, opts);
+      return driverFor(m?.siteId).sendPrompt(prompt, { ...opts, model: qualified });
     },
-    driverStatus: () => driver.status(),
-    loginTrigger: () => driver.openLogin(),
+    driverStatus: () => {
+      const base = driver.status();
+      // 聚合全部内容服务的登录/运行状态：未初始化的站点给占位（不启动浏览器）。
+      const sites = SITES.map((st) => {
+        const d = st.id === 'deepseek' ? driver : drivers.get(st.id);
+        if (!d) return { siteId: st.id, siteName: st.name, initialized: false, running: false, busy: false, loggedIn: null, needLogin: false, selectedModel: null };
+        const s = d.status();
+        return { siteId: st.id, siteName: st.name, initialized: true, running: s.running, busy: s.busy, loggedIn: s.loggedIn, needLogin: s.needLogin, selectedModel: s.selectedModel };
+      });
+      return { ...base, sites };
+    },
+    loginTrigger: (siteId) => driverFor(siteId || 'deepseek').openLogin(),
+    siteConnect: (siteId) => driverFor(getSite(siteId) ? siteId : 'deepseek'),
     sessionImport: (dir) => driver.importStorageFromProfile(dir),
     onHttp: (req, res) => {
       const u = new URL(req.url, 'http://localhost');
       const pathname = u.pathname;
+      // 多站点侧栏视图：/__webcode/site/<siteId>/… → 对应站点 mirror
+      const siteRoute = /^\/__webcode\/site\/([a-z0-9-]+)(\/.*)?$/.exec(pathname);
+      if (siteRoute) {
+        const [, sid, rest = '/'] = siteRoute;
+        if (!getSite(sid)) {
+          res.writeHead(404, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: { message: 'unknown site: ' + sid } }));
+          return;
+        }
+        mirrorFor(sid).handle(req, res, rest, u.search).catch(() => { try { res.end(); } catch {} });
+        return;
+      }
       // web-side control fallbacks (standalone relay without DSH webServer)
       if (pathname === '/bridge/web/preview') {
         webControl.handlePreview(req, res).catch(() => { try { res.end(); } catch {} });
@@ -498,21 +648,42 @@ export function apply(ctx, config = {}) {
     // settings-page prompt-template preview: the exact first-turn text the
     // bridge last sent (or the static skeleton before any turn)
     presetInfo: () => lastPresetInfo,
-    settingsStore,
+    settingsStore: configManager,
   });
   const mirror = createMirror({
     siteOrigin: new URL(cfg.site).origin,
     getToken: () => driver.getToken(),
     logger: console,
   });
+  // 多站点侧栏视图：每个内容服务一个 mirror 实例（各自 origin + 对应 driver 的
+  // 登录态 token），懒创建；路径前缀 /__webcode/site/<siteId>/…。
+  const mirrors = new Map();
+  function mirrorFor(siteId) {
+    const sid = getSite(siteId) ? siteId : 'deepseek';
+    if (!mirrors.has(sid)) {
+      const st = getSite(sid);
+      mirrors.set(sid, createMirror({
+        siteOrigin: st.origin,
+        getToken: () => driverFor(sid).getToken(),
+        logger: console,
+      }));
+    }
+    return mirrors.get(sid);
+  }
 
   // Session-mode turn builder (needs cfg; installed once). Images ride in the
   // turn meta (only the newly-arrived ones) so vision turns attach real files
   // on the web side; parallel agents get their own web conversation via the
   // agent-qualified session key.
   buildTurn = (options = {}) => {
+  const extraPrompt = configManager.get().extraPrompt;
+    // 用户未显式选模型时，设置页保存的「默认模型」生效（此前只有 extraPrompt
+    // 被消费，defaultModel 是个只存不用的摆设）。
+    const defaultModel = configManager.get().defaultModel;
     const messages = Array.isArray(options.messages) ? options.messages : [];
-    const model = resolveWebModel(options.model || cfg.modelId).id;
+    const resolvedModel = resolveWebModel(options.model || defaultModel || cfg.modelId);
+    const model = resolvedModel.id;
+    const siteId = resolvedModel.siteId;
     const agentId = options.agentId ?? options.agentName ?? options.agent ?? null;
     const keyPath = options.sessionId && cfg.contextMode === 'session' && !options.purpose
       ? [String(options.sessionId), agentId ? String(agentId) : ''].filter(Boolean).join('::')
@@ -534,7 +705,7 @@ export function apply(ctx, config = {}) {
       recordPreset(prompt);
       return {
         prompt,
-        meta: { model },
+        meta: { model: siteId + ':' + model, siteId },
         async attach() {
           const imgs = imagesOfMessages(messages);
           return imgs.length ? resolveRemoteImages(imgs) : [];
@@ -553,7 +724,7 @@ export function apply(ctx, config = {}) {
     else prompt = delta.text;
     return {
       prompt,
-      meta: { sessionKey: keyPath, fresh, model },
+      meta: { sessionKey: keyPath, fresh, model: siteId + ':' + model, siteId },
       invalidate: () => sessionState.delete(keyPath),
       async attach() {
         // a fresh turn replays the whole transcript → attach every image in it;
@@ -590,7 +761,7 @@ export function apply(ctx, config = {}) {
       ['connect', 'connect'], ['interact', 'interact'],
       ['sessions', 'sessions'], ['history', 'history'],
       ['workspaces', 'workspaces'], ['import', 'import'],
-      ['settings', 'settings'],
+      ['settings', 'settings'], ['models', 'models'],
     ];
     for (const [, suffix] of routes) {
       try {
@@ -616,6 +787,111 @@ export function apply(ctx, config = {}) {
     } catch (e) {
       warn('webServer preview route failed:', e?.message);
     }
+
+    // 设置页面 UI (HTML)
+    try {
+      routeDisposers.push(webServer.register({
+        kind: 'exact',
+        path: '/__webcode/settings-page',
+        handler: (req, res) => {
+          const html = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Webcode Bridge 设置</title>
+<style>
+body { font-family: system-ui, sans-serif; background: #f8fafc; padding: 20px; max-width: 600px; margin: 0 auto; }
+.card { background: #fff; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); padding: 24px; }
+h1 { font-size: 20px; margin-top: 0; }
+label { display: block; margin: 16px 0 6px; font-weight: 600; }
+textarea, select, input { width: 100%; padding: 8px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; box-sizing: border-box; }
+textarea { min-height: 80px; font-family: inherit; }
+button { background: #2563eb; color: white; border: none; padding: 10px 20px; border-radius: 6px; font-size: 16px; cursor: pointer; margin-top: 16px; width: 100%; }
+button:hover { background: #1d4ed8; }
+#status { margin-top: 12px; padding: 8px; border-radius: 6px; }
+.success { background: #dcfce7; color: #166534; }
+.error { background: #fee2e2; color: #991b1b; }
+.hint { font-size: 13px; color: #6b7280; margin-top: 4px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>⚙️ Webcode Bridge 设置</h1>
+  <form id="settingsForm">
+    <label for="extraPrompt">全局指令（首轮注入）</label>
+    <textarea id="extraPrompt" placeholder="例如：请始终使用中文回答..."></textarea>
+    <div class="hint">这段文本会追加到每个新网页会话的第一条用户消息之前。</div>
+
+    <label for="defaultModel">默认模型</label>
+    <select id="defaultModel">
+      ${WEB_MODELS.map((m) => `<option value="${m.id}">${m.name}（${m.siteName}${m.experimental ? ' · 实验' : ''}）</option>`).join('\n      ')}
+    </select>
+    <div class="hint">新建会话时默认选择的模型。已接入：DeepSeek、GLM、ChatGPT、Kimi、通义千问、豆包、Grok、Claude、Gemini。</div>
+
+    <label for="previewRefreshRate">预览刷新率 (毫秒)</label>
+    <input type="number" id="previewRefreshRate" min="1000" max="30000" step="500" value="5000">
+    <div class="hint">控制预览面板自动刷新的间隔。</div>
+
+    <button type="submit">保存设置</button>
+  </form>
+  <div id="status"></div>
+</div>
+<script>
+  const API_BASE = '/__webcode';
+  // 裸模型 id（历史设置值，如 'flash'）→ 站点限定 id（'deepseek:flash'）
+  const MODEL_IDS = ${JSON.stringify(Object.fromEntries(WEB_MODELS.map((m) => [m.id.split(':').pop(), m.id])))};
+  const form = document.getElementById('settingsForm');
+  const statusEl = document.getElementById('status');
+
+  async function loadSettings() {
+    try {
+      const res = await fetch(API_BASE + '/settings');
+      if (!res.ok) throw new Error('加载失败');
+      const data = await res.json();
+      document.getElementById('extraPrompt').value = data.extraPrompt || '';
+      document.getElementById('defaultModel').value = MODEL_IDS[data.defaultModel] || data.defaultModel || 'deepseek:flash';
+      document.getElementById('previewRefreshRate').value = data.previewRefreshRate || 5000;
+    } catch (e) {
+      statusEl.textContent = '加载设置失败: ' + e.message;
+      statusEl.className = 'error';
+    }
+  }
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const payload = {
+      extraPrompt: document.getElementById('extraPrompt').value,
+      defaultModel: document.getElementById('defaultModel').value,
+      previewRefreshRate: parseInt(document.getElementById('previewRefreshRate').value, 10) || 5000,
+    };
+    try {
+      const res = await fetch(API_BASE + '/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error('保存失败');
+      const result = await res.json();
+      statusEl.textContent = '✅ 设置已保存';
+      statusEl.className = 'success';
+    } catch (e) {
+      statusEl.textContent = '❌ ' + e.message;
+      statusEl.className = 'error';
+    }
+  });
+
+  loadSettings();
+</script>
+</body>
+</html>`;
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(html);
+        }
+      }));
+      log('settings-page route mounted');
+    } catch (e) {
+      warn('webServer settings-page route failed:', e?.message);
+    }
   }
   front = createOpenAiFront(relay, cfg);
   relay.start();
@@ -627,6 +903,7 @@ export function apply(ctx, config = {}) {
     for (const dispose of routeDisposers) if (typeof dispose === 'function') dispose();
     relay.stop();
     driver.close();
+    for (const d of drivers.values()) d.close().catch(() => {});
     log('unregistered; relay closed; driver stopped');
   };
 }

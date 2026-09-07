@@ -16,17 +16,81 @@ test('普通回复完成、模型传递、游标提交与同长度历史改写',
   const collect = async options => { const chunks = []; for await (const c of adapter.stream(options)) chunks.push(c); return chunks; };
   try {
     const models = await adapter.listModels('webcode');
-    assert.deepEqual(models.map(m => m.id), ['flash', 'vision', 'deepseek']);
+    const ids = models.map(m => m.id);
+    assert.ok(ids.includes('deepseek:flash') && ids.includes('deepseek:vision') && ids.includes('deepseek:deepseek'));
+    assert.ok(ids.includes('glm:glm-4.6') && ids.includes('chatgpt:gpt-5') && ids.includes('kimi:kimi'));
     const base = { sessionId: 'regression', model: 'flash', messages: [user('第一句')] };
     const chunks = await collect(base);
     assert.equal(chunks.at(-1).type, 'finish');
-    assert.equal(turns[0].model, 'flash');
+    assert.equal(turns[0].model, 'deepseek:flash');
     await collect({ ...base, messages: [...base.messages, { role: 'assistant', content: [{ type: 'text', text: '回答' }] }, user('第二句')] });
     assert.equal(turns[1].fresh, false);
     assert.ok(!turns[1].prompt.includes('第一句'));
     await collect({ ...base, messages: [user('改写')] });
     assert.equal(turns[2].fresh, true);
     assert.ok(turns[2].prompt.includes('改写'));
+  } finally { await dispose(); }
+});
+test('限定模型 id（site:model）全程不丢站点前缀，直达 executor', async () => {
+  let adapter; const turns = [];
+  const driver = {
+    status: () => ({ running: true }), close: async () => {}, resetConversation: async () => {},
+    sendTurn: async (key, prompt, opts) => { turns.push({ key, prompt, ...opts }); opts.onDelta?.('好'); return { text: '好' }; },
+    sendPrompt: async (prompt, opts) => { turns.push({ prompt, ...opts }); return { text: '好' }; },
+  };
+  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  const user = text => ({ role: 'user', content: [{ type: 'text', text }] });
+  try {
+    const chunks = [];
+    for await (const c of adapter.stream({ sessionId: 's', model: 'deepseek:deepseek', messages: [user('问')] })) chunks.push(c);
+    assert.equal(chunks.at(-1).type, 'finish');
+    assert.equal(turns[0].model, 'deepseek:deepseek');
+  } finally { await dispose(); }
+});
+test('会话模式（sendTurn）思考链与图片经回调到达 DSH 流（回归 0.6 修复）', async () => {
+  let adapter; let turnOpts;
+  const driver = {
+    status: () => ({ running: true }), close: async () => {}, resetConversation: async () => {},
+    sendTurn: async (key, prompt, opts) => {
+      turnOpts = opts; // 0.5.1 回归点：sendTurn 分支曾丢 onThink/onImage
+      opts.onThink?.('先分析问题');
+      opts.onDelta?.('结论在这里');
+      opts.onImage?.({ url: 'https://example.com/pic.png' });
+      return { text: '结论在这里', thinking: '先分析问题', images: [{ url: 'https://example.com/pic.png' }] };
+    },
+    sendPrompt: async () => ({ text: '' }),
+  };
+  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  const user = text => ({ role: 'user', content: [{ type: 'text', text }] });
+  try {
+    const chunks = [];
+    for await (const c of adapter.stream({ sessionId: 's2', model: 'deepseek:deepseek', messages: [user('问')] })) chunks.push(c);
+    assert.equal(typeof turnOpts.onThink, 'function', 'sendTurn 分支必须透传 onThink');
+    assert.equal(typeof turnOpts.onImage, 'function', 'sendTurn 分支必须透传 onImage');
+    const reasoning = chunks.find(c => c.type === 'reasoning-delta');
+    assert.ok(reasoning, '思考链应以 reasoning-delta 输出');
+    assert.equal(reasoning.text, '先分析问题');
+    const textEnd = chunks.find(c => c.type === 'block-end' && c.block?.type === 'text');
+    assert.ok(textEnd.block.text.includes('example.com/pic.png'), '网页图片应以 markdown 追加到文本');
+    assert.equal(chunks.at(-1).type, 'finish');
+  } finally { await dispose(); }
+});
+test('设置保存的默认模型在未显式选模型时生效', async () => {
+  let adapter; const turns = [];
+  const driver = {
+    status: () => ({ running: true }), close: async () => {}, resetConversation: async () => {},
+    sendTurn: async (key, prompt, opts) => { turns.push({ key, prompt, ...opts }); opts.onDelta?.('答'); return { text: '答' }; },
+    sendPrompt: async (prompt, opts) => { turns.push({ prompt, ...opts }); return { text: '答' }; },
+  };
+  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  const user = text => ({ role: 'user', content: [{ type: 'text', text }] });
+  try {
+    // 直接调用 buildTurn 消费的同一 settings 路径：走 openai.js 风格限定 id
+    const collect = async options => { const out = []; for await (const c of adapter.stream(options)) out.push(c); return out; };
+    // 无 model 字段 → buildTurn 用 settings defaultModel；默认配置里 defaultModel='flash'
+    const chunks = await collect({ sessionId: 'dm', messages: [user('问')] });
+    assert.equal(chunks.at(-1).type, 'finish');
+    assert.equal(turns[0].model, 'deepseek:flash');
   } finally { await dispose(); }
 });
 test('首轮保留全部历史与工具结果', () => {
@@ -48,7 +112,7 @@ test('SSE 支持 CRLF 分块和空 close 事件', () => {
   const decoder = new globalThis.WebCodeDeepSeekStreamDecoder();
   const raw = 'data: ' + JSON.stringify({ v: { response: { role: 'ASSISTANT', message_id: '1', status: 'FINISHED', fragments: [{ type: 'RESPONSE', content: '成功' }] } } }) + '\r\n\r\nevent: close\r\n\r\n';
   for (const c of raw) decoder.push(c);
-  assert.deepEqual(decoder.finish(), { complete: true, text: '成功' });
+  assert.deepEqual(decoder.finish(), { complete: true, text: '成功', thinking: '', images: [] });
 });
 
 test('工具名称在网页流完成前到达 Harness，参数完整后才提交', async () => {

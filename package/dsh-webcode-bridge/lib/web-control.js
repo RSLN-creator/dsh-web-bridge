@@ -16,6 +16,8 @@
 //     `fetch` inside the logged-in tab and only distilled JSON comes back.
 //   • Responses never echo tokens; errors are fixed-text; bodies are bounded.
 
+import { listAllModels } from './providers.js';
+
 const MAX_BODY_BYTES = 256 * 1024;
 const LOOPBACK_HOST = /^(127\.0\.0\.1|\[::1\]|localhost)(:\d+)?$/i;
 
@@ -109,7 +111,13 @@ export function createWebControl(deps = {}) {
 
   /** One route table keyed by "METHOD path-suffix". */
   const actions = {
-    'POST connect': async () => driver.connect(),
+    'POST connect': async (body) => {
+      // 侧栏视图按站点连接：未指定时保持 DeepSeek 兼容行为
+      const siteId = String(body?.siteId || 'deepseek').trim();
+      const target = relay?.config?.siteConnect?.(siteId);
+      if (target) return target.connect();
+      return driver.connect();
+    },
     'POST interact': async body => {
       if (!relay?.status().consent) return { ok: false, error: '请在设置中启用网页自动化' };
       return driver.interact(body);
@@ -120,34 +128,40 @@ export function createWebControl(deps = {}) {
       relay: relay ? (({ running, consent, consentPersistent, requireConsent, busy, queueLength, activeRequests, lastError, metrics }) => ({
         running, consent, consentPersistent, requireConsent, busy, queueLength, activeRequests, lastError, metrics,
       }))(relay.status()) : null,
-      driver: driver ? (({ running, busy, loggedIn, needLogin, selectedModel, lastTurn, profileDir, conversations }) => ({
+      driver: relay?.config?.driverStatus?.() ?? (driver ? (({ running, busy, loggedIn, needLogin, selectedModel, lastTurn, profileDir, conversations }) => ({
         running, busy, loggedIn, needLogin, selectedModel, profileDir,
         conversationCount: conversations ? Object.keys(conversations).length : 0,
         lastTurn: lastTurn ? { sessionId: lastTurn.sessionId, at: lastTurn.at, rebuilt: Boolean(lastTurn.rebuilt) } : null,
-      }))(driver.status()) : null,
+      }))(driver.status()) : null),
     }),
     'POST consent': async (body) => {
       if (!relay) return { ok: false, error: 'no relay' };
       relay.setConsent(body?.accepted === true);
       return { ok: true, consent: relay.status().consent };
     },
+    'GET models': async () => ({ ok: true, models: listAllModels() }),
     'GET settings': async () => {
       if (!settingsStore) return { ok: true, extraPrompt: '' };
-      return { ok: true, ...settingsStore.get() };
+      const config = settingsStore.get();
+      return { ok: true, ...config };
     },
     'POST settings': async (body) => {
       if (!settingsStore) return { ok: false, error: 'settings store unavailable' };
-      return { ok: true, ...settingsStore.set(body?.extraPrompt) };
+      const current = settingsStore.get();
+      const updated = { ...current, ...body };
+      const result = settingsStore.set(updated);
+      return { ok: true, ...result };
     },
     'GET preset': async () => {
       const info = presetInfo?.() ?? null;
       if (!info) return { ok: true, prompt: null, note: '尚未发送过首轮请求——发送第一条消息后这里显示实际注入的完整提示词模板' };
       return { ok: true, ...info };
     },
-    'POST login': async () => {
+    'POST login': async (body) => {
       const loginTrigger = relay?.config?.loginTrigger;
       if (!loginTrigger) return { ok: false, error: 'no driver' };
-      loginTrigger().catch((err) => warn('login flow error:', err?.message));
+      const siteId = String(body?.siteId || '').trim() || undefined;
+      loginTrigger(siteId).catch((err) => warn('login flow error:', err?.message));
       return { ok: true, message: '登录窗口打开中，请在该窗口完成一次性登录' };
     },
     'POST sessions': async (body) => {

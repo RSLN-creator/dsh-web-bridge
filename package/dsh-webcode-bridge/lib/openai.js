@@ -1,13 +1,15 @@
-// openai.js — OpenAI-compatible HTTP front over the relay.
-//   GET  /v1/models
-//   POST /v1/chat/completions   (stream:false → JSON, stream:true → SSE + [DONE])
-//   GET  /bridge/status         (relay + extension + consent diagnostics)
+// openai.js — OpenAI 兼容 HTTP 前端（跑在中继上）。
+// GET /v1/models   POST /v1/chat/completions (stream:false → JSON, stream:true → SSE + [DONE])
+// GET /bridge/status (relay + extension + consent diagnostics)
 //
-// Requests are flattened into a single prompt and forwarded to the consented
-// extension; responses stream back as deltas arrive.
+// 本版：
+// • meta.images — 从 OpenAI 消息提取的图片附件进入 turn.meta（修复“有图说没图”）
+// • onThink 通道 — SSE 发 delta.reasoning_content（深度思考链不再丢失）
+// • onImage 通道 — 网页生成的图片回传为 content parts（image_url / b64 / 引用）
+// • /v1/models — 列出全部内容服务站点的模型（site:id 限定 id）
 
-import { flattenOpenAiMessages } from './flatten.js';
-import { DEEPSEEK, resolveWebModel } from './providers.js';
+import { flattenOpenAiMessages, imagesOfOpenAiMessages } from './flatten.js';
+import { SITES, resolveWebModel, DEFAULT_MODEL_ID, qualifyModelId } from './providers.js';
 import { estimateTokens } from './metrics.js';
 import os from 'node:os';
 import path from 'node:path';
@@ -17,11 +19,7 @@ const pkgRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const JSON_CT = 'application/json; charset=utf-8';
 const LOOPBACK_HOST = /^(127\.0\.0\.1|\[::1\]|localhost)(:\d+)?$/i;
 
-/** Reject browser contexts a hostile web page controls (anti-CSRF/anti-rebind).
- *  Loopback Host kills DNS rebinding; `Sec-Fetch-Site: cross-site` kills
- *  requests initiated from public websites; an explicit Origin must be the
- *  server's own origin or on the allowlist (another loopback port is a
- *  different application, not "us"). Local CLI tools send neither header. */
+/** 拒绝浏览器里恶意网页可控的上下文（防 CSRF/防 DNS 重绑定）。 */
 function csrfSafe(req, allowedOrigins = []) {
   if (!LOOPBACK_HOST.test(String(req.headers.host || ''))) return false;
   const site = String(req.headers['sec-fetch-site'] || '').toLowerCase();
@@ -35,7 +33,7 @@ function csrfSafe(req, allowedOrigins = []) {
   return true;
 }
 
-/** CORS preflight/headers reflecting ONLY allowlisted origins (never `*`). */
+/** CORS 预检/响应头只反映白名单来源（绝不 *）。 */
 function corsHeaders(req, allowedOrigins = []) {
   const origin = String(req.headers.origin || '');
   if (origin && allowedOrigins.includes(origin.toLowerCase())) {
@@ -49,8 +47,7 @@ function corsHeaders(req, allowedOrigins = []) {
   return {};
 }
 
-/** Only the safe subset of relay status leaves the process: no profile
- *  paths, no web-session URLs (ids alone are fine for diagnostics). */
+/** 只有中继状态的安全子集会离开进程：不带 profile 路径、不带网页会话 URL。 */
 function publicStatus(relay) {
   const st = relay.status();
   const d = st.driver || {};
@@ -59,13 +56,12 @@ function publicStatus(relay) {
     running: st.running, consent: st.consent, requireConsent: st.requireConsent,
     busy: st.busy, lastError: st.lastError,
     driver: {
+      siteId: d.siteId ?? 'deepseek',
       running: d.running, busy: d.busy, needLogin: d.needLogin, loggedIn: d.loggedIn, lastTurn: lt,
-      // Measured generation metrics from the last web turn (for the settings
-      // page "估算 vs 实测" display). Account label keeps the login row legible
-      // without leaking any real username/token out of the page.
-      account: d.loggedIn ? 'DeepSeek 网页账号（已登录）' : (d.needLogin ? '未登录' : '未知'),
+      account: d.loggedIn ? '网页账号（已登录）' : (d.needLogin ? '未登录' : '未知'),
       lastRate: d.lastRate ?? null,
     },
+    sites: Array.isArray(d.sites) ? d.sites : null,
   };
 }
 
@@ -85,7 +81,8 @@ export function createOpenAiFront(relay, modelInfo) {
       const chunks = [];
       req.on('data', (c) => {
         size += c.length;
-        if (size > 4_000_000) { reject(new Error('body too large')); req.destroy(); return; }
+        // 20MB：允许携带 base64 图片附件（6 张 × ≤8MB 之内），超出拒绝
+        if (size > 20_000_000) { reject(new Error('body too large')); req.destroy(); return; }
         chunks.push(c);
       });
       req.on('end', () => {
@@ -96,16 +93,41 @@ export function createOpenAiFront(relay, modelInfo) {
     });
   }
 
-  function estimateTokens(s) { return Math.ceil((s ? String(s).length : 0) / 4); }
-
+  /** 全部内容服务站的模型目录（site:id 限定 id + 能力元数据）。 */
   function modelsDocument() {
-    return {
-      object: 'list',
-      data: DEEPSEEK.models.map(m => ({ id: m.id, object: 'model', created: 0, owned_by: providerId })),
-    };
+    const data = [];
+    for (const st of SITES) {
+      for (const m of st.models) {
+        data.push({
+          id: st.id + ':' + m.id,
+          object: 'model',
+          created: 0,
+          owned_by: st.id,
+          meta: { name: m.name, thinking: m.thinking === true, vision: m.vision === true, experimental: Boolean(st.experimental) },
+        });
+      }
+    }
+    data.push({ id: 'deepseek-web', object: 'model', created: 0, owned_by: 'deepseek', meta: { name: 'DeepSeek Web (兼容别名)' } });
+    return { object: 'list', data };
   }
 
   function completionId() { return 'chatcmpl-webcode-' + Math.random().toString(36).slice(2); }
+
+  /** 网页生成的图片 → OpenAI content parts。url 优先；b64 缺 mime 按 png；
+   * image_asset_pointer（ChatGPT）无直链时以引用形式透出。 */
+  function imageParts(images = []) {
+    const parts = [];
+    for (const img of images.slice(0, 6)) {
+      if (typeof img === 'string') { parts.push({ type: 'image_url', image_url: { url: img } }); continue; }
+      if (!img) continue;
+      if (img.url) parts.push({ type: 'image_url', image_url: { url: img.url } });
+      else if (img.base64) parts.push({ type: 'image_url', image_url: { url: 'data:' + (img.mime || 'image/png') + ';base64,' + img.base64 } });
+      else if (img.pointer || img.assetPointer) {
+        parts.push({ type: 'image_ref', image_ref: { pointer: img.pointer || null, asset: Boolean(img.assetPointer), mime: img.mime || 'image/png' } });
+      }
+    }
+    return parts;
+  }
 
   async function handleChatCompletions(req, res) {
     let body;
@@ -114,13 +136,15 @@ export function createOpenAiFront(relay, modelInfo) {
 
     const messages = Array.isArray(body?.messages) ? body.messages : null;
     if (!messages) return sendJson(res, 400, { error: { message: 'messages array required' } });
-    let selectedModel;
-    try { selectedModel = resolveWebModel(body.model || modelId).id; }
+    let selectedModel, selectedSiteId;
+    try { const r = resolveWebModel(body.model || modelId); selectedModel = r.id; selectedSiteId = r.siteId; }
     catch (err) { return sendJson(res, 400, { error: { message: err.message } }); }
     const controller = new AbortController();
     res.on('close', () => { if (!res.writableEnded) controller.abort(); });
     const stream = body?.stream === true;
     const prompt = flattenOpenAiMessages(messages);
+    // 关键修复：用户消息里的图片附件进入 meta.images，由驱动上传到网页（识图模式）
+    const images = imagesOfOpenAiMessages(messages);
     const created = Math.floor(Date.now() / 1000);
     const id = completionId();
     if (stream) {
@@ -135,10 +159,14 @@ export function createOpenAiFront(relay, modelInfo) {
         ...(usage ? { usage } : {}),
       });
       res.write('data: ' + frame({ role: 'assistant', content: '' }, null) + '\n\n');
+      const qualified = qualifyModelId(selectedModel, selectedSiteId);
       try {
         await relay.submit(prompt, {
-          meta: { model: selectedModel }, signal: controller.signal,
+          meta: { model: qualified, siteId: selectedSiteId, images },
+          signal: controller.signal,
           onDelta: (t) => { try { res.write('data: ' + frame({ content: t }, null) + '\n\n'); } catch {} },
+          onThink: (t) => { try { res.write('data: ' + frame({ reasoning_content: t }, null) + '\n\n'); } catch {} },
+          onImage: (img) => { try { res.write('data: ' + frame({ images: [img] }, null) + '\n\n'); } catch {} },
         }).then(({ text }) => {
           if (!text.trim()) throw new Error('empty response from web AI');
           const usage = { prompt_tokens: estimateTokens(prompt), completion_tokens: estimateTokens(text), total_tokens: estimateTokens(prompt) + estimateTokens(text) };
@@ -157,12 +185,18 @@ export function createOpenAiFront(relay, modelInfo) {
     }
 
     try {
-      const { text } = await relay.submit(prompt, { meta: { model: selectedModel }, signal: controller.signal });
+      const qualified = qualifyModelId(selectedModel, selectedSiteId);
+      const { text, thinking, images: genImages } = await relay.submit(prompt, { meta: { model: qualified, siteId: selectedSiteId, images }, signal: controller.signal });
       if (!text.trim()) throw new Error('empty response from web AI');
       const usage = { prompt_tokens: estimateTokens(prompt), completion_tokens: estimateTokens(text), total_tokens: estimateTokens(prompt) + estimateTokens(text) };
+      const parts = [{ type: 'text', text }];
+      const imgs = imageParts(genImages);
+      if (imgs.length) parts.push(...imgs);
+      const message = { role: 'assistant', content: parts };
+      if (thinking) message.reasoning_content = thinking;
       sendJson(res, 200, {
         id, object: 'chat.completion', created, model: selectedModel,
-        choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }],
+        choices: [{ index: 0, message, finish_reason: 'stop' }],
         usage,
       });
     } catch (err) {
@@ -174,7 +208,6 @@ export function createOpenAiFront(relay, modelInfo) {
 
   function handle(req, res, pathname) {
     if (req.method === 'OPTIONS') {
-      // preflight: reflect only allowlisted origins (bare 204 for strangers)
       res.writeHead(204, corsHeaders(req, allowedOrigins));
       res.end();
       return;
@@ -183,7 +216,6 @@ export function createOpenAiFront(relay, modelInfo) {
       return sendJson(res, 200, modelsDocument());
     }
     if (req.method === 'GET' && pathname === '/bridge/status') {
-      // public subset only — no profile paths, no session URLs
       const st = publicStatus(relay);
       return sendJson(res, 200, { ...st, modelId, modelName });
     }
@@ -207,9 +239,8 @@ export function createOpenAiFront(relay, modelInfo) {
         if (!sessionImport || !dir) {
           return sendJson(res, 400, { error: { message: 'sourceProfileDir required / no driver' } });
         }
-        // only profiles in the DSH home, under the driver profile, or in this
-        // package tree — an arbitrary user-data-dir would let callers create
-        // Chromium profile files anywhere on disk
+        // 只允许 DSH home、驱动 profile 或本包树内的 profile —— 任意 user-data-dir
+        // 会让调用方在磁盘任意位置创建 Chromium profile 文件
         let resolved = null;
         try { resolved = path.resolve(dir); } catch {}
         const bases = [relay.config.profileDir, process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), pkgRoot]
@@ -231,9 +262,12 @@ export function createOpenAiFront(relay, modelInfo) {
     }
     if (req.method === 'POST' && pathname === '/bridge/login') {
       return void (async () => {
+        let body = {};
+        try { body = await readBody(req); } catch {}
         const loginTrigger = relay.config.loginTrigger;
         if (!loginTrigger) return sendJson(res, 503, { error: { message: 'no driver' } });
-        loginTrigger().then(
+        const siteId = String(body?.siteId || '').trim() || undefined;
+        loginTrigger(siteId).then(
           () => {},
           (err) => console.warn('[webcode-bridge] login flow error:', err?.message),
         );
@@ -243,7 +277,7 @@ export function createOpenAiFront(relay, modelInfo) {
     if (req.method === 'POST' && (pathname === '/v1/chat/completions' || pathname === '/webcode/v1/chat/completions')) {
       return void handleChatCompletions(req, res);
     }
-    sendJson(res, 404, { error: { message: `no route: ${req.method} ${pathname}` } });
+    sendJson(res, 404, { error: { message: 'no route: ' + req.method + ' ' + pathname } });
   }
 
   return { handle, modelsDocument };

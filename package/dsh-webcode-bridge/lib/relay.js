@@ -140,6 +140,8 @@ export function createRelay(options = {}) {
         e.seq += 1;
         try { item.onDelta?.(t); } catch {}
       },
+      onThink: (t) => { try { item.onThink?.(t); } catch {} },
+      onImage: (img) => { try { item.onImage?.(img); } catch {} },
     })).then(
       (result = {}) => {
         const text = result.text;
@@ -170,7 +172,11 @@ export function createRelay(options = {}) {
           phaseSource: measured.firstResponseMs != null ? '网页 SSE' : '中继观测',
         };
         lastError = '';
-        e.item.resolve({ text: (text ?? e.text) || '' });
+        e.item.resolve({
+          text: (text ?? e.text) || '',
+          thinking: typeof result.thinking === 'string' ? result.thinking : '',
+          images: Array.isArray(result.images) ? result.images : [],
+        });
         log('request done', requestId, `chars=${(text ?? '').length}`);
       },
       (err) => {
@@ -193,7 +199,7 @@ export function createRelay(options = {}) {
     dispatchNext();
   }
 
-  function submit(prompt, { signal, onDelta, meta } = {}) {
+  function submit(prompt, { signal, onDelta, onThink, onImage, meta } = {}) {
     return new Promise((resolve, reject) => {
       if (!cfg.executor) return reject(new Error('webcode relay: no executor configured'));
       if (queue.length >= 32) {
@@ -201,7 +207,7 @@ export function createRelay(options = {}) {
         warn(lastError);
         return reject(new Error('webcode relay: ' + lastError));
       }
-      const item = { prompt, resolve, reject, onDelta, signal, meta };
+      const item = { prompt, resolve, reject, onDelta, onThink, onImage, signal, meta };
       const qTimer = setTimeout(() => {
         const i = queue.indexOf(item);
         if (i >= 0) {
