@@ -1,0 +1,19 @@
+# dsh-webcode-bridge bundle layer.
+# Applied when this package appears in a profile's dsh.profile.bundles list.
+- insert:
+    - id: webcode-bridge
+      name: dsh-webcode-bridge
+      config:
+        # Local HTTP relay; browser automation runs in the package.
+        port: 8931
+        host: 127.0.0.1
+        # Provider directory entry in the DSH model selector.
+        providerId: webcode
+        displayName: Harness Web Bridge
+        modelId: deepseek-web
+        modelName: DeepSeek Web (网页版)
+        settingsNs: webcode
+        # Native settings controls automation consent for this process.
+        requireConsent: true
+        requestTimeoutMs: 240000
+        queueTimeoutMs: 300000

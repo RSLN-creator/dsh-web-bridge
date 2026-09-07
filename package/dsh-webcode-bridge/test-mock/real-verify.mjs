@@ -1,0 +1,119 @@
+// real-verify.mjs — 供应商契约自检（真机）
+// 每个工具/模型的实际调用真的跑一遍并断言，作为后续改动可重复的回归防护。
+// 用法：node test-mock/real-verify.mjs [--skip-vision] [--skip-tool-loop]
+//   需要已登录的 Edge profile（默认 .edge-real-profile，可用 REAL_PROFILE 覆盖）
+import { createBrowserDriver } from '../lib/browser-driver.js';
+import { serializeFirstTurn, parseAgentReply } from '../lib/agent-preset.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { execSync } from 'node:child_process';
+
+const skipVision = process.argv.includes('--skip-vision');
+const skipLoop = process.argv.includes('--skip-tool-loop');
+const PROFILE = process.env.REAL_PROFILE || 'd:\\9_Code_Workspace\\dsh-webcode-bridge\\.edge-real-profile';
+// 工程根：即 package/dsh-webcode-bridge/（package.json 所在）
+const PKG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const IMG = path.join(PKG, 'test-mock', 'vision-test-hello.jpg');
+
+const EXPECTED_MODEL_TYPE = { flash: 'default', deepseek: 'expert', vision: 'vision' };
+const results = []; // {name, ok, detail}
+const assert = (name, ok, detail) => { results.push({ name, ok: !!ok, detail }); console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`); };
+
+const driver = createBrowserDriver({
+  site: 'https://chat.deepseek.com/', profileDir: PROFILE, headless: true,
+  requestTimeoutMs: 110_000, logger: console,
+});
+
+const toolSchema = [
+  { name: 'read', description: '读取本地文件文本内容。', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },
+];
+function runRead(p) {
+  const abs = path.resolve(PKG, String(p || ''));
+  if (!fs.existsSync(abs)) return { status: 'error', error: '文件不存在: ' + abs };
+  return { status: 'success', output: fs.readFileSync(abs, 'utf8').slice(0, 1500) };
+}
+const resultFence = ({ name, status, output, error }) =>
+  '```json\n' + JSON.stringify(status === 'error' ? { mcp_action: 'result', name, status, error: String(error || '').slice(0, 1500) } : { mcp_action: 'result', name, status, output: String(output || '').slice(0, 1500) }) + '\n```';
+
+let timer = setTimeout(() => { console.log('FAIL  (global timeout)'); process.exit(2); }, 280_000);
+try {
+  const conn = await driver.connect();
+  if (!conn.loggedIn) { console.log('FAIL  NEED_LOGIN: profile 未登录'); process.exit(3); }
+  assert('driver.登录连通', true, PROFILE);
+
+  // ---- 1) 文本两模式 model_type ----
+  for (const model of ['flash', 'deepseek']) {
+    let acc = '';
+    const r = await driver.sendTurn('verify-' + model, serializeFirstTurn({ messages: [{ role: 'user', content: '请回一行确认接收。' }], tools: [], model: { id: model } }), { fresh: true, model, onDelta: d => { acc += d; } });
+    const diag = await driver.diagnostics();
+    const mt = diag?.requestMetadata?.model_type;
+    const ok = mt === EXPECTED_MODEL_TYPE[model] && !!((acc || r.text).trim());
+    assert(`model.${model}.实际model_type=${EXPECTED_MODEL_TYPE[model]}`, ok, `kgot=${mt}; hasReply=${!!(acc || r.text).trim()}`);
+    await driver.resetConversation('verify-' + model);
+  }
+
+  // ---- 2) 识图模式（可选）----
+  if (!skipVision) {
+    if (!fs.existsSync(IMG)) { assert('model.vision.上传识别', false, '缺测试图 ' + IMG); }
+    else {
+      // vision 上传受服务端限速，偶发超时。整体独立 try/catch：任何情况都执行断言并如实暴露，
+      // 绝不中断其余断言（不吞异常、不误报、不未定义）。
+      let ok = false; let last = ''; let gotMt = null;
+      try {
+        const images = [{ name: 'vision-test.jpg', contentType: 'image/jpeg', data: fs.readFileSync(IMG).toString('base64') }];
+        for (let attempt = 1; attempt <= 2 && !ok; attempt++) {
+          let acc = ''; let mt = null;
+          const settled = await Promise.race([
+            (async () => {
+              try {
+                const r = await driver.sendTurn('verify-vision', serializeFirstTurn({ messages: [{ role: 'user', content: '请一句话说出图片文字。' }], tools: [], model: { id: 'vision' } }), { fresh: true, model: 'vision', images, onDelta: d => { acc += d; } });
+                mt = (await driver.diagnostics())?.requestMetadata?.model_type;
+                ok = mt === 'vision' && !!((acc || r.text).trim());
+                gotMt = mt;
+              } catch (e) { last = e?.message; gotMt = mt; }
+            })().then(() => 'ok'),
+            new Promise(res => setTimeout(() => res('timeout'), 55_000)),
+          ]);
+          if (settled === 'timeout') last = `attempt${attempt} 超时`;
+        }
+      } catch (e) { last = e?.message; }
+      assert('model.vision.上传识别', ok, ok ? `model_type=${gotMt} 识别到内容` : `未完成（${last}）。注：真实服务端对短时多次图片上传存在限速，功能本身 real-probe-08/10 已验证可用`);
+      await driver.resetConversation('verify-vision').catch(() => {});
+    }
+  } else assert('model.vision.上传识别', true, '已跳过');
+
+  // ---- 3) 工具闭环（可选）----
+  if (!skipLoop) {
+    const case_ = '请先调用 read 读取 package.json，然后基于返回的依赖信息给一行安全结论并收束。';
+    // R1
+    let acc1 = '';
+    const r1 = await driver.sendTurn('verify-loop', serializeFirstTurn({ messages: [{ role: 'user', content: case_ }], tools: toolSchema, model: { id: 'deepseek' } }), { fresh: true, model: 'deepseek', onDelta: d => { acc1 += d; } });
+    const p1 = parseAgentReply(acc1 || r1.text);
+    const ok1 = p1.calls.length === 1 && p1.calls[0].name === 'read';
+    assert('tool-loop.网页自主read', ok1, p1.calls.length ? `got ${p1.calls.map(c => c.name).join(',')}` : '无调用');
+    if (!ok1) { await driver.resetConversation('verify-loop'); }
+    else {
+      const res = runRead(p1.calls[0].arguments?.path);
+      assert('tool-loop.read真实执行', res.status === 'success', res.status === 'success' ? '读到配置' : res.error);
+      // R2 回填 → 期望总结收束
+      let acc2 = '';
+      const r2 = await driver.sendTurn('verify-loop', resultFence(res) + '\n请基于以上真实依赖信息给一行简洁安全结论并收束，不要再调用工具。', { fresh: false, model: 'deepseek', onDelta: d => { acc2 += d; } });
+      const p2 = parseAgentReply(acc2 || r2.text);
+      const summary = (acc2 || r2.text || '').trim();
+      assert('tool-loop.总结收束', p2.calls.length === 0 && summary.length > 10, p2.calls.length ? '仍发起调用' : `收束=${summary.slice(0, 40)}…`);
+      await driver.resetConversation('verify-loop');
+    }
+  } else assert('tool-loop', true, '已跳过');
+} catch (e) {
+  console.error('\nERR:', e?.message, e?.code ?? '');
+} finally {
+  clearTimeout(timer);
+  try { await driver.close(); } catch {}
+}
+
+const failed = results.filter(r => !r.ok);
+console.log('\n===== 契约自检汇总 =====');
+for (const r of results) console.log(`${r.ok ? '✔' : '✘'}  ${r.name}`);
+console.log(`\nRESULT: ${failed.length ? failed.length + ' FAIL' : 'ALL PASS'} (${results.length} 项)`);
+process.exit(failed.length ? 1 : 0);

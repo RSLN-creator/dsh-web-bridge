@@ -1,0 +1,122 @@
+{
+  "startedAt": "2026-09-06T16:37:59.408Z",
+  "steps": {
+    "connect": {
+      "ok": true,
+      "loggedIn": true
+    },
+    "diagnostics": {
+      "urlPath": "/",
+      "selectedModel": null,
+      "controls": [
+        {
+          "text": "快速模式",
+          "tag": "DIV",
+          "pressed": null,
+          "state": null,
+          "className": "dfb78875",
+          "parentClass": "_9f2341b _18572c1 _31a22b0"
+        },
+        {
+          "text": "快速模式",
+          "tag": "SPAN",
+          "pressed": null,
+          "state": null,
+          "className": "_321831d",
+          "parentClass": "dfb78875"
+        },
+        {
+          "text": "快速模式",
+          "tag": "DIV",
+          "pressed": null,
+          "state": null,
+          "className": "aa40b5de",
+          "parentClass": "_9f2341b _18572c1 _31a22b0"
+        },
+        {
+          "text": "快速模式",
+          "tag": "SPAN",
+          "pressed": null,
+          "state": null,
+          "className": "_321831d _37fb93d",
+          "parentClass": "aa40b5de"
+        },
+        {
+          "text": "专家模式",
+          "tag": "DIV",
+          "pressed": null,
+          "state": null,
+          "className": "dfb78875",
+          "parentClass": "_9f2341b _18572c1"
+        },
+        {
+          "text": "专家模式",
+          "tag": "SPAN",
+          "pressed": null,
+          "state": null,
+          "className": "_321831d",
+          "parentClass": "dfb78875"
+        },
+        {
+          "text": "专家模式",
+          "tag": "DIV",
+          "pressed": null,
+          "state": null,
+          "className": "aa40b5de",
+          "parentClass": "_9f2341b _18572c1"
+        },
+        {
+          "text": "专家模式",
+          "tag": "SPAN",
+          "pressed": null,
+          "state": null,
+          "className": "_321831d _37fb93d",
+          "parentClass": "aa40b5de"
+        }
+      ]
+    },
+    "flash-turn": {
+      "ms": 1228,
+      "text": "收到",
+      "metrics": {
+        "endToEndMs": 1050,
+        "firstResponseMs": 878,
+        "thinkingMs": null,
+        "responseMs": 172
+      },
+      "error": null
+    },
+    "deepseek-turn": {
+      "ms": 1591,
+      "text": "我是DeepSeek最新版模型，由深度求索公司创造的AI助手。",
+      "metrics": {
+        "endToEndMs": 1289,
+        "firstResponseMs": 669,
+        "thinkingMs": null,
+        "responseMs": 620
+      },
+      "error": null
+    },
+    "vision-turn": {
+      "ms": 2963,
+      "text": "红色和白色",
+      "metrics": {
+        "endToEndMs": 1979,
+        "firstResponseMs": 1809,
+        "thinkingMs": null,
+        "responseMs": 170
+      },
+      "error": null
+    },
+    "screenshot": {
+      "clip": null,
+      "viewport": {
+        "width": 800,
+        "height": 1000
+      },
+      "bytes": 23832,
+      "error": null
+    }
+  },
+  "finishedAt": "2026-09-06T16:38:08.160Z"
+}

@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <h1>webcode bridge</h1>
+    <span id="ws-state" class="state">离线</span>
+  </header>
+
+  <section class="notice" id="notice">
+    <h2>自动化风险告知（请务必阅读）</h2>
+    <p>启用后，本扩展将在你已登录的 DeepSeek 网页里<strong>自动发送消息并抓取回复</strong>，把网页版 AI 当作 DSH 的模型后端使用。</p>
+    <p>你应当了解：</p>
+    <ul>
+      <li>自动访问可能<strong>违反站点服务条款</strong>；</li>
+      <li>可能触发限流、验证码，严重时<strong>账号可能被限制或封禁</strong>；</li>
+      <li>请求由本机本地中继转发，仅在你自己的浏览器与账户内进行；</li>
+      <li>是否继续由你自行判断并自担风险。</li>
+    </ul>
+    <label class="agree">
+      <input type="checkbox" id="agree">
+      <span>我已阅读并理解上述风险，自愿启用</span>
+    </label>
+  </section>
+
+  <section class="controls">
+    <label class="toggle">
+      <span>启用桥接</span>
+      <input type="checkbox" id="enabled" disabled>
+    </label>
+
+    <label class="field">
+      <span>桥接地址</span>
+      <input type="text" id="bridgeUrl" spellcheck="false">
+    </label>
+
+    <div class="status" id="status"></div>
+
+    <div class="actions">
+      <button id="openSite" type="button">打开 DeepSeek 网页</button>
+      <button id="reconnect" type="button">重连</button>
+    </div>
+  </section>
+
+  <script src="popup.js"></script>
+</body>
+</html>

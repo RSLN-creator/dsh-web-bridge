@@ -1,0 +1,60 @@
+{
+  "name": "dsh-webcode-bridge",
+  "version": "0.5.1",
+  "description": "Harness Web Bridge: DeepSeek web models, native Harness tool loops, right sidebar conversation and native settings.",
+  "type": "module",
+  "main": "./lib/index.js",
+  "bin": {
+    "webcode-bridge-standalone": "./bin/bridge-standalone.js"
+  },
+  "scripts": {
+    "start": "node bin/bridge-standalone.js",
+    "test": "node --test test/regression.test.mjs test/mirror.test.mjs && node test/parse.test.mjs && node test/run-m1.js",
+      "doctor": "node test-mock/real-verify.mjs"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=20",
+    "dsh": ">=0.1.0-rc.6"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "slots",
+        "settingsScope"
+      ],
+      "platform": "web"
+    }
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.cjs",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "bin",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "dsh-bundle",
+    "webcode",
+    "web-ai",
+    "llm-adapter",
+    "model-provider",
+    "deepseek-web"
+  ],
+  "dependencies": {
+    "playwright-core": "^1.63.0",
+    "ws": "^8.21.3"
+  },
+  "packageManager": "pnpm@11.25.0+sha512.5cde925b4f075f725eb71fbae18a42ffe784524789f19b61c731cb8721ec28aaee160e01a8d5af4fedb2a42cdbf300efe23db356b0d4a17b4d63e11f8ab7c956"
+}

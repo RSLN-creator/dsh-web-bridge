@@ -1,0 +1,103 @@
+新会话
+工作区
+dsh-webcode-bridge
+请实际调用本地只读工具，读取绝对
+刚刚
+Generate the ses
+7分钟
+Generate the ses
+15分钟
+Generate the ses
+18分钟
+Generate the ses
+19分钟
+展开其余 9 个会话
+Pelago
+4_Olllama
+A0-缺陷检测项目
+实用程序
+9_Code_Workspace
+未分组
+dsh-agent-test3
+2天
+dsh-agent-test2
+2天
+dsh-agent-test2
+2天
+dsh-agent-test
+2天
+你还
+19天
+设置
+请实际调用本地只读工具，读取绝对
+极简模式
+Session log
+对话
+轨迹
+请实际调用本地只读工具，读取绝对路径 D:/9_Code_Workspace/dsh-webcode-bridge/package/dsh-webcode-bridge/lib/providers.js 并审查。工作区是 D:/9_Code_Workspace/dsh-webcode-bridge。必须读取文件后列出三种模型的 id 与对应中文标签，指出一项真实风险。不要搜索目录，不要联网搜索，不要修改文件。最终回答以 HARNESS_REVIEW_OK 结尾。
+22:42
+Tool call
+str_replace_editor · view
+
+根据对 providers.js 文件的审查，以下是其中定义的三种模型 ID 与中文标签：
+
+ID: flash → 中文标签: DeepSeek Flash · 快速模式 (标签: 快速模式, Flash)
+ID: vision → 中文标签: DeepSeek Vision · 识图模式 (标签: 识图模式, Vision)
+ID: deepseek → 中文标签: DeepSeek · 专家模式 (标签: 专家模式, DeepSeek)
+一项真实风险
+
+风险：resolveWebModel 函数在映射别名时存在不完全覆盖，可能导致无法解析某些有效模型 ID。
+
+具体来说：
+
+第 14 行定义别名映射：{ 'deepseek-web': 'flash', 'deepseek-reasoner': 'deepseek' }。
+第 15 行使用 aliases[id] || id 查找模型。这意味着：
+如果传入 'deepseek-web'，会映射到 'flash' 并匹配成功。
+如果传入 'deepseek-reasoner'，会映射到 'deepseek' 并匹配成功。
+但如果传入类似 'deepseek-v3'、'deepseek-r1' 等官方曾使用或未来可能使用的模型标识，由于未在 aliases 中定义，会直接以原 ID 去查找 DEEPSEEK.models 数组，而该数组仅包含 flash、vision、deepseek 三个 ID，导致查找失败并抛出“不支持的网页模型”错误。
+
+潜在影响： 当上游系统或用户传入这些有效但未被显式别名的模型名称时，桥接器会直接拒绝请求，而不是降级或给出更友好的提示，可能影响兼容性和用户体验。
+
+HARNESS_REVIEW_OK
+
+22:42 · 用时 6秒 · 首 token 1.1秒 · 68 tok/s
+Workspace Write
+DeepSeek Flash · 快速模式
+1 轮 · 2 步| LLM 6.6s · 工具调用 0s| 首 token 平均 1.3s · 68 tok/s| 缓存命中 0%| 输入 1.8K tok · 输出 277 tok
+详情
+点击消息流中的工具行查看详情
+🎁
+🎁 免费模型榜
+✕
+📖 使用教程
+📖 使用教程
+⚡ 配置本页全部
+🔄 刷新
+1.
+📌AMD热门
+›
+2.
+📌小红书开源280B免费大模型推荐
+›
+3.
+InternLM（书生·浦语）官网免费模型，每月免费额度推荐
+›
+4.
+agnes-ai免费模型
+›
+5.
+aionlabs免费模型
+›
+6.
+chatanywhere免费模型推荐
+›
+7.
+deepseek V4 flash和GLM5.2免费模型
+›
+技术笔记
+·
+插件开发
+·
+联系站长
+·
+⬆ 升级

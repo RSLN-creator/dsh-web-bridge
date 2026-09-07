@@ -1,0 +1,1 @@
+[2026-09-06] Harness Web Bridge 0.4.1：真实三模型切换、Calling 工具协议、流式 TPS、右侧 better-sidebar 会话和原生设置修复；实际文件读取及重启续聊通过，7 回归+8解析+M1/M2b/M2c通过 | package/dsh-webcode-bridge/lib、test、test-mock、README.md、PLAN.md、doc | 已安装到本机 web profile；图片上传与旧网页导入仍待适配

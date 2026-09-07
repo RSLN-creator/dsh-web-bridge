@@ -1,0 +1,6 @@
+node_modules/
+.pnpm-store/
+.edge-real-profile/
+.edge-real-profile2/
+.tmp-plugins.json
+*.log

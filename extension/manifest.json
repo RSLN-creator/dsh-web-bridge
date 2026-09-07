@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "webcode bridge (DSH)",
+  "version": "0.1.0",
+  "description": "把已登录的 DeepSeek 网页版桥接为 DSH 的模型提供商。启用前需阅读并同意自动化风险告知。",
+  "minimum_chrome_version": "116",
+  "permissions": ["storage", "tabs"],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "https://chat.deepseek.com/*"
+  ],
+  "background": {
+    "service_worker": "background/service_worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "webcode bridge"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://chat.deepseek.com/*"],
+      "js": ["content/capture_page.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": true
+    },
+    {
+      "matches": ["https://chat.deepseek.com/*"],
+      "js": ["vendor/decoder.js", "content/main.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ]
+}

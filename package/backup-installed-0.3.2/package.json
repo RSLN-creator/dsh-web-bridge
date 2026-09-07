@@ -1,0 +1,57 @@
+{
+  "name": "dsh-webcode-bridge",
+  "version": "0.3.2",
+  "description": "Web AI (webcode): bridge the logged-in DeepSeek web page into DeepSeek Harness as an LLM provider — real-site window + live preview, web conversation sync (naming/branches/import), consent-gated browser driver.",
+  "type": "module",
+  "main": "./lib/index.js",
+  "bin": {
+    "webcode-bridge-standalone": "./bin/bridge-standalone.js"
+  },
+  "scripts": {
+    "start": "node bin/bridge-standalone.js",
+    "test": "node test/run-m1.js"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=20",
+    "dsh": ">=0.1.0-rc.6"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "settingsScope"
+      ],
+      "platform": "web"
+    }
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.cjs",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "bin",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "dsh-bundle",
+    "webcode",
+    "web-ai",
+    "llm-adapter",
+    "model-provider",
+    "deepseek-web"
+  ],
+  "dependencies": {
+    "playwright-core": "^1.63.0",
+    "ws": "^8.21.3"
+  }
+}
