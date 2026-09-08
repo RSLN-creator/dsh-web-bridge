@@ -54,6 +54,8 @@ export function buildPreset(options = {}) {
       '```',
       '一次回复可以包含多个工具调用代码块，会按顺序执行；有依赖的调用请分多轮等待结果。',
       '工具执行结果会作为用户消息自动回填给你，格式：{"mcp_action":"result","name":"…","status":"success","output":"…"}（失败为 "status":"error","error":"…"）。',
+      '重要：如果上一次工具调用因参数无效而失败，收到了 status:"error" 的结果，请在下一轮把参数修正后重新调用，不要因为失败而放弃工具改用猜测。',
+      '回填结果中的每一轮调用（含失败）都会编号出现；继续任务时请基于真实结果，不要虚构文件内容。',
       '# 使用准则',
       '本会话的最终目标由用户的最新消息决定。除非用户只是闲聊/要观点，否则默认应优先通过真实工具获取数据，而不是凭记忆或设想作答。',
       '判断是否需要调用工具，应看"这个回答是否依赖本机真实文件、目录或命令执行结果"——依赖就用，不依赖就不用；能用一次调用覆盖就不用多次。',
@@ -185,11 +187,17 @@ export function parseAgentReply(text) {
     seen.add(t);
     let obj;
     try { obj = JSON.parse(t); } catch { return; }
-    if (!tagged && obj.mcp_action !== 'call') return;
+    // 三种合法调用形状（tag fence 历来全收；code fence 优先 mcp_action 协议，
+    // 但纯 {"name","arguments"} 形状在真实第二轮里高频出现——2026-09-08 会话
+    // f3fa97fd 复盘：模型把错误结果回读后省略 mcp_action 字段直接输出该形状，
+    // 导致调用被静默丢弃、任务在第二轮裸奔。宁可多认，由下方 isCall 严格把关）。
+    const fenceCall = tagged || obj.mcp_action === 'call';
+    if (!fenceCall && !(!obj.mcp_action && typeof obj.name === 'string' && obj.name.trim())) return;
     const args = normArgs(obj.arguments ?? obj.input ?? obj.parameters);
     const isCall =
-      (obj && obj.mcp_action === 'call' && typeof obj.name === 'string' && obj.name.trim()) ||
-      (obj && !obj.mcp_action && typeof obj.name === 'string' && obj.name.trim() && (typeof obj.arguments === 'object' || typeof obj.input === 'object' || (typeof obj.arguments === 'string' && obj.arguments.trim().startsWith('{'))));
+      fenceCall
+        ? (typeof obj.name === 'string' && obj.name.trim())
+        : (typeof obj.arguments === 'object' || typeof obj.input === 'object' || (typeof obj.arguments === 'string' && obj.arguments.trim().startsWith('{')));
     if (!isCall) return;
     if (Array.isArray(args)) return;
     calls.push({ name: obj.name.trim(), arguments: args });

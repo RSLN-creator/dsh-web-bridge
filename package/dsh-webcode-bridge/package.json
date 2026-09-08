@@ -1,6 +1,6 @@
 {
   "name": "dsh-webcode-bridge",
-  "version": "0.6.8",
+  "version": "0.6.9",
   "description": "Harness Web Bridge: DeepSeek web models, native Harness tool loops, right sidebar conversation and native settings.",
   "type": "module",
   "main": "./lib/index.js",
@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node bin/bridge-standalone.js",
     "test": "node --test test/regression.test.mjs test/mirror.test.mjs && node test/parse.test.mjs && node test/run-m1.js",
-      "doctor": "node test-mock/real-verify.mjs"
+    "doctor": "node test-mock/real-verify.mjs"
   },
   "license": "MIT",
   "engines": {

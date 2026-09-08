@@ -28,6 +28,16 @@ const driver = createBrowserDriver({
 const toolSchema = [
   { name: 'read', description: '读取本地文件文本内容。', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },
 ];
+
+// ---- 0) 裸 fence 解析（离线契约：2026-09-08 会话 f3fa97fd 复盘的回归点）----
+// 模型在工具错误回读后常省略 mcp_action 直接输出 {"name","arguments"} code fence——
+// 该形状必须被解析为工具调用，否则第二轮调用被静默丢弃、任务裸奔。
+{
+  const bare = '```json\n{"name":"read","arguments":{"path":"README.md"}}\n```';
+  const calls = parseAgentReply(bare).calls;
+  assert('parse.裸fence调用形状', calls.length === 1 && calls[0]?.name === 'read' && calls[0]?.arguments?.path === 'README.md',
+    calls.length ? `got ${calls[0].name}` : '未解析（回归 0.6.9 前的丢调用缺陷）');
+}
 function runRead(p) {
   const abs = path.resolve(PKG, String(p || ''));
   if (!fs.existsSync(abs)) return { status: 'error', error: '文件不存在: ' + abs };

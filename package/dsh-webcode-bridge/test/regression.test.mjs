@@ -100,7 +100,12 @@ test('首轮保留全部历史与工具结果', () => {
   assert.ok(delta.text.includes('文件内容'));
 });
 test('普通 JSON 示例不触发工具执行', () => {
-  assert.equal(parseAgentReply('例子：```json\n{"name":"read","arguments":{}}\n```').calls.length, 0);
+  // 散文中的参数示例（无 name/arguments 调用形状）不触发执行
+  assert.equal(parseAgentReply('例子：```json\n{"command":"view","path":"README.md"}\n```').calls.length, 0);
+  // prose 前置 + 调用形状 fence：真机第二轮高频形态（2026-09-08 会话复盘），
+  // 模型在错误回读后会省略 mcp_action 直接给 {"name","arguments"} fence，必须执行
+  assert.deepEqual(parseAgentReply('让我读取该文件。\n```json\n{"name":"read","arguments":{"path":"README.md"}}\n```').calls,
+    [{ name: 'read', arguments: { path: 'README.md' } }]);
 });
 test('真实网页 Calling 格式经过严格 JSON 解析', () => {
   assert.deepEqual(parseAgentReply('**Calling:** `str_replace_editor`\n{"command":"view","path":"README.md"}').calls,
