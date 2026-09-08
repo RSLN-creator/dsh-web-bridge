@@ -161,7 +161,14 @@ export function serializeDelta(messages, sent, toolResultsSent = 0, knownNames) 
  */
 export function parseAgentReply(text) {
   if (!text) return { calls: [], text: '' };
-  const s = String(text);
+  let s = String(text);
+  // 网页端流式噪声：DeepSeek 网页版偶发把协议标记输出成 <|DSML|…> 的变形——
+  // 竖线全角化成对出现（<｜｜DSML｜｜tool_calls>，U+FF5C）、丢开头 <。reference/
+  // deepseek-free-api 的 strip_dsml_markup 用 chr(0xff5c) 归一化处理同一问题。
+  // 这里把 DSML 前缀整体剥掉还原成裸 XML 标签，交给后面的 tag/invoke 正则。
+  s = s.replace(/<[\uFF5C|]+\s*DSML\s*[\uFF5C|]+/gi, '<').replace(/<\/[\uFF5C|]+\s*DSML\s*[\uFF5C|]+/gi, '</')
+    // 丢开头 < 的裸标记（｜DSML｜invoke …）：只在后跟已知标记名时补 <，避免误伤正文
+    .replace(/(^|[^\w<])[\uFF5C|]+\s*DSML\s*[\uFF5C|]+(?=(?:tool_calls|invoke|parameter)\b)/gi, '\$1<');
   const calls = [];
   const seen = new Set();
   // DeepSeek 网页版与 OpenAI 一样，常把 arguments 设置为"转义 JSON 字符串"
@@ -207,6 +214,18 @@ export function parseAgentReply(text) {
   while ((m = fenceRe.exec(s)) !== null) takeObj(m[1]);
   const tagRe = /<\s*(?:tool_call|function|stories)\s*>([\s\S]*?)<\s*\/\s*(?:tool_call|function|stories)\s*>/gi;
   while ((m = tagRe.exec(s)) !== null) takeObj(m[1], true);
+  // 裸 <invoke> XML 形状（probe-17 首跑 2026-09-09 发现：无 fence、无 mcp_action，
+  // 模型把 DSH 原生 XML 调用语法直接搬进网页回复）。<parameter name="k">v</parameter>
+  // 逐个收集为 arguments；至少一个 parameter 才算调用，散文举例不触发。
+  const invokeRe = /<\s*invoke\s+name\s*=\s*"([^"]+)"\s*>([\s\S]*?)<\s*\/\s*invoke\s*>/gi;
+  while ((m = invokeRe.exec(s)) !== null) {
+    const args = {};
+    let n = 0;
+    const paramRe = /<\s*parameter\s+name\s*=\s*"([^"]*)"\s*>([\s\S]*?)<\s*\/\s*parameter\s*>/gi;
+    let pm;
+    while ((pm = paramRe.exec(m[2])) !== null) { args[pm[1]] = pm[2].trim(); n++; }
+    if (n > 0) takeObj(JSON.stringify({ mcp_action: 'call', name: m[1], arguments: args }));
+  }
   const bareObjRe = /(\{\s*"mcp_action"\s*:\s*"call"[\s\S]*?\})\s*(?=<|$)/gi;
   while ((m = bareObjRe.exec(s)) !== null) takeObj(m[1]);
   // DeepSeek web also renders a native-looking call as bold Calling + a

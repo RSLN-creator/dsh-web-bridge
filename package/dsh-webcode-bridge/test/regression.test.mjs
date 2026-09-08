@@ -113,6 +113,30 @@ test('真实网页 Calling 格式经过严格 JSON 解析', () => {
   assert.equal(parseAgentReply('例如 Calling: read {"path":"secret"}').calls.length, 0);
   assert.equal(parseAgentReply('**Calling:** `read`\n{"path":"README.md"}\n只是示例').calls.length, 0);
 });
+test('裸 invoke XML 形状被解析为调用', () => {
+  // probe-17 首跑（2026-09-09）：无 fence、无 mcp_action，模型直接输出
+  // <invoke name="shell"><parameter name="command">ls -la</parameter></invoke>
+  // 旧解析器三种形状都不认 → 第 3 轮裸奔。必须归一为调用。
+  assert.deepEqual(parseAgentReply('<tool_call>\n<invoke name="shell">\n<parameter name="command">ls -la</parameter>\n<parameter name="purpose">查看仓库根目录文件列表</parameter>\n</invoke>\n').calls,
+    [{ name: 'shell', arguments: { command: 'ls -la', purpose: '查看仓库根目录文件列表' } }]);
+  // 多 invoke 同轮也要全收
+  const two = parseAgentReply('先看结构：\n<invoke name="read"><parameter name="path">README.md</parameter></invoke>\n再检索：\n<invoke name="grep"><parameter name="query">secret</parameter></invoke>\n');
+  assert.deepEqual(two.calls, [{ name: 'read', arguments: { path: 'README.md' } }, { name: 'grep', arguments: { query: 'secret' } }]);
+  // 散文中举例的 invoke（无 parameter 或空 name）不触发
+  assert.equal(parseAgentReply('可以像 <invoke name="read"></invoke> 这样调用').calls.length, 0);
+});
+test('DSML 全角/半角/丢开头形状归一为调用', () => {
+  // 马拉松终跑（2026-09-09）观察：网页流式把协议标记噪声化——竖线成对全角化
+  // （U+FF5C）或整段丢开头 <。reference/deepseek-free-api strip_dsml_markup 同源问题。
+  assert.deepEqual(parseAgentReply('<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name="shell">\n<｜｜DSML｜｜parameter name="command">git status</｜｜DSML｜｜parameter>\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>').calls,
+    [{ name: 'shell', arguments: { command: 'git status' } }]);
+  assert.deepEqual(parseAgentReply('<|DSML|tool_calls><|DSML|invoke name="read"><|DSML|parameter name="path">README.md</|DSML|parameter></|DSML|invoke></|DSML|tool_calls>').calls,
+    [{ name: 'read', arguments: { path: 'README.md' } }]);
+  assert.deepEqual(parseAgentReply('｜DSML｜invoke name="read"><｜DSML｜parameter name="path">PLAN.md</｜DSML｜parameter></｜DSML｜invoke>').calls,
+    [{ name: 'read', arguments: { path: 'PLAN.md' } }]);
+  // 散文提及 DSML 不触发
+  assert.equal(parseAgentReply('DSML 是协议名，不是调用').calls.length, 0);
+});
 test('SSE 支持 CRLF 分块和空 close 事件', () => {
   const decoder = new globalThis.WebCodeDeepSeekStreamDecoder();
   const raw = 'data: ' + JSON.stringify({ v: { response: { role: 'ASSISTANT', message_id: '1', status: 'FINISHED', fragments: [{ type: 'RESPONSE', content: '成功' }] } } }) + '\r\n\r\nevent: close\r\n\r\n';
