@@ -193,12 +193,20 @@ export function apply(ctx, config = {}) {
   const settingsPath = path.join(cfg.profileDir, 'webcode-settings.json');
   let settingsService = null;
   try { settingsService = ctx.get('settings') || ctx.settings; } catch {}
+  // 宿主 settings 必须读写双全才启用（DSH 实测存在 get-only 形态）；
+  // 只读宿主会造成「写文件、读宿主」的读写分裂——保存永远丢失。get/set 同源是硬约束。
+  if (!(settingsService && typeof settingsService.get === 'function' && typeof settingsService.set === 'function')) {
+    settingsService = null;
+  }
   const defaultConfig = { extraPrompt: '', defaultModel: 'flash', previewRefreshRate: 5000 };
   const configManager = {
     get() {
+      // settingsService 已在初始化时校验 get/set 双全；此处仍防御式包裹
       if (settingsService) {
-        const ns = settingsService.get('webcode');
-        return { ...defaultConfig, ...(ns || {}) };
+        try {
+          const ns = settingsService.get('webcode');
+          return { ...defaultConfig, ...(ns || {}) };
+        } catch { /* fall through to file store */ }
       }
       try {
         const data = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
@@ -207,9 +215,9 @@ export function apply(ctx, config = {}) {
     },
     set(newConfig) {
       const merged = { ...defaultConfig, ...newConfig };
+      // settingsService 初始化时已确认可写；运行期异常仍回落文件，绝不让保存 502
       if (settingsService) {
-        settingsService.set('webcode', merged);
-        return merged;
+        try { settingsService.set('webcode', merged); return merged; } catch (err) { warn('host settings set failed:', err?.message); }
       }
       try {
         fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
