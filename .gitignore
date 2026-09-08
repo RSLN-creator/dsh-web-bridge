@@ -4,3 +4,10 @@ node_modules/
 .edge-real-profile2/
 .tmp-plugins.json
 *.log
+
+# reference: 新增逆向参考仓库为纯 git clone（带 .git），不入库；README 内列出清单与来源
+reference/*/
+!reference/local-refs/
+# reference 根下散放的 PDF 蓝图等资料同样不入库（gitignore 对已被目录规则排除的路径，否定规则需逐层重开）
+!reference/
+reference/*.pdf
