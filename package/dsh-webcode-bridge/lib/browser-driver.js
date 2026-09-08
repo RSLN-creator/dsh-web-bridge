@@ -579,6 +579,47 @@ export function createBrowserDriver(options = {}) {
     return { strict: false, fallback: 'default-model' };
   }
 
+  /** 网页新版的「深度思考」pill 是独立开关(aria-pressed),与模型 pill 并存:
+   *  thinking 模型必须把它点亮(否则 thinking_enabled=false、无 THINK 流——
+   *  2026-09-08 真机实测);非 thinking 模型必须关掉。任何形态缺失都只是
+   *  跳过同步,绝不阻断已成功的模型选择。
+   *  定位:输入框往上第 3 层祖先容器内取「深度思考」文本(与 diagnostics
+   *  的 composer 分析同一 DOM 路径;全页 getByText 会撞上菜单/会话标题)。 */
+  async function syncThinkPill(want) {
+    try {
+      const pill = await page.evaluateHandle(() => {
+        const ta = [...document.querySelectorAll('textarea')].find(e => { const r = e.getBoundingClientRect(); return r.width > 40 && r.height > 0; });
+        if (!ta) return null;
+        let box = ta;
+        for (let i = 0; i < 3 && box.parentElement; i++) box = box.parentElement;
+        for (const el of box.querySelectorAll('button, [role="button"], [aria-pressed]')) {
+          if ((el.textContent || '').trim() === '深度思考' && el.getAttribute('aria-pressed') !== null) return el;
+        }
+        return null;
+      });
+      if (!pill || !(await pill.asElement())) return null;
+      const el = pill.asElement();
+      const pressed = await el.getAttribute('aria-pressed');
+      const enabled = pressed === 'true';
+      if (enabled !== want) {
+        await el.click({ timeout: 3000 });
+        await page.waitForTimeout(400);
+        let now = await el.getAttribute('aria-pressed');
+        if (now !== (want ? 'true' : 'false')) {
+          // 点击未翻转:真实坐标兜底(部分版本 pill 只吃真实鼠标事件)
+          const box = await el.boundingBox();
+          if (box) {
+            await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+            await page.waitForTimeout(400);
+          }
+          now = await el.getAttribute('aria-pressed');
+          if (now !== (want ? 'true' : 'false')) warn('深度思考 pill 点击后仍未翻转(当前:', now, '目标:', want, ')');
+        }
+      }
+      return want;
+    } catch (err) { warn('深度思考 pill 同步失败:', err?.message); return null; }
+  }
+
   async function selectModelDeepSeek(model, { hasImages, label }) {
     let mode = page.getByText(model.labels[0], { exact: true });
     if (!await mode.count()) {
@@ -590,6 +631,7 @@ export function createBrowserDriver(options = {}) {
       await mode.last().click();
       await page.keyboard.press('Escape');
       selectedModel = model.id;
+      await syncThinkPill(model.thinking === true);
       return { strict: true };
     }
     const native = page.locator('select[aria-label="模型"], select[aria-label="Model"]');
@@ -602,6 +644,7 @@ export function createBrowserDriver(options = {}) {
       await native.first().selectOption(model.id);
       if (await native.first().inputValue() !== model.id) throw new Error('模型选择未生效');
       selectedModel = model.id;
+      await syncThinkPill(model.thinking === true);
       return { strict: true };
     }
     const thinking = page.getByRole('button', { name: /^深度思考$|^DeepThink(?: \(R1\))?$/i });
@@ -631,15 +674,39 @@ export function createBrowserDriver(options = {}) {
     }
     await option.first().click();
     if (!await page.getByRole('button', { name: label }).count()) throw new Error('模型选择未确认');
+    selectedModel = model.id;
+    await syncThinkPill(model.thinking === true);
     return { strict: true };
   }
 
   async function diagnostics() {
     if (!page) return { controls: [], urlPath: null, transport: 'playwright-edge', preview: false, siteId };
+    // composer 分析:输入框附近(输入框向上 3 层祖先容器内)的全部可点元素,
+    // 用于真机核对模型 pill/深度思考开关的真实形态。只读,不点击。
+    const composer = await page.evaluate(() => {
+      const ta = [...document.querySelectorAll('textarea')].find(e => { const r = e.getBoundingClientRect(); return r.width > 40 && r.height > 0; });
+      if (!ta) return null;
+      let box = ta;
+      for (let i = 0; i < 3 && box.parentElement; i++) box = box.parentElement;
+      const out = [];
+      for (const el of box.querySelectorAll('button, [role="button"], [aria-pressed], [aria-label]')) {
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) continue;
+        out.push({
+          text: (el.textContent || '').trim().slice(0, 30),
+          ariaLabel: el.getAttribute('aria-label'),
+          pressed: el.getAttribute('aria-pressed'),
+          state: el.getAttribute('data-state'),
+          x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height),
+        });
+      }
+      return out.slice(0, 20);
+    }).catch(() => null);
     return {
       urlPath: new URL(page.url()).pathname,
       selectedModel,
       requestMetadata,
+      composer,
       transport: 'playwright-edge',
       preview: !page.isClosed?.(),
       siteId,
