@@ -178,12 +178,20 @@ window.__ModuleLoader__.load({
       const [defaultModel, setDefaultModel] = React.useState('');
       const [modelSaved, setModelSaved] = React.useState('');
       const [modelNotice, setModelNotice] = React.useState('');
+      const [thinkMode, setThinkMode] = React.useState('auto');
+      const [thinkSaved, setThinkSaved] = React.useState('auto');
+      const [thinkNotice, setThinkNotice] = React.useState('');
       React.useEffect(() => {
         let alive = true;
         const poll = () => api('status').then(s => { if (alive) setStatus(s); }).catch(e => { if (alive) setError(e.message); });
         poll();
         api('models').then(m => { if (alive) setModels(m.models || []); }).catch(() => {});
-        api('settings').then(s => { if (alive) { setDefaultModel(s.defaultModel || ''); setModelSaved(s.defaultModel || ''); } }).catch(() => {});
+        api('settings').then(s => {
+          if (!alive) return;
+          setDefaultModel(s.defaultModel || ''); setModelSaved(s.defaultModel || '');
+          setThinkMode(['on', 'off', 'auto'].includes(s.thinkMode) ? s.thinkMode : 'auto');
+          setThinkSaved(['on', 'off', 'auto'].includes(s.thinkMode) ? s.thinkMode : 'auto');
+        }).catch(() => {});
         const timer = setInterval(poll, 4000);
         return () => { alive = false; clearInterval(timer); };
       }, []);
@@ -191,6 +199,15 @@ window.__ModuleLoader__.load({
         setPending(true); setError('');
         try { await api(name, body); setStatus(await api('status')); }
         catch (e) { setError(e.message); }
+        finally { setPending(false); }
+      }
+      async function saveThink(value) {
+        setPending(true); setThinkNotice(''); setError('');
+        try {
+          const r = await api('settings', { thinkMode: value });
+          setThinkMode(r.thinkMode || value); setThinkSaved(r.thinkMode || value);
+          setThinkNotice('已保存。下次生成起生效。');
+        } catch (e) { setError(e.message); }
         finally { setPending(false); }
       }
       async function saveModel(value) {
@@ -220,6 +237,13 @@ window.__ModuleLoader__.load({
           h(ModelSelect, { models, value: defaultModel, disabled: pending, onChange: setDefaultModel }),
           h('button', { disabled: pending || !defaultModel || defaultModel === modelSaved, onClick: () => saveModel(defaultModel) }, '保存'),
           modelNotice && h('span', { className: 'hwb-hint' }, modelNotice)),
+        h('div', { className: 'hwb-row' }, h('span', null, '深度思考',
+          h('select', { className: 'hwb-model-select', value: thinkMode, disabled: pending, onChange: e => setThinkMode(e.target.value) },
+            h('option', { value: 'auto' }, '自动（按所选模型的默认思考行为）'),
+            h('option', { value: 'on' }, '始终开启（强制打开网页「深度思考」开关）'),
+            h('option', { value: 'off' }, '始终关闭（追求速度）')),
+          h('button', { disabled: pending || thinkMode === thinkSaved, onClick: () => saveThink(thinkMode) }, '保存'),
+          thinkNotice && h('span', { className: 'hwb-hint' }, thinkNotice))),
         h('div', { className: 'hwb-row' }, h('span', null, '账户'),
           h('span', null, driver?.loggedIn ? 'DeepSeek 网页账号已登录（本地浏览器配置）' : driver?.needLogin ? '未登录（需要先登录一次）' : '待检查'),
           h('button', { disabled: pending || relay?.busy, onClick: () => action('login', { siteId: 'deepseek' }) },

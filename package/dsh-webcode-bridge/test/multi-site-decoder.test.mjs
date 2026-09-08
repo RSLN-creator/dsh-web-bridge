@@ -6,7 +6,7 @@ import { qualifyModelId, resolveWebModel, listAllModels } from '../lib/providers
 const D = globalThis.WebCodeStreamDecoders;
 
 test('qualifyModelId：裸 id 补站点前缀、限定 id 原样、空值透传', () => {
-  assert.equal(qualifyModelId('glm-4.6', 'glm'), 'glm:glm-4.6');
+  assert.equal(qualifyModelId('auto', 'glm'), 'glm:auto');
   assert.equal(qualifyModelId('deepseek:flash', 'deepseek'), 'deepseek:flash');
   assert.equal(qualifyModelId('flash', undefined), 'flash');
   assert.equal(qualifyModelId(null, 'glm'), null);
@@ -16,11 +16,11 @@ test('listAllModels：全站点目录含 DeepSeek/GLM/ChatGPT/Kimi/Qwen 与兼�
   const all = listAllModels();
   const ids = new Set(all.map((m) => m.id));
   assert.ok(ids.has('deepseek:flash') && ids.has('deepseek:deepseek'));
-  assert.ok(ids.has('glm:glm-4.6') && ids.has('chatgpt:gpt-5') && ids.has('kimi:kimi'));
-  assert.ok(ids.has('qwen:qwen3-max') && ids.has('deepseek-web'));
-  const m = resolveWebModel('glm:glm-4.6');
+  assert.ok(ids.has('glm:auto') && ids.has('chatgpt:auto') && ids.has('kimi:auto'));
+  assert.ok(ids.has('qwen:auto') && ids.has('deepseek-web'));
+  const m = resolveWebModel('glm:auto');
   assert.equal(m.siteId, 'glm');
-  assert.equal(m.id, 'glm-4.6');
+  assert.equal(m.id, 'auto');
 });
 
 test('glm：parts[].content[] 嵌套结构的正文与图片（glm-free-api 同构帧）', () => {

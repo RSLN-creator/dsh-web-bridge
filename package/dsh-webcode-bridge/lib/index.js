@@ -198,7 +198,7 @@ export function apply(ctx, config = {}) {
   if (!(settingsService && typeof settingsService.get === 'function' && typeof settingsService.set === 'function')) {
     settingsService = null;
   }
-  const defaultConfig = { extraPrompt: '', defaultModel: 'flash', previewRefreshRate: 5000 };
+  const defaultConfig = { extraPrompt: '', defaultModel: 'flash', previewRefreshRate: 5000, thinkMode: 'auto' };
   const configManager = {
     get() {
       // settingsService 已在初始化时校验 get/set 双全；此处仍防御式包裹
@@ -577,6 +577,8 @@ function imageMarkdown(images) {
       // 归一化模型限定 id：meta 可能只带裸 id（OpenAI 前端），补上站点前缀，
       // 保证 driver 的 selectModel 一定解析到正确站点，不会因跨站点重名串模型。
       const qualified = qualifyModelId(m?.model, m?.siteId);
+      // thinkMode: 'auto' | 'on' | 'off' — 设置页手动覆盖网页「深度思考」开关
+      const thinkMode = ['on', 'off', 'auto'].includes(m?.thinkMode) ? m.thinkMode : 'auto';
       if (m?.sessionKey) {
         return driverFor(m.siteId).sendTurn(m.sessionKey, prompt, {
           fresh: m.fresh === true,
@@ -586,6 +588,7 @@ function imageMarkdown(images) {
           onImage: opts.onImage,
           model: qualified,
           images: m.images,
+          thinkMode,
         }).catch(async (err) => {
           // a vanished/deleted conversation poisons the stored slot — reset
           // it so the NEXT turn reopens a fresh web chat
@@ -593,7 +596,7 @@ function imageMarkdown(images) {
           throw err;
         });
       }
-      return driverFor(m?.siteId).sendPrompt(prompt, { ...opts, model: qualified });
+      return driverFor(m?.siteId).sendPrompt(prompt, { ...opts, model: qualified, thinkMode });
     },
     driverStatus: () => {
       const base = driver.status();
@@ -688,6 +691,7 @@ function imageMarkdown(images) {
     // 用户未显式选模型时，设置页保存的「默认模型」生效（此前只有 extraPrompt
     // 被消费，defaultModel 是个只存不用的摆设）。
     const defaultModel = configManager.get().defaultModel;
+    const thinkMode = ['on', 'off', 'auto'].includes(configManager.get().thinkMode) ? configManager.get().thinkMode : 'auto';
     const messages = Array.isArray(options.messages) ? options.messages : [];
     const resolvedModel = resolveWebModel(options.model || defaultModel || cfg.modelId);
     const model = resolvedModel.id;
@@ -713,7 +717,7 @@ function imageMarkdown(images) {
       recordPreset(prompt);
       return {
         prompt,
-        meta: { model: siteId + ':' + model, siteId },
+        meta: { model: siteId + ':' + model, siteId, thinkMode },
         async attach() {
           const imgs = imagesOfMessages(messages);
           return imgs.length ? resolveRemoteImages(imgs) : [];
@@ -732,7 +736,7 @@ function imageMarkdown(images) {
     else prompt = delta.text;
     return {
       prompt,
-      meta: { sessionKey: keyPath, fresh, model: siteId + ':' + model, siteId },
+      meta: { sessionKey: keyPath, fresh, model: siteId + ':' + model, siteId, thinkMode },
       invalidate: () => sessionState.delete(keyPath),
       async attach() {
         // a fresh turn replays the whole transcript → attach every image in it;
@@ -840,6 +844,14 @@ button:hover { background: #1d4ed8; }
     <input type="number" id="previewRefreshRate" min="1000" max="30000" step="500" value="5000">
     <div class="hint">控制预览面板自动刷新的间隔。</div>
 
+    <label for="thinkMode">深度思考</label>
+    <select id="thinkMode">
+      <option value="auto">自动（按所选模型的默认思考行为）</option>
+      <option value="on">始终开启（强制打开网页「深度思考」开关）</option>
+      <option value="off">始终关闭（追求速度）</option>
+    </select>
+    <div class="hint">手动覆盖网页端的「深度思考」开关。自动=按模型属性（专家模式自动开、快速模式自动关）；始终开启/关闭则无视模型。</div>
+
     <button type="submit">保存设置</button>
   </form>
   <div id="status"></div>
@@ -859,6 +871,7 @@ button:hover { background: #1d4ed8; }
       document.getElementById('extraPrompt').value = data.extraPrompt || '';
       document.getElementById('defaultModel').value = MODEL_IDS[data.defaultModel] || data.defaultModel || 'deepseek:flash';
       document.getElementById('previewRefreshRate').value = data.previewRefreshRate || 5000;
+      document.getElementById('thinkMode').value = ['on', 'off', 'auto'].includes(data.thinkMode) ? data.thinkMode : 'auto';
     } catch (e) {
       statusEl.textContent = '加载设置失败: ' + e.message;
       statusEl.className = 'error';
@@ -871,6 +884,7 @@ button:hover { background: #1d4ed8; }
       extraPrompt: document.getElementById('extraPrompt').value,
       defaultModel: document.getElementById('defaultModel').value,
       previewRefreshRate: parseInt(document.getElementById('previewRefreshRate').value, 10) || 5000,
+      thinkMode: document.getElementById('thinkMode').value,
     };
     try {
       const res = await fetch(API_BASE + '/settings', {

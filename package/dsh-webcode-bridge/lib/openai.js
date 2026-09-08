@@ -139,6 +139,7 @@ export function createOpenAiFront(relay, modelInfo) {
     let selectedModel, selectedSiteId;
     try { const r = resolveWebModel(body.model || modelId); selectedModel = r.id; selectedSiteId = r.siteId; }
     catch (err) { return sendJson(res, 400, { error: { message: err.message } }); }
+    const thinkMode = ['on', 'off', 'auto'].includes(body?.think_mode) ? body.think_mode : 'auto';
     const controller = new AbortController();
     res.on('close', () => { if (!res.writableEnded) controller.abort(); });
     const stream = body?.stream === true;
@@ -162,7 +163,7 @@ export function createOpenAiFront(relay, modelInfo) {
       const qualified = qualifyModelId(selectedModel, selectedSiteId);
       try {
         await relay.submit(prompt, {
-          meta: { model: qualified, siteId: selectedSiteId, images },
+          meta: { model: qualified, siteId: selectedSiteId, images, thinkMode },
           signal: controller.signal,
           onDelta: (t) => { try { res.write('data: ' + frame({ content: t }, null) + '\n\n'); } catch {} },
           onThink: (t) => { try { res.write('data: ' + frame({ reasoning_content: t }, null) + '\n\n'); } catch {} },
@@ -186,7 +187,7 @@ export function createOpenAiFront(relay, modelInfo) {
 
     try {
       const qualified = qualifyModelId(selectedModel, selectedSiteId);
-      const { text, thinking, images: genImages } = await relay.submit(prompt, { meta: { model: qualified, siteId: selectedSiteId, images }, signal: controller.signal });
+      const { text, thinking, images: genImages } = await relay.submit(prompt, { meta: { model: qualified, siteId: selectedSiteId, images, thinkMode }, signal: controller.signal });
       if (!text.trim()) throw new Error('empty response from web AI');
       const usage = { prompt_tokens: estimateTokens(prompt), completion_tokens: estimateTokens(text), total_tokens: estimateTokens(prompt) + estimateTokens(text) };
       const parts = [{ type: 'text', text }];

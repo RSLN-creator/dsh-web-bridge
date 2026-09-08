@@ -385,7 +385,7 @@ export function createBrowserDriver(options = {}) {
     await page.waitForTimeout(500);
   }
 
-  async function runTurn(message, { navigate, signal, onDelta, onThink, onImage, model, images } = {}) {
+  async function runTurn(message, { navigate, signal, onDelta, onThink, onImage, model, images, thinkMode } = {}) {
     if (busy || transitioning) throw new Error('driver busy');
     busy = true;
     let timer = null;
@@ -440,7 +440,10 @@ export function createBrowserDriver(options = {}) {
       }
 
       loggedIn = true;
-      const selection = model ? await selectModel(model, { hasImages: Array.isArray(images) && images.length > 0 }) : null;
+      // thinkMode: 'auto'(按模型默认) | 'on'(强制开) | 'off'(强制关)——设置页手动覆盖。
+      // DeepSeek 的「深度思考」pill 是独立开关,auto 时按模型 thinking 属性双向同步。
+      const thinkOverride = thinkMode === 'on' ? true : thinkMode === 'off' ? false : null;
+      const selection = model ? await selectModel(model, { hasImages: Array.isArray(images) && images.length > 0, thinkOverride }) : null;
       if (contract.searchTogglePattern) {
         const search = page.locator('[aria-pressed]').filter({ hasText: contract.searchTogglePattern });
         if (await search.count() && await search.first().getAttribute('aria-pressed') === 'true') await search.first().click();
@@ -521,28 +524,28 @@ export function createBrowserDriver(options = {}) {
     }
   }
 
-  async function sendTurn(key, message, { fresh = false, signal, onDelta, onThink, onImage, model, images } = {}) {
+  async function sendTurn(key, message, { fresh = false, signal, onDelta, onThink, onImage, model, images, thinkMode } = {}) {
     const existing = conversationFor(key);
     let navigate = 'fresh';
     if (!fresh && existing?.webSessionId) {
       const root = new URL(cfg.site);
       navigate = root.origin + '/a/chat/s/' + encodeURIComponent(existing.webSessionId);
     }
-    const result = await runTurn(message, { navigate, signal, onDelta, onThink, onImage, model, images });
+    const result = await runTurn(message, { navigate, signal, onDelta, onThink, onImage, model, images, thinkMode });
     if (result.sessionId) rememberConversation(key, result.sessionId);
     else if (navigate !== 'fresh') forgetConversation(key);
     return result;
   }
 
-  async function sendPrompt(prompt, { signal, onDelta, onThink, onImage, meta, model } = {}) {
+  async function sendPrompt(prompt, { signal, onDelta, onThink, onImage, meta, model, thinkMode } = {}) {
     return runTurn(prompt, {
-      navigate: 'fresh', signal, onDelta, onThink, onImage,
+      navigate: 'fresh', signal, onDelta, onThink, onImage, thinkMode,
       model: model || meta?.model,
       images: meta?.images,
     });
   }
 
-  async function selectModel(value, { hasImages = false } = {}) {
+  async function selectModel(value, { hasImages = false, thinkOverride = null } = {}) {
     const model = resolveWebModel(value);
     if (model.siteId !== siteId) throw new Error(`MODEL_SITE_MISMATCH: 模型 ${model.id} 属于站点${model.siteId}，当前驱动为 ${siteId}`);
     if (model.vision && !hasImages) {
@@ -550,9 +553,15 @@ export function createBrowserDriver(options = {}) {
       err.code = 'VISION_REQUIRES_IMAGE';
       throw err;
     }
+    // 未真机校准的站点用「网页当前模型」入口:不做任何模型 UI 操作,
+    // 网页上选什么就用什么(DOM 契约未知,乱点比不点风险更大)。
+    if (model.id === 'auto') {
+      selectedModel = model.id;
+      return { strict: false, fallback: 'web-current' };
+    }
+    // 手动覆盖 > 模型默认;auto 时不干预 pill 之外的既有逻辑
     const label = new RegExp('^(?:' + model.labels.join('|') + ')$', 'i');
-    // DeepSeek 契约保持原有严格选择逻辑；其余站点用通用标签点击（宽松）。
-    if (siteId === 'deepseek') return selectModelDeepSeek(model, { hasImages, label });
+    if (siteId === 'deepseek') return selectModelDeepSeek(model, { hasImages, label, thinkOverride });
     return selectModelGeneric(model, { label });
   }
 
@@ -620,7 +629,9 @@ export function createBrowserDriver(options = {}) {
     } catch (err) { warn('深度思考 pill 同步失败:', err?.message); return null; }
   }
 
-  async function selectModelDeepSeek(model, { hasImages, label }) {
+  async function selectModelDeepSeek(model, { hasImages, label, thinkOverride = null }) {
+    // pill 目标:手动覆盖优先,否则按模型 thinking 属性
+    const wantThink = thinkOverride !== null ? thinkOverride : model.thinking === true;
     let mode = page.getByText(model.labels[0], { exact: true });
     if (!await mode.count()) {
       const current = page.getByText(/^(快速模式|专家模式|识图模式)$/).filter({ visible: true });
@@ -631,7 +642,7 @@ export function createBrowserDriver(options = {}) {
       await mode.last().click();
       await page.keyboard.press('Escape');
       selectedModel = model.id;
-      await syncThinkPill(model.thinking === true);
+      await syncThinkPill(wantThink);
       return { strict: true };
     }
     const native = page.locator('select[aria-label="模型"], select[aria-label="Model"]');
@@ -644,7 +655,7 @@ export function createBrowserDriver(options = {}) {
       await native.first().selectOption(model.id);
       if (await native.first().inputValue() !== model.id) throw new Error('模型选择未生效');
       selectedModel = model.id;
-      await syncThinkPill(model.thinking === true);
+      await syncThinkPill(wantThink);
       return { strict: true };
     }
     const thinking = page.getByRole('button', { name: /^深度思考$|^DeepThink(?: \(R1\))?$/i });
@@ -675,7 +686,7 @@ export function createBrowserDriver(options = {}) {
     await option.first().click();
     if (!await page.getByRole('button', { name: label }).count()) throw new Error('模型选择未确认');
     selectedModel = model.id;
-    await syncThinkPill(model.thinking === true);
+    await syncThinkPill(wantThink);
     return { strict: true };
   }
 

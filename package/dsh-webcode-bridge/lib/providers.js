@@ -30,11 +30,11 @@ export const GLM = site({
   input: 'textarea#chat-input, textarea[placeholder], textarea',
   attachSelector: "input[type='file']",
   decoder: 'glm', stream: true,
+  // 未真机校准的站点只给「网页当前模型」入口:桥不宣称具体版本号(网页
+  // 模型更新极快,硬编码清单必然过时——2026-09-08 用户实测 GLM 网页已到
+  // 5.x,旧目录还在 4.5/4.6)。在右侧网页里手动选模型,桥按当前网页状态对话。
   models: [
-    { id: 'glm-4.5-flash', name: 'GLM-4.5-Flash · 免费快速', labels: ['GLM-4-Flash', 'Flash', '快速'] },
-    { id: 'glm-4.6', name: 'GLM-4.6 · 旗舰', labels: ['GLM-4.6', '旗舰'] },
-    { id: 'glm-4.6-thinking', name: 'GLM-4.6 · 深度思考', labels: ['深度思考', 'Thinking'], thinking: true },
-    { id: 'glm-4v', name: 'GLM-4V · 识图', labels: ['识图', 'Vision'], vision: true },
+    { id: 'auto', name: '智谱清言 · 网页当前模型', labels: ['GLM'] },
   ],
 });
 
@@ -45,9 +45,7 @@ export const CHATGPT = site({
   attachSelector: "input[type='file']",
   decoder: 'chatgpt', stream: true,
   models: [
-    { id: 'gpt-5', name: 'GPT-5 · 标准模式', labels: ['GPT-5', 'ChatGPT'] },
-    { id: 'gpt-5-thinking', name: 'GPT-5 Thinking · 深度思考', labels: ['思考', 'Thinking', 'Extended'], thinking: true },
-    { id: 'dall-e', name: 'DALL·E · 图像生成', labels: ['图像', 'DALL·E', 'Create image'], imageOut: true },
+    { id: 'auto', name: 'ChatGPT · 网页当前模型', labels: ['ChatGPT'] },
   ],
 });
 
@@ -59,9 +57,7 @@ export const KIMI = site({
   attachSelector: "input[type='file']",
   decoder: 'kimi', stream: true,
   models: [
-    { id: 'kimi', name: 'Kimi K2 · 快速', labels: ['K2', 'Kimi'] },
-    { id: 'kimi-thinking', name: 'Kimi K2 · 深度思考', labels: ['K2 思考', '深度思考', 'Thinking'], thinking: true },
-    { id: 'kimi-vision', name: 'Kimi 视觉版 · 识图', labels: ['视觉版', 'Vision'], vision: true },
+    { id: 'auto', name: 'Kimi · 网页当前模型', labels: ['Kimi'] },
   ],
 });
 
@@ -73,9 +69,7 @@ export const QWEN = site({
   attachSelector: "input[type='file']",
   decoder: 'openai-sse', stream: true, experimental: true,
   models: [
-    { id: 'qwen3-max', name: 'Qwen3-Max · 旗舰', labels: ['Qwen3-Max', 'Max'] },
-    { id: 'qwen3-thinking', name: 'Qwen3 · 深度思考', labels: ['思考', 'Thinking'], thinking: true },
-    { id: 'qwen-vl', name: 'Qwen-VL · 识图', labels: ['VL', '识图'], vision: true },
+    { id: 'auto', name: '通义千问 · 网页当前模型', labels: ['Qwen'] },
   ],
 });
 
@@ -86,8 +80,7 @@ export const DOUBAO = site({
   attachSelector: "input[type='file']",
   decoder: 'doubao', stream: true, experimental: true,
   models: [
-    { id: 'doubao-pro', name: '豆包 Pro', labels: ['Pro', '豆包'] },
-    { id: 'doubao-thinking', name: '豆包 · 深度思考', labels: ['深度思考', 'Thinking'], thinking: true },
+    { id: 'auto', name: '豆包 · 网页当前模型', labels: ['豆包'] },
   ],
 });
 
@@ -98,8 +91,7 @@ export const GROK = site({
   attachSelector: "input[type='file']",
   decoder: 'grok', stream: true,
   models: [
-    { id: 'grok-4', name: 'Grok 4', labels: ['Grok 4', 'Grok'] },
-    { id: 'grok-think', name: 'Grok · Think 深度思考', labels: ['Think', '思考'], thinking: true },
+    { id: 'auto', name: 'Grok · 网页当前模型', labels: ['Grok'] },
   ],
 });
 
@@ -110,9 +102,7 @@ export const CLAUDE = site({
   attachSelector: "input[type='file']",
   decoder: 'claude', stream: true,
   models: [
-    { id: 'claude-sonnet', name: 'Claude Sonnet 4.5', labels: ['Sonnet 4.5', 'Sonnet'] },
-    { id: 'claude-sonnet-extended', name: 'Claude Sonnet · Extended 思考', labels: ['Extended', '思考'], thinking: true },
-    { id: 'claude-opus', name: 'Claude Opus 4.1', labels: ['Opus 4.1', 'Opus'] },
+    { id: 'auto', name: 'Claude · 网页当前模型', labels: ['Claude'] },
   ],
 });
 
@@ -124,8 +114,7 @@ export const GEMINI = site({
   attachSelector: "input[type='file']",
   decoder: 'dom', stream: false, experimental: true,
   models: [
-    { id: 'gemini-2-5-pro', name: 'Gemini 2.5 Pro', labels: ['2.5 Pro', 'Pro'] },
-    { id: 'gemini-2-5-flash', name: 'Gemini 2.5 Flash', labels: ['2.5 Flash', 'Flash'] },
+    { id: 'auto', name: 'Gemini · 网页当前模型', labels: ['Gemini'] },
   ],
 });
 
@@ -159,10 +148,10 @@ export function listAllModels() {
 const ALIASES = Object.freeze({
   'deepseek-web': 'deepseek:flash',
   'deepseek-reasoner': 'deepseek:deepseek',
-  'gpt-4o': 'chatgpt:gpt-5', chatgpt: 'chatgpt:gpt-5',
-  glm: 'glm:glm-4.6', 'glm-4.5': 'glm:glm-4.6',
-  kimi: 'kimi:kimi', qwen: 'qwen:qwen3-max', doubao: 'doubao:doubao-pro',
-  grok: 'grok:grok-4', claude: 'claude:claude-sonnet', gemini: 'gemini:gemini-2-5-pro',
+  'gpt-4o': 'chatgpt:auto', chatgpt: 'chatgpt:auto',
+  glm: 'glm:auto', 'glm-4.5': 'glm:auto', 'glm-4.6': 'glm:auto',
+  kimi: 'kimi:auto', qwen: 'qwen:auto', doubao: 'doubao:auto',
+  grok: 'grok:auto', claude: 'claude:auto', gemini: 'gemini:auto',
 });
 
 export const DEFAULT_MODEL_ID = 'deepseek-web';

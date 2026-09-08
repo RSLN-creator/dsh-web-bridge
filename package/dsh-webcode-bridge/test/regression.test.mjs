@@ -18,7 +18,7 @@ test('普通回复完成、模型传递、游标提交与同长度历史改写',
     const models = await adapter.listModels('webcode');
     const ids = models.map(m => m.id);
     assert.ok(ids.includes('deepseek:flash') && ids.includes('deepseek:vision') && ids.includes('deepseek:deepseek'));
-    assert.ok(ids.includes('glm:glm-4.6') && ids.includes('chatgpt:gpt-5') && ids.includes('kimi:kimi'));
+    assert.ok(ids.includes('glm:auto') && ids.includes('chatgpt:auto') && ids.includes('kimi:auto'));
     const base = { sessionId: 'regression', model: 'flash', messages: [user('第一句')] };
     const chunks = await collect(base);
     assert.equal(chunks.at(-1).type, 'finish');
