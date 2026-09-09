@@ -432,11 +432,16 @@ export function apply(ctx, config = {}) {
         for (let i = 0; i < valid.length; i++) {
           // id carries the session so harness-side streams / logs can be traced
           // back to the web conversation that produced the call.
-          const id = callId(i);
-          const index = nextIndex++;
+          // 0.7.1：流式期间已提前开块的 pendingCall 必须在这里复用同一个
+          // index/id 补发参数并关闭——真实会话（2026-09-08 f3fa97fd）暴露
+          // 旧实现另开新 index 重发一遍，Harness 收到同 id 两条调用：先空
+          // 参数执行一次（INVALID_ARGS 假错误），再真参数重复执行。
+          const reuse = i === 0 && pendingCall;
+          const id = reuse ? pendingCall.id : callId(i);
+          const index = reuse ? pendingCall.index : nextIndex++;
           const args = JSON.stringify(valid[i].arguments ?? {});
-          if (!(i === 0 && pendingCall)) yield { type: 'block-start', index, blockType: 'tool-call' };
-          yield { type: 'tool-call-delta', index, id, ...(i === 0 && pendingCall ? {} : { name: valid[i].name }), argumentsDelta: args };
+          if (!reuse) yield { type: 'block-start', index, blockType: 'tool-call' };
+          yield { type: 'tool-call-delta', index, id, ...(reuse ? {} : { name: valid[i].name }), argumentsDelta: args };
           yield { type: 'block-end', index, block: { type: 'tool-call', id, name: valid[i].name, arguments: args } };
         }
         yield { type: 'usage', usage: { inputTokens: estimateTokens(turn.prompt), outputTokens: estimateTokens(finalText + thinkAcc) } };
@@ -925,7 +930,7 @@ button:hover { background: #1d4ed8; }
   front = createOpenAiFront(relay, cfg);
   relay.start();
   log(`provider "${cfg.providerId}" registered; relay on http://${cfg.host}:${cfg.port}`);
-  log(`web driver ready: site=${cfg.site} profile=${cfg.profileDir}`);
+  log(`web driver ready: site=${cfg.site} profile=${cfg.driver ? '(injected)' : cfg.profileDir}`);
 
   // cordis: returning a disposer scopes everything to this plugin's fiber.
   return () => {

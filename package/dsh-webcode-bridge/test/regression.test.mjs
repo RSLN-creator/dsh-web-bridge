@@ -162,6 +162,52 @@ test('工具名称在网页流完成前到达 Harness，参数完整后才提交
     finish({ text: '**Calling:** `read`\n{"path":"README.md"}' });
     const remaining = []; for await (const chunk of stream) remaining.push(chunk);
     assert.equal(remaining.find(chunk => chunk.type === 'block-end').block.arguments, '{"path":"README.md"}');
+    // 0.7.1 回归（真实会话 f3fa97fd 复盘）：流式期间提前开块的调用，收尾时
+    // 必须复用同一块补发参数——旧实现另开新块重发，Harness 收到同 id 两条
+    // tool-call（空参数 INVALID_ARGS + 真参数重复执行）。
+    const callEnds = remaining.filter(chunk => chunk.type === 'block-end' && chunk.block?.type === 'tool-call');
+    assert.equal(callEnds.length, 1, '必须只有一个 tool-call 终块，实际 ' + callEnds.length);
+    const callStarts = remaining.filter(chunk => chunk.type === 'block-start' && chunk.blockType === 'tool-call');
+    assert.equal(callStarts.length, 0, '流中已开块，收尾不得再 block-start 新 tool-call');
+    const deltas = remaining.filter(chunk => chunk.type === 'tool-call-delta');
+    assert.equal(deltas.length, 1, '只有一个 tool-call-delta（同块补发参数）');
+    assert.equal(deltas[0].argumentsDelta, '{"path":"README.md"}');
+    assert.equal(deltas[0].id, early.id, '复用流式期间已宣布的 call id');
+    assert.equal(callEnds[0].block.id, early.id, '终块 id 与流式期间一致');
+  } finally { finish({ text: '' }); dispose(); }
+});
+
+test('流式多调用场景不重发：首调用复用 pendingCall 块，后续调用各一块', async () => {
+  let adapter, finish;
+  const result = new Promise(resolve => { finish = resolve; });
+  const driver = {
+    status: () => ({}), close: async () => {},
+    sendPrompt: async (_, opts) => {
+      // 流式先到达第一个调用的开头（fence + name），足以触发 pendingCall
+      opts.onDelta('```json\n{"mcp_action": "call", "name": "read", "arguments": {"path":');
+      return result;
+    },
+  };
+  const dispose = apply({ llm: { registerAdapter: (_, value) => { adapter = value; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  try {
+    const stream = adapter.stream({ model: 'flash', tools: [{ name: 'read', parameters: {} }, { name: 'grep', parameters: {} }], messages: [{ role: 'user', content: '读两个目标' }] });
+    await stream.next(); // block-start（pendingCall 开块）
+    const early = (await stream.next()).value;
+    assert.equal(early.type, 'tool-call-delta');
+    assert.equal(early.name, 'read', '流式期间即宣布首调用名');
+    finish({ text: '```json\n{"mcp_action": "call", "name": "read", "arguments": {"path": "README.md"}}\n```\n```json\n{"mcp_action": "call", "name": "grep", "arguments": {"query": "secret"}}\n```' });
+    const remaining = []; for await (const chunk of stream) remaining.push(chunk);
+    const callEnds = remaining.filter(chunk => chunk.type === 'block-end' && chunk.block?.type === 'tool-call');
+    assert.equal(callEnds.length, 2, '两个调用两个终块');
+    assert.deepEqual(callEnds.map(b => b.block.name), ['read', 'grep']);
+    const ids = new Set(callEnds.map(b => b.block.id));
+    assert.equal(ids.size, 2, '两个调用 id 不同');
+    const lateStarts = remaining.filter(chunk => chunk.type === 'block-start');
+    assert.equal(lateStarts.length, 1, '只有第二个调用新开块，首个复用流式已开块');
+    assert.equal(lateStarts[0].blockType, 'tool-call');
+    assert.equal(callEnds[0].block.id, early.id, '首调用终块 id 复用流式期间宣布的 id');
+    const readDelta = remaining.find(chunk => chunk.type === 'tool-call-delta' && chunk.argumentsDelta?.includes('README'));
+    assert.equal(readDelta.id, early.id, '首调用参数增量落在同一块');
   } finally { finish({ text: '' }); dispose(); }
 });
 

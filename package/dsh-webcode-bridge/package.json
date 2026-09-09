@@ -1,6 +1,6 @@
 {
   "name": "dsh-webcode-bridge",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Harness Web Bridge: DeepSeek web models, native Harness tool loops, right sidebar conversation and native settings.",
   "type": "module",
   "main": "./lib/index.js",

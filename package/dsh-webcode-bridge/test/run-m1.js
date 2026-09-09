@@ -188,7 +188,12 @@ try {
   ok('turn1: opening user message present', String(t1.message).includes('请读取 PLAN.md 的标题行'));
 
   const types1 = r1.map((c) => c.type).join(',');
-  ok('turn1: tool-call chunk sequence', /^block-start,tool-call-delta,block-end(,block-start,tool-call-delta,block-end)?,usage,finish$/.test(types1), types1);
+  // 0.7.1 收紧：scriptedDriver 一次性返回全文（无 onDelta），流式提前开块
+  // 不触发，终块只应有一组。若出现两组 block-start/delta/end，就是
+  // pendingCall 双发射回归（真实会话 f3fa97fd 同一调用被执行两次）。
+  ok('turn1: tool-call chunk sequence', /^block-start,tool-call-delta,block-end,usage,finish$/.test(types1), types1);
+  const callChunks = r1.filter((c) => c.type === 'tool-call-delta');
+  ok('turn1: exactly one native tool call', callChunks.length === 1, 'deltas=' + callChunks.length);
   const callChunk = r1.find((c) => c.type === 'tool-call-delta');
   ok('turn1: tool name parsed (mcp_action)', callChunk?.name === 'read', callChunk?.name);
   ok('turn1: harness tool-loop finish reason', r1.at(-1)?.reason?.kind === 'tool-calls');
