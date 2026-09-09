@@ -118,6 +118,26 @@ export function createWebControl(deps = {}) {
       if (target) return target.connect();
       return driver.connect();
     },
+    // 展示窗口（真实有头 Edge 窗口）：open/close 两个动作 + 状态查询。
+    // 与 login/consent 同级敏感度：窗口里是已登录网页会话，因此只接受
+    // csrfSafe 的本地请求（同源挂载 / allowlisted origin），不新增暴露面。
+    'POST window': async (body) => {
+      const opener = relay?.config?.windowOpener;
+      if (!opener) return { ok: false, error: 'no driver' };
+      const siteId = String(body?.siteId || 'deepseek').trim() || 'deepseek';
+      const action = body?.action === 'close' ? 'close' : 'open';
+      const width = Number(body?.width) || undefined;
+      const height = Number(body?.height) || undefined;
+      if (action === 'close') return opener(siteId, 'close');
+      return opener(siteId, 'open', { width, height });
+    },
+    'GET window': async () => {
+      const state = relay?.config?.driverStatus?.();
+      const sid = String(state?.siteId || 'deepseek');
+      // 顶层 window 字段来自 deepseek 主驱动;聚合 sites 里各站点窗口各自带
+      const siteWindow = state?.window ?? state?.sites?.find((s) => s.siteId === sid)?.window ?? null;
+      return { ok: true, siteId: sid, window: siteWindow };
+    },
     'POST interact': async body => {
       if (!relay?.status().consent) return { ok: false, error: '请在设置中启用网页自动化' };
       return driver.interact(body);

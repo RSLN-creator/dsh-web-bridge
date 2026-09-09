@@ -288,42 +288,70 @@ window.__ModuleLoader__.load({
     }
 
       function Conversation({ browserSrc }) {
-      const [siteId, setSiteId] = React.useState('deepseek');
-      const [frameSrc, setFrameSrc] = React.useState('');
-      const [frameReady, setFrameReady] = React.useState(false);
-      const [connectError, setConnectError] = React.useState('');
-      React.useEffect(() => {
-        let alive = true;
-        setFrameReady(false);
-        api('connect', { siteId }, 90000).then(() => {
-          if (alive) setFrameSrc(browserSrc + '__webcode/site/' + siteId + '/?ts=' + Date.now());
-        }).catch(e => { if (alive) setConnectError(e.message); });
-        return () => { alive = false; };
-      }, [browserSrc, siteId]);
-      return h('div', { className: 'hwb-conversation' },
-        h('div', { className: 'hwb-sitebar', role: 'tablist', 'aria-label': '内容服务站点' },
-          Object.entries(SITE_NAMES).map(([sid, name]) => h('button', {
-            key: sid, role: 'tab', 'aria-selected': sid === siteId, className: sid === siteId ? 'active' : '',
-            onClick: () => setSiteId(sid),
-          }, name))),
-        connectError && h('div', { className: 'hwb-error', role: 'status' },
-          '浏览器视图未能连接：' + connectError + ' ',
-          h('button', { className: 'hwb-retry', onClick: () => { setConnectError(''); setFrameReady(false); setFrameSrc(browserSrc + '__webcode/site/' + siteId + '/?ts=' + Date.now()); } }, '重试')),
-        frameSrc && h('iframe', {
-          className: 'hwb-browser-frame',
-          src: frameSrc,
-          title: SITE_NAMES[siteId] + ' 网页对话',
-          referrerPolicy: 'no-referrer',
-          sandbox: 'allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads',
-          onLoad: () => { setFrameReady(true); setConnectError(''); },
-          onError: () => { setFrameReady(false); setConnectError('网页代理加载失败，请确认中继服务已启动'); },
-        }),
-        frameSrc && !frameReady && !connectError && h('div', { className: 'hwb-frame-status' }, '正在加载 ' + SITE_NAMES[siteId] + ' 网页…（加载后可直接在右侧操作，生成任务由网页原生执行）'));
-    }
+        const [siteId, setSiteId] = React.useState('deepseek');
+        const [frameSrc, setFrameSrc] = React.useState('');
+        const [frameReady, setFrameReady] = React.useState(false);
+        const [connectError, setConnectError] = React.useState('');
+        const [winBusy, setWinBusy] = React.useState(false);
+        const [winOpen, setWinOpen] = React.useState(null); // siteId whose window is open
+        const winState = site => api('window').then(w => {
+          const openSite = w?.window?.open ? w.siteId : null;
+          setWinOpen(openSite);
+          return openSite;
+        }).catch(() => null);
+        React.useEffect(() => {
+          let alive = true;
+          winState().then(s => { if (alive && s && s !== siteId) setSiteId(s); });
+          const poll = setInterval(() => winState(), 5000);
+          return () => { alive = false; clearInterval(poll); };
+        }, []);
+        React.useEffect(() => {
+          let alive = true;
+          setFrameReady(false);
+          api('connect', { siteId }, 90000).then(() => {
+            if (alive) setFrameSrc(browserSrc + '__webcode/site/' + siteId + '/?ts=' + Date.now());
+          }).catch(e => { if (alive) setConnectError(e.message); });
+          return () => { alive = false; };
+        }, [browserSrc, siteId]);
+        async function toggleWindow() {
+          setWinBusy(true); setConnectError('');
+          try {
+            const target = winOpen === siteId ? 'close' : 'open';
+            await api('window', { siteId, action: target });
+            await winState();
+          } catch (e) { setConnectError(e.message); }
+          finally { setWinBusy(false); }
+        }
+        return h('div', { className: 'hwb-conversation' },
+          h('div', { className: 'hwb-sitebar', role: 'tablist', 'aria-label': '内容服务站点' },
+            h('div', { className: 'hwb-sitebar-tabs' },
+              Object.entries(SITE_NAMES).map(([sid, name]) => h('button', {
+                key: sid, role: 'tab', 'aria-selected': sid === siteId, className: sid === siteId ? 'active' : '',
+                onClick: () => setSiteId(sid),
+              }, name))),
+            h('button', {
+              className: 'hwb-win-btn' + (winOpen === siteId ? ' open' : ''), disabled: winBusy,
+              title: winOpen === siteId ? '收起独立窗口（回到无头运行）' : '在独立窗口中打开真实网页（可登录、可聊天、与桥共用会话）',
+              'aria-pressed': winOpen === siteId, onClick: toggleWindow,
+            }, winBusy ? '窗口切换中…' : winOpen === siteId ? '✓ 已开独立窗口 · 点击收回' : '⧉ 独立窗口打开')),
+          connectError && h('div', { className: 'hwb-error', role: 'status' },
+            '浏览器视图未能连接：' + connectError + ' ',
+            h('button', { className: 'hwb-retry', onClick: () => { setConnectError(''); setFrameReady(false); setFrameSrc(browserSrc + '__webcode/site/' + siteId + '/?ts=' + Date.now()); } }, '重试')),
+          frameSrc && h('iframe', {
+            className: 'hwb-browser-frame',
+            src: frameSrc,
+            title: SITE_NAMES[siteId] + ' 网页对话',
+            referrerPolicy: 'no-referrer',
+            sandbox: 'allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads',
+            onLoad: () => { setFrameReady(true); setConnectError(''); },
+            onError: () => { setFrameReady(false); setConnectError('网页代理加载失败，请确认中继服务已启动'); },
+          }),
+          frameSrc && !frameReady && !connectError && h('div', { className: 'hwb-frame-status' }, '正在加载 ' + SITE_NAMES[siteId] + ' 网页…（加载后可直接在右侧操作，生成任务由网页原生执行）'));
+      }
 
     function apply(ctx) {
       const style = document.createElement('style');
-      style.textContent = '.hwb-settings{max-width:760px;padding:20px;color:inherit;display:flex;flex-direction:column;gap:14px}.hwb-settings h2{font-size:20px;letter-spacing:0;margin:0 0 2px}.hwb-lead{font-size:12px;opacity:.72;margin:0;line-height:1.6}.hwb-card{border:1px solid #8884;border-radius:10px;padding:2px 16px 8px;background:transparent}.hwb-group{font-size:12px;font-weight:600;opacity:.72;margin:12px 0 0}.hwb-group.first{margin-top:12px}.hwb-row{display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap;padding:11px 0;border-bottom:1px solid #8883}.hwb-row:last-child{border-bottom:0}.hwb-row-label{flex:0 0 128px;min-width:96px;font-size:13px;padding-top:2px}.hwb-row-main{flex:1;min-width:240px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}.hwb-row button{padding:5px 12px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;cursor:pointer}.hwb-consent{display:flex;align-items:center;gap:8px}.hwb-hint{font-size:12px;opacity:.72;margin:4px 0 0;line-height:1.5}.hwb-hint.indent{margin:6px 0 8px 128px}.hwb-model-select{min-width:220px;max-width:340px;padding:6px 8px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit}.hwb-sites{display:flex;flex-direction:column}.hwb-site-row{display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid #8883}.hwb-site-row:last-child{border-bottom:0}.hwb-site-row.busy{opacity:.55}.hwb-site-name{flex:1;font-size:13px}.hwb-site-state{font-size:12px;padding:1px 8px;border-radius:10px;border:1px solid #8885}.hwb-site-state.ok{color:#2e7d32;border-color:#2e7d3280}.hwb-site-state.bad{color:#93443e;border-color:#93443e80}.hwb-site-row button{padding:4px 12px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;cursor:pointer}.hwb-metrics{display:flex;flex-direction:column;gap:2px;min-width:220px}.hwb-metrics-head{font-size:12px;margin-bottom:4px}.hwb-metrics-row{display:flex;justify-content:space-between;gap:16px;font-variant-numeric:tabular-nums}.hwb-badge{display:inline-block;padding:0 6px;border-radius:4px;font-size:11px;border:1px solid #8885;margin-right:8px}.hwb-badge.measured{color:#2e7d32;border-color:#2e7d3280}.hwb-preset{padding:12px 0;border-bottom:1px solid #8883}.hwb-preset:last-child{border-bottom:0}.hwb-preset summary{cursor:pointer;font-size:13px}.hwb-import{display:flex;flex-direction:column;gap:8px}.hwb-import select{padding:6px 8px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit}.hwb-import-row{display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid #8883}.hwb-import-title{flex:1;font-size:13px}.hwb-prompt-input{width:100%;min-height:80px;padding:8px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;font:inherit;line-height:1.5;resize:vertical}.hwb-preset pre{max-height:280px;overflow:auto;font-size:12px;line-height:1.5;padding:10px;border:1px solid #8883;border-radius:6px;white-space:pre-wrap;word-break:break-word}.hwb-conversation{height:100%;width:100%;min-height:0;overflow:auto;background:#fff;position:relative}.hwb-retry{padding:4px 10px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;cursor:pointer}.hwb-error{padding:8px;font-size:12px;color:#93443e;background:#fff}.hwb-launch{position:fixed;right:10px;top:90px;width:32px;height:32px;z-index:99996;border:1px solid #8885;border-radius:6px;background:var(--ds-bg,#fff);color:var(--ds-text,#444);display:grid;place-items:center;cursor:pointer}.hwb-fallback{position:fixed;right:0;top:0;bottom:0;width:min(720px,100vw);z-index:99995;border-left:1px solid #8885;display:flex;flex-direction:column;background:var(--ds-bg,#fff)}.hwb-fallback header{padding:8px;display:flex;justify-content:space-between}.hwb-fallback>div{flex:1;min-height:0}.hwb-sitebar{display:flex;gap:6px;flex-wrap:wrap;padding:6px 8px;border-bottom:1px solid #8883;background:var(--ds-bg,#fff)}.hwb-sitebar button{padding:3px 10px;border:1px solid #8885;border-radius:12px;background:transparent;color:inherit;cursor:pointer;font-size:12px}.hwb-sitebar button.active{background:#2563eb;color:#fff;border-color:#2563eb}';
+      style.textContent = '.hwb-settings{max-width:760px;padding:20px;color:inherit;display:flex;flex-direction:column;gap:14px}.hwb-settings h2{font-size:20px;letter-spacing:0;margin:0 0 2px}.hwb-lead{font-size:12px;opacity:.72;margin:0;line-height:1.6}.hwb-card{border:1px solid #8884;border-radius:10px;padding:2px 16px 8px;background:transparent}.hwb-group{font-size:12px;font-weight:600;opacity:.72;margin:12px 0 0}.hwb-group.first{margin-top:12px}.hwb-row{display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap;padding:11px 0;border-bottom:1px solid #8883}.hwb-row:last-child{border-bottom:0}.hwb-row-label{flex:0 0 128px;min-width:96px;font-size:13px;padding-top:2px}.hwb-row-main{flex:1;min-width:240px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}.hwb-row button{padding:5px 12px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;cursor:pointer}.hwb-consent{display:flex;align-items:center;gap:8px}.hwb-hint{font-size:12px;opacity:.72;margin:4px 0 0;line-height:1.5}.hwb-hint.indent{margin:6px 0 8px 128px}.hwb-model-select{min-width:220px;max-width:340px;padding:6px 8px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit}.hwb-sites{display:flex;flex-direction:column}.hwb-site-row{display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid #8883}.hwb-site-row:last-child{border-bottom:0}.hwb-site-row.busy{opacity:.55}.hwb-site-name{flex:1;font-size:13px}.hwb-site-state{font-size:12px;padding:1px 8px;border-radius:10px;border:1px solid #8885}.hwb-site-state.ok{color:#2e7d32;border-color:#2e7d3280}.hwb-site-state.bad{color:#93443e;border-color:#93443e80}.hwb-site-row button{padding:4px 12px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;cursor:pointer}.hwb-metrics{display:flex;flex-direction:column;gap:2px;min-width:220px}.hwb-metrics-head{font-size:12px;margin-bottom:4px}.hwb-metrics-row{display:flex;justify-content:space-between;gap:16px;font-variant-numeric:tabular-nums}.hwb-badge{display:inline-block;padding:0 6px;border-radius:4px;font-size:11px;border:1px solid #8885;margin-right:8px}.hwb-badge.measured{color:#2e7d32;border-color:#2e7d3280}.hwb-preset{padding:12px 0;border-bottom:1px solid #8883}.hwb-preset:last-child{border-bottom:0}.hwb-preset summary{cursor:pointer;font-size:13px}.hwb-import{display:flex;flex-direction:column;gap:8px}.hwb-import select{padding:6px 8px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit}.hwb-import-row{display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid #8883}.hwb-import-title{flex:1;font-size:13px}.hwb-prompt-input{width:100%;min-height:80px;padding:8px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;font:inherit;line-height:1.5;resize:vertical}.hwb-preset pre{max-height:280px;overflow:auto;font-size:12px;line-height:1.5;padding:10px;border:1px solid #8883;border-radius:6px;white-space:pre-wrap;word-break:break-word}.hwb-conversation{height:100%;width:100%;min-height:0;overflow:hidden;background:#fff;position:relative;display:flex;flex-direction:column}.hwb-retry{padding:4px 10px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;cursor:pointer}.hwb-error{padding:8px;font-size:12px;color:#93443e;background:#fff}.hwb-launch{position:fixed;right:14px;top:76px;width:40px;height:40px;z-index:99996;border:1px solid #8884;border-radius:10px;background:linear-gradient(145deg,var(--ds-bg,#fff),var(--ds-bg-alt,#f2f4f7));color:var(--ds-text,#555);display:grid;place-items:center;cursor:pointer;box-shadow:0 2px 8px #0002;transition:transform .15s,box-shadow .15s}.hwb-launch:hover{transform:translateY(-2px);box-shadow:0 6px 16px #0003}.hwb-launch:active{transform:translateY(0)}.hwb-fallback{position:fixed;right:0;top:0;bottom:0;width:min(760px,96vw);z-index:99995;border-left:1px solid #8885;display:flex;flex-direction:column;background:var(--ds-bg,#fff);box-shadow:-12px 0 40px #0004;animation:hwb-slide-in .22s ease}.hwb-fallback.closing{animation:hwb-slide-out .18s ease forwards}.hwb-fallback header{padding:10px 14px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #8883;font-size:13px;font-weight:600}.hwb-fallback header button{width:26px;height:26px;border:0;border-radius:6px;background:transparent;color:inherit;font-size:15px;line-height:1;cursor:pointer;display:grid;place-items:center}.hwb-fallback header button:hover{background:#8882}.hwb-fallback>div{flex:1;min-height:0}.hwb-sitebar{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid #8883;background:var(--ds-bg,#fff)}.hwb-sitebar-tabs{display:flex;gap:6px;flex:1;min-width:0;overflow-x:auto;scrollbar-width:thin;padding-bottom:1px}.hwb-sitebar button{padding:3px 10px;border:1px solid #8885;border-radius:999px;background:transparent;color:inherit;cursor:pointer;font-size:12px;white-space:nowrap;transition:background .15s,color .15s,border-color .15s}.hwb-sitebar button:hover{border-color:#8888;background:#8881}.hwb-sitebar button.active{background:#2563eb;color:#fff;border-color:#2563eb}.hwb-win-btn{flex:0 0 auto;align-self:center;padding:4px 10px;border:1px solid #2563eb80;border-radius:8px;background:#2563eb0d;color:#2563eb;cursor:pointer;font-size:12px;white-space:nowrap;transition:background .15s}.hwb-win-btn:hover{background:#2563eb1a}.hwb-win-btn.open{background:#2563eb;color:#fff}.hwb-win-btn:disabled{opacity:.5;cursor:default}.hwb-sitebar-tabs::-webkit-scrollbar{height:4px}.hwb-sitebar-tabs::-webkit-scrollbar-thumb{background:#8884;border-radius:2px}@keyframes hwb-slide-in{from{transform:translateX(24px);opacity:.4}to{transform:translateX(0);opacity:1}}@keyframes hwb-slide-out{from{transform:translateX(0);opacity:1}to{transform:translateX(24px);opacity:0}}';
       document.head.appendChild(style);
       const browserStyle = document.createElement('style');
       browserStyle.textContent = '.hwb-browser-frame{display:block;width:100%;height:100%;min-height:0;border:0;background:#fff}.hwb-frame-status{position:absolute;inset:0;display:grid;place-items:center;background:#fff;color:#7a8494;font-size:12px;pointer-events:none}';
@@ -345,18 +373,27 @@ window.__ModuleLoader__.load({
       const hasBetterSidebar = !!(typeof ctx.inject === 'function' && ctx.get?.('betterSidebar'));
       if (!hasBetterSidebar) {
         const launcher = document.createElement('button');
-        launcher.className = 'hwb-launch'; launcher.title = 'Web Bridge 会话'; launcher.setAttribute('aria-label', 'Web Bridge 会话');
+        launcher.className = 'hwb-launch'; launcher.title = '打开 Web Bridge 网页会话'; launcher.setAttribute('aria-label', '打开 Web Bridge 网页会话');
         const launcherRoot = createRoot(launcher); launcherRoot.render(icon(18));
+        let closingTimer = null;
+        const closeFallback = () => {
+          if (!fallback) return;
+          fallback.classList.add('closing');
+          closingTimer = setTimeout(() => { fallbackRoot?.unmount(); fallback?.remove(); fallback = null; }, 180);
+        };
         launcher.onclick = () => {
-          if (fallback) { fallbackRoot.unmount(); fallback.remove(); fallback = null; return; }
+          if (fallback) { clearTimeout(closingTimer); closeFallback(); return; }
           fallback = document.createElement('aside'); fallback.className = 'hwb-fallback';
           document.body.appendChild(fallback); fallbackRoot = createRoot(fallback);
-          fallbackRoot.render(h(React.Fragment, null, h('header', null, 'Web Bridge', h('button', {
-            title: '收起会话', 'aria-label': '收起会话', onClick: () => { fallbackRoot.unmount(); fallback.remove(); fallback = null; },
-          }, '\u00d7')), h('div', null, h(Conversation, { browserSrc: relayBase + '/' }))));
+          fallbackRoot.render(h(React.Fragment, null, h('header', null,
+            h('span', null, 'Web Bridge'),
+            h('button', {
+              title: '收起会话', 'aria-label': '收起会话', onClick: closeFallback,
+            }, '\u00d7')),
+            h('div', null, h(Conversation, { browserSrc: relayBase + '/' }))));
         };
         document.body.appendChild(launcher);
-        disposers.push(() => { launcherRoot.unmount(); launcher.remove(); fallbackRoot?.unmount(); fallback?.remove(); });
+        disposers.push(() => { launcherRoot.unmount(); launcher.remove(); clearTimeout(closingTimer); fallbackRoot?.unmount(); fallback?.remove(); });
       }
       return () => disposers.reverse().forEach(dispose => dispose());
     }

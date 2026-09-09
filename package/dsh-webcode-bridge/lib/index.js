@@ -603,14 +603,21 @@ function imageMarkdown(images) {
       // 聚合全部内容服务的登录/运行状态：未初始化的站点给占位（不启动浏览器）。
       const sites = SITES.map((st) => {
         const d = st.id === 'deepseek' ? driver : drivers.get(st.id);
-        if (!d) return { siteId: st.id, siteName: st.name, initialized: false, running: false, busy: false, loggedIn: null, needLogin: false, selectedModel: null };
+        if (!d) return { siteId: st.id, siteName: st.name, initialized: false, running: false, busy: false, loggedIn: null, needLogin: false, selectedModel: null, window: null };
         const s = d.status();
-        return { siteId: st.id, siteName: st.name, initialized: true, running: s.running, busy: s.busy, loggedIn: s.loggedIn, needLogin: s.needLogin, selectedModel: s.selectedModel };
+        return { siteId: st.id, siteName: st.name, initialized: true, running: s.running, busy: s.busy, loggedIn: s.loggedIn, needLogin: s.needLogin, selectedModel: s.selectedModel, window: s.window ?? null };
       });
       return { ...base, sites };
     },
     loginTrigger: (siteId) => driverFor(siteId || 'deepseek').openLogin(),
     siteConnect: (siteId) => driverFor(getSite(siteId) ? siteId : 'deepseek'),
+    // 展示窗口动作（有头 Edge）：侧栏「独立窗口」按钮走这里，与登录共用
+    // 同一持久 profile——窗口里直接可聊，自动化轮次驱动同一页面。
+    windowOpener: (siteId, action, opts = {}) => {
+      const d = driverFor(getSite(siteId) ? siteId : 'deepseek');
+      if (action === 'close') return d.closeWindow();
+      return d.openWindow(opts);
+    },
     sessionImport: (dir) => driver.importStorageFromProfile(dir),
     onHttp: (req, res) => {
       const u = new URL(req.url, 'http://localhost');
@@ -770,7 +777,7 @@ function imageMarkdown(images) {
     const routes = [
       ['status', 'status'], ['consent', 'consent'], ['login', 'login'],
       ['diagnostics', 'diagnostics'], ['preset', 'preset'],
-      ['connect', 'connect'], ['interact', 'interact'],
+      ['connect', 'connect'], ['interact', 'interact'], ['window', 'window'],
       ['sessions', 'sessions'], ['history', 'history'],
       ['workspaces', 'workspaces'], ['import', 'import'],
       ['settings', 'settings'], ['models', 'models'],

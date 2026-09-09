@@ -183,6 +183,9 @@ export function createBrowserDriver(options = {}) {
   let lastTurn = null;
   let conversations = new Map();
   let storeLoaded = false;
+  // 有头展示窗口：openWindow 打开，headlessMode 记录「无头会话是否曾在
+  // 展示窗口上执行」——展示窗口被用户关闭后，Page#close 事件触发 relaunch。
+  let headed = false;
   const storePath = () => path.join(cfg.profileDir, 'webcode-sessions-' + siteId + '.json');
 
   function loadStore() {
@@ -229,6 +232,7 @@ export function createBrowserDriver(options = {}) {
       conversations: Object.fromEntries(conversations),
       transport: 'playwright-edge',
       preview: Boolean(page && !page.isClosed?.()),
+      window: windowState(),
     };
   }
 
@@ -302,29 +306,46 @@ export function createBrowserDriver(options = {}) {
       ...(cfg.storageState ? { storageState: cfg.storageState } : {}),
     });
     page = ctx.pages()[0] || (await ctx.newPage());
-    const paths = site.completionPaths || [];
-    page.on('request', (request) => {
-      if (request.method() !== 'POST' || !paths.some((p) => request.url().includes(p))) return;
-      try {
-        const body = request.postDataJSON();
-        requestMetadata = Object.fromEntries(Object.entries(body).filter(([key, value]) => /model|thinking|search/.test(key) && ['string', 'boolean', 'number'].includes(typeof value)));
-      } catch { requestMetadata = null; }
-    });
-    await page.exposeBinding('__webcodeChunk', (source, captureId, phase, text) => {
-      onPageCapture({ captureId, phase, text });
-    });
-    const init = captureInit(paths);
-    await page.addInitScript(init);
-    try { await page.evaluate(init); } catch { /* 页面尚未可用时忽略 */ }
-    log(`launched (${headless ?? cfg.headless ? 'headless' : 'headed'}) profile=${cfg.profileDir}`);
+    // 展示窗口被用户点 X 关掉时：上下文仍在（页面关闭≠浏览器退出），
+    // 清掉 page 引用让 ensure() 下次自愈重开新页，而不是拿死句柄操作。
+    const openedPage = page;
+    page.on('close', () => { if (page === openedPage) page = null; });
+    await installPage();
+    log(`launched (${(headless ?? cfg.headless) ? 'headless' : 'headed'}) profile=${cfg.profileDir}`);
   }
 
   async function ensure() {
     if (launching) return launching;
     if (ctx && page && !page.isClosed()) return;
+    // 展示窗口被用户关闭（page=null）或浏览器整个退出（ctx 已死）：
+    // 无头转有头窗口保留在当前形态重开一页；无头会话则回到无头。
+    const targetHeadless = ctx ? headed : cfg.headless !== false;
+    if (ctx) {
+      try { page = await ctx.newPage(); await installPage(); } catch { ctx = null; page = null; }
+      if (page) return;
+    }
     if (!Decoders) Decoders = loadDecoderRegistry(cfg.decoderPath);
-    launching = launch();
+    launching = (async () => { await launch({ headless: targetHeadless }); })();
     try { await launching; } finally { launching = null; }
+  }
+
+  /** 在已开的浏览器上下文里装捕获脚本（新页/自愈重开后共用）。 */
+  async function installPage() {
+    const p = page;
+    const paths = site.completionPaths || [];
+    p.on('request', (request) => {
+      if (request.method() !== 'POST' || !paths.some((path) => request.url().includes(path))) return;
+      try {
+        const body = request.postDataJSON();
+        requestMetadata = Object.fromEntries(Object.entries(body).filter(([key, value]) => /model|thinking|search/.test(key) && ['string', 'boolean', 'number'].includes(typeof value)));
+      } catch { requestMetadata = null; }
+    });
+    await p.exposeBinding('__webcodeChunk', (source, captureId, phase, text) => {
+      onPageCapture({ captureId, phase, text });
+    }).catch(() => {});
+    const init = captureInit(paths);
+    await p.addInitScript(init);
+    try { await p.evaluate(init); } catch { /* 页面尚未可用时忽略 */ }
   }
 
   async function connect() {
@@ -783,6 +804,95 @@ export function createBrowserDriver(options = {}) {
     }
   }
 
+  // ---- 展示窗口（真实有头 Edge 窗口）--------------------------------
+  // openWindow: 把当前站点开成一个真实浏览器窗口（默认停靠屏幕右半），
+  // 用户可直接在里面聊天/选模型/登录；自动化轮次照常驱动同一页面——
+  // 「独立窗口」与「右栏预览」共享同一登录会话，这是 iframe 方案做不到的
+  // （DeepSeek 等站点 CSP 拒绝 iframe，参考 webcode 也用独立窗口承载）。
+  // 生成期间可用：busy 锁只挡写操作（登录/导入），窗口打开不与轮次互斥。
+  async function openWindow({ width, height, url } = {}) {
+    await ensure();
+    throwIfTransitioning();
+    const w = Math.max(360, Math.min(3840, Math.round(Number(width) || 0)) || 1000);
+    const h = Math.max(480, Math.min(2160, Math.round(Number(height) || 0)) || 900);
+    if (ctx && !headed) {
+      // 无头上下文 → 有头窗口：持久 profile 只能开一个实例，必须先关再开。
+      try { await ctx.close(); } catch {}
+      ctx = null; page = null;
+      await launch({ headless: false });
+    } else if (!page || page.isClosed()) {
+      await ensure();
+    }
+    headed = true;
+    await page.setViewportSize({ width: w, height: h });
+    // 停靠屏幕右半（Playwright 无直接 API，用 CDP setWindowBounds；屏幕几何
+    // 只在 browser-target CDP session 上有——用 ctx.browser().newBrowserCDPSession）。
+    try {
+      const browserCtx = ctx.browser();
+      const bcdp = await (browserCtx?.newCDPSession?.() ?? null);
+      if (bcdp) {
+        const screens = (await bcdp.send('SystemInfo.getInfo'))?.displayInfo || [];
+        await bcdp.detach().catch(() => {});
+        const screen = screens.find((d) => !d.isPrimary === false) || screens[0];
+        const bounds = screen?.bounds ? {
+          left: Math.round(screen.bounds.left + (screen.bounds.width - w) / 2 + screen.bounds.width / 4),
+          top: screen.bounds.top || 0,
+          width: w,
+          height: Math.min(h, (screen.bounds.height || h) - 40),
+          windowState: 'normal',
+        } : { left: 0, top: 0, width: w, height: h, windowState: 'normal' };
+        const cdp = await ctx.newCDPSession(page);
+        const { windowId } = await cdp.send('Browser.getWindowForTarget');
+        await cdp.send('Browser.setWindowBounds', { windowId, bounds });
+        await cdp.detach();
+      }
+    } catch (err) { warn('window dock failed (window stays at default position):', err?.message); }
+    const target = url || cfg.site;
+    try { await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => {}); } catch { /* already there */ }
+    try { loggedIn = await page.locator(SEL.input).count() > 0 || !/sign|login/i.test(new URL(page.url()).pathname); } catch { loggedIn = null; }
+    log(`headed window open ${w}x${h} → ${target}`);
+    return { ok: true, ...windowState() };
+  }
+
+  /** 关闭展示窗口，回到无头（自动化继续，屏幕上不留窗口）。 */
+  async function closeWindow() {
+    throwIfTransitioning();
+    if (!headed) return { ok: true, ...windowState() };
+    if (busy) {
+      // 正在生成：不硬关（会杀掉进行中的轮次页面），只标记意图，轮次结束后由 ensure 收尾。
+      warn('a web turn is running — window will go headless after it settles');
+      await activeSettled();
+    }
+    try { if (ctx) await ctx.close(); } catch {}
+    ctx = null; page = null;
+    headed = false;
+    await launch({ headless: true });
+    await gotoFreshChat().catch(() => {});
+    return { ok: true, ...windowState() };
+  }
+
+  async function activeSettled() {
+    const a = active;
+    if (!a) return;
+    await new Promise((resolve) => { const t = setTimeout(resolve, 120_000); a.resolve && (a.settleHook = t); });
+  }
+
+  function throwIfTransitioning() {
+    if (busy || transitioning) {
+      const err = new Error('driver busy with a web turn — window switch refused, retry after the turn settles');
+      err.code = 'DRIVER_BUSY';
+      throw err;
+    }
+  }
+
+  function windowState() {
+    return {
+      open: headed && Boolean(page && !page.isClosed?.()),
+      headed,
+      url: page && !page.isClosed?.() ? safeUrl(page.url()) : null,
+    };
+  }
+
   async function importStorageFromProfile(sourceProfileDir) {
     if (busy || transitioning) throw new Error('driver busy with a web turn — session import refused');
     transitioning = true;
@@ -969,7 +1079,7 @@ export function createBrowserDriver(options = {}) {
   }
   function safeUrl(url) { try { return String(new URL(url)); } catch { return null; } }
 
-  return { sendPrompt, sendTurn, resetConversation, conversationFor, connect, interact, openLogin, importStorageFromProfile, status, close, diagnostics, getToken, get page() { return page; }, webApi, listSessions, fetchHistory, screenshotBase64 };
+  return { sendPrompt, sendTurn, resetConversation, conversationFor, connect, interact, openLogin, openWindow, closeWindow, importStorageFromProfile, status, close, diagnostics, getToken, get page() { return page; }, webApi, listSessions, fetchHistory, screenshotBase64 };
 }
 
 function abortError() {

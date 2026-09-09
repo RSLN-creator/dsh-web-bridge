@@ -41,6 +41,8 @@ const relay = createRelay({
   executor: (prompt, opts) => driver.sendPrompt(prompt, opts),
   driverStatus: () => driver.status(),
   loginTrigger: () => driver.openLogin(),
+  siteConnect: () => driver,
+  windowOpener: (siteId, action, opts = {}) => action === 'close' ? driver.closeWindow() : driver.openWindow(opts),
   onHttp: (req, res) => {
     const u = new URL(req.url, 'http://localhost');
     const pathname = u.pathname;

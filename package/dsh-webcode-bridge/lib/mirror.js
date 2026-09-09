@@ -58,16 +58,113 @@ export function createMirror(options = {}) {
       : 'null';
     const originLiteral = JSON.stringify(upstreamOrigin);
     return `<script data-webcode-mirror>(function(){
-try{if(${tokenLiteral}!==null)localStorage.setItem('userToken',${tokenLiteral});}catch(e){}
-try{if(navigator.serviceWorker)navigator.serviceWorker.register=function(){return Promise.reject(new Error('mirror: service worker disabled'));};}catch(e){}
-var UP=${originLiteral};
-var fetch0=window.fetch;
-if(fetch0)window.fetch=function(input,init){try{
-if(typeof input==='string'&&input.indexOf(UP)===0)input=input.slice(UP.length)||'/';
-else if(input&&typeof input.url==='string'&&input.url.indexOf(UP)===0)input=new Request(input.url.slice(UP.length)||'/',input);
-}catch(e){}return fetch0.call(this,input,init);};
-var open0=XMLHttpRequest.prototype.open;
-XMLHttpRequest.prototype.open=function(method,url){if(typeof url==='string'&&url.indexOf(UP)===0)url=url.slice(UP.length)||'/';return open0.apply(this,arguments);};
+	try{if(${tokenLiteral}!==null)localStorage.setItem('userToken',${tokenLiteral});}catch(e){}
+	try{if(navigator.serviceWorker)navigator.serviceWorker.register=function(){return Promise.reject(new Error('mirror: service worker disabled'));};}catch(e){}
+	var UP=${originLiteral};
+	var fetch0=window.fetch;
+	if(fetch0)window.fetch=function(input,init){try{
+	if(typeof input==='string'&&input.indexOf(UP)===0)input=input.slice(UP.length)||'/';
+	else if(input&&typeof input.url==='string'&&input.url.indexOf(UP)===0)input=new Request(input.url.slice(UP.length)||'/',input);
+	}catch(e){}return fetch0.call(this,input,init);};
+	var open0=XMLHttpRequest.prototype.open;
+	XMLHttpRequest.prototype.open=function(method,url){if(typeof url==='string'&&url.indexOf(UP)===0)url=url.slice(UP.length)||'/';return open0.apply(this,arguments);};
+})();</script>
+<style data-webcode-singlecol>
+/* 侧栏单栏化：站点自带的双栏布局在窄面板里很挤——隐藏左侧导航列，
+   需要时从左缘右滑呼出（overlay 抽屉，不动站点自身逻辑）。选择器按
+   「导航列特征」而不是站点版本号 class（改版频繁，特征更稳）。 */
+.hwb-nav-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.32);opacity:0;pointer-events:none;transition:opacity .18s;z-index:2147483000}
+.hwb-nav-backdrop.show{opacity:1;pointer-events:auto}
+.hwb-nav-rail{position:fixed;left:-44px;top:0;bottom:0;width:44px;display:flex;align-items:center;justify-content:center;
+  background:var(--ds-bg,#fff);border-right:1px solid #8883;cursor:pointer;z-index:2147483001;
+  color:var(--ds-text,#555);font-size:11px;writing-mode:vertical-rl;letter-spacing:2px;
+  box-shadow:2px 0 10px rgba(0,0,0,.12);user-select:none;opacity:0;transition:opacity .18s,left .18s}
+.hwb-nav-rail.show{opacity:1;left:0}
+.hwb-nav-rail:hover{background:#8881}
+</style>
+<script data-webcode-singlecol>(function(){
+	if(window.__webcodeSingleCol)return;window.__webcodeSingleCol=1;
+	// 左侧导航列探测：宽高比像侧栏（高≥视口 70%、宽 ≤ 320px、无输入框）
+	// 的最左可见 flex/grid 子元素；找不到就不动布局（宁可不改也别改坏）。
+	function findNavColumn(){
+		var vw=window.innerWidth;
+		var cands=[].slice.call(document.body.children).filter(function(el){
+			var r=el.getBoundingClientRect();
+			return r.width>0&&r.height>=window.innerHeight*0.7&&r.left<vw*0.42&&r.right<=vw*0.45+320;
+		});
+		// 常见形态：主容器是 flex 行、第一个子元素是窄列
+		for(var i=0;i<cands.length;i++){
+			var el=cands[i],r=el.getBoundingClientRect();
+			if(r.width>0&&r.width<=320&&r.right<=vw*0.45+1){
+				if(el.querySelector('textarea'))continue;
+				return el;
+			}
+			var kids=[].slice.call(el.children).filter(function(k){var kr=k.getBoundingClientRect();return kr.width>0;});
+			if(kids.length>=2){
+				var first=kids[0].getBoundingClientRect(),second=kids[1].getBoundingClientRect();
+				if(second.left>first.right&&first.width>0&&first.width<=320&&first.right<=vw*0.45+1&&first.height>=window.innerHeight*0.6){
+					if(kids[0].querySelector('textarea'))continue;
+					return kids[0];
+				}
+			}
+		}
+		return null;
+	}
+	var backdrop=document.createElement('div');backdrop.className='hwb-nav-backdrop';
+	var rail=document.createElement('div');rail.className='hwb-nav-rail';rail.textContent='会话列表';
+	rail.title='右滑/点击展开会话列表';
+	var navEl=null,navPrev='';
+	function applySingle(){
+		var nav=findNavColumn();
+		if(!nav||nav===navEl)return;
+		if(navEl){try{navEl.style.cssText=navPrev}catch(e){}}
+		navEl=nav;navPrev=nav.style.cssText;
+		nav.style.cssText=navPrev+';position:fixed;left:-'+nav.getBoundingClientRect().width+'px;top:0;bottom:0;z-index:2147483002;transition:left .2s ease;box-shadow:4px 0 18px rgba(0,0,0,.18);';
+	}
+	function openNav(){
+		if(!navEl)applySingle();
+		if(!navEl)return;
+		navEl.style.left='0';backdrop.classList.add('show');rail.classList.remove('show');
+	}
+	function closeNav(){
+		if(navEl)navEl.style.left='-'+navEl.getBoundingClientRect().width+'px';
+		backdrop.classList.remove('show');rail.classList.add('show');
+	}
+	function mount(){
+		if(!document.body)return;
+		document.body.appendChild(backdrop);document.body.appendChild(rail);
+		backdrop.addEventListener('click',closeNav);
+		rail.addEventListener('click',openNav);
+		// 左缘 24px 内右滑呼出
+		var sx=0,sy=0,tracking=false;
+		document.addEventListener('touchstart',function(e){
+			var t=e.touches[0];sx=t.clientX;sy=t.clientY;tracking=sx<24;
+		},{passive:true});
+		document.addEventListener('touchmove',function(e){
+			if(!tracking)return;var t=e.touches[0];
+			if(t.clientX-sx>36&&Math.abs(t.clientY-sy)<48){openNav();tracking=false;}
+			else if(sx-t.clientX>36){closeNav();tracking=false;}
+		},{passive:true});
+		// 鼠标/键盘也可用（桌面无触摸）
+		document.addEventListener('keydown',function(e){
+			if((e.ctrlKey||e.metaKey)&&e.key==='b'){e.preventDefault();navEl&&navEl.style.left==='0'?closeNav():openNav();}
+		});
+		var lastX=0,hover=false;
+		document.addEventListener('mousemove',function(e){
+			if(hover)return;
+			if(e.clientX<6){hover=true;lastX=e.clientX;return;}
+			if(hover&&e.clientX-lastX>60){openNav();hover=false;}
+		});
+		// 布局收敛后再应用一次（SPA 首帧有骨架屏时列结构未定型）
+		var tries=0,timer=setInterval(function(){
+			applySingle();
+			if(navEl||++tries>40)clearInterval(timer);
+		},500);
+		applySingle();closeNav();
+	}
+	if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',mount);else mount();
+	// SPA 路由切换后重新探测
+	var push0=history.pushState;if(push0){history.pushState=function(){var r=push0.apply(this,arguments);closeNav();navEl=null;applySingle();return r;};}
 })();</script>`;
   }
 
