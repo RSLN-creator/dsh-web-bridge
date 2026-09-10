@@ -13,6 +13,23 @@
 
 系统需要 Node.js 20+ 和 Microsoft Edge，无需另外加载浏览器扩展。当前本机运行入口为 http://127.0.0.1:3080。
 
+## 工具调用折叠
+
+网页面板里，模型按协议输出的工具调用与结果（```json 围栏 / `<tool_call>` 标签）会折成
+**一行摘要**，点击才展开原文：
+
+```
+▶ ⚙ pwsh   command: Get-ChildItem -Force
+▶ ✓ pwsh   success   1.2 千字符
+```
+
+- 判定按 `mcp_action` / `tool_call` 字样，纯字符串扫描（不用正则，避免转义失真）；
+- **只动工具协议块**，普通代码块原样保留；
+- 不改站点 DOM 结构：仅在 `<pre>` 前插一行 header，切换该 `<pre>` 的 display；
+- `MutationObserver` 跟随流式渲染，新出现的块自动折叠。
+
+实现见 `lib/toolfold.js`，护栏见 `test/toolfold.test.mjs`（真机 Edge 断言折叠与展开）。
+
 ## 当前能力
 
 | 模型 ID | 名称 | 实际请求（旧三 pill UI） | 实际请求（2026-09-10 新版 UI） |

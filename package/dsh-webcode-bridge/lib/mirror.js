@@ -2,6 +2,8 @@
 // The upstream is fixed at siteOrigin; this is a same-origin relay, not an
 // open proxy. The page token is injected only into the relay origin's storage.
 
+import { TOOL_FOLD_HTML } from './toolfold.js';
+
 export function createMirror(options = {}) {
   const {
     siteOrigin = 'https://chat.deepseek.com',
@@ -405,7 +407,7 @@ export function createMirror(options = {}) {
       // URL 改成同源后 crossorigin 不再需要；integrity 一旦不匹配会让整页脚本
       // 失效（失败面大于收益），一并剥离。
       patched = patched.replace(/\s+integrity="[^"]*"/gi, '').replace(/\s+crossorigin(?:="[^"]*")?/gi, '');
-      const injected = bootstrap(typeof token === 'string' ? token : null);
+      const injected = bootstrap(typeof token === 'string' ? token : null) + TOOL_FOLD_HTML;
       patched = patched.includes('</head>')
         ? patched.replace('</head>', injected + '</head>')
         : injected + patched;

@@ -1,6 +1,15 @@
 # Harness Web Bridge 路线
 
-## 当前版本 0.9.0
+## 当前版本 0.9.1
+
+0.9.1（工具调用折叠）：网页面板里的工具调用/结果代码块改成一行摘要，点击展开。
+网页模型按协议输出的 ```json / `<tool_call>` 块在对话流里是一大段 JSON，既占屏幕
+又打断阅读。新增 `lib/toolfold.js` 注入纯前端折叠：判定 `mcp_action`/`tool_call`，
+把这类 `<pre>` 换成「工具名 + 首个参数 + 结果状态」的一行 header；普通代码块不动。
+不改站点 DOM 结构（只前置 header 并切换 display），MutationObserver 跟随流式渲染。
+护栏 `test/toolfold.test.mjs` 用真机 Edge 断言折叠/展开与「普通块不受影响」。
+
+## 0.9.0
 
 0.9.0（官方右侧栏 + 多站点真实可开）：三处收敛。
 
