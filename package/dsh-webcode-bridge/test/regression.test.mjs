@@ -182,6 +182,55 @@ test('裸 invoke XML 形状被解析为调用', () => {
   // 散文中举例的 invoke（无 parameter 或空 name）不触发
   assert.equal(parseAgentReply('可以像 <invoke name="read"></invoke> 这样调用').calls.length, 0);
 });
+test('混合形状：<invoke> 壳 + 裸 JSON 参数（2026-09-10 probe-17 真机出现）', () => {
+  // 真机第 7 轮原文：外壳 DSH 原生 invoke，参数是本协议的裸 JSON，且尾随游离 </parameter>。
+  // 旧解析器三种形状都不认 → 解析为空 → 探针误当收束、工具循环静默中断。
+  const hybrid = 'The read output was truncated. Let me pull the key files.\n\n<tool_call>\n<invoke name="read" purpose="读取 providers.js 全文">\n{"path": "package/dsh-webcode-bridge/lib/providers.js"}\n</parameter>\n</invoke>\n<invoke name="grep" purpose="检索硬编码密钥形态">\n{"query": "sk-[A-Za-z0-9]{10,}|ghp_"}\n</parameter>\n</invoke>\n</tool_call>';
+  assert.deepEqual(parseAgentReply(hybrid).calls, [
+    { name: 'read', arguments: { path: 'package/dsh-webcode-bridge/lib/providers.js' } },
+    { name: 'grep', arguments: { query: 'sk-[A-Za-z0-9]{10,}|ghp_' } },
+  ]);
+  // 回归护栏：空 invoke（散文举例）不触发；裸 JSON 参数照样收
+  assert.equal(parseAgentReply('<invoke name="shell" purpose="示例"></invoke>').calls.length, 0);
+  assert.deepEqual(parseAgentReply('<invoke name="shell" purpose="示例">{"command":"git status"}</invoke>').calls,
+    [{ name: 'shell', arguments: { command: 'git status' } }]);
+});
+test('包装形状：<invoke name="tool_call"> 里装完整调用对象（2026-09-10 真机第 3 跑）', () => {
+  // 真机原文：DSML 外壳名写成 tool_call，壳内才是真调用；旧逻辑会把 read/grep
+  // 变成「名为 tool_call 的工具」的参数，每轮报一次未知工具（errRate 53%）。
+  const raw = '<\uFF5C\uFF5CDSML\uFF5C\uFF5C calls>\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C invoke name="tool_call">\n{"mcp_action": "call", "name": "read", "purpose": "read security doc", "arguments": {"path": "doc/security-review.md"}}\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter>\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C invoke>\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C calls>';
+  const calls = parseAgentReply(raw).calls;
+  assert.equal(calls.length, 1, '壳 + 壳内 JSON 只应记一个调用');
+  assert.deepEqual(calls, [{ name: 'read', arguments: { path: 'doc/security-review.md' } }]);
+});
+test('畸形属性抢救：调用 JSON 塞进 <invoke name=…（2026-09-10 真机第 6 跑）', () => {
+  // 真机原文：整段调用 JSON 落进了 invoke 的 name 属性区，标签本身没说清工具名。
+  const raw = '<\uFF5C\uFF5CDSML\uFF5C\uFF5C calls>\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C invoke name="mcp_action":"call","name":"read","arguments":{"path":"doc/security-review.md"}}\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter name="mcp_action":"call","name":"grep","arguments":{"query":"secret"}}\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter>\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C invoke>\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C calls>';
+  assert.deepEqual(parseAgentReply(raw).calls, [
+    { name: 'read', arguments: { path: 'doc/security-review.md' } },
+    { name: 'grep', arguments: { query: 'secret' } },
+  ]);
+});
+test('畸形标签抢救：JSON 漏进标签名的 `<parameter name="name": …`（2026-09-10 真机第 5 跑）', () => {
+  // 真机原文：三段调用对象被拼进 <parameter name=… 的标签名里（畸形），
+  // 但 \"name\"/\"arguments\" 片段完整——必须按片段配对还原，否则整轮丢 3 个调用。
+  const raw = '<\uFF5C\uFF5CDSML\uFF5C\uFF5C calls>\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C invoke name="tool_call">\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter name="description" string="true">读取 README 与 PLAN</\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter>\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter name="name": "read", "arguments": {"path": "README.md"}}\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter>\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter name="shell", "arguments": {"command": "git status"}}\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter>\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C invoke>\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C calls>';
+  assert.deepEqual(parseAgentReply(raw).calls, [
+    { name: 'read', arguments: { path: 'README.md' } },
+    { name: 'shell', arguments: { command: 'git status' } },
+  ]);
+});
+test('包装形状：<invoke name="tool_call"> + name/arguments 参数（2026-09-10 真机第 4 跑）', () => {
+  // 真机原文：外壳名 tool_call，真调用藏在 name/arguments 两个参数里。
+  const raw = '<\uFF5C\uFF5CDSML\uFF5C\uFF5C calls>\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C invoke name="tool_call">\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter name="arguments" string="false">{"command": "git status"}</\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter>\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter name="name" string="true">shell</\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter>\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter name="purpose" string="true">查看状态</\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter>\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C invoke>\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C calls>';
+  assert.deepEqual(parseAgentReply(raw).calls, [{ name: 'shell', arguments: { command: 'git status' } }]);
+});
+test('新版 DSML：带类型属性的 <parameter name="x" string="true">（2026-09-10 真机第 2 轮）', () => {
+  // 真机原文（新版 UI）：全角竖线 DSML 前缀 + 参数带 string="true" 属性。
+  // 旧 paramRe 要求 name 后直接跟 >，整段调用被判为空 → 工具循环静默中断。
+  const raw = '我需要更完整的文件清单与源码细节。\n\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C calls>\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C invoke name="shell">\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter name="command" string="true">git ls-files</\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter>\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter name="purpose" string="true">列出代码文件</\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter>\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C invoke>\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C calls>';
+  assert.deepEqual(parseAgentReply(raw).calls, [{ name: 'shell', arguments: { command: 'git ls-files', purpose: '列出代码文件' } }]);
+});
 test('DSML 全角/半角/丢开头形状归一为调用', () => {
   // 马拉松终跑（2026-09-09）观察：网页流式把协议标记噪声化——竖线成对全角化
   // （U+FF5C）或整段丢开头 <。reference/deepseek-free-api strip_dsml_markup 同源问题。

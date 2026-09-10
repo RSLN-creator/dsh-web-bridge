@@ -16,3 +16,6 @@ reference/*.pdf
 # 覆盖 .driver-profile* / .edge-profile* / .mirror-profile-* / .harness-ui-profile 与 .test-build。
 package/dsh-webcode-bridge/test-mock/.*-profile*/
 package/dsh-webcode-bridge/test-mock/.test-build/
+
+# 打包/探针输出（tgz、真机探针日志），不入库
+package/output/

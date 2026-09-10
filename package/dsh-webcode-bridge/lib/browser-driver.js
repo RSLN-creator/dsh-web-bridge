@@ -152,6 +152,7 @@ export function createBrowserDriver(options = {}) {
   let Decoders = null;
   let loggedIn = null;
   let selectedModel = null;
+  let dsUi = null; // DeepSeek 网页 UI 代际缓存：'classic' | 'unified'（见 detectDeepSeekUi）
   let requestMetadata = null;
   let launching = null;
   let interaction = Promise.resolve();
@@ -324,6 +325,7 @@ export function createBrowserDriver(options = {}) {
    *  会被白白耗在死句柄上，长跑会表现为「卡住不动」。 */
   async function installPage() {
     const p = page;
+  dsUi = null; // 换页/换浏览器后 UI 代际要重新侦测
     const paths = site.completionPaths || [];
     p.on('close', () => { if (page === p) page = null; });
     p.on('crash', () => {
@@ -532,9 +534,31 @@ export function createBrowserDriver(options = {}) {
       } else {
         result = await done;
       }
-      if (siteId === 'deepseek' && model && requestMetadata?.model_type && selection?.strict !== false) {
-        const expected = contract.expectedModelType(model);
-        if (requestMetadata.model_type !== expected) throw new Error('MODEL_UI_CHANGED: 网页实际模型与所选模型不一致');
+      if (siteId === 'deepseek' && model && selection?.strict !== false) {
+        // 「绝不静默降级模型」：核验本轮真实请求元数据。新版统一 UI 的模式差异在
+        // thinking_enabled（model_type 恒为 default），旧三 pill UI 的差异在
+        // model_type。取不到请求体本身即失败——旧实现只比对非空 model_type，
+        // 请求体一旦改形（如 model_type 消失）就会静默放行。
+        if (!requestMetadata) {
+          const err = new Error('MODEL_UI_CHANGED: 未捕获到本轮 /chat/completion 请求体，无法核验网页实际模式');
+          err.code = 'MODEL_UI_CHANGED';
+          throw err;
+        }
+        const expect = contract.expectedRequestMetadata(model, { ui: selection?.ui, wantThink: selection?.wantThink });
+        // 续聊消息（同会话第 2 条起）网页只发 model_type:null——语义是「沿用会话
+        // 模型」，新会话首条已核验过，故 model_type 缺失/为 null 时跳过该项；其余
+        // 期望键（unified 的 thinking_enabled）必须出现且相等，不允许静默降级。
+        const bad = Object.entries(expect || {}).find(([k, want]) => {
+          if (want == null) return false;
+          const seen = requestMetadata[k];
+          if (seen == null) return k !== 'model_type';
+          return seen !== want;
+        });
+        if (bad) {
+          const err = new Error(`MODEL_UI_CHANGED: 网页实际 ${bad[0]}=${JSON.stringify(requestMetadata[bad[0]])}，所选模式期望 ${JSON.stringify(bad[1])}`);
+          err.code = 'MODEL_UI_CHANGED';
+          throw err;
+        }
       }
       if (!result.complete) throw new Error('web capture ended incomplete: ' + (result.reason || 'unknown'));
       if (!result.text?.trim()) throw new Error('empty response from web AI');
@@ -690,10 +714,63 @@ export function createBrowserDriver(options = {}) {
     } catch (err) { warn('深度思考 pill 同步失败:', err?.message); return null; }
   }
 
+  /** DeepSeek 网页 UI 代际侦测（其余站点返回 null）。
+   *  classic：输入框上方有「快速模式/专家模式/识图模式」三 pill（≤0.7.2 的旧版）；
+   *  unified：2026-09-10 新版统一 UI——没有模型 pill，模式差异只剩「深度思考」
+   *  aria-pressed 开关（真机 probe-19/20 实测：POST 体 model_type 恒为 default，
+   *  带图发送同样是 default + ref_file_ids，识图不再单独占一个 model_type）。
+   *  判定缓存到 dsUi，页面重装（installPage）时失效。 */
+  async function detectDeepSeekUi() {
+    if (siteId !== 'deepseek' || !page || page.isClosed?.()) return null;
+    if (dsUi) return dsUi;
+    try {
+      if (await page.getByText(/^(快速模式|专家模式|识图模式)$/).filter({ visible: true }).count() > 0) {
+        dsUi = 'classic';
+        return dsUi;
+      }
+      const hasThinkToggle = await page.evaluate(() => {
+        const ta = [...document.querySelectorAll('textarea')].find(e => { const r = e.getBoundingClientRect(); return r.width > 40 && r.height > 0; });
+        if (!ta) return false;
+        let box = ta;
+        for (let i = 0; i < 3 && box.parentElement; i++) box = box.parentElement;
+        return [...box.querySelectorAll('[aria-pressed]')].some(el => (el.textContent || '').trim() === '深度思考');
+      });
+      if (hasThinkToggle) dsUi = 'unified';
+    } catch { /* 页面转场中偶发取不到 DOM——保持未判定，下一轮再判 */ }
+    return dsUi;
+  }
+
   async function selectModelDeepSeek(model, { hasImages, label, thinkOverride = null }) {
-    // pill 目标:手动覆盖优先,否则按模型 thinking 属性
+    // 思考状态目标:手动覆盖优先,否则按模型 thinking 属性
     const wantThink = thinkOverride !== null ? thinkOverride : model.thinking === true;
-    let mode = page.getByText(model.labels[0], { exact: true });
+    const ui = await detectDeepSeekUi();
+
+    if (ui === 'unified') {
+      // 新版统一 UI：模型 pill 已取消，模式差异 =「深度思考」开关。
+      //   deepseek → 打开思考（model_type=default + thinking_enabled=true）
+      //   flash    → 关闭思考（model_type=default + thinking_enabled=false）
+      //   vision   → 没有独立入口：带图发送由网页自行路由（probe-20 实测
+      //              model_type=default + ref_file_ids，回答确实读了图）。
+      if (model.vision) {
+        selectedModel = model.id;
+        return { strict: false, ui, fallback: 'image-auto-route' };
+      }
+      const thinkState = await syncThinkPill(wantThink);
+      if (thinkState === null) {
+        // 连「深度思考」开关都定位不到：本轮 thinking 状态不可控，不再假装成功。
+        selectedModel = null;
+        const diag = await composerSnippet();
+        const err = new Error('MODEL_UI_CHANGED: 新版网页未找到「深度思考」开关' + (diag ? ' — 输入框附近可点项：' + diag : ''));
+        err.code = 'MODEL_UI_CHANGED';
+        throw err;
+      }
+      selectedModel = model.id;
+      return { strict: true, ui, wantThink };
+    }
+
+    // classic 三 pill（≤0.7.2 的旧版 UI）：找不到本模型 pill 时先点当前 pill 打开
+    // 菜单，再选目标；再不行才走下面的通用弹层兜底。
+    let mode = page.getByText(model.labels[0], { exact: true }).filter({ visible: true });
     if (!await mode.count()) {
       const current = page.getByText(/^(快速模式|专家模式|识图模式)$/).filter({ visible: true });
       if (await current.count()) await current.first().click();
@@ -704,24 +781,24 @@ export function createBrowserDriver(options = {}) {
       await page.keyboard.press('Escape');
       selectedModel = model.id;
       await syncThinkPill(wantThink);
-      return { strict: true };
+      return { strict: true, ui: 'classic', wantThink };
     }
     const native = page.locator('select[aria-label="模型"], select[aria-label="Model"]');
     if (await native.count()) {
       const option = native.first().locator(`option[value="${model.id}"]`);
       if (!await option.count()) {
-        if (model.vision && hasImages) { selectedModel = model.id; return { strict: false, fallback: 'image-attachment' }; }
+        if (model.vision && hasImages) { selectedModel = model.id; return { strict: false, ui: 'classic', fallback: 'image-attachment' }; }
         throw new Error('MODEL_UNAVAILABLE: 当前账号没有目标模型 ' + model.id);
       }
       await native.first().selectOption(model.id);
       if (await native.first().inputValue() !== model.id) throw new Error('模型选择未生效');
       selectedModel = model.id;
       await syncThinkPill(wantThink);
-      return { strict: true };
+      return { strict: true, ui: 'classic', wantThink };
     }
     const thinking = page.getByRole('button', { name: /^深度思考$|^DeepThink(?: \(R1\))?$/i });
     if (await thinking.count()) {
-      if (model.vision && hasImages) { selectedModel = model.id; return { strict: false, fallback: 'image-attachment' }; }
+      if (model.vision && hasImages) { selectedModel = model.id; return { strict: false, ui: 'classic', fallback: 'image-attachment' }; }
       if (model.vision) throw new Error('MODEL_UNAVAILABLE: 当前网页没有独立 Vision 模型选择器');
       const control = thinking.first();
       const pressed = await control.getAttribute('aria-pressed');
@@ -730,25 +807,50 @@ export function createBrowserDriver(options = {}) {
         const enabled = pressed === 'true' || state === 'on' || state === 'checked';
         if (enabled !== (model.id === 'deepseek')) await control.click();
         selectedModel = model.id;
-        return { strict: true };
+        return { strict: true, ui: 'classic', wantThink };
       }
     }
-    const trigger = page.getByRole('button', { name: /^(Flash|Vision|DeepSeek|模型|Model|快速|极速|视觉|深度思考)$/i });
+    // 通用弹层入口：旧版 UI 的模型选择器可能藏在输入框工具条里。找不到就把
+    // 输入框附近的可点元素如实报出来，让 MODEL_UI_CHANGED 自带诊断。
+    const trigger = page.getByRole('button', { name: /^(Flash|Vision|DeepSeek|模型|Model|快速|极速|视觉)/i }).first();
     if (!await trigger.count()) {
-      if (model.vision && hasImages) { selectedModel = model.id; return { strict: false, fallback: 'image-attachment' }; }
-      throw new Error('MODEL_UI_CHANGED: 未找到模型选择器');
+      const diag = await composerSnippet();
+      if (model.vision && hasImages) { selectedModel = model.id; return { strict: false, ui: 'classic', fallback: 'image-attachment' }; }
+      const err = new Error('MODEL_UI_CHANGED: 未找到模型选择器' + (diag ? ' — 输入框附近可点项：' + diag : ''));
+      err.code = 'MODEL_UI_CHANGED';
+      throw err;
     }
-    await trigger.first().click();
+    await trigger.click();
     const option = page.getByRole('option', { name: label }).or(page.getByRole('menuitem', { name: label }));
     if (!await option.count()) {
-      if (model.vision && hasImages) { selectedModel = model.id; return { strict: false, fallback: 'image-attachment' }; }
+      if (model.vision && hasImages) { selectedModel = model.id; return { strict: false, ui: 'classic', fallback: 'image-attachment' }; }
       throw new Error('MODEL_UNAVAILABLE: 当前账号没有目标模型 ' + model.id);
     }
     await option.first().click();
     if (!await page.getByRole('button', { name: label }).count()) throw new Error('模型选择未确认');
     selectedModel = model.id;
     await syncThinkPill(wantThink);
-    return { strict: true };
+    return { strict: true, ui: 'classic', wantThink };
+  }
+
+  /** 报错前抓一段输入框附近的按钮文本，让 MODEL_UI_CHANGED 不再是一句干报错。 */
+  async function composerSnippet() {
+    try {
+      return await page.evaluate(() => {
+        const ta = [...document.querySelectorAll('textarea')].find(e => { const r = e.getBoundingClientRect(); return r.width > 40 && r.height > 0; });
+        if (!ta) return null;
+        let box = ta;
+        for (let i = 0; i < 3 && box.parentElement; i++) box = box.parentElement;
+        const names = [];
+        for (const el of box.querySelectorAll('button, [role="button"]')) {
+          const r = el.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) continue;
+          const t = (el.textContent || '').trim().slice(0, 20);
+          if (t) names.push(t + (el.getAttribute('aria-pressed') ? '[p' + el.getAttribute('aria-pressed') + ']' : ''));
+        }
+        return names.slice(0, 10).join('、');
+      });
+    } catch { return null; }
   }
 
   async function diagnostics() {
@@ -776,6 +878,7 @@ export function createBrowserDriver(options = {}) {
     }).catch(() => null);
     return {
       urlPath: new URL(page.url()).pathname,
+      ui: await detectDeepSeekUi(),
       selectedModel,
       requestMetadata,
       composer,

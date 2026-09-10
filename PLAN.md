@@ -1,6 +1,18 @@
 # Harness Web Bridge 路线
 
-## 当前版本 0.7.2
+## 当前版本 0.7.3
+
+0.7.3（新版 UI 适配）：2026-09-10 chat.deepseek.com 改版——模型三 pill 消失，
+输入框只剩「深度思考 / 智能搜索」开关，首条与续聊消息的 model_type 恒为 default，
+模式差异只剩 thinking_enabled（带图发送 = default + ref_file_ids）。驱动新增 UI 代际
+侦测（classic/unified），unified 下按模型语义同步深度思考开关；发送后核验升级为
+「契约期望元数据全量比对」（unified 必查 thinking_enabled，model_type 缺失/null 视为
+网页沿用会话模型）。长跑真机还暴露三种「解析器漏形状 → 工具循环静默中断」的调用漂移
+（混合壳 / 新版 DSML 带类型属性 / tool_call 包装壳）与重复匹配，均已修复并加回归测试；
+probe-17 增加「收束文本仍含调用记号即 FAIL」护栏。真机 doctor 8/8、10 轮零干预马拉松通过。详见
+[长跑审查](doc/deepseek-longrun.md) 第六节。
+
+## 0.7.2
 
 0.7.2（长跑可靠性）：网页会话丢失改「重放整段首轮」而不是静默发增量；网页输入框
 截断超长提示词改为报错；页面崩溃/浏览器被关立刻失败并自愈重开；中止会等停止

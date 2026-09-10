@@ -20,9 +20,28 @@ export function deriveLastRate(lastFinished, mode = null) {
   };
 }
 
-/** 网页模型 id → 其 SSE/请求上报的 model_type 期望值（真机核验契约）。 */
-export function expectedModelType(modelId) {
-  return { flash: 'default', deepseek: 'expert', vision: 'vision' }[modelId] ?? null;
+/** 网页模型 id → 其请求上报的 model_type 期望值（真机核验契约）。
+ *
+ *  classic = 旧三 pill UI（快速模式/专家模式/识图模式，≤0.7.2）：
+ *    flash→default、deepseek→expert、vision→vision（real-verify 0.6.x 实测）。
+ *  unified = 2026-09-10 新版统一 UI（没有模型 pill，模式差异只剩「深度思考」开关）：
+ *    真机 probe-19/20 实测纯文本与带图发送的 model_type 都是 default，
+ *    识图不再单独占一个 model_type（带图 = default + ref_file_ids）。 */
+export const MODEL_TYPES_BY_UI = Object.freeze({
+  classic: Object.freeze({ flash: 'default', deepseek: 'expert', vision: 'vision' }),
+  unified: Object.freeze({ flash: 'default', deepseek: 'default', vision: 'default' }),
+});
+export function expectedModelType(modelId, ui = 'classic') {
+  return (MODEL_TYPES_BY_UI[ui] ?? MODEL_TYPES_BY_UI.classic)[modelId] ?? null;
+}
+
+/** 一次发送后对 /api/v0/chat/completion 请求体元数据的期望（strict 核验用）。
+ *  返回的键若为 null/undefined 则不校验；unified 下 flash/deepseek 的差异
+ *  全在 thinking_enabled，model_type 恒为 default。 */
+export function expectedRequestMetadata(modelId, { ui = 'classic', wantThink = null } = {}) {
+  const model_type = expectedModelType(modelId, ui);
+  if (ui === 'unified' && modelId !== 'vision') return { model_type, thinking_enabled: wantThink === true };
+  return { model_type };
 }
 
 const CJK_RE = /\p{Script=Han}|\p{Script=Hiragana}|\p{Script=Katakana}|\p{Script=Hangul}/u;

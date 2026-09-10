@@ -99,11 +99,14 @@ const resultFence = (r) => '```json\n' + JSON.stringify(r.status === 'error'
 
 // 与官方 API 轨迹（DSH 存档 08-14~08-24 deepseek-official/deepseek-v4-pro）同口径的指标：
 // calls 总数、errRate、reasoningChars、带调用的自主步数（官方 57~96）、工具多样性。
-const stats = { rounds: 0, calls: {}, callTotal: 0, errors: 0, reasoningChars: 0, textChars: 0, callRounds: 0, errThenOk: {}, lastErrRecovered: true };
+const stats = { rounds: 0, calls: {}, callTotal: 0, errors: 0, reasoningChars: 0, textChars: 0, callRounds: 0, errThenOk: {}, lastErrRecovered: true, callShapedUnparsed: false };
 const GLOBAL_TIMEOUT = 20 * 60_000;
 let timer = setTimeout(() => { console.log('GLOBAL-TIMEOUT'); traceWrite('meta-end', { ...stats, timeout: true }); trace.end(); process.exit(2); }, GLOBAL_TIMEOUT);
+// driver 必须在 finally 里关掉：Playwright 的浏览器连接会一直吊着事件循环，
+// 不关就等于每次长跑都留一个孤儿 Edge 进程树（会锁住 profile，下次跑直接起不来）。
+let driver = null;
 try {
-  const driver = createBrowserDriver({
+  driver = createBrowserDriver({
     site: 'https://chat.deepseek.com/',
     profileDir: process.env.WEBCODE_PROFILE || path.join(REPO, '.edge-real-profile'),
     headless: true, requestTimeoutMs: 150_000, logger: console,
@@ -123,7 +126,15 @@ try {
     const turnStart = Date.now();
     const p = parseAgentReply(running?.text ?? '');
     traceWrite('assistant/message', { round, calls: p.calls.map((c) => ({ name: c.name, arguments: c.arguments })), text: (running?.text || '').slice(0, 4000) });
-    if (!p.calls.length) { finalText = (running.text || '').trim(); traceWrite('round/end', { round, durMs: Date.now() - turnStart, calls: 0 }); break; }
+    if (!p.calls.length) {
+      finalText = (running.text || '').trim();
+      // 静默丢调用护栏：收束文本如果还带着调用记号（invoke/mcp_action/parameter），
+      // 说明解析器漏了一种调用形状——这不是「模型收束」，是工具循环被打断，
+      // 必须让本次长跑 FAIL，而不是记一个好看的 PASS。
+      stats.callShapedUnparsed = /<\s*invoke\s+name\s*=|"mcp_action"\s*:\s*"call"|<\s*parameter\s+name\s*=|[\uFF5C|]\s*DSML\s*[\uFF5C|]/.test(finalText);
+      traceWrite('round/end', { round, durMs: Date.now() - turnStart, calls: 0, callShapedUnparsed: stats.callShapedUnparsed });
+      break;
+    }
     stats.callRounds++;
     const results = p.calls.map((c) => {
       stats.callTotal++; stats.calls[c.name] = (stats.calls[c.name] || 0) + 1;
@@ -157,8 +168,10 @@ try {
   const okBrief = stats.textChars > 200;
   const okSelf = stats.callRounds >= 4;
   const okDiversity = toolDiversity >= 2;
-  const pass = okCalls && okErr && okThink && okBrief && okSelf && okDiversity;
-  console.log(`RESULT ${pass ? 'PASS' : 'FAIL'}  calls=${okCalls} errLoop=${okErr} think=${okThink} brief=${okBrief} selfDriven=${okSelf} diversity=${okDiversity}`);
+  const okParsed = !stats.callShapedUnparsed;
+  if (!okParsed) console.log('注意：收束文本仍含调用记号——解析器漏形状，工具循环是被打断的（静默丢调用）。');
+  const pass = okCalls && okErr && okThink && okBrief && okSelf && okDiversity && okParsed;
+  console.log(`RESULT ${pass ? 'PASS' : 'FAIL'}  calls=${okCalls} errLoop=${okErr} think=${okThink} brief=${okBrief} selfDriven=${okSelf} diversity=${okDiversity} parsed=${okParsed}`);
   traceWrite('meta-end', { ...stats, pass, errRate, durationMs: Date.now() - t0 });
   await driver.resetConversation('probe17');
 } catch (e) {
@@ -167,5 +180,6 @@ try {
   process.exitCode = 1;
 } finally {
   clearTimeout(timer);
+  try { await driver?.close(); } catch {}
   trace.end();
 }

@@ -14,11 +14,11 @@
 
 ## 当前能力
 
-| 模型 ID | 网页模式 | 实际请求 model_type |
-| --- | --- | --- |
-| flash | 快速模式 | default |
-| vision | 识图模式 | vision |
-| deepseek | 专家模式 | expert |
+| 模型 ID | 网页模式 | 实际请求（旧三 pill UI） | 实际请求（2026-09-10 新版 UI） |
+| --- | --- | --- | --- |
+| flash | 快速模式 / 关闭深度思考 | model_type=default | model_type=default + thinking_enabled=false |
+| deepseek | 专家模式 / 打开深度思考 | model_type=expert | model_type=default + thinking_enabled=true |
+| vision | 识图模式 / 带图发送 | model_type=vision | 无独立入口：带图发送 = default + ref_file_ids，由网页自行路由 |
 
 网页模型生成工具请求，由 Harness 原生权限系统执行本地工具，结果回传同一网页会话。支持完整首轮上下文、增量工具结果、历史改写后重建和重启后从 Harness 历史恢复。网页智能搜索在自动生成前关闭。
 
@@ -36,5 +36,6 @@
 - 设置页新增「网页历史」导入区：读取真实网页会话列表，选择工作区后一键导入为主线 DSH 会话（已真机验证 fetch_page / history_messages 解析）。
 - 不保证模型审查结论正确；网页输出中的工具示例也可能被误识别，必须保留 Harness 的工具权限与审批。
 - 网页会话被删/过期时不再静默降级：桥会用整段首轮提示词重建（见 [长跑审查](doc/deepseek-longrun.md)）；网页输入框截断超长提示词会报 `PROMPT_TRUNCATED` 而不是发出半截。
+- 2026-09-10 新版 UI（无模型 pill、只剩深度思考开关）已适配：驱动按 UI 代际自动选择操作路径，`pnpm doctor` 在新版真机 8/8 通过；取证见 [新版 UI 取证](doc/research/deepseek-newui-2026-09-10.md)。
 
 [路线](PLAN.md)记录多站点适配与 DeepSeek 更新策略；[安全审查](doc/security-review.md)记录实际防护及剩余限制；[审查入口](doc/review-guide.md)给出「只看这 15 个文件」的代码地图与探针清单。

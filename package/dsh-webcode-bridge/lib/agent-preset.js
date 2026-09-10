@@ -165,6 +165,47 @@ export function serializeDelta(messages, sent, toolResultsSent = 0, knownNames) 
   return { text: text || '[系统] 上一次回复未成功接收，请重新回复。', consumed: msgs.length, toolResultsSent: results };
 }
 
+/** 从 text[start]（应为 '{'）做花括号配对（跳过字符串内的括号），配平即试解析。 */
+function jsonObjectAt(text, start) {
+  const src = String(text ?? '');
+  if (src[start] !== '{') return null;
+  let depth = 0; let inStr = false; let esc = false;
+  for (let i = start; i < src.length; i++) {
+    const c = src[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '{') depth++;
+    else if (c === '}') {
+      depth--;
+      if (depth === 0) {
+        try {
+          const obj = JSON.parse(src.slice(start, i + 1));
+          return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : null;
+        } catch { return null; }
+      }
+    }
+  }
+  return null;
+}
+
+/** 从一段可能夹带标签/散文的文本里取第一个完整 JSON 对象（首个 { 到末个 }）。
+ *  混合形状的 <invoke> 体里既有裸 JSON 又有游离 </parameter>，直接切首尾即可。 */
+function jsonObjectIn(text) {
+  const body = String(text ?? '');
+  const a = body.indexOf('{');
+  const b = body.lastIndexOf('}');
+  if (a < 0 || b <= a) return null;
+  try {
+    const parsed = JSON.parse(body.slice(a, b + 1));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch { return null; }
+}
+
 /**
  * Parse the web reply for tool-call fences. Tolerant of prose around the
  * fences — that's the point of a fence protocol — but every fence must be a
@@ -187,6 +228,9 @@ export function parseAgentReply(text) {
     .replace(/(^|[^\w<])[\uFF5C|]+\s*DSML\s*[\uFF5C|]+(?=(?:tool_calls|invoke|parameter)\b)/gi, '\$1<');
   const calls = [];
   const seen = new Set();
+  // 同一个调用可能被多条规则各匹配一次（fence / 标签 / 裸对象 / invoke 兜底）。
+  // 原文去重（seen）挡不住「同一对象、不同书写」的重复，故再按内容签名去重。
+  const seenSig = new Set();
   // DeepSeek 网页版与 OpenAI 一样，常把 arguments 设置为"转义 JSON 字符串"
   // （"{\"command\":\"...\"}"）而非对象。这里统一做一次"字符串→对象"归一化，
   // 否则这些参数会被当成空对象丢弃，工具拿到空参数执行失败。任何解析失败的
@@ -223,6 +267,9 @@ export function parseAgentReply(text) {
         : (typeof obj.arguments === 'object' || typeof obj.input === 'object' || (typeof obj.arguments === 'string' && obj.arguments.trim().startsWith('{')));
     if (!isCall) return;
     if (Array.isArray(args)) return;
+    const sig = obj.name.trim() + '\u0000' + JSON.stringify(args);
+    if (seenSig.has(sig)) return;
+    seenSig.add(sig);
     calls.push({ name: obj.name.trim(), arguments: args });
   };
   const fenceRe = /```(?:json)?\s*\n?([\s\S]*?)```/gi;
@@ -233,14 +280,56 @@ export function parseAgentReply(text) {
   // 裸 <invoke> XML 形状（probe-17 首跑 2026-09-09 发现：无 fence、无 mcp_action，
   // 模型把 DSH 原生 XML 调用语法直接搬进网页回复）。<parameter name="k">v</parameter>
   // 逐个收集为 arguments；至少一个 parameter 才算调用，散文举例不触发。
-  const invokeRe = /<\s*invoke\s+name\s*=\s*"([^"]+)"\s*>([\s\S]*?)<\s*\/\s*invoke\s*>/gi;
+  // probe-17 终跑（2026-09-10）再发现的混合形状：外壳是 DSH 原生 <invoke>，
+  // 参数却是本协议的裸 JSON 对象，还带一串游离的 </parameter>：
+  //   <invoke name="read" purpose="…">{"path":"…"}</parameter></invoke>
+  // 只在没有 <parameter> 元素时才按裸 JSON 兜底（有 parameter 的老形状不变）。
+  const invokeRe = /<\s*invoke\s+name\s*=\s*"([^"]+)"\s*[^>]*>([\s\S]*?)<\s*\/\s*invoke\s*>/gi;
   while ((m = invokeRe.exec(s)) !== null) {
     const args = {};
     let n = 0;
-    const paramRe = /<\s*parameter\s+name\s*=\s*"([^"]*)"\s*>([\s\S]*?)<\s*\/\s*parameter\s*>/gi;
+    // 新版 UI（2026-09-10）的 DSML 序列化会给参数带类型属性：
+    //   <parameter name="command" string="true">…</parameter>
+    // 旧的「name 之后必须直接是 >」写法会整段漏掉这类调用，故允许任意其它属性。
+    const paramRe = /<\s*parameter\s+name\s*=\s*"([^"]*)"[^>]*>([\s\S]*?)<\s*\/\s*parameter\s*>/gi;
     let pm;
     while ((pm = paramRe.exec(m[2])) !== null) { args[pm[1]] = pm[2].trim(); n++; }
-    if (n > 0) takeObj(JSON.stringify({ mcp_action: 'call', name: m[1], arguments: args }));
+    if (n === 0) {
+      const raw = jsonObjectIn(m[2]);
+      // 壳里装的是「完整调用对象」时（真机 2026-09-10 第 3 跑：<invoke name="tool_call">
+      // 里塞了整段 {"mcp_action":"call","name":"read",…}），外壳名是噪声——
+      // 按内层对象本身入账，别把 read/grep 变成名为 tool_call 的工具的参数。
+      if (raw && (raw.mcp_action === 'call' || (typeof raw.name === 'string' && raw.name.trim() && ('arguments' in raw || 'input' in raw)))) {
+        takeObj(JSON.stringify(raw));
+        continue;
+      }
+      if (raw) { for (const [k, v] of Object.entries(raw)) { args[k] = v; n++; } }
+    }
+    // 参数形态的包装壳（真机 2026-09-10 第 3 跑）：
+    //   <invoke name="tool_call"><parameter name="name">shell</parameter>
+    //   <parameter name="arguments" string="false">{"command":"…"}</parameter></invoke>
+    // 外壳名不是工具名——按内层 name/arguments 还原成真调用。
+    // mcp_action 也在此列：畸形属性形态会把 "mcp_action":"call" 截成外壳名。
+    const wrapperName = /^(?:tool_calls?|function|invoke|mcp_action)$/i.test(String(m[1]).trim());
+    if (wrapperName && typeof args.name === 'string' && args.name.trim() && (args.arguments !== undefined || args.input !== undefined || args.parameters !== undefined)) {
+      takeObj(JSON.stringify({ mcp_action: 'call', name: args.name.trim(), arguments: normArgs(args.arguments ?? args.input ?? args.parameters) }));
+      continue;
+    }
+    // 抢救形状（真机 2026-09-10 第 5 跑）：模型把调用对象直接拼进了标签名里——
+    //   <parameter name="name": "read", "arguments": {"path": "README.md"}}
+    // 标签已经畸形，但「\"name\": \"x\", \"arguments\": {…}」片段还在，逐个配对还原。
+    // 扫整个 invoke 匹配（含属性区）：真机还有把调用 JSON 直接塞进 name 属性的形态——
+    //   <invoke name="mcp_action":"call","name":"read","arguments":{"path":"…"}}
+    // 这种畸形下 JSON 片段落在属性区，只扫 m[2] 会漏。
+    const salvageRe = /(?:"name"\s*:\s*|name\s*=\s*)"([^"]+)"\s*,\s*"arguments"\s*:\s*/g;
+    let sm;
+    let salvaged = 0;
+    while ((sm = salvageRe.exec(m[0])) !== null) {
+      const obj = jsonObjectAt(m[0], salvageRe.lastIndex);
+      if (obj) { salvaged++; takeObj(JSON.stringify({ mcp_action: 'call', name: sm[1], arguments: obj })); }
+    }
+    // 已抢救出真调用、外壳名只是 tool_call/function 包装名时，别再挂一个假调用。
+    if (n > 0 && !(salvaged > 0 && wrapperName)) takeObj(JSON.stringify({ mcp_action: 'call', name: m[1], arguments: args }));
   }
   const bareObjRe = /(\{\s*"mcp_action"\s*:\s*"call"[\s\S]*?\})\s*(?=<|$)/gi;
   while ((m = bareObjRe.exec(s)) !== null) takeObj(m[1]);

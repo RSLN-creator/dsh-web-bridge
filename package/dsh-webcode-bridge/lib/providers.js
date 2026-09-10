@@ -18,9 +18,9 @@ export const DEEPSEEK = site({
   attachSelector: "input[type='file']",
   decoder: 'deepseek', stream: true,
   models: [
-    { id: 'flash', name: 'DeepSeek Flash · 快速模式', labels: ['快速模式', 'Flash'] },
-    { id: 'vision', name: 'DeepSeek Vision · 识图模式', labels: ['识图模式', 'Vision'], vision: true },
-    { id: 'deepseek', name: 'DeepSeek · 专家模式（深度思考）', labels: ['专家模式', 'DeepSeek'], thinking: true },
+    { id: 'flash', name: 'DeepSeek · 快速（关深度思考）', labels: ['快速模式', 'Flash'] },
+    { id: 'vision', name: 'DeepSeek Vision · 识图（带图发送）', labels: ['识图模式', 'Vision'], vision: true },
+    { id: 'deepseek', name: 'DeepSeek · 专家/深度思考', labels: ['专家模式', 'DeepSeek'], thinking: true },
   ],
 });
 

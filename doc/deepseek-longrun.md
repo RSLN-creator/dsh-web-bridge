@@ -113,3 +113,68 @@ system 文本里的「标题/命名」判据短路真实轮次（工作区指令
 - 网页 composer 的真实长度上限仍是未知数——本次只是让它在越界时**报错**
   而不是静默出错。抓一次真实上限填回 `providers.js` 会让 `contextWindow`
   的声明更诚实（当前统一声明 1_000_000，对网页端而言过于乐观）。
+
+## 六、2026-09-10 网页改版：三 pill → 统一模型 + 深度思考开关（已适配）
+
+### 改版事实（probe-19/20 真机取证，证据见 doc/research/deepseek-newui-2026-09-10.md）
+
+| 观测项 | 旧版 UI（≤0.7.2 适配对象） | 新版 UI（2026-09-10 起） |
+| --- | --- | --- |
+| 模型 pill | 快速模式 / 专家模式 / 识图模式 | **没有模型 pill**；输入框附近只剩「深度思考 / 智能搜索」两个 aria-pressed 开关 |
+| 首条消息 model_type | default / expert / vision | **恒为 default** |
+| 模式差异载体 | model_type | **thinking_enabled**（点击「深度思考」开关，下一条 POST 的该字段即随之变化） |
+| 识图 | 识图模式 → model_type=vision | 无独立入口：带图发送 = default + `ref_file_ids`，回复确实读到图（测试图 HELLO） |
+| 续聊消息 | — | `model_type:null`（网页「沿用会话模型」），thinking_enabled 仍逐条发送 |
+| 会话 URL | /a/chat/s/<id> | 不变；发送按钮 svg path 也不变 |
+| 开关初始状态 | — | 跨会话保留（连续三次运行里 true/false/false 都出现过） |
+
+### 驱动适配（同批修改）
+
+- `detectDeepSeekUi()`：按「有没有三 pill / 有没有 composer 内深度思考开关」判定 UI
+  代际（classic/unified），缓存到 `dsUi`，换页失效；两代 UI 都能跑，网页再改回去也不会翻车。
+- unified 下 `flash`/`deepseek` 都只操作「深度思考」开关（flash 关、deepseek 开）；
+  开关定位不到时抛 `MODEL_UI_CHANGED`（带输入框附近可点项诊断），**不再假装选中**。
+- 发送后核验从「只看非空 model_type」升级为「契约期望元数据全量比对」
+  （`contract.expectedRequestMetadata`）：unified 必查 `thinking_enabled`；`model_type`
+  缺失/null 视为网页「沿用会话模型」（首条消息已核验），其它取值不符即报错。
+- 旧实现里 `model_type` 一旦从请求体消失就整段跳过核验——现在取不到请求体本身就是失败。
+
+### 真机验证（2026-09-10 同批）
+
+- `pnpm doctor`（real-verify.mjs）8/8 全绿：flash=default+thinking_enabled:false、
+  deepseek=default+thinking_enabled:true、vision 带图回复 HELLO（unified 判据）、
+  工具闭环（网页自主 read → 真实执行 → 收束）。
+- `real-probe-17-autonomous-marathon.mjs`：10 轮零干预自主长跑，见
+  doc/research 轨迹与提交说明。
+
+### 对长跑的含义
+
+1. **每轮同步开关是必需品**：开关状态跨会话保留且会漂移（三次运行初始值不同），
+   不做每轮同步就会出现「选了 flash 实际开着深度思考」这类静默错配。
+2. **续聊的 model_type=null 不是降级**：会话模型在首条消息确定，驱动在首条核验；
+   把 null 当错误会让所有多轮长任务在第一轮之后全灭。
+3. 三 pill 时代的 `expectedModelType` 单值契约已不成立，模式期望必须按 UI 代际取值
+   （`lib/metrics.js` 的 `MODEL_TYPES_BY_UI`）——两代并存的过渡期尤其如此。
+
+### 六之补：长跑暴露的调用形状漂移（同批修复）
+
+真机马拉松（probe-17，2026-09-10 两跑）抓到两种**解析器漏形状 → 工具循环静默中断**
+的真实漂移。两种都表现为「回复看着像调用，解析结果为空」，探针旧判据却把它当收束
+（第一跑因此误报 PASS）——这正是长任务跑着跑着不动的典型形态。
+
+| 形状 | 真机原文（节选） | 旧解析结果 | 修复 |
+| --- | --- | --- | --- |
+| 混合壳 | `<invoke name="read" purpose="…">{"path":"…"}</parameter></invoke>` | 0 调用（invoke 体要求 `<parameter>` 元素，被游离 `</parameter>` 噪声挡住） | `jsonObjectIn()`：无 `<parameter>` 时按裸 JSON 取参 |
+| 新版 DSML + 类型属性 | `<｜DSML｜invoke name="shell"><｜DSML｜parameter name="command" string="true">git ls-files</｜DSML｜parameter>` | 0 调用（`paramRe` 要求 name 后直接 `>`，多一个属性就整段漏） | `paramRe` 允许 `name` 之后的任意属性 |
+| JSON 包装壳 | `<invoke name="tool_call">{"mcp_action":"call","name":"read",…}</invoke>` | 1 个假调用（工具名变成 `tool_call`，真调用靠裸对象规则兜回，两路重复） | 壳内是完整调用对象时按内层入账 + 内容签名去重 |
+| 参数包装壳 | `<invoke name="tool_call"><parameter name="name">shell</parameter><parameter name="arguments">{…}</parameter></invoke>` | 3 个假 `tool_call`/轮（未知工具，errRate 53%） | 包装名（tool_call/function/invoke）+ name/arguments 参数 → 还原成真调用 |
+| 标签名漏 JSON | `<parameter name="name": "read", "arguments": {"path":"README.md"}}` | 0 调用 | 片段抢救：按 `"name":"x","arguments":{…}` 花括号配对还原 |
+| 属性区漏 JSON | `<invoke name="mcp_action":"call","name":"read","arguments":{"path":"…"}}` | 0 调用 / 1 个假 `mcp_action` | 抢救扫描扩到整个 invoke 匹配（含属性区），`mcp_action` 列入包装名 |
+
+顺带一提：修好之后回放同一批真机轨迹，发现 **旧解析器还在静默丢调用**——例如一轮里模型
+连发 3 个 `read`（contract.js / providers.js / decoder.js），旧逻辑只记第 1 个，另外两个
+从此消失。修完这批形状后同类轨迹的调用数显著上升，长任务的工具循环因此更完整。
+
+护栏：`parseAgentReply` 两处兜底 + 回归测试各一条；probe-17 增加「收束文本仍含调用
+记号（invoke/parameter/mcp_action/DSML）」判 FAIL——静默丢调用不再能混过 PASS。
+另修 probe-17 不在 finally 关 driver 的缺陷（每次长跑留一个孤儿 Edge 进程树锁 profile）。

@@ -1,0 +1,186 @@
+{"type":"meta","time":1789051560244,"data":{"probe":"real-probe-17-autonomous-marathon","model":"deepseek","maxRounds":10,"repo":"D:\\9_Code_Workspace\\dsh-webcode-bridge","provider":"webcode(web-bridge)","version":"0.7.3"}}
+{"type":"user/message","time":1789051561573,"data":{"role":"user","content":"对本仓库做一次完整的深度审查并交付简报：1) 理解项目结构与目标（README/PLAN/doc）；2) 审查关键实现源码（lib/ 下的解析、驱动、契约）找真实缺陷与风险；3) 检查凭据/密钥泄漏（grep token/secret/password/api_key）；4) 用 git log 了解演进脉络；5) 对每个疑点用 read/shell 亲自核实，不要臆断。若工具报错（参数无效/路径不存在），修正参数后重试。全部核实完成后输出 5-10 行审查简报（发现、证据、建议）并停止调用工具。"}}
+{"type":"reasoning-chunk","time":1789051562689,"data":{"round":0,"text":"用户"}}
+{"type":"reasoning-chunk","time":1789051562690,"data":{"round":0,"text":"希望"}}
+{"type":"reasoning-chunk","time":1789051562690,"data":{"round":0,"text":"对本"}}
+{"type":"reasoning-chunk","time":1789051562699,"data":{"round":0,"text":"仓库"}}
+{"type":"reasoning-chunk","time":1789051562699,"data":{"round":0,"text":"进行"}}
+{"type":"reasoning-chunk","time":1789051562699,"data":{"round":0,"text":"深度"}}
+{"type":"reasoning-chunk","time":1789051562699,"data":{"round":0,"text":"审查"}}
+{"type":"reasoning-chunk","time":1789051562699,"data":{"round":0,"text":"并"}}
+{"type":"reasoning-chunk","time":1789051562699,"data":{"round":0,"text":"交付"}}
+{"type":"reasoning-chunk","time":1789051562699,"data":{"round":0,"text":"简报"}}
+{"type":"reasoning-chunk","time":1789051562699,"data":{"round":0,"text":"。"}}
+{"type":"reasoning-chunk","time":1789051562699,"data":{"round":0,"text":"让我"}}
+{"type":"reasoning-chunk","time":1789051562699,"data":{"round":0,"text":"先"}}
+{"type":"reasoning-chunk","time":1789051562699,"data":{"round":0,"text":"了解"}}
+{"type":"reasoning-chunk","time":1789051562728,"data":{"round":0,"text":"项目"}}
+{"type":"reasoning-chunk","time":1789051562772,"data":{"round":0,"text":"结构"}}
+{"type":"reasoning-chunk","time":1789051562772,"data":{"round":0,"text":"。\n\n"}}
+{"type":"reasoning-chunk","time":1789051562772,"data":{"round":0,"text":"先从"}}
+{"type":"reasoning-chunk","time":1789051562772,"data":{"round":0,"text":"读取"}}
+{"type":"reasoning-chunk","time":1789051562772,"data":{"round":0,"text":"README"}}
+{"type":"reasoning-chunk","time":1789051562789,"data":{"round":0,"text":"、"}}
+{"type":"reasoning-chunk","time":1789051562789,"data":{"round":0,"text":"列出"}}
+{"type":"reasoning-chunk","time":1789051562819,"data":{"round":0,"text":"根"}}
+{"type":"reasoning-chunk","time":1789051562819,"data":{"round":0,"text":"目录"}}
+{"type":"reasoning-chunk","time":1789051562819,"data":{"round":0,"text":"开始"}}
+{"type":"reasoning-chunk","time":1789051562848,"data":{"round":0,"text":"。"}}
+{"type":"reasoning-chunk","time":1789051562848,"data":{"round":0,"text":"shell"}}
+{"type":"reasoning-chunk","time":1789051562880,"data":{"round":0,"text":" "}}
+{"type":"reasoning-chunk","time":1789051562880,"data":{"round":0,"text":"是"}}
+{"type":"reasoning-chunk","time":1789051562880,"data":{"round":0,"text":"只"}}
+{"type":"reasoning-chunk","time":1789051562880,"data":{"round":0,"text":"读"}}
+{"type":"reasoning-chunk","time":1789051562880,"data":{"round":0,"text":"的"}}
+{"type":"reasoning-chunk","time":1789051562880,"data":{"round":0,"text":"，"}}
+{"type":"reasoning-chunk","time":1789051562880,"data":{"round":0,"text":"我"}}
+{"type":"reasoning-chunk","time":1789051562908,"data":{"round":0,"text":"可以用"}}
+{"type":"reasoning-chunk","time":1789051562908,"data":{"round":0,"text":" `"}}
+{"type":"reasoning-chunk","time":1789051562908,"data":{"round":0,"text":"dir"}}
+{"type":"reasoning-chunk","time":1789051562908,"data":{"round":0,"text":"`"}}
+{"type":"reasoning-chunk","time":1789051562908,"data":{"round":0,"text":" "}}
+{"type":"reasoning-chunk","time":1789051562908,"data":{"round":0,"text":"或"}}
+{"type":"reasoning-chunk","time":1789051562908,"data":{"round":0,"text":" `"}}
+{"type":"reasoning-chunk","time":1789051562908,"data":{"round":0,"text":"git"}}
+{"type":"reasoning-chunk","time":1789051562908,"data":{"round":0,"text":" ls"}}
+{"type":"reasoning-chunk","time":1789051562908,"data":{"round":0,"text":"-f"}}
+{"type":"reasoning-chunk","time":1789051562908,"data":{"round":0,"text":"iles"}}
+{"type":"reasoning-chunk","time":1789051562908,"data":{"round":0,"text":"`"}}
+{"type":"reasoning-chunk","time":1789051562908,"data":{"round":0,"text":"。\n\n"}}
+{"type":"reasoning-chunk","time":1789051562908,"data":{"round":0,"text":"让我"}}
+{"type":"reasoning-chunk","time":1789051562908,"data":{"round":0,"text":"发起"}}
+{"type":"reasoning-chunk","time":1789051562972,"data":{"round":0,"text":"多个"}}
+{"type":"reasoning-chunk","time":1789051562972,"data":{"round":0,"text":"并行"}}
+{"type":"reasoning-chunk","time":1789051562972,"data":{"round":0,"text":"调用"}}
+{"type":"reasoning-chunk","time":1789051562972,"data":{"round":0,"text":"："}}
+{"type":"reasoning-chunk","time":1789051562972,"data":{"round":0,"text":"读取"}}
+{"type":"reasoning-chunk","time":1789051562972,"data":{"round":0,"text":" READ"}}
+{"type":"reasoning-chunk","time":1789051562972,"data":{"round":0,"text":"ME"}}
+{"type":"reasoning-chunk","time":1789051562972,"data":{"round":0,"text":".md"}}
+{"type":"reasoning-chunk","time":1789051562999,"data":{"round":0,"text":"、"}}
+{"type":"reasoning-chunk","time":1789051562999,"data":{"round":0,"text":"PL"}}
+{"type":"reasoning-chunk","time":1789051562999,"data":{"round":0,"text":"AN"}}
+{"type":"reasoning-chunk","time":1789051562999,"data":{"round":0,"text":".md"}}
+{"type":"reasoning-chunk","time":1789051562999,"data":{"round":0,"text":"、"}}
+{"type":"reasoning-chunk","time":1789051562999,"data":{"round":0,"text":"用"}}
+{"type":"reasoning-chunk","time":1789051563029,"data":{"round":0,"text":" git"}}
+{"type":"reasoning-chunk","time":1789051563030,"data":{"round":0,"text":" ls"}}
+{"type":"reasoning-chunk","time":1789051563030,"data":{"round":0,"text":"-f"}}
+{"type":"reasoning-chunk","time":1789051563030,"data":{"round":0,"text":"iles"}}
+{"type":"reasoning-chunk","time":1789051563030,"data":{"round":0,"text":" "}}
+{"type":"reasoning-chunk","time":1789051563030,"data":{"round":0,"text":"列出"}}
+{"type":"reasoning-chunk","time":1789051563059,"data":{"round":0,"text":"文件"}}
+{"type":"reasoning-chunk","time":1789051563060,"data":{"round":0,"text":"、"}}
+{"type":"reasoning-chunk","time":1789051563060,"data":{"round":0,"text":"git"}}
+{"type":"reasoning-chunk","time":1789051563060,"data":{"round":0,"text":" log"}}
+{"type":"reasoning-chunk","time":1789051563060,"data":{"round":0,"text":"。\n\n"}}
+{"type":"reasoning-chunk","time":1789051563060,"data":{"round":0,"text":"注意"}}
+{"type":"reasoning-chunk","time":1789051563060,"data":{"round":0,"text":"路径"}}
+{"type":"reasoning-chunk","time":1789051563089,"data":{"round":0,"text":"可能是"}}
+{"type":"reasoning-chunk","time":1789051563119,"data":{"round":0,"text":" READ"}}
+{"type":"reasoning-chunk","time":1789051563119,"data":{"round":0,"text":"ME"}}
+{"type":"reasoning-chunk","time":1789051563119,"data":{"round":0,"text":".md"}}
+{"type":"reasoning-chunk","time":1789051563119,"data":{"round":0,"text":"。"}}
+{"type":"reasoning-chunk","time":1789051563119,"data":{"round":0,"text":"让我"}}
+{"type":"reasoning-chunk","time":1789051563119,"data":{"round":0,"text":"先"}}
+{"type":"reasoning-chunk","time":1789051563119,"data":{"round":0,"text":"执行"}}
+{"type":"reasoning-chunk","time":1789051563119,"data":{"round":0,"text":" shell"}}
+{"type":"reasoning-chunk","time":1789051563150,"data":{"round":0,"text":":"}}
+{"type":"reasoning-chunk","time":1789051563150,"data":{"round":0,"text":" git"}}
+{"type":"reasoning-chunk","time":1789051563150,"data":{"round":0,"text":" ls"}}
+{"type":"reasoning-chunk","time":1789051563150,"data":{"round":0,"text":"-f"}}
+{"type":"reasoning-chunk","time":1789051563150,"data":{"round":0,"text":"iles"}}
+{"type":"reasoning-chunk","time":1789051563150,"data":{"round":0,"text":"，"}}
+{"type":"reasoning-chunk","time":1789051563150,"data":{"round":0,"text":"看看"}}
+{"type":"reasoning-chunk","time":1789051563178,"data":{"round":0,"text":"有哪些"}}
+{"type":"reasoning-chunk","time":1789051563178,"data":{"round":0,"text":"文件"}}
+{"type":"reasoning-chunk","time":1789051563178,"data":{"round":0,"text":"，"}}
+{"type":"reasoning-chunk","time":1789051563178,"data":{"round":0,"text":"同时"}}
+{"type":"reasoning-chunk","time":1789051563178,"data":{"round":0,"text":"读取"}}
+{"type":"reasoning-chunk","time":1789051563178,"data":{"round":0,"text":" READ"}}
+{"type":"reasoning-chunk","time":1789051563178,"data":{"round":0,"text":"ME"}}
+{"type":"reasoning-chunk","time":1789051563178,"data":{"round":0,"text":".md"}}
+{"type":"reasoning-chunk","time":1789051563209,"data":{"round":0,"text":"。\n\n"}}
+{"type":"reasoning-chunk","time":1789051563209,"data":{"round":0,"text":"我先"}}
+{"type":"reasoning-chunk","time":1789051563209,"data":{"round":0,"text":"并行"}}
+{"type":"reasoning-chunk","time":1789051563209,"data":{"round":0,"text":"发起"}}
+{"type":"reasoning-chunk","time":1789051563209,"data":{"round":0,"text":"："}}
+{"type":"reasoning-chunk","time":1789051563239,"data":{"round":0,"text":"read"}}
+{"type":"reasoning-chunk","time":1789051563239,"data":{"round":0,"text":" READ"}}
+{"type":"reasoning-chunk","time":1789051563239,"data":{"round":0,"text":"ME"}}
+{"type":"reasoning-chunk","time":1789051563239,"data":{"round":0,"text":".md"}}
+{"type":"reasoning-chunk","time":1789051563239,"data":{"round":0,"text":"、"}}
+{"type":"reasoning-chunk","time":1789051563269,"data":{"round":0,"text":"shell"}}
+{"type":"reasoning-chunk","time":1789051563269,"data":{"round":0,"text":" git"}}
+{"type":"reasoning-chunk","time":1789051563269,"data":{"round":0,"text":" log"}}
+{"type":"reasoning-chunk","time":1789051563269,"data":{"round":0,"text":" --"}}
+{"type":"reasoning-chunk","time":1789051563269,"data":{"round":0,"text":"on"}}
+{"type":"reasoning-chunk","time":1789051563269,"data":{"round":0,"text":"eline"}}
+{"type":"reasoning-chunk","time":1789051563269,"data":{"round":0,"text":" -"}}
+{"type":"reasoning-chunk","time":1789051563298,"data":{"round":0,"text":"20"}}
+{"type":"reasoning-chunk","time":1789051563298,"data":{"round":0,"text":"、"}}
+{"type":"reasoning-chunk","time":1789051563298,"data":{"round":0,"text":"shell"}}
+{"type":"reasoning-chunk","time":1789051563298,"data":{"round":0,"text":" git"}}
+{"type":"reasoning-chunk","time":1789051563298,"data":{"round":0,"text":" ls"}}
+{"type":"reasoning-chunk","time":1789051563298,"data":{"round":0,"text":"-f"}}
+{"type":"reasoning-chunk","time":1789051563298,"data":{"round":0,"text":"iles"}}
+{"type":"reasoning-chunk","time":1789051563298,"data":{"round":0,"text":"。"}}
+{"type":"reasoning-chunk","time":1789051563298,"data":{"round":0,"text":"但"}}
+{"type":"reasoning-chunk","time":1789051563298,"data":{"round":0,"text":"路径"}}
+{"type":"reasoning-chunk","time":1789051563298,"data":{"round":0,"text":"未知"}}
+{"type":"reasoning-chunk","time":1789051563328,"data":{"round":0,"text":"，"}}
+{"type":"reasoning-chunk","time":1789051563328,"data":{"round":0,"text":"read"}}
+{"type":"reasoning-chunk","time":1789051563359,"data":{"round":0,"text":" "}}
+{"type":"reasoning-chunk","time":1789051563359,"data":{"round":0,"text":"可能"}}
+{"type":"reasoning-chunk","time":1789051563359,"data":{"round":0,"text":"失败"}}
+{"type":"reasoning-chunk","time":1789051563359,"data":{"round":0,"text":"。"}}
+{"type":"reasoning-chunk","time":1789051563359,"data":{"round":0,"text":"不过"}}
+{"type":"reasoning-chunk","time":1789051563359,"data":{"round":0,"text":"可以"}}
+{"type":"reasoning-chunk","time":1789051563388,"data":{"round":0,"text":"修正"}}
+{"type":"reasoning-chunk","time":1789051563388,"data":{"round":0,"text":"。\n\n"}}
+{"type":"reasoning-chunk","time":1789051563388,"data":{"round":0,"text":"先"}}
+{"type":"reasoning-chunk","time":1789051563388,"data":{"round":0,"text":"做"}}
+{"type":"reasoning-chunk","time":1789051563388,"data":{"round":0,"text":"吧"}}
+{"type":"reasoning-chunk","time":1789051563388,"data":{"round":0,"text":"。"}}
+{"type":"assistant/message","time":1789051564088,"data":{"round":1,"calls":[{"name":"shell","arguments":{"command":"git ls-files"}},{"name":"read","arguments":{"path":"README.md"}},{"name":"shell","arguments":{"command":"git log --oneline -25"}}],"text":"我将开始对本仓库做深度审查。先并行获取项目清单、README 与 git 历史。\n\n<tool_call>\n{\"mcp_action\":\"call\",\"name\":\"shell\",\"purpose\":\"列出仓库所有受版本控制的文件，掌握项目结构\",\"arguments\":{\"command\":\"git ls-files\"}}\n</tool_call>\n<tool_call>\n{\"mcp_action\":\"call\",\"name\":\"read\",\"purpose\":\"读取 README 了解项目目标\",\"arguments\":{\"path\":\"README.md\"}}\n</tool_call>\n<tool_call>\n{\"mcp_action\":\"call\",\"name\":\"shell\",\"purpose\":\"查看提交历史以了解演进脉络\",\"arguments\":{\"command\":\"git log --oneline -25\"}}\n</tool_call>\n</tool_call>"}}
+{"type":"tool/call","time":1789051564088,"data":{"round":1,"name":"shell","arguments":{"command":"git ls-files"}}}
+{"type":"tool/result","time":1789051566009,"data":{"round":1,"name":"shell","status":"success","output":"\".Codex/GEP-skills/00-Genes/DSH \\346\\250\\241\\345\\236\\213provider\\346\\263\\250\\345\\206\\214\\346\\255\\243\\347\\241\\256\\345\\275\\242\\346\\200\\201.md\"\n\".Codex/GEP-skills/00-Genes/DSH\\345\\267\\245\\345\\205\\267\\350\\247\\204\\345\\210\\231\\345\\234\\250tools\\346\\217\\217\\350\\277\\260\\351\\207\\214.md\"\n\".Codex/GEP-skills/00-Genes/\\345\\244\\232\\347\\253\\231\\347\\202\\271\\346\\250\\241\\345\\236\\213\\350\\267\\257\\347\\224\\261\\346\\236\\266\\346\\236\\204.md\"\n\".Codex/GEP-skills/00-Genes/\\346\\216\\222\\346\\237\\245\\346\\265\\213\\350\\257\\225\\345\\"}}
+{"type":"tool/call","time":1789051566009,"data":{"round":1,"name":"read","arguments":{"path":"README.md"}}}
+{"type":"tool/result","time":1789051566010,"data":{"round":1,"name":"read","status":"success","output":"# Harness Web Bridge\r\n\r\n将已登录的 DeepSeek 网页接入 DeepSeek Harness。当前只支持 DeepSeek，包名 `dsh-webcode-bridge` 和 provider `webcode` 保留兼容。\r\n\r\n## 使用\r\n\r\n1. 在 `package/dsh-webcode-bridge` 执行 `pnpm install --frozen-lockfile`、`pnpm pack`。\r\n2. 执行 `dsh plugin --profile web add ./dsh-webcode-bridge-<版本>.tgz`，重启 Harness。\r\n3. 原生「设置 > 网页桥接」管理登录和自动化开关。默认复用 `~/.dsh/webcode-edge-profile`。\r\n4. 模型选择器的 Harness Web Bridge 分组提供 Flash、Vision、DeepSeek。\r\n5. 右侧 DeepSeek 入口复用已安装 `dsh-better-sidebar` 的标签页、展开收起与拖动；无该插件时使用右侧抽屉。\r\n\r\n系统"}}
+{"type":"tool/call","time":1789051566010,"data":{"round":1,"name":"shell","arguments":{"command":"git log --oneline -25"}}}
+{"type":"tool/result","time":1789051567954,"data":{"round":1,"name":"shell","status":"success","output":"7d33c4b docs: GEP event for 0.7.2 长跑可靠性五修 + 工具规则在 tools.description 基因\nb8d1366 chore: 取消跟踪 test-mock 浏览器 profile（9911 个再生缓存）\n0d15d4b fix: DeepSeek 网页桥长跑可靠性五修（0.7.2）\n055e8b3 docs: GEP event for 0.7.1 双发射修复\na9fe1ff fix: 工具调用同 id 双发射——pendingCall 收尾复用同块补发参数（0.7.1）\n50ea032 feat: 右栏独立窗口与单栏化（0.7.0）——openWindow 真实有头窗口、mirror 导航抽屉右滑、站点栏美化\n4027354 docs: GEP event for 2026-09-09 自主马拉松与调用形状三连修\n3debfbc fix: 调用形状三连修（裸 invoke XML / 全角 DSML / 探针 ENOBUFS）+ 自主马拉松真机 PASS\nba4f85d fix: 工具错误恢复闭环——裸 fence 调用解析修复，多轮自驱"}}
+{"type":"round/end","time":1789051567954,"data":{"round":1,"durMs":3868,"calls":3}}
+{"type":"reasoning-chunk","time":1789051569081,"data":{"round":1,"text":"I"}}
+{"type":"reasoning-chunk","time":1789051569118,"data":{"round":1,"text":" need"}}
+{"type":"reasoning-chunk","time":1789051569119,"data":{"round":1,"text":" to"}}
+{"type":"reasoning-chunk","time":1789051569119,"data":{"round":1,"text":" explore"}}
+{"type":"reasoning-chunk","time":1789051569148,"data":{"round":1,"text":" more"}}
+{"type":"reasoning-chunk","time":1789051569148,"data":{"round":1,"text":"."}}
+{"type":"reasoning-chunk","time":1789051569148,"data":{"round":1,"text":" Let"}}
+{"type":"reasoning-chunk","time":1789051569148,"data":{"round":1,"text":" me"}}
+{"type":"reasoning-chunk","time":1789051569148,"data":{"round":1,"text":" list"}}
+{"type":"reasoning-chunk","time":1789051569148,"data":{"round":1,"text":" lib"}}
+{"type":"reasoning-chunk","time":1789051569178,"data":{"round":1,"text":"/"}}
+{"type":"reasoning-chunk","time":1789051569178,"data":{"round":1,"text":" files"}}
+{"type":"reasoning-chunk","time":1789051569178,"data":{"round":1,"text":" and"}}
+{"type":"reasoning-chunk","time":1789051569178,"data":{"round":1,"text":" package"}}
+{"type":"reasoning-chunk","time":1789051569178,"data":{"round":1,"text":" structure"}}
+{"type":"reasoning-chunk","time":1789051569178,"data":{"round":1,"text":"."}}
+{"type":"reasoning-chunk","time":1789051569178,"data":{"round":1,"text":" The"}}
+{"type":"reasoning-chunk","time":1789051569208,"data":{"round":1,"text":" git"}}
+{"type":"reasoning-chunk","time":1789051569208,"data":{"round":1,"text":" ls"}}
+{"type":"reasoning-chunk","time":1789051569208,"data":{"round":1,"text":"-f"}}
+{"type":"reasoning-chunk","time":1789051569208,"data":{"round":1,"text":"iles"}}
+{"type":"reasoning-chunk","time":1789051569208,"data":{"round":1,"text":" output"}}
+{"type":"reasoning-chunk","time":1789051569208,"data":{"round":1,"text":" was"}}
+{"type":"reasoning-chunk","time":1789051569208,"data":{"round":1,"text":" truncated"}}
+{"type":"reasoning-chunk","time":1789051569209,"data":{"round":1,"text":"."}}
+{"type":"reasoning-chunk","time":1789051569209,"data":{"round":1,"text":" Let"}}
+{"type":"reasoning-chunk","time":1789051569209,"data":{"round":1,"text":" me"}}
+{"type":"reasoning-chunk","time":1789051569209,"data":{"round":1,"text":" get"}}
+{"type":"reasoning-chunk","time":1789051569209,"data":{"round":1,"text":" targeted"}}
+{"type":"reasoning-chunk","time":1789051569237,"data":{"round":1,"text":" lists"}}
+{"type":"reasoning-chunk","time":1789051569267,"data":{"round":1,"text":"."}}
+{"type":"assistant/message","time":1789051569879,"data":{"round":2,"calls":[],"text":"我需要更完整的文件清单与源码细节。\n\n<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"shell\">\n<｜｜DSML｜｜ parameter name=\"command\" string=\"true\">git ls-files | Select-String -Pattern '\\.(js|mjs|cjs|ts|json|md)$' | Select-Object -First 200</｜｜DSML｜｜ parameter>\n<｜｜DSML｜｜ parameter name=\"purpose\" string=\"true\">列出代码与文档文件</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n<｜｜DSML｜｜ invoke name=\"shell\">\n<｜｜DSML｜｜ parameter name=\"command\" string=\"true\">git ls-files | Measure-Object; git ls-files '*.js' | Select-Object -First 100</｜｜DSML｜｜ parameter>\n<｜｜DSML｜｜ parameter name=\"purpose\" string=\"true\">统计文件总数并列出 js 文件</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>"}}
+{"type":"round/end","time":1789051569879,"data":{"round":2,"durMs":1,"calls":0,"callShapedUnparsed":false}}
+{"type":"meta-end","time":1789051569879,"data":{"rounds":2,"calls":{"shell":2,"read":1},"callTotal":3,"errors":0,"reasoningChars":456,"textChars":631,"callRounds":1,"errThenOk":{"shell":{"err":0,"ok":2},"read":{"err":0,"ok":1}},"lastErrRecovered":true,"callShapedUnparsed":false,"pass":false,"errRate":"0.0","durationMs":9636}}

@@ -4,6 +4,7 @@
 //   需要已登录的 Edge profile（默认 .edge-real-profile，可用 REAL_PROFILE 覆盖）
 import { createBrowserDriver } from '../lib/browser-driver.js';
 import { serializeFirstTurn, parseAgentReply } from '../lib/agent-preset.js';
+import { expectedModelType, expectedRequestMetadata } from '../lib/metrics.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,7 +17,6 @@ const PROFILE = process.env.REAL_PROFILE || 'd:\\9_Code_Workspace\\dsh-webcode-b
 const PKG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const IMG = path.join(PKG, 'test-mock', 'vision-test-hello.jpg');
 
-const EXPECTED_MODEL_TYPE = { flash: 'default', deepseek: 'expert', vision: 'vision' };
 const results = []; // {name, ok, detail}
 const assert = (name, ok, detail) => { results.push({ name, ok: !!ok, detail }); console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`); };
 
@@ -52,14 +52,23 @@ try {
   if (!conn.loggedIn) { console.log('FAIL  NEED_LOGIN: profile 未登录'); process.exit(3); }
   assert('driver.登录连通', true, PROFILE);
 
-  // ---- 1) 文本两模式 model_type ----
+  // ---- 1) 文本两模式：真实请求元数据必须与所选模式一致 ----
+  // classic UI：差异在 model_type（default/expert）；unified UI（2026-09-10 新版）：
+  // model_type 恒为 default，差异在 thinking_enabled。期望值来自 lib/metrics.js，
+  // 与驱动的发送后严格核验同源——探针只负责把真实观测值摆出来。
   for (const model of ['flash', 'deepseek']) {
     let acc = '';
     const r = await driver.sendTurn('verify-' + model, serializeFirstTurn({ messages: [{ role: 'user', content: '请回一行确认接收。' }], tools: [], model: { id: model } }), { fresh: true, model, onDelta: d => { acc += d; } });
     const diag = await driver.diagnostics();
-    const mt = diag?.requestMetadata?.model_type;
-    const ok = mt === EXPECTED_MODEL_TYPE[model] && !!((acc || r.text).trim());
-    assert(`model.${model}.实际model_type=${EXPECTED_MODEL_TYPE[model]}`, ok, `kgot=${mt}; hasReply=${!!(acc || r.text).trim()}`);
+    const ui = diag?.ui ?? 'classic';
+    const meta = diag?.requestMetadata ?? {};
+    const expect = expectedRequestMetadata(model, { ui, wantThink: model === 'deepseek' });
+    // 新会话首条本应带 model_type；续聊消息网页发 null（沿用会话模型）——都算通过。
+    const mtOk = meta.model_type == null ? ui === 'unified' : meta.model_type === expect.model_type;
+    const thinkOk = expect.thinking_enabled == null ? true : meta.thinking_enabled === expect.thinking_enabled;
+    const hasReply = !!((acc || r.text).trim());
+    assert(`model.${model}.请求元数据符合所选模式（${ui}）`, mtOk && thinkOk && hasReply,
+      `model_type=${JSON.stringify(meta.model_type)} thinking_enabled=${JSON.stringify(meta.thinking_enabled)} 期望=${JSON.stringify(expect)} hasReply=${hasReply}`);
     await driver.resetConversation('verify-' + model);
   }
 
@@ -67,6 +76,9 @@ try {
   if (!skipVision) {
     if (!fs.existsSync(IMG)) { assert('model.vision.上传识别', false, '缺测试图 ' + IMG); }
     else {
+      // unified UI 没有独立识图入口：带图发送 = model_type default + ref_file_ids，
+      // 功能判据改为「回复确实读到了图里的文字（测试图内容 HELLO）」。
+      const unified = (await driver.diagnostics().catch(() => null))?.ui === 'unified';
       // vision 上传受服务端限速，偶发超时。整体独立 try/catch：任何情况都执行断言并如实暴露，
       // 绝不中断其余断言（不吞异常、不误报、不未定义）。
       let ok = false; let last = ''; let gotMt = null;
@@ -79,7 +91,8 @@ try {
               try {
                 const r = await driver.sendTurn('verify-vision', serializeFirstTurn({ messages: [{ role: 'user', content: '请一句话说出图片文字。' }], tools: [], model: { id: 'vision' } }), { fresh: true, model: 'vision', images, onDelta: d => { acc += d; } });
                 mt = (await driver.diagnostics())?.requestMetadata?.model_type;
-                ok = mt === 'vision' && !!((acc || r.text).trim());
+                const text = (acc || r.text || '').trim();
+                ok = (unified ? /hello/i.test(text) : (mt === 'vision' && !!text));
                 gotMt = mt;
               } catch (e) { last = e?.message; gotMt = mt; }
             })().then(() => 'ok'),
@@ -88,7 +101,7 @@ try {
           if (settled === 'timeout') last = `attempt${attempt} 超时`;
         }
       } catch (e) { last = e?.message; }
-      assert('model.vision.上传识别', ok, ok ? `model_type=${gotMt} 识别到内容` : `未完成（${last}）。注：真实服务端对短时多次图片上传存在限速，功能本身 real-probe-08/10 已验证可用`);
+      assert('model.vision.上传识别', ok, ok ? `${unified ? 'unified 带图路由' : 'vision model_type'} model_type=${gotMt} 识别到内容` : `未完成（${last}）。注：真实服务端对短时多次图片上传存在限速，功能本身 real-probe-08/10 已验证可用`);
       await driver.resetConversation('verify-vision').catch(() => {});
     }
   } else assert('model.vision.上传识别', true, '已跳过');
