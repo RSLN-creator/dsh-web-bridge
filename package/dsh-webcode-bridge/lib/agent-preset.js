@@ -18,6 +18,20 @@ const MAX_OUTPUT_CHARS = 16_000;
 /** Every Nth tool result re-teaches the call format (webcode's train note). */
 const TRAIN_EVERY = 5;
 const TRAIN_NOTE = '[系统提示] 请保持工具调用格式：以 <tool_call> 开始、</tool_call> 结束，其内为单个 JSON 对象 {"mcp_action":"call","name":"工具名","purpose":"原因","arguments":{…}}。';
+/** 单个工具描述的保留上限。DSH 的工具描述本身就是提示词主体（最长实测约
+ *  400 字符，含「路径必须绝对」「不要产出超大输出」这类硬约束），旧实现的
+ *  300 字符截断会把这些约束截掉一半。 */
+const MAX_TOOL_DESC_CHARS = 1_200;
+/** 单个工具参数 schema 的保留上限（防止极端 schema 撑爆网页输入框）。 */
+const MAX_TOOL_SCHEMA_CHARS = 4_000;
+
+/** 本机平台一句话。DSH 的 persona 不保证带平台信息（极简模式只有一句
+ *  「You are a helpful software engineer assistant.」），而真机轨迹里约
+ *  一半的工具错误来自模型用 Unix 习惯命令打 Windows（`ls -la`、`&&` 链）。 */
+function platformNote() {
+  const os = process.platform === 'win32' ? 'Windows' : process.platform === 'darwin' ? 'macOS' : 'Linux';
+  return `运行环境：${os}（Node ${process.version}）。请按该平台的原生命令与路径书写习惯调用工具（如 Windows 用 PowerShell 语法与反斜杠路径），不要照搬其它平台的命令。`;
+}
 
 /** The agent preset: who the model is, which local tools exist, and the exact
  *  call/result protocol. Mirrors webcode's prompt_zh.md structure. */
@@ -32,14 +46,16 @@ export function buildPreset(options = {}) {
     const lines = [];
     for (const t of tools) {
       if (!t || typeof t.name !== 'string') continue;
-      const desc = typeof t.description === 'string' ? t.description.slice(0, 300) : '';
+      const desc = typeof t.description === 'string' ? t.description.slice(0, MAX_TOOL_DESC_CHARS) : '';
       let params = '';
       try { params = JSON.stringify(t.parameters ?? {}); } catch { params = '{}'; }
-      lines.push(`- ${t.name}: ${desc} | 参数schema: ${params}`);
+      if (params.length > MAX_TOOL_SCHEMA_CHARS) params = params.slice(0, MAX_TOOL_SCHEMA_CHARS) + '…(schema 已截断)';
+      lines.push(`- ${t.name}: ${desc}\n  参数 schema: ${params}`);
     }
     parts.push([
       '# 可用本地工具',
       '本次会话已为你接入 DeepSeek Harness (DSH) 本地工具网关。以下工具在你的运行环境之外真实执行：',
+      platformNote(),
       ...lines,
       '',
       '# 工具调用格式',

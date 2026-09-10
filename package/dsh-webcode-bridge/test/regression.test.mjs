@@ -93,6 +93,63 @@ test('设置保存的默认模型在未显式选模型时生效', async () => {
     assert.equal(turns[0].model, 'deepseek:flash');
   } finally { await dispose(); }
 });
+test('网页会话丢失时用整段首轮提示词重放，而不是把增量丢进空会话', async () => {
+  let adapter; const turns = [];
+  const driver = {
+    status: () => ({ running: true }), close: async () => {}, resetConversation: async () => {},
+    sendTurn: async (key, prompt, opts) => {
+      turns.push({ key, prompt, fresh: opts.fresh === true });
+      if (turns.length === 2) { const e = new Error('WEB_SESSION_LOST: gone'); e.code = 'WEB_SESSION_LOST'; throw e; }
+      opts.onDelta?.('答');
+      return { text: '答' };
+    },
+    sendPrompt: async (prompt, opts) => { turns.push({ prompt }); return { text: '答' }; },
+  };
+  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  const user = text => ({ role: 'user', content: [{ type: 'text', text }] });
+  try {
+    const collect = async options => { const out = []; for await (const c of adapter.stream(options)) out.push(c); return out; };
+    const base = { sessionId: 'lost', model: 'flash', tools: [{ name: 'read', description: '读文件', parameters: { type: 'object' } }], messages: [user('第一句')] };
+    await collect(base);
+    assert.equal(turns[0].fresh, true);
+    assert.ok(turns[0].prompt.includes('第一句'));
+    // 第二轮走增量，网页侧会话已死 → 桥必须自己重放首轮整段，而不是把增量发进新会话
+    const chunks = await collect({ ...base, messages: [...base.messages, { role: 'assistant', content: [{ type: 'text', text: '答' }] }, user('第二句')] });
+    assert.equal(chunks.at(-1).type, 'finish');
+    assert.equal(turns.length, 3, '丢失后自动重放一次，共三次网页发送');
+    assert.equal(turns[1].fresh, false);
+    assert.ok(!turns[1].prompt.includes('第一句'), '第二次是增量');
+    assert.equal(turns[2].fresh, true, '重放必须开新会话');
+    assert.ok(turns[2].prompt.includes('第一句') && turns[2].prompt.includes('第二句'), '重放带完整上下文');
+    assert.ok(turns[2].prompt.includes('# 可用本地工具'), '重放带回工具协议');
+  } finally { await dispose(); }
+});
+test('会话标题辅助调用只认 purpose=session-title，不误伤真实轮次', async () => {
+  let adapter; const calls = [];
+  const driver = {
+    status: () => ({ running: true }), close: async () => {}, resetConversation: async () => {},
+    sendTurn: async () => ({ text: '' }),
+    sendPrompt: async (prompt) => { calls.push(prompt); return { text: '真实回答' }; },
+  };
+  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  const user = text => ({ role: 'user', content: [{ type: 'text', text }] });
+  const collect = async options => { const out = []; for await (const c of adapter.stream(options)) out.push(c); return out; };
+  try {
+    // 工作区指令里出现「标题」字样 → 旧实现会把真实轮次本地截成前 16 字
+    const real = await collect({ messages: [user('帮我分析这个仓库的结构')], system: '写文档时要给出标题和命名规范' });
+    assert.equal(real.filter(c => c.type === 'text-delta').map(c => c.text).join(''), '真实回答');
+    assert.equal(calls.length, 1, '真实轮次必须到达网页');
+    // 真正的标题调用仍走本地快路径
+    const title = await collect({ purpose: 'session-title', messages: [user('Generate the session title from this JSON array of human messages:\n[{"text":"帮我分析这个仓库的结构"}]')] });
+    assert.equal(title.filter(c => c.type === 'text-delta').map(c => c.text).join(''), '帮我分析这个仓库的结构');
+    assert.equal(calls.length, 1, '标题调用不落网页');
+  } finally { await dispose(); }
+});
+test('工具描述按 DSH 原始长度进预设，不再截到 300 字符', () => {
+  const long = 'x'.repeat(500);
+  const preset = serializeFirstTurn({ messages: [{ role: 'user', content: '跑一下' }], tools: [{ name: 'pwsh', description: long, parameters: { type: 'object' } }] });
+  assert.ok(preset.includes(long), '完整描述必须进首轮提示词（DSH 把硬约束写在描述里）');
+});
 test('首轮保留全部历史与工具结果', () => {
   const text = serializeFirstTurn({ messages: [{ role: 'user', content: '旧问题' }, { role: 'assistant', content: '旧答案' }, { role: 'user', content: '最新问题' }] });
   assert.ok(text.includes('最新问题')); assert.ok(text.includes('旧答案'));

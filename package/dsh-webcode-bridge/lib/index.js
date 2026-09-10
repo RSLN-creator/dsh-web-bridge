@@ -18,7 +18,7 @@ import { createBrowserDriver } from './browser-driver.js';
 import { createWebControl, buildSessionEvents, mainLineOf } from './web-control.js';
 import { serializeFirstTurn, serializeDelta, parseAgentReply } from './agent-preset.js';
 import { createMirror } from './mirror.js';
-import { flattenGenerateOptions, textOfBlocks } from './flatten.js';
+import { textOfBlocks } from './flatten.js';
 import { estimateTokens } from './metrics.js';
 
 export const name = 'webcode-bridge';
@@ -37,7 +37,10 @@ const DEFAULTS = {
   settingsNs: 'webcode',
   requireConsent: true,
   requestTimeoutMs: 240_000,
-  queueTimeoutMs: 300_000,
+  // 排队上限必须显著大于单轮上限：网页一次只跑一轮，并行子代理会排队；
+  // 旧值 300s 只比单轮 240s 多 60s，排在第二位的请求几乎必然「刚开始跑就超时」，
+  // 长任务里的并行分支会成片失败。900s 足够跨过 2-3 轮排队。
+  queueTimeoutMs: 900_000,
   site: 'https://chat.deepseek.com/',
   profileDir: path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 'webcode-edge-profile'),
   headless: true,
@@ -156,12 +159,14 @@ function logCall(options) {
  * Auxiliary calls that do not need the web page are answered locally so the
  * user does not see duplicate sends on the web side. Currently: title/naming
  * style requests (small, no tools) derived from the first user message.
+ *
+ * 只认 DSH 自己的 `purpose: 'session-title'`。旧实现还拿 system 文本里的
+ * 「title/标题/命名」当判据——工作区指令里只要出现过这些词，一次真实轮次就会
+ * 被本地截成前 16 个字直接返回，模型根本没被调用。
  */
 function localAnswer(options) {
   try {
-    const purpose = String(options.purpose || '');
-    const sys = String(options.system || '');
-    if (!/title|标题|命名|naming/i.test(`${purpose} ${sys}`)) return null;
+    if (String(options.purpose || '') !== 'session-title') return null;
     if (Array.isArray(options.tools) && options.tools.length) return null;
     const firstUser = (options.messages || []).find((m) => m?.role === 'user');
     let t = textOfBlocks(firstUser?.content);
@@ -330,8 +335,10 @@ export function apply(ctx, config = {}) {
             break;
           }
         }
-        if (!acc.trim() && !thinkAcc.trim()) throw new Error('webcode relay: empty response from web AI');
         const endImages = Array.isArray(end?.images) && end.images.length ? end.images : images;
+        // 只出图不出字的回复是合法的（识图模式的常见形态），不能在追加图片
+        // markdown 之前就按「空回复」判死。
+        if (!acc.trim() && !thinkAcc.trim() && endImages.length === 0) throw new Error('webcode relay: empty response from web AI');
         const imageMd = imageMarkdown(endImages);
         if (imageMd) {
           acc += imageMd;
@@ -413,7 +420,7 @@ export function apply(ctx, config = {}) {
       await settled;
       let finalText = (end?.text ?? acc) || '';
       const endImages = Array.isArray(end?.images) && end.images.length ? end.images : genImages;
-      if (!finalText.trim() && !thinkAcc.trim()) throw new Error('webcode relay: empty response from web AI');
+      if (!finalText.trim() && !thinkAcc.trim() && endImages.length === 0) throw new Error('webcode relay: empty response from web AI');
 
       const { calls } = parseAgentReply(finalText);
       const valid = calls.filter((c) => tools.some((t) => t?.name === c.name));
@@ -585,7 +592,8 @@ function imageMarkdown(images) {
       // thinkMode: 'auto' | 'on' | 'off' — 设置页手动覆盖网页「深度思考」开关
       const thinkMode = ['on', 'off', 'auto'].includes(m?.thinkMode) ? m.thinkMode : 'auto';
       if (m?.sessionKey) {
-        return driverFor(m.siteId).sendTurn(m.sessionKey, prompt, {
+        const drive = driverFor(m.siteId);
+        const turnOpts = {
           fresh: m.fresh === true,
           signal: opts.signal,
           onDelta: opts.onDelta,
@@ -594,10 +602,20 @@ function imageMarkdown(images) {
           model: qualified,
           images: m.images,
           thinkMode,
-        }).catch(async (err) => {
+        };
+        return drive.sendTurn(m.sessionKey, prompt, turnOpts).catch(async (err) => {
+          // 网页会话被删/过期：桥这一侧的唯一正确恢复是重放「首轮整段」——
+          // 网页会话里保有的就是首轮全文 + 后续增量，重放首轮即完整上下文
+          // 与工具协议，而不是把一个没有前文的增量丢进新会话（那才是真正的
+          // 「跑着跑着变傻」）。重放失败才把游标作废，交给下一轮。
+          if (err?.code === 'WEB_SESSION_LOST' && typeof m.rebuild === 'function') {
+            log('web session lost — replaying the full first-turn prompt into a fresh web chat');
+            await drive.resetConversation(m.sessionKey).catch(() => {});
+            return drive.sendTurn(m.sessionKey, m.rebuild(), { ...turnOpts, fresh: true });
+          }
           // a vanished/deleted conversation poisons the stored slot — reset
           // it so the NEXT turn reopens a fresh web chat
-          if (err && !err.code) await driverFor(m.siteId).resetConversation(m.sessionKey).catch(() => {});
+          if (err && !err.code) await drive.resetConversation(m.sessionKey).catch(() => {});
           throw err;
         });
       }
@@ -699,11 +717,14 @@ function imageMarkdown(images) {
   // on the web side; parallel agents get their own web conversation via the
   // agent-qualified session key.
   buildTurn = (options = {}) => {
-  const extraPrompt = configManager.get().extraPrompt;
+    // 一次读取设置（宿主 settings 服务或文件），本轮三处消费同一份快照——
+    // 旧实现每轮读三次，且三处可能读到不同版本。
+    const settings = configManager.get();
+    const extraPrompt = settings.extraPrompt;
     // 用户未显式选模型时，设置页保存的「默认模型」生效（此前只有 extraPrompt
     // 被消费，defaultModel 是个只存不用的摆设）。
-    const defaultModel = configManager.get().defaultModel;
-    const thinkMode = ['on', 'off', 'auto'].includes(configManager.get().thinkMode) ? configManager.get().thinkMode : 'auto';
+    const defaultModel = settings.defaultModel;
+    const thinkMode = ['on', 'off', 'auto'].includes(settings.thinkMode) ? settings.thinkMode : 'auto';
     const messages = Array.isArray(options.messages) ? options.messages : [];
     const resolvedModel = resolveWebModel(options.model || defaultModel || cfg.modelId);
     const model = resolvedModel.id;
@@ -748,7 +769,11 @@ function imageMarkdown(images) {
     else prompt = delta.text;
     return {
       prompt,
-      meta: { sessionKey: keyPath, fresh, model: siteId + ':' + model, siteId, thinkMode },
+      meta: {
+        sessionKey: keyPath, fresh, model: siteId + ':' + model, siteId, thinkMode,
+        // 网页会话丢失时的整段重放文本（见 executor 的 WEB_SESSION_LOST 分支）
+        rebuild: () => serializeFirstTurn({ ...options, extraPrompt }),
+      },
       invalidate: () => sessionState.delete(keyPath),
       async attach() {
         // a fresh turn replays the whole transcript → attach every image in it;
@@ -758,6 +783,10 @@ function imageMarkdown(images) {
         return imgs.length ? resolveRemoteImages(imgs) : [];
       },
       commit() {
+        // 先删后插把键移到 Map 尾部；配合尾部淘汰就是「最近最少使用」，
+        // 旧写法对已存在键 set 不改变插入序，淘汰会先丢掉最老的热会话，
+        // 表现为长会话莫名重新整段重发。
+        sessionState.delete(keyPath);
         sessionState.set(keyPath, { sent: messages.length, toolResults: delta.toolResultsSent, fingerprint: fingerprint(messages.length) });
         if (sessionState.size > 512) sessionState.delete(sessionState.keys().next().value);
       },

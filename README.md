@@ -5,7 +5,7 @@
 ## 使用
 
 1. 在 `package/dsh-webcode-bridge` 执行 `pnpm install --frozen-lockfile`、`pnpm pack`。
-2. 执行 `dsh plugin --profile web add ./dsh-webcode-bridge-0.5.0.tgz`，重启 Harness。
+2. 执行 `dsh plugin --profile web add ./dsh-webcode-bridge-<版本>.tgz`，重启 Harness。
 3. 原生「设置 > 网页桥接」管理登录和自动化开关。默认复用 `~/.dsh/webcode-edge-profile`。
 4. 模型选择器的 Harness Web Bridge 分组提供 Flash、Vision、DeepSeek。
 5. 右侧 DeepSeek 入口复用已安装 `dsh-better-sidebar` 的标签页、展开收起与拖动；无该插件时使用右侧抽屉。
@@ -35,5 +35,6 @@
 - Vision 模式切换与 Harness 图片附件上传已接入；网页版本没有独立 Vision 控件时会使用图片附件兼容路径。
 - 设置页新增「网页历史」导入区：读取真实网页会话列表，选择工作区后一键导入为主线 DSH 会话（已真机验证 fetch_page / history_messages 解析）。
 - 不保证模型审查结论正确；网页输出中的工具示例也可能被误识别，必须保留 Harness 的工具权限与审批。
+- 网页会话被删/过期时不再静默降级：桥会用整段首轮提示词重建（见 [长跑审查](doc/deepseek-longrun.md)）；网页输入框截断超长提示词会报 `PROMPT_TRUNCATED` 而不是发出半截。
 
-[路线](PLAN.md)记录多站点适配与 DeepSeek 更新策略；[安全审查](doc/security-review.md)记录实际防护及剩余限制。
+[路线](PLAN.md)记录多站点适配与 DeepSeek 更新策略；[安全审查](doc/security-review.md)记录实际防护及剩余限制；[审查入口](doc/review-guide.md)给出「只看这 15 个文件」的代码地图与探针清单。

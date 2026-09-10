@@ -1,6 +1,13 @@
 # Harness Web Bridge 路线
 
-## 当前版本 0.6.0
+## 当前版本 0.7.2
+
+0.7.2（长跑可靠性）：网页会话丢失改「重放整段首轮」而不是静默发增量；网页输入框
+截断超长提示词改为报错；页面崩溃/浏览器被关立刻失败并自愈重开；中止会等停止
+按钮点完；工具描述不再截到 300 字符（DSH 的硬约束就写在描述里）。详见
+[长跑审查](doc/deepseek-longrun.md)。
+
+## 0.6.0
 
 多站点内容服务打通：模型选择器与 /v1/models 暴露全部 9 个内容服务的模型（'site:model' 限定 id），executor 按站点路由到独立 driver（独立 profile，避免登录态串号），未初始化站点在状态接口给占位、不启动浏览器；思考链（onThink → DSH reasoning 块）与网页图片（onImage → markdown/OpenAI image parts）贯穿 DeepSeek/GLM/ChatGPT/Kimi/Qwen/豆包/Grok/Claude/Gemini。
 

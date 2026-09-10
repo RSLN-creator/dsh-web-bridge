@@ -26,13 +26,6 @@ function loadDecoderRegistry(explicitPath) {
   return globalThis.WebCodeStreamDecoders;
 }
 
-const SEL = {
-  input: DEEPSEEK_INPUT(),
-  sendButton: "div[role='button']:has(path[d^='M8.3125'])",
-  stopButton: "div[role='button']:has(path[d^='M2 4.88'])",
-};
-function DEEPSEEK_INPUT() { return 'textarea.ds-scroll-area'; }
-
 /** 捕获脚本：按站点 completionPaths 拦截 SSE（XHR drain + fetch tee）。 */
 function captureInit(paths) {
   const list = JSON.stringify(paths.length ? paths : ['/api/v0/chat/completion']);
@@ -124,24 +117,6 @@ const DOM_CAPTURE = `
   return prev;
 })()
 `;
-
-const fillAndSend = (prompt) => {
-  const visible = (el) => { if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
-  const el = [...document.querySelectorAll('textarea')].find(visible) || document.querySelector('textarea, [contenteditable="true"]');
-  if (!el) return { ok: false, reason: 'input-not-found' };
-  if (el.isContentEditable) { el.textContent = prompt; el.dispatchEvent(new InputEvent('input', { bubbles: true })); }
-  else {
-    const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-    Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, prompt);
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-  }
-  el.focus();
-  const base = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
-  el.dispatchEvent(new KeyboardEvent('keydown', base));
-  el.dispatchEvent(new KeyboardEvent('keypress', base));
-  el.dispatchEvent(new KeyboardEvent('keyup', base));
-  return { ok: true };
-};
 
 export function createBrowserDriver(options = {}) {
   const siteId = options.siteId ?? 'deepseek';
@@ -292,7 +267,20 @@ export function createBrowserDriver(options = {}) {
     active = null;
     busy = false;
     if (a?.timer) clearTimeout(a.timer);
+    if (a) { try { a.settleResolve?.(); } catch {} }
     return a;
+  }
+
+  /** 当前轮次以「页面已死」这类故障收尾：立刻失败，不要干等到 requestTimeoutMs。
+   *  返回 false 表示当时没有进行中的轮次（例如我们自己有意关掉上下文）。 */
+  function failActive(reason, code) {
+    const a = finishActive();
+    if (!a) return false;
+    const err = new Error(reason);
+    err.code = code;
+    warn(reason);
+    try { a.reject?.(err); } catch {}
+    return true;
   }
 
   async function launch({ headless } = {}) {
@@ -306,10 +294,10 @@ export function createBrowserDriver(options = {}) {
       ...(cfg.storageState ? { storageState: cfg.storageState } : {}),
     });
     page = ctx.pages()[0] || (await ctx.newPage());
-    // 展示窗口被用户点 X 关掉时：上下文仍在（页面关闭≠浏览器退出），
-    // 清掉 page 引用让 ensure() 下次自愈重开新页，而不是拿死句柄操作。
-    const openedPage = page;
-    page.on('close', () => { if (page === openedPage) page = null; });
+    ctx.on('close', () => {
+      ctx = null; page = null;
+      failActive(`WEB_BROWSER_CLOSED: 浏览器已关闭 — 下一轮会自动重启`, 'WEB_BROWSER_CLOSED');
+    });
     await installPage();
     log(`launched (${(headless ?? cfg.headless) ? 'headless' : 'headed'}) profile=${cfg.profileDir}`);
   }
@@ -329,10 +317,19 @@ export function createBrowserDriver(options = {}) {
     try { await launching; } finally { launching = null; }
   }
 
-  /** 在已开的浏览器上下文里装捕获脚本（新页/自愈重开后共用）。 */
+  /** 在已开的浏览器上下文里装捕获脚本（新页/自愈重开后共用），并挂上页面
+   *  生命周期兜底。展示窗口被用户点 X 关掉时上下文仍在（页面关闭≠浏览器
+   *  退出）：清掉 page 引用让 ensure() 下次自愈重开新页，而不是拿死句柄操作。
+   *  页面崩溃 / 浏览器被整个关掉时，立刻让进行中的轮次失败——否则 240s 超时
+   *  会被白白耗在死句柄上，长跑会表现为「卡住不动」。 */
   async function installPage() {
     const p = page;
     const paths = site.completionPaths || [];
+    p.on('close', () => { if (page === p) page = null; });
+    p.on('crash', () => {
+      if (page === p) page = null;
+      failActive(`WEB_PAGE_CRASHED: ${site.name} 页面崩溃 — 下一轮会自动重开`, 'WEB_PAGE_CRASHED');
+    });
     p.on('request', (request) => {
       if (request.method() !== 'POST' || !paths.some((path) => request.url().includes(path))) return;
       try {
@@ -410,14 +407,20 @@ export function createBrowserDriver(options = {}) {
     if (busy || transitioning) throw new Error('driver busy');
     busy = true;
     let timer = null;
-    let rebuilt = false;
+    let stopClick = null;
     if (signal?.aborted) { busy = false; throw abortError(); }
     const throwIfAborted = () => { if (signal?.aborted) throw abortError(); };
     const onAbort = () => {
       const a = finishActive();
-      void (async () => {
+      // 中止必须把网页端仍在生成的这一轮真正停下：只放行 busy 不点停止，
+      // 下一轮会在站点仍处于「生成中」时填框发送（输入被禁用、消息被吞）。
+      stopClick = (async () => {
         try {
-          const stop = page?.locator(SEL.stopButton || "div[role='button']").first();
+          // 没有停止按钮契约的站点就什么都不点：旧写法回落到
+          // "div[role='button']" 会点到页面上第一个按钮（可能是「新会话」
+          // 或发送），中止反而把页面搞乱。
+          if (!SEL.stopButton) return;
+          const stop = page?.locator(SEL.stopButton).first();
           if (stop && await stop.isVisible()) await stop.click({ timeout: 1000 });
         } catch {}
       })();
@@ -425,6 +428,9 @@ export function createBrowserDriver(options = {}) {
     };
     signal?.addEventListener('abort', onAbort, { once: true });
     try {
+      // 每次轮次重置请求元数据：上一轮（尤其被中止的那轮）残留的 model_type
+      // 会让本轮的严格模型校验误判为 MODEL_UI_CHANGED。
+      requestMetadata = null;
       await ensure();
       throwIfAborted();
 
@@ -449,14 +455,20 @@ export function createBrowserDriver(options = {}) {
         } catch { ready = false; }
         throwIfAborted();
         if (!ready) {
-          rebuilt = true;
-          warn('conversation page unreachable, falling back to a fresh chat');
+          // 会话在网页端已被删除或过期。旧实现在这里静默改开新会话、把这轮的
+          // 增量照发——新会话既没有首轮预设也没有任何历史，模型带着半截上下文
+          // 裸奔（长时间运行的会话删/过期后最常见的一类「越跑越傻」）。
+          // 现在抛码给上层：游标作废、下一轮整段重建。
           const inputReady = await gotoFreshChat();
           if (!inputReady) {
+            loggedIn = false;
             const err = new Error(`NEED_LOGIN:${site.name} 会话缺失 — 打开 Web AI 面板登录一次`);
             err.code = 'NEED_LOGIN';
             throw err;
           }
+          const err = new Error('WEB_SESSION_LOST: 网页会话已不可达（已删除或过期） — 需要整段重建');
+          err.code = 'WEB_SESSION_LOST';
+          throw err;
         }
       }
 
@@ -475,10 +487,13 @@ export function createBrowserDriver(options = {}) {
         throwIfAborted();
       }
       const done = new Promise((resolve, reject) => {
+        let settleResolve;
+        const settled = new Promise((r) => { settleResolve = r; });
         active = {
           captureId: null, decoder: null, decoderKind: site.decoder,
           text: '', thinking: '', images: [],
           onDelta, onThink, onImage, resolve, reject,
+          settled, settleResolve,
           timer: null, firstThinkAt: null, firstResponseAt: null, t0: null,
         };
       });
@@ -495,6 +510,15 @@ export function createBrowserDriver(options = {}) {
       }
       const input = page.locator(SEL.input).first();
       await input.fill(message);
+      // 网页输入框有长度上限，超限会被静默截断——模型只看到半截提示词却照常
+      // 作答，长跑里表现为「越到后面越答非所问」。回读一次，长度对不上就拒绝
+      // 发送，让上层压缩后重试（此时还没按 Enter，网页端没有被污染）。
+      const echoed = await input.inputValue().catch(() => null);
+      if (typeof echoed === 'string' && echoed.length < String(message).length - 8) {
+        const err = new Error(`PROMPT_TRUNCATED: 网页输入框只接收了 ${echoed.length}/${String(message).length} 字符（网页端长度上限）— 请缩短上下文或先压缩历史再重试`);
+        err.code = 'PROMPT_TRUNCATED';
+        throw err;
+      }
       throwIfAborted();
       if (active) active.t0 = performance.now();
       await input.press('Enter');
@@ -514,7 +538,7 @@ export function createBrowserDriver(options = {}) {
       }
       if (!result.complete) throw new Error('web capture ended incomplete: ' + (result.reason || 'unknown'));
       if (!result.text?.trim()) throw new Error('empty response from web AI');
-      lastTurn = { sessionId: sessionIdFromUrl(page.url()), url: safeUrl(page.url()), at: Date.now(), rebuilt };
+      lastTurn = { sessionId: sessionIdFromUrl(page.url()), url: safeUrl(page.url()), at: Date.now() };
       const endAt = performance.now();
       const fin = lastFinished;
       const t0 = fin?.t0 ?? endAt;
@@ -535,12 +559,13 @@ export function createBrowserDriver(options = {}) {
         images: Array.isArray(result.images) ? result.images : [],
         sessionId: lastTurn.sessionId,
         metrics,
-        rebuilt,
       };
     } finally {
       signal?.removeEventListener('abort', onAbort);
       if (active) finishActive();
       else busy = false;
+      // 中止路径要把「点停止」等完再放行，否则下一轮与仍在生成的页面打架。
+      if (stopClick) await stopClick.catch(() => {});
       void timer;
     }
   }
@@ -551,8 +576,23 @@ export function createBrowserDriver(options = {}) {
     if (!fresh && existing?.webSessionId) {
       const root = new URL(cfg.site);
       navigate = root.origin + '/a/chat/s/' + encodeURIComponent(existing.webSessionId);
+    } else if (!fresh) {
+      // 上层要续聊、本地却没有对应的网页会话（store 丢了/被清过）。此时若默默
+      // 开新会话并只发增量，网页模型会在毫无前文的情况下接着答——同样是静默
+      // 丢上下文。抛码让上层重放首轮整段。
+      const err = new Error('WEB_SESSION_LOST: 本地会话槽为空 — 需要整段重建');
+      err.code = 'WEB_SESSION_LOST';
+      throw err;
     }
-    const result = await runTurn(message, { navigate, signal, onDelta, onThink, onImage, model, images, thinkMode });
+    let result;
+    try {
+      result = await runTurn(message, { navigate, signal, onDelta, onThink, onImage, model, images, thinkMode });
+    } catch (err) {
+      // 会话槽里存的是一个已经死掉的网页会话：立刻丢掉，别让下一轮再撞一次。
+      // 上层收到 WEB_SESSION_LOST 后作废游标并以整段首轮提示词重开。
+      if (err?.code === 'WEB_SESSION_LOST') forgetConversation(key);
+      throw err;
+    }
     if (result.sessionId) rememberConversation(key, result.sessionId);
     else if (navigate !== 'fresh') forgetConversation(key);
     return result;
@@ -833,7 +873,7 @@ export function createBrowserDriver(options = {}) {
       if (bcdp) {
         const screens = (await bcdp.send('SystemInfo.getInfo'))?.displayInfo || [];
         await bcdp.detach().catch(() => {});
-        const screen = screens.find((d) => !d.isPrimary === false) || screens[0];
+        const screen = screens.find((d) => d.isPrimary) || screens[0];
         const bounds = screen?.bounds ? {
           left: Math.round(screen.bounds.left + (screen.bounds.width - w) / 2 + screen.bounds.width / 4),
           top: screen.bounds.top || 0,
@@ -874,7 +914,13 @@ export function createBrowserDriver(options = {}) {
   async function activeSettled() {
     const a = active;
     if (!a) return;
-    await new Promise((resolve) => { const t = setTimeout(resolve, 120_000); a.resolve && (a.settleHook = t); });
+    // 轮次一结束（成功/失败/中止/超时）就返回；120s 只是极端情况下的兜底。
+    // 旧写法把定时器挂在 a.settleHook 上，但没有任何地方会在轮次结束时
+    // 清除它——于是「生成期间关窗口」每次都白等满 120 秒。
+    let t = null;
+    try {
+      await Promise.race([a.settled, new Promise((resolve) => { t = setTimeout(resolve, 120_000); })]);
+    } finally { if (t) clearTimeout(t); }
   }
 
   function throwIfTransitioning() {

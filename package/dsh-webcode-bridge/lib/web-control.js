@@ -151,7 +151,7 @@ export function createWebControl(deps = {}) {
       driver: relay?.config?.driverStatus?.() ?? (driver ? (({ running, busy, loggedIn, needLogin, selectedModel, lastTurn, profileDir, conversations }) => ({
         running, busy, loggedIn, needLogin, selectedModel, profileDir,
         conversationCount: conversations ? Object.keys(conversations).length : 0,
-        lastTurn: lastTurn ? { sessionId: lastTurn.sessionId, at: lastTurn.at, rebuilt: Boolean(lastTurn.rebuilt) } : null,
+        lastTurn: lastTurn ? { sessionId: lastTurn.sessionId, at: lastTurn.at } : null,
       }))(driver.status()) : null),
     }),
     'POST consent': async (body) => {
