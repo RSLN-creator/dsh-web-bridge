@@ -11,3 +11,8 @@ reference/*/
 # reference 根下散放的 PDF 蓝图等资料同样不入库（gitignore 对已被目录规则排除的路径，否定规则需逐层重开）
 !reference/
 reference/*.pdf
+
+# 测试用浏览器 profile（Edge/Chromium 缓存与登录态，可再生，且会把仓库撑到 GB 级）。
+# 覆盖 .driver-profile* / .edge-profile* / .mirror-profile-* / .harness-ui-profile 与 .test-build。
+package/dsh-webcode-bridge/test-mock/.*-profile*/
+package/dsh-webcode-bridge/test-mock/.test-build/
