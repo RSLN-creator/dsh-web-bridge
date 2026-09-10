@@ -22,14 +22,13 @@ export function deriveLastRate(lastFinished, mode = null) {
 
 /** 网页模型 id → 其请求上报的 model_type 期望值（真机核验契约）。
  *
- *  classic = 旧三 pill UI（快速模式/专家模式/识图模式，≤0.7.2）：
- *    flash→default、deepseek→expert、vision→vision（real-verify 0.6.x 实测）。
- *  unified = 2026-09-10 新版统一 UI（没有模型 pill，模式差异只剩「深度思考」开关）：
- *    真机 probe-19/20 实测纯文本与带图发送的 model_type 都是 default，
- *    识图不再单独占一个 model_type（带图 = default + ref_file_ids）。 */
+ *  桥只暴露一个 DeepSeek 模型（2026-09-11 三合一），差异全在「深度思考」：
+ *  classic = 旧三 pill UI（≤0.7.2）：deepseek 走专家模式 → model_type=expert；
+ *  unified = 2026-09-10 新版 UI：model_type 恒为 default，差异只剩 thinking_enabled
+ *  （带图发送同样是 default + ref_file_ids，由网页自行路由）。 */
 export const MODEL_TYPES_BY_UI = Object.freeze({
-  classic: Object.freeze({ flash: 'default', deepseek: 'expert', vision: 'vision' }),
-  unified: Object.freeze({ flash: 'default', deepseek: 'default', vision: 'default' }),
+  classic: Object.freeze({ deepseek: 'expert' }),
+  unified: Object.freeze({ deepseek: 'default' }),
 });
 export function expectedModelType(modelId, ui = 'classic') {
   return (MODEL_TYPES_BY_UI[ui] ?? MODEL_TYPES_BY_UI.classic)[modelId] ?? null;
@@ -40,7 +39,8 @@ export function expectedModelType(modelId, ui = 'classic') {
  *  全在 thinking_enabled，model_type 恒为 default。 */
 export function expectedRequestMetadata(modelId, { ui = 'classic', wantThink = null } = {}) {
   const model_type = expectedModelType(modelId, ui);
-  if (ui === 'unified' && modelId !== 'vision') return { model_type, thinking_enabled: wantThink === true };
+  // 新版统一 UI 下 model_type 恒为 default，模式差异只剩 thinking_enabled。
+  if (ui === 'unified') return { model_type, thinking_enabled: wantThink === true };
   return { model_type };
 }
 

@@ -1,6 +1,28 @@
 # Harness Web Bridge 路线
 
-## 当前版本 0.7.3
+## 当前版本 0.9.0
+
+0.9.0（官方右侧栏 + 多站点真实可开）：三处收敛。
+
+1. **右侧栏改用 DSH 官方实现**：`@deepseek-ai/dsh-client-ui-sidebar-right` 的
+   `sidebarRightTabs.register()` + `sidebar.right.pane.tab` seat，与会话头角落按钮配对。
+   此前依赖第三方 `dsh-better-sidebar`，且降级分支是 `position:fixed` 浮层——
+   浮层会盖住右侧内容，正是「点击展开就遮挡」的来源。迁移后侧栏是布局内的一格，
+   **结构上不可能遮挡**，并彻底删除 `dsh-better-sidebar` 依赖与浮层代码。
+2. **模型三合一**：网页版早已没有「快速/专家/识图」三 pill，模式差异只剩「深度思考」。
+   模型目录收敛为一个 `DeepSeek`；`flash`/`vision`/`deepseek-web`/`deepseek-reasoner`
+   保留为别名，旧设置值不炸。带图能力对该模型自动生效。
+3. **跨域静态资源同源化**：修复「打开异常」的真因——站点脚本跨域 + 非法 ACAO 被浏览器拒绝。
+   站点声明 `staticOrigins`，镜像改写 HTML/CSS 绝对 URL、剥离 integrity/crossorigin，
+   并把运行时 fetch/XHR 一并改写。GLM 埋点 CORS 52→0。
+
+附带修复：Kimi 域名迁移（`kimi.moonshot.cn` → `www.kimi.com`，旧域名只剩 302）；
+面板顶栏加 **刷新** 按钮（官方右侧栏无此入口）；不可达站点给出带站点名的说明页而非裸 JSON；
+`test/mirror.test.mjs` 新增护栏锁住「先改写再注入」的顺序契约。
+
+## 0.7.3
+
+0.7.3（新 UI 适配）：2026-09-10 chat.deepseek.com 改版——模型三 pill 消失，
 
 0.7.3（新版 UI 适配）：2026-09-10 chat.deepseek.com 改版——模型三 pill 消失，
 输入框只剩「深度思考 / 智能搜索」开关，首条与续聊消息的 model_type 恒为 default，

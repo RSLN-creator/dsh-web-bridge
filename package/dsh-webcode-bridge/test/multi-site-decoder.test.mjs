@@ -7,7 +7,7 @@ const D = globalThis.WebCodeStreamDecoders;
 
 test('qualifyModelId：裸 id 补站点前缀、限定 id 原样、空值透传', () => {
   assert.equal(qualifyModelId('auto', 'glm'), 'glm:auto');
-  assert.equal(qualifyModelId('deepseek:flash', 'deepseek'), 'deepseek:flash');
+  assert.equal(qualifyModelId('deepseek:deepseek', 'deepseek'), 'deepseek:deepseek');
   assert.equal(qualifyModelId('flash', undefined), 'flash');
   assert.equal(qualifyModelId(null, 'glm'), null);
 });
@@ -15,7 +15,8 @@ test('qualifyModelId：裸 id 补站点前缀、限定 id 原样、空值透传'
 test('listAllModels：全站点目录含 DeepSeek/GLM/ChatGPT/Kimi/Qwen 与兼容别名', () => {
   const all = listAllModels();
   const ids = new Set(all.map((m) => m.id));
-  assert.ok(ids.has('deepseek:flash') && ids.has('deepseek:deepseek'));
+  // 三合一后 DeepSeek 只有唯一模型（旧 id 仍可解析为别名，但不再出现在目录里）
+  assert.ok(ids.has('deepseek:deepseek') && !ids.has('deepseek:flash') && !ids.has('deepseek:vision'));
   assert.ok(ids.has('glm:auto') && ids.has('chatgpt:auto') && ids.has('kimi:auto'));
   assert.ok(ids.has('qwen:auto') && ids.has('deepseek-web'));
   const m = resolveWebModel('glm:auto');

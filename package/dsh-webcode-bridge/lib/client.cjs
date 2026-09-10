@@ -6,7 +6,7 @@ window.__ModuleLoader__.load({
     const { createRoot } = require('react-dom/client');
     const { IconCodeOutline16 } = require('@deepseek-ai/dsh-client-ui-primitives');
     const h = React.createElement;
-    const inject = ['slots', 'settingsScope'];
+    const inject = ['slots', 'settingsScope', 'sidebarRightTabs', 'sidebarRight'];
     const RELAY_PORT = 8931;
     const relayBase = 'http://127.0.0.1:' + RELAY_PORT;
     const icon = size => h(IconCodeOutline16, { size });
@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
       return data;
     }
 
-    const MODEL_NAMES = { flash: '快速模式', vision: '识图模式', deepseek: '深度思考（专家）' };
+    const MODEL_NAMES = { deepseek: 'DeepSeek' };
     // 站点显示名 + 多站点模型目录（打开时从 /__webcode/models 拉取）
     const SITE_NAMES = { deepseek: 'DeepSeek', glm: '智谱清言', chatgpt: 'ChatGPT', kimi: 'Kimi', qwen: '通义千问', doubao: '豆包', grok: 'Grok', claude: 'Claude', gemini: 'Gemini' };
 
@@ -228,7 +228,7 @@ window.__ModuleLoader__.load({
       // 「深度思考」三态开关仅对 DeepSeek 站点有意义——只有默认模型落在
       // deepseek 站点时才展示（其余站点 pill 契约未真机校准，不硬造开关）
       const defaultSiteId = (defaultModel || '').split(':')[0];
-      const showThink = defaultSiteId === 'deepseek' || defaultModel === 'flash' || defaultModel === 'deepseek' || defaultModel === 'vision';
+      const showThink = defaultSiteId === 'deepseek';
       return h('section', { className: 'hwb-settings' },
         h('h2', null, 'Harness Web Bridge'),
         h('p', { className: 'hwb-lead' }, '用已登录的 Edge 网页驱动内容服务：右侧直接显示可操作的真实网页，模型生成与工具调用均以网页原生流程执行，与 API 调用同源。'),
@@ -322,6 +322,12 @@ window.__ModuleLoader__.load({
           } catch (e) { setConnectError(e.message); }
           finally { setWinBusy(false); }
         }
+
+        // 官方右侧栏没有刷新入口；镜像页面用带时间戳的 URL 重挂 iframe 即可重载。
+        function reloadFrame() {
+          setConnectError(''); setFrameReady(false);
+          setFrameSrc(browserSrc + '__webcode/site/' + siteId + '/?ts=' + Date.now());
+        }
         return h('div', { className: 'hwb-conversation' },
           h('div', { className: 'hwb-sitebar', role: 'tablist', 'aria-label': '内容服务站点' },
             h('div', { className: 'hwb-sitebar-tabs' },
@@ -330,13 +336,17 @@ window.__ModuleLoader__.load({
                 onClick: () => setSiteId(sid),
               }, name))),
             h('button', {
+              className: 'hwb-icon-btn', title: '刷新右侧网页（重新加载镜像页面）',
+              'aria-label': '刷新右侧网页', onClick: reloadFrame,
+            }, '\u21bb'),
+            h('button', {
               className: 'hwb-win-btn' + (winOpen === siteId ? ' open' : ''), disabled: winBusy,
               title: winOpen === siteId ? '收起独立窗口（回到无头运行）' : '在独立窗口中打开真实网页（可登录、可聊天、与桥共用会话）',
               'aria-pressed': winOpen === siteId, onClick: toggleWindow,
             }, winBusy ? '窗口切换中…' : winOpen === siteId ? '✓ 已开独立窗口 · 点击收回' : '⧉ 独立窗口打开')),
           connectError && h('div', { className: 'hwb-error', role: 'status' },
             '浏览器视图未能连接：' + connectError + ' ',
-            h('button', { className: 'hwb-retry', onClick: () => { setConnectError(''); setFrameReady(false); setFrameSrc(browserSrc + '__webcode/site/' + siteId + '/?ts=' + Date.now()); } }, '重试')),
+            h('button', { className: 'hwb-retry', onClick: reloadFrame }, '重试')),
           frameSrc && h('iframe', {
             className: 'hwb-browser-frame',
             src: frameSrc,
@@ -351,51 +361,70 @@ window.__ModuleLoader__.load({
 
     function apply(ctx) {
       const style = document.createElement('style');
-      style.textContent = '.hwb-settings{max-width:760px;padding:20px;color:inherit;display:flex;flex-direction:column;gap:14px}.hwb-settings h2{font-size:20px;letter-spacing:0;margin:0 0 2px}.hwb-lead{font-size:12px;opacity:.72;margin:0;line-height:1.6}.hwb-card{border:1px solid #8884;border-radius:10px;padding:2px 16px 8px;background:transparent}.hwb-group{font-size:12px;font-weight:600;opacity:.72;margin:12px 0 0}.hwb-group.first{margin-top:12px}.hwb-row{display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap;padding:11px 0;border-bottom:1px solid #8883}.hwb-row:last-child{border-bottom:0}.hwb-row-label{flex:0 0 128px;min-width:96px;font-size:13px;padding-top:2px}.hwb-row-main{flex:1;min-width:240px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}.hwb-row button{padding:5px 12px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;cursor:pointer}.hwb-consent{display:flex;align-items:center;gap:8px}.hwb-hint{font-size:12px;opacity:.72;margin:4px 0 0;line-height:1.5}.hwb-hint.indent{margin:6px 0 8px 128px}.hwb-model-select{min-width:220px;max-width:340px;padding:6px 8px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit}.hwb-sites{display:flex;flex-direction:column}.hwb-site-row{display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid #8883}.hwb-site-row:last-child{border-bottom:0}.hwb-site-row.busy{opacity:.55}.hwb-site-name{flex:1;font-size:13px}.hwb-site-state{font-size:12px;padding:1px 8px;border-radius:10px;border:1px solid #8885}.hwb-site-state.ok{color:#2e7d32;border-color:#2e7d3280}.hwb-site-state.bad{color:#93443e;border-color:#93443e80}.hwb-site-row button{padding:4px 12px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;cursor:pointer}.hwb-metrics{display:flex;flex-direction:column;gap:2px;min-width:220px}.hwb-metrics-head{font-size:12px;margin-bottom:4px}.hwb-metrics-row{display:flex;justify-content:space-between;gap:16px;font-variant-numeric:tabular-nums}.hwb-badge{display:inline-block;padding:0 6px;border-radius:4px;font-size:11px;border:1px solid #8885;margin-right:8px}.hwb-badge.measured{color:#2e7d32;border-color:#2e7d3280}.hwb-preset{padding:12px 0;border-bottom:1px solid #8883}.hwb-preset:last-child{border-bottom:0}.hwb-preset summary{cursor:pointer;font-size:13px}.hwb-import{display:flex;flex-direction:column;gap:8px}.hwb-import select{padding:6px 8px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit}.hwb-import-row{display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid #8883}.hwb-import-title{flex:1;font-size:13px}.hwb-prompt-input{width:100%;min-height:80px;padding:8px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;font:inherit;line-height:1.5;resize:vertical}.hwb-preset pre{max-height:280px;overflow:auto;font-size:12px;line-height:1.5;padding:10px;border:1px solid #8883;border-radius:6px;white-space:pre-wrap;word-break:break-word}.hwb-conversation{height:100%;width:100%;min-height:0;overflow:hidden;background:#fff;position:relative;display:flex;flex-direction:column}.hwb-retry{padding:4px 10px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;cursor:pointer}.hwb-error{padding:8px;font-size:12px;color:#93443e;background:#fff}.hwb-launch{position:fixed;right:14px;top:76px;width:40px;height:40px;z-index:99996;border:1px solid #8884;border-radius:10px;background:linear-gradient(145deg,var(--ds-bg,#fff),var(--ds-bg-alt,#f2f4f7));color:var(--ds-text,#555);display:grid;place-items:center;cursor:pointer;box-shadow:0 2px 8px #0002;transition:transform .15s,box-shadow .15s}.hwb-launch:hover{transform:translateY(-2px);box-shadow:0 6px 16px #0003}.hwb-launch:active{transform:translateY(0)}.hwb-fallback{position:fixed;right:0;top:0;bottom:0;width:min(760px,96vw);z-index:99995;border-left:1px solid #8885;display:flex;flex-direction:column;background:var(--ds-bg,#fff);box-shadow:-12px 0 40px #0004;animation:hwb-slide-in .22s ease}.hwb-fallback.closing{animation:hwb-slide-out .18s ease forwards}.hwb-fallback header{padding:10px 14px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #8883;font-size:13px;font-weight:600}.hwb-fallback header button{width:26px;height:26px;border:0;border-radius:6px;background:transparent;color:inherit;font-size:15px;line-height:1;cursor:pointer;display:grid;place-items:center}.hwb-fallback header button:hover{background:#8882}.hwb-fallback>div{flex:1;min-height:0}.hwb-sitebar{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid #8883;background:var(--ds-bg,#fff)}.hwb-sitebar-tabs{display:flex;gap:6px;flex:1;min-width:0;overflow-x:auto;scrollbar-width:thin;padding-bottom:1px}.hwb-sitebar button{padding:3px 10px;border:1px solid #8885;border-radius:999px;background:transparent;color:inherit;cursor:pointer;font-size:12px;white-space:nowrap;transition:background .15s,color .15s,border-color .15s}.hwb-sitebar button:hover{border-color:#8888;background:#8881}.hwb-sitebar button.active{background:#2563eb;color:#fff;border-color:#2563eb}.hwb-win-btn{flex:0 0 auto;align-self:center;padding:4px 10px;border:1px solid #2563eb80;border-radius:8px;background:#2563eb0d;color:#2563eb;cursor:pointer;font-size:12px;white-space:nowrap;transition:background .15s}.hwb-win-btn:hover{background:#2563eb1a}.hwb-win-btn.open{background:#2563eb;color:#fff}.hwb-win-btn:disabled{opacity:.5;cursor:default}.hwb-sitebar-tabs::-webkit-scrollbar{height:4px}.hwb-sitebar-tabs::-webkit-scrollbar-thumb{background:#8884;border-radius:2px}@keyframes hwb-slide-in{from{transform:translateX(24px);opacity:.4}to{transform:translateX(0);opacity:1}}@keyframes hwb-slide-out{from{transform:translateX(0);opacity:1}to{transform:translateX(24px);opacity:0}}';
+      style.textContent = '.hwb-settings{max-width:760px;padding:20px;color:inherit;display:flex;flex-direction:column;gap:14px}.hwb-settings h2{font-size:20px;letter-spacing:0;margin:0 0 2px}.hwb-lead{font-size:12px;opacity:.72;margin:0;line-height:1.6}.hwb-card{border:1px solid #8884;border-radius:10px;padding:2px 16px 8px;background:transparent}.hwb-group{font-size:12px;font-weight:600;opacity:.72;margin:12px 0 0}.hwb-group.first{margin-top:12px}.hwb-row{display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap;padding:11px 0;border-bottom:1px solid #8883}.hwb-row:last-child{border-bottom:0}.hwb-row-label{flex:0 0 128px;min-width:96px;font-size:13px;padding-top:2px}.hwb-row-main{flex:1;min-width:240px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}.hwb-row button{padding:5px 12px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;cursor:pointer}.hwb-consent{display:flex;align-items:center;gap:8px}.hwb-hint{font-size:12px;opacity:.72;margin:4px 0 0;line-height:1.5}.hwb-hint.indent{margin:6px 0 8px 128px}.hwb-model-select{min-width:220px;max-width:340px;padding:6px 8px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit}.hwb-sites{display:flex;flex-direction:column}.hwb-site-row{display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid #8883}.hwb-site-row:last-child{border-bottom:0}.hwb-site-row.busy{opacity:.55}.hwb-site-name{flex:1;font-size:13px}.hwb-site-state{font-size:12px;padding:1px 8px;border-radius:10px;border:1px solid #8885}.hwb-site-state.ok{color:#2e7d32;border-color:#2e7d3280}.hwb-site-state.bad{color:#93443e;border-color:#93443e80}.hwb-site-row button{padding:4px 12px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;cursor:pointer}.hwb-metrics{display:flex;flex-direction:column;gap:2px;min-width:220px}.hwb-metrics-head{font-size:12px;margin-bottom:4px}.hwb-metrics-row{display:flex;justify-content:space-between;gap:16px;font-variant-numeric:tabular-nums}.hwb-badge{display:inline-block;padding:0 6px;border-radius:4px;font-size:11px;border:1px solid #8885;margin-right:8px}.hwb-badge.measured{color:#2e7d32;border-color:#2e7d3280}.hwb-preset{padding:12px 0;border-bottom:1px solid #8883}.hwb-preset:last-child{border-bottom:0}.hwb-preset summary{cursor:pointer;font-size:13px}.hwb-import{display:flex;flex-direction:column;gap:8px}.hwb-import select{padding:6px 8px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit}.hwb-import-row{display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid #8883}.hwb-import-title{flex:1;font-size:13px}.hwb-prompt-input{width:100%;min-height:80px;padding:8px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;font:inherit;line-height:1.5;resize:vertical}.hwb-preset pre{max-height:280px;overflow:auto;font-size:12px;line-height:1.5;padding:10px;border:1px solid #8883;border-radius:6px;white-space:pre-wrap;word-break:break-word}.hwb-conversation{height:100%;width:100%;min-height:0;overflow:hidden;background:#fff;position:relative;display:flex;flex-direction:column}.hwb-retry{padding:4px 10px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;cursor:pointer}.hwb-error{padding:8px;font-size:12px;color:#93443e;background:#fff}.hwb-sitebar{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid #8883;background:var(--ds-bg,#fff)}.hwb-sitebar-tabs{display:flex;gap:6px;flex:1;min-width:0;overflow-x:auto;scrollbar-width:thin;padding-bottom:1px}.hwb-sitebar button{padding:3px 10px;border:1px solid #8885;border-radius:999px;background:transparent;color:inherit;cursor:pointer;font-size:12px;white-space:nowrap;transition:background .15s,color .15s,border-color .15s}.hwb-sitebar button:hover{border-color:#8888;background:#8881}.hwb-sitebar button.active{background:#2563eb;color:#fff;border-color:#2563eb}.hwb-icon-btn{flex:0 0 auto;align-self:center;width:26px;height:26px;display:grid;place-items:center;padding:0;border:1px solid #8885;border-radius:7px;background:transparent;color:inherit;cursor:pointer;font-size:14px;line-height:1}.hwb-icon-btn:hover{background:#8882}.hwb-win-btn{flex:0 0 auto;align-self:center;padding:4px 10px;border:1px solid #2563eb80;border-radius:8px;background:#2563eb0d;color:#2563eb;cursor:pointer;font-size:12px;white-space:nowrap;transition:background .15s}.hwb-win-btn:hover{background:#2563eb1a}.hwb-win-btn.open{background:#2563eb;color:#fff}.hwb-win-btn:disabled{opacity:.5;cursor:default}.hwb-sitebar-tabs::-webkit-scrollbar{height:4px}.hwb-sitebar-tabs::-webkit-scrollbar-thumb{background:#8884;border-radius:2px}to{transform:translateX(0);opacity:1}}to{transform:translateX(24px);opacity:0}}';
       document.head.appendChild(style);
       const browserStyle = document.createElement('style');
       browserStyle.textContent = '.hwb-browser-frame{display:block;width:100%;height:100%;min-height:0;border:0;background:#fff}.hwb-frame-status{position:absolute;inset:0;display:grid;place-items:center;background:#fff;color:#7a8494;font-size:12px;pointer-events:none}';
       document.head.appendChild(browserStyle);
-      const disposers = [() => style.remove(), () => browserStyle.remove()];
-      ctx.slots.inject('settings.section', () => ctx.slots.register({
-        name: 'settings.section', id: 'webcode', order: 110,
-        label: () => '网页桥接', inject: () => ({}),
-      }, Settings));
+      const cornerStyle = document.createElement('style');
+      cornerStyle.textContent = '.hwb-corner-btn{width:28px;height:28px;display:grid;place-items:center;border:1px solid #8884;border-radius:7px;background:transparent;color:inherit;cursor:pointer;padding:0}.hwb-corner-btn:hover{background:#8882}';
+      document.head.appendChild(cornerStyle);
+      const disposers = [() => style.remove(), () => browserStyle.remove(), () => cornerStyle.remove()];
+      const warn = (what, e) => console.warn('[webcode-bridge] ' + what + ' failed:', e && e.message ? e.message : e);
 
-      let sidebar = null, fallbackRoot, fallback;
-      const register = child => {
-        sidebar = child.get('betterSidebar');
-        const off = sidebar.registerTab({ id: 'webcode', title: () => 'Web Bridge', icon, order: 55, single: true, component: () => h(Conversation, { browserSrc: relayBase + '/' }) });
-        return () => { off(); sidebar = null; };
-      };
-      if (typeof ctx.inject === 'function') ctx.inject(['betterSidebar'], register);
-      // 无 better-sidebar 时，使用右侧抽屉 + 浮窗按钮作为降级方案
-      const hasBetterSidebar = !!(typeof ctx.inject === 'function' && ctx.get?.('betterSidebar'));
-      if (!hasBetterSidebar) {
-        const launcher = document.createElement('button');
-        launcher.className = 'hwb-launch'; launcher.title = '打开 Web Bridge 网页会话'; launcher.setAttribute('aria-label', '打开 Web Bridge 网页会话');
-        const launcherRoot = createRoot(launcher); launcherRoot.render(icon(18));
-        let closingTimer = null;
-        const closeFallback = () => {
-          if (!fallback) return;
-          fallback.classList.add('closing');
-          closingTimer = setTimeout(() => { fallbackRoot?.unmount(); fallback?.remove(); fallback = null; }, 180);
-        };
-        launcher.onclick = () => {
-          if (fallback) { clearTimeout(closingTimer); closeFallback(); return; }
-          fallback = document.createElement('aside'); fallback.className = 'hwb-fallback';
-          document.body.appendChild(fallback); fallbackRoot = createRoot(fallback);
-          fallbackRoot.render(h(React.Fragment, null, h('header', null,
-            h('span', null, 'Web Bridge'),
-            h('button', {
-              title: '收起会话', 'aria-label': '收起会话', onClick: closeFallback,
-            }, '\u00d7')),
-            h('div', null, h(Conversation, { browserSrc: relayBase + '/' }))));
-        };
-        document.body.appendChild(launcher);
-        disposers.push(() => { launcherRoot.unmount(); launcher.remove(); clearTimeout(closingTimer); fallbackRoot?.unmount(); fallback?.remove(); });
-      }
-      return () => disposers.reverse().forEach(dispose => dispose());
+      // ---- 设置页（保持原有能力） --------------------------------------
+      try {
+        const off = ctx.slots.inject('settings.section', () => ctx.slots.register({
+          name: 'settings.section', id: 'webcode', order: 110,
+          label: () => '网页桥接', inject: () => ({}),
+        }, Settings));
+        if (typeof off === 'function') disposers.push(off);
+      } catch (e) { warn('settings section', e); }
+
+      // ---- 官方右侧栏（@deepseek-ai/dsh-client-ui-sidebar-right）--------
+      // 页面类型：不声明 patterns，由 kind 寻址；内容体注册在同名 id 的 keyed seat。
+      // 这条路径与 DSH 自带的文件树/文档预览同级——是布局内的一格，不是浮层。
+      const TAB_ID = 'dsh-webcode-bridge';
+      const TAB_KIND = 'webcode-bridge';
+      const WebcodeBody = () => h(Conversation, { browserSrc: relayBase + '/' });
+
+      try {
+        const offType = ctx.sidebarRightTabs.register({
+          id: TAB_ID,
+          kind: TAB_KIND,
+          priority: 'extension',
+          title: () => 'Web Bridge',
+          guide: [{
+            order: 55,
+            title: () => 'Web Bridge',
+            description: () => 'DeepSeek 网页会话（已登录的真实网页，可读可写）',
+          }],
+        });
+        if (typeof offType === 'function') disposers.push(offType);
+      } catch (e) { warn('sidebarRightTabs.register', e); }
+
+      try {
+        const offBody = ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
+          name: 'sidebar.right.pane.tab', key: TAB_ID,
+        }, WebcodeBody));
+        if (typeof offBody === 'function') disposers.push(offBody);
+      } catch (e) { warn('pane.tab body', e); }
+
+      // ---- 会话头角落按钮：展开/收起右侧栏 ------------------------------
+      try {
+        const CornerButton = () => h('button', {
+          className: 'hwb-corner-btn', type: 'button',
+          title: '打开 Web Bridge 网页会话（右侧栏）',
+          'aria-label': '打开 Web Bridge 网页会话',
+          onClick: () => { try { ctx.sidebarRight.toggleExpanded(); } catch (_) {} },
+        }, icon(16));
+        const offCorner = ctx.slots.inject('conversation.session.header.corner', () => ctx.slots.register({
+          name: 'conversation.session.header.corner',
+        }, CornerButton));
+        if (typeof offCorner === 'function') disposers.push(offCorner);
+      } catch (e) { warn('header corner button', e); }
+
+      return () => disposers.reverse().forEach(d => { try { d(); } catch (_) {} });
     }
     const exports = { name: 'webcode-bridge-client', inject, apply };
     if (module) module.exports = exports;

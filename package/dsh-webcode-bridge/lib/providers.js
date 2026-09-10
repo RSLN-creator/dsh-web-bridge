@@ -11,21 +11,32 @@ const site = (s) => Object.freeze(s);
 
 export const DEEPSEEK = site({
   id: 'deepseek', name: 'DeepSeek 网页版', origin: 'https://chat.deepseek.com',
+  // 静态资源域：站点 HTML 用绝对 URL + crossorigin 引用，而该域返回的
+  // Access-Control-Allow-Origin 是字面量通配（https://*.deepseek.com，非法值），
+  // 浏览器据此硬性拒绝执行脚本，整页退化成「页面资源加载异常」。
+  // 这些域改由 lib/mirror.js 同源转发（/__static/<host>/…）。
+  staticOrigins: ['https://fe-static.deepseek.com'],
   completionPaths: ['/api/v0/chat/completion'],
   input: 'textarea.ds-scroll-area',
   sendButton: "div[role='button']:has(path[d^='M8.3125'])",
   stopButton: "div[role='button']:has(path[d^='M2 4.88'])",
   attachSelector: "input[type='file']",
   decoder: 'deepseek', stream: true,
+  // 单一模型入口：桥只暴露一个 DeepSeek（深度思考）。
+  // 旧版三 pill（快速/专家/识图）已随 2026-09-10 新版 UI 取消——真机实测
+  // model_type 恒为 default，模式差异只剩「深度思考」开关；带图发送同样是
+  // default + ref_file_ids，由网页自行路由。因此不再拆成三个模型 id，
+  // 带图能力对本模型自动生效（有图就传，无图不受限）。
   models: [
-    { id: 'flash', name: 'DeepSeek · 快速（关深度思考）', labels: ['快速模式', 'Flash'] },
-    { id: 'vision', name: 'DeepSeek Vision · 识图（带图发送）', labels: ['识图模式', 'Vision'], vision: true },
-    { id: 'deepseek', name: 'DeepSeek · 专家/深度思考', labels: ['专家模式', 'DeepSeek'], thinking: true },
+    { id: 'deepseek', name: 'DeepSeek', labels: ['专家模式', 'DeepSeek'], thinking: true },
   ],
 });
 
 export const GLM = site({
   id: 'glm', name: '智谱清言 (GLM)', origin: 'https://chatglm.cn',
+  // sdata.chatglm.cn 是埋点上报域：跨域被拒不影响功能，但会在控制台刷
+  // 一片 CORS 错误（真机 52 条）。纳入同源转发后干净且仍能上报。
+  staticOrigins: ['https://sdata.chatglm.cn'],
   completionPaths: ['/chatglm/backend-api/assistant/stream'],
   input: 'textarea#chat-input, textarea[placeholder], textarea',
   attachSelector: "input[type='file']",
@@ -50,7 +61,10 @@ export const CHATGPT = site({
 });
 
 export const KIMI = site({
-  id: 'kimi', name: 'Kimi (月之暗面)', origin: 'https://kimi.moonshot.cn',
+  // 2026-09-11 实测：kimi.moonshot.cn 已只剩 302 → https://www.kimi.com/，
+  // 镜像按旧域名取页会拿到空跳转壳，右侧栏打不开。改用真实站点。
+  id: 'kimi', name: 'Kimi (月之暗面)', origin: 'https://www.kimi.com',
+  staticOrigins: ['https://statics.moonshot.cn'],
   // 真实流端点带动态会话 id：/api/chat/{id}/completion/stream（Kimi-Free-API 同构），子串匹配
   completionPaths: ['/api/chat/', '/completion/stream'],
   input: 'textarea.chat-input, textarea[placeholder], textarea',
@@ -63,6 +77,7 @@ export const KIMI = site({
 
 export const QWEN = site({
   id: 'qwen', name: '通义千问 (Qwen)', origin: 'https://chat.qwen.ai',
+  staticOrigins: ['https://g.alicdn.com', 'https://img.alicdn.com'],
   // 浏览器端为 OpenAI 兼容 SSE（LLMs2API 实测拦截 /api/ + chat 的 POST 流）
   completionPaths: ['/api/chat'],
   input: 'textarea#chat-input, textarea[placeholder], textarea',
@@ -140,14 +155,17 @@ export function listAllModels() {
       });
     }
   }
-  out.push({ id: 'deepseek-web', siteId: 'deepseek', siteName: DEEPSEEK.name, name: 'DeepSeek Web (兼容别名)', labels: [], thinking: false, vision: false, imageOut: false, experimental: false });
+  out.push({ id: 'deepseek-web', siteId: 'deepseek', siteName: DEEPSEEK.name, name: 'DeepSeek (兼容别名)', labels: [], thinking: true, vision: false, imageOut: false, experimental: false });
   return out;
 }
 
 /** 兼容别名 → 'site:model' 限定 id。 */
 const ALIASES = Object.freeze({
-  'deepseek-web': 'deepseek:flash',
+  // 历史 id / 兼容别名 → 唯一 DeepSeek 模型（升级后旧设置值仍可用）。
+  'deepseek-web': 'deepseek:deepseek',
   'deepseek-reasoner': 'deepseek:deepseek',
+  flash: 'deepseek:deepseek',
+  vision: 'deepseek:deepseek',
   'gpt-4o': 'chatgpt:auto', chatgpt: 'chatgpt:auto',
   glm: 'glm:auto', 'glm-4.5': 'glm:auto', 'glm-4.6': 'glm:auto',
   kimi: 'kimi:auto', qwen: 'qwen:auto', doubao: 'doubao:auto',

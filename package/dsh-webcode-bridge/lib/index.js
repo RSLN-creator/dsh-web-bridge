@@ -203,7 +203,7 @@ export function apply(ctx, config = {}) {
   if (!(settingsService && typeof settingsService.get === 'function' && typeof settingsService.set === 'function')) {
     settingsService = null;
   }
-  const defaultConfig = { extraPrompt: '', defaultModel: 'flash', previewRefreshRate: 5000, thinkMode: 'auto' };
+  const defaultConfig = { extraPrompt: '', defaultModel: 'deepseek', previewRefreshRate: 5000, thinkMode: 'auto' };
   const configManager = {
     get() {
       // settingsService 已在初始化时校验 get/set 双全；此处仍防御式包裹
@@ -695,6 +695,8 @@ function imageMarkdown(images) {
     siteOrigin: new URL(cfg.site).origin,
     getToken: () => driver.getToken(),
     logger: console,
+    assetOrigins: getSite('deepseek')?.staticOrigins || [],
+    mountPrefix: '',
   });
   // 多站点侧栏视图：每个内容服务一个 mirror 实例（各自 origin + 对应 driver 的
   // 登录态 token），懒创建；路径前缀 /__webcode/site/<siteId>/…。
@@ -707,6 +709,8 @@ function imageMarkdown(images) {
         siteOrigin: st.origin,
         getToken: () => driverFor(sid).getToken(),
         logger: console,
+        assetOrigins: st.staticOrigins || [],
+        mountPrefix: '/__webcode/site/' + sid,
       }));
     }
     return mirrors.get(sid);
@@ -891,7 +895,7 @@ button:hover { background: #1d4ed8; }
       <option value="on">始终开启（强制打开网页「深度思考」开关）</option>
       <option value="off">始终关闭（追求速度）</option>
     </select>
-    <div class="hint">手动覆盖网页端的「深度思考」开关。自动=按模型属性（专家模式自动开、快速模式自动关）；始终开启/关闭则无视模型。</div>
+    <div class="hint">手动覆盖网页端的「深度思考」开关。自动=按模型属性（DeepSeek 默认开启深度思考）；始终开启/关闭则无视模型。</div>
 
     <button type="submit">保存设置</button>
   </form>
@@ -899,7 +903,7 @@ button:hover { background: #1d4ed8; }
 </div>
 <script>
   const API_BASE = '/__webcode';
-  // 裸模型 id（历史设置值，如 'flash'）→ 站点限定 id（'deepseek:flash'）
+  // 裸模型 id（历史设置值，如 'deepseek-web'）→ 站点限定 id（'deepseek:deepseek'）
   const MODEL_IDS = ${JSON.stringify(Object.fromEntries(WEB_MODELS.map((m) => [m.id.split(':').pop(), m.id])))};
   const form = document.getElementById('settingsForm');
   const statusEl = document.getElementById('status');
@@ -910,7 +914,7 @@ button:hover { background: #1d4ed8; }
       if (!res.ok) throw new Error('加载失败');
       const data = await res.json();
       document.getElementById('extraPrompt').value = data.extraPrompt || '';
-      document.getElementById('defaultModel').value = MODEL_IDS[data.defaultModel] || data.defaultModel || 'deepseek:flash';
+      document.getElementById('defaultModel').value = MODEL_IDS[data.defaultModel] || data.defaultModel || 'deepseek:deepseek';
       document.getElementById('previewRefreshRate').value = data.previewRefreshRate || 5000;
       document.getElementById('thinkMode').value = ['on', 'off', 'auto'].includes(data.thinkMode) ? data.thinkMode : 'auto';
     } catch (e) {

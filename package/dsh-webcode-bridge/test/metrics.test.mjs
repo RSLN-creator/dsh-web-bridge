@@ -11,7 +11,7 @@ test('deriveLastRate：空/无 metrics → null', () => {
 });
 
 test('deriveLastRate：正常样本推导 charsPerSec 与各阶段', () => {
-  const out = deriveLastRate({ metrics: { responseMs: 349, firstResponseMs: 528, thinkingMs: null, endToEndMs: 877 }, chars: 12 }, 'flash');
+  const out = deriveLastRate({ metrics: { responseMs: 349, firstResponseMs: 528, thinkingMs: null, endToEndMs: 877 }, chars: 12 }, 'deepseek');
   assert.deepEqual(out, {
     chars: 12,
     responseMs: 349,
@@ -19,7 +19,7 @@ test('deriveLastRate：正常样本推导 charsPerSec 与各阶段', () => {
     thinkingMs: null,
     endToEndMs: 877,
     charsPerSec: 34, // Math.round(12 / (349 / 1000))
-    mode: 'flash',
+    mode: 'deepseek',
   });
 });
 
@@ -34,25 +34,19 @@ test('deriveLastRate：默认 mode null', () => {
   assert.equal(out.mode, null);
 });
 
-test('expectedModelType：classic（旧三 pill）契约 flash=default/deepseek=expert/vision=vision', () => {
-  assert.equal(expectedModelType('flash'), 'default');
+test('expectedModelType：classic（旧三 pill UI）deepseek 走专家模式', () => {
   assert.equal(expectedModelType('deepseek'), 'expert');
-  assert.equal(expectedModelType('vision'), 'vision');
   assert.equal(expectedModelType('unknown'), null);
 });
 
-test('expectedModelType：unified（2026-09-10 新版统一 UI）契约 model_type 恒为 default', () => {
+test('expectedModelType：unified（2026-09-10 新版 UI）model_type 恒为 default', () => {
   // probe-19/20 真机实测：新版没有模型 pill，纯文本与带图发送的 model_type 都是 default
-  assert.equal(expectedModelType('flash', 'unified'), 'default');
   assert.equal(expectedModelType('deepseek', 'unified'), 'default');
-  assert.equal(expectedModelType('vision', 'unified'), 'default');
 });
 
-test('expectedRequestMetadata：unified 下模式差异在 thinking_enabled，classic 下在 model_type', () => {
+test('expectedRequestMetadata：unified 看 thinking_enabled，classic 看 model_type', () => {
   assert.deepEqual(expectedRequestMetadata('deepseek', { ui: 'unified', wantThink: true }), { model_type: 'default', thinking_enabled: true });
-  assert.deepEqual(expectedRequestMetadata('flash', { ui: 'unified', wantThink: false }), { model_type: 'default', thinking_enabled: false });
-  // vision 不校验 thinking（网页带图路由，思考开关由页面自行决定）
-  assert.deepEqual(expectedRequestMetadata('vision', { ui: 'unified', wantThink: true }), { model_type: 'default' });
+  assert.deepEqual(expectedRequestMetadata('deepseek', { ui: 'unified', wantThink: false }), { model_type: 'default', thinking_enabled: false });
   assert.deepEqual(expectedRequestMetadata('deepseek', { ui: 'classic', wantThink: true }), { model_type: 'expert' });
 });
 

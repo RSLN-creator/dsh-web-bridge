@@ -17,12 +17,12 @@ test('普通回复完成、模型传递、游标提交与同长度历史改写',
   try {
     const models = await adapter.listModels('webcode');
     const ids = models.map(m => m.id);
-    assert.ok(ids.includes('deepseek:flash') && ids.includes('deepseek:vision') && ids.includes('deepseek:deepseek'));
+    assert.ok(ids.includes('deepseek:deepseek'));
     assert.ok(ids.includes('glm:auto') && ids.includes('chatgpt:auto') && ids.includes('kimi:auto'));
     const base = { sessionId: 'regression', model: 'flash', messages: [user('第一句')] };
     const chunks = await collect(base);
     assert.equal(chunks.at(-1).type, 'finish');
-    assert.equal(turns[0].model, 'deepseek:flash');
+    assert.equal(turns[0].model, 'deepseek:deepseek');
     await collect({ ...base, messages: [...base.messages, { role: 'assistant', content: [{ type: 'text', text: '回答' }] }, user('第二句')] });
     assert.equal(turns[1].fresh, false);
     assert.ok(!turns[1].prompt.includes('第一句'));
@@ -87,10 +87,10 @@ test('设置保存的默认模型在未显式选模型时生效', async () => {
   try {
     // 直接调用 buildTurn 消费的同一 settings 路径：走 openai.js 风格限定 id
     const collect = async options => { const out = []; for await (const c of adapter.stream(options)) out.push(c); return out; };
-    // 无 model 字段 → buildTurn 用 settings defaultModel；默认配置里 defaultModel='flash'
+    // 无 model 字段 → buildTurn 用 settings defaultModel；默认配置里 defaultModel='deepseek'
     const chunks = await collect({ sessionId: 'dm', messages: [user('问')] });
     assert.equal(chunks.at(-1).type, 'finish');
-    assert.equal(turns[0].model, 'deepseek:flash');
+    assert.equal(turns[0].model, 'deepseek:deepseek');
   } finally { await dispose(); }
 });
 test('网页会话丢失时用整段首轮提示词重放，而不是把增量丢进空会话', async () => {
