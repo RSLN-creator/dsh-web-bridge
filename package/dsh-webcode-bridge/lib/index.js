@@ -48,7 +48,7 @@ const DEFAULTS = {
   // 每个站点向 DSH 声明的上下文窗口。网页 composer 的真实上限未知，声明过大
   // 会让 DSH 的压缩永不触发（transcript 只增不减）；这里给保守值，越界时由
   // PROMPT_TRUNCATED 回读校验报错而不是静默截断。
-  contextWindowBySite: { deepseek: 128_000 },
+  contextWindowBySite: { deepseek: 1_000_000 },
   site: 'https://chat.deepseek.com/',
   profileDir: path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 'webcode-edge-profile'),
   headless: true,
@@ -271,8 +271,9 @@ export function apply(ctx, config = {}) {
       // 部分来源。按站点给一个诚实的保守值：DeepSeek 网页实测能稳定收下十万级
       // 字符，按 CJK≈0.7 token/字符折算留出余量取 128k；其余站点 64k
       // （每个都有 PROMPT_TRUNCATED 回读校验兜底，越界会报错而不是静默截断）。
-      const contextWindow = cfg.contextWindowBySite?.[m.siteId]
-        ?? (m.siteId === 'deepseek' ? 128_000 : 64_000);
+      const contextWindow = m.context
+        ?? cfg.contextWindowBySite?.[m.siteId]
+        ?? (m.siteId === 'deepseek' ? 1_000_000 : 64_000);
       return { provider, id: model || m.id, name: m.name, context: { contextWindow } };
     },
     async prepareCall(provider, model, signal) {

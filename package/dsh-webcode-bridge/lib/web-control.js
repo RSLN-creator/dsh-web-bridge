@@ -277,10 +277,12 @@ export function createWebControl(deps = {}) {
       const result = await actions[key](body);
       sendJson(req, res, result, 200);
     } catch (err) {
-      // Never echo internals — fixed text plus, when the driver attached a
-      // sanitized payload hint, that hint only (already size-capped).
+      // 错误文本透传（截断到 200 字符）：设置面板是本机用户的唯一操作入口，
+      // 把「web request failed」换成真实原因（如 profile 锁被孤儿 Edge 占用）
+      // 才能照着排查。端点本身 loopback-only，暴露面没有变化。
       warn(suffix, 'failed:', err?.message);
-      sendJson(req, res, { ok: false, error: err?.payload ? err.message : 'web request failed' }, 502);
+      const reason = String(err?.message || '').slice(0, 200) || 'web request failed';
+      sendJson(req, res, { ok: false, error: reason }, 502);
     }
     return true;
   }

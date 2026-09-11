@@ -36,7 +36,7 @@ test('z.ai：站点契约（origin / SSE 端点 / 解码器 / 静态域）', () 
   const st = SITES.find(s => s.id === 'zai');
   assert.ok(st, 'SITES 必须包含 zai');
   assert.ok(st.completionPaths.includes('/api/chat/completions'));
-  assert.deepEqual([...st.staticOrigins], ['https://z-cdn.chatglm.cn']);
+  assert.deepEqual([...st.staticOrigins], ['https://z-cdn.chatglm.cn', 'https://api.z.ai']);
   // 解码器注册表里确实有这个 kind（否则驱动会静默拿不到 decoder）
   assert.equal(typeof D['openai-sse'], 'function');
 });

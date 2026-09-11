@@ -1,5 +1,31 @@
 # Harness Web Bridge 路线
 
+## 当前版本 0.10.0
+
+0.10.0（孤儿 Edge 自愈 + 模型目录对齐 2026-09 网页版）：针对「豆包窗口开过一次后
+其余站点登录/开窗全报请求失败」与「z.ai 镜像页提示无法连接服务」两条真机反馈。
+
+1. **孤儿 Edge 自愈（browser-driver.js）。** 桥进程被强杀/DSH 重启后，Playwright
+   启动的 Edge 常驻后台并持有 profile 单实例锁；之后的 launch 报
+   「Target page, context or browser has been closed」，该站点从此打不开。
+   三层自愈：launch 时带 --remote-debugging-port=0（profile 记录
+   DevToolsActivePort）→ 锁冲突时先经 CDP connectOverCDP 优雅回收孤儿浏览器
+   （无需管理员权限）；不行再 WMI Terminate 强杀命令行绑定本 profile 的孤儿
+   （必须用 WMI：Stop-Process/taskkill 对 Chromium 的受限 DACL 拒绝访问，
+   真机实测 WMI 可行）；最后清锁重试 launch 一次。E2E：开窗→强杀桥→重启→
+   再开窗成功。
+2. **控制面错误透传（web-control.js）。** 设置面板的 ✗ 从笼统的「web request
+   failed」改为真实错误（截断 200 字符），锁冲突这类问题可以照着排查。
+3. **z.ai 镜像 API 代理（providers.js）。** z.ai 前端从绝对域 https://api.z.ai
+   调后端，不在 bootstrap 的 ASSETS 清单里 → 跨域失败、页面提示「无法连接到
+   服务」。api.z.ai 纳入 staticOrigins 后 fetch/XHR 同源转发；真机验证代理返回
+   上游网关响应。
+4. **模型目录对齐当前网页版（providers.js + index.js）。** DeepSeek 网页 2026-02
+   起全端 1M 上下文（V4）；GLM-5.3 / GLM-5.3-Flash、Kimi K3、通义千问 Qwen4 架构
+   均 1M 档（智谱开放文档/阿里云口径）；Claude 200K、ChatGPT 196K、豆包/Grok
+   256K 保守估计。模型条目新增 context 字段并在 listAllModels/resolveModel
+   贯通，DSH 的上下文压缩阈值按此生效（模型条目 > 站点覆盖 > 64K 兜底）。
+
 ## 当前版本 0.9.9
 
 0.9.9（多站点 tab 适配 + 设置页按真实需求重构）：针对「除 DeepSeek 外 kimi/qwen

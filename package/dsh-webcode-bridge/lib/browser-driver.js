@@ -14,6 +14,7 @@
 import { chromium } from 'playwright-core';
 import { getSite, getContract, resolveWebModel } from './contract.js';
 import { deriveLastRate } from './metrics.js';
+import child_process from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -310,23 +311,85 @@ export function createBrowserDriver(options = {}) {
         if (!fs.existsSync(p)) continue;
         fs.rmSync(p, { force: true });
         removed.push(name);
-      } catch (err) { warn('stale lock remove failed', name, err?.message); }
+      } catch (err) {
+        warn('stale lock remove failed', name, err?.message);
+        // Windows：EPERM = 锁被一个**活着的** Edge 进程持有（用户直接关掉窗口
+        // 而 Edge 按配置留在后台、或上次会话崩溃残留）。只清文件救不回来——
+        // 按命令行里的 profileDir 精确匹配杀掉这些孤儿进程再清一次。
+        if (err?.code === 'EPERM') killOrphanEdgeForProfile();
+      }
     }
     if (removed.length) warn('cleared stale profile locks:', removed.join(', '));
     return removed;
+  }
+
+  /** 杀掉命令行里含本 profileDir 的孤儿 Edge 进程（只杀 ours，不碰用户自己的 Edge）。
+   *  必须走 WMI Terminate：Stop-Process/taskkill 对 Chromium 子进程的受限 DACL
+   *  会拒绝访问（真机 2026-09-12 实测），WMI 的 Terminate 能正常终结。 */
+  function killOrphanEdgeForProfile() {
+    if (process.platform !== 'win32') return;
+    try {
+      const script =
+        `$procs = Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" | ` +
+        `Where-Object { $_.CommandLine -like '*${cfg.profileDir.replace(/'/g, "''")}*' }; ` +
+        `foreach ($p in $procs) { Invoke-CimMethod -InputObject $p -MethodName Terminate | Out-Null; Write-Output $p.ProcessId }`;
+      const out = child_process.execFileSync('powershell.exe', ['-NoProfile', '-Command', script], { timeout: 30_000, encoding: 'utf8' });
+      const pids = out.split(/\s+/).filter(Boolean);
+      if (pids.length) warn(`killed orphan Edge for profile via WMI (pids: ${pids.join(', ')})`);
+      setTimeout(() => clearStaleProfileLocks(), 500);
+    } catch (err) { warn('orphan edge kill failed:', err?.message); }
+  }
+
+  /** 经 CDP 优雅回收孤儿 Edge：launch 时带 --remote-debugging-port=0，profile 里的
+   *  DevToolsActivePort 记录了调试端口；孤儿进程还在监听时 connectOverCDP 后
+   *  browser.close() 即可让它正常退出、释放单实例锁（强杀受 Playwright 的受限
+   *  DACL 保护会拒绝访问，这条路才是可靠的）。 */
+  async function releaseOrphanByCDP() {
+    const portFile = path.join(cfg.profileDir, 'DevToolsActivePort');
+    try {
+      if (!fs.existsSync(portFile)) return false;
+      const port = String(fs.readFileSync(portFile, 'utf8').split('\n')[0] || '').trim();
+      if (!/^\d+$/.test(port)) return false;
+      const browser = await chromium.connectOverCDP('http://127.0.0.1:' + port, { timeout: 5000 });
+      await browser.close();
+      await new Promise((r) => setTimeout(r, 800));
+      log('orphan Edge released via CDP (port ' + port + ')');
+      return true;
+    } catch (err) { warn('cdp orphan release failed:', err?.message); return false; }
   }
 
   async function launch({ headless } = {}) {
     if (!cfg.executablePath) throw new Error('system Edge not found — install Edge or set executablePath');
     fs.mkdirSync(cfg.profileDir, { recursive: true });
     clearStaleProfileLocks();
-    ctx = await chromium.launchPersistentContext(cfg.profileDir, {
+    const launchOnce = () => chromium.launchPersistentContext(cfg.profileDir, {
       executablePath: cfg.executablePath,
       headless: headless ?? cfg.headless,
-      args: ['--no-first-run', '--no-default-browser-check', '--disable-blink-features=AutomationControlled'],
+      args: [
+        '--no-first-run', '--no-default-browser-check', '--disable-blink-features=AutomationControlled',
+        // 记录调试端口到 profile 的 DevToolsActivePort：本进程意外退出后，下一次
+        // 启动可以经 CDP 优雅关掉孤儿浏览器、释放单实例锁（不需要管理员权限）。
+        '--remote-debugging-port=0',
+      ],
       viewport: { width: 640, height: 900 },
       ...(cfg.storageState ? { storageState: cfg.storageState } : {}),
     });
+    try {
+      ctx = await launchOnce();
+    } catch (err) {
+      // 锁被孤儿进程占着时的典型报错——用户手动关窗后 Edge 留在后台持锁、
+      // 或上次会话崩溃/进程被强杀残留。先经 CDP 优雅回收（能杀干净且不留
+      // 半死状态），再退回强杀孤儿，最后清锁重试一次。
+      const msg = String(err?.message || err);
+      if (!/has been closed|ProcessSingleton|SingletonLock|Target closed|singleton/i.test(msg)) throw err;
+      warn('launch failed with stale profile lock — attempting self-heal:', msg.slice(0, 160));
+      ctx = null; page = null;
+      await releaseOrphanByCDP();
+      killOrphanEdgeForProfile();
+      await new Promise((r) => setTimeout(r, 1200));
+      clearStaleProfileLocks();
+      ctx = await launchOnce();
+    }
     page = ctx.pages()[0] || (await ctx.newPage());
     ctx.on('close', () => {
       ctx = null; page = null;
