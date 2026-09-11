@@ -36,7 +36,7 @@ export const GLM = site({
   id: 'glm', name: '智谱清言 (GLM)', origin: 'https://chatglm.cn',
   // sdata.chatglm.cn 是埋点上报域：跨域被拒不影响功能，但会在控制台刷
   // 一片 CORS 错误（真机 52 条）。纳入同源转发后干净且仍能上报。
-  staticOrigins: ['https://sdata.chatglm.cn'],
+  staticOrigins: ['https://sdata.chatglm.cn', 'https://at.alicdn.com', 'https://o.alicdn.com', 'https://lf3-data.volccdn.com', 'https://res.wx.qq.com'],
   completionPaths: ['/chatglm/backend-api/assistant/stream'],
   input: 'textarea#chat-input, textarea[placeholder], textarea',
   attachSelector: "input[type='file']",
@@ -77,7 +77,7 @@ export const KIMI = site({
 
 export const QWEN = site({
   id: 'qwen', name: '通义千问 (Qwen)', origin: 'https://chat.qwen.ai',
-  staticOrigins: ['https://g.alicdn.com', 'https://img.alicdn.com'],
+  staticOrigins: ['https://g.alicdn.com', 'https://img.alicdn.com', 'https://assets.alicdn.com'],
   // 浏览器端为 OpenAI 兼容 SSE（LLMs2API 实测拦截 /api/ + chat 的 POST 流）
   completionPaths: ['/api/chat'],
   input: 'textarea#chat-input, textarea[placeholder], textarea',

@@ -13,7 +13,7 @@ import { createOpenAiFront } from '../lib/openai.js';
 import { createBrowserDriver } from '../lib/browser-driver.js';
 import { createWebControl } from '../lib/web-control.js';
 import { createMirror } from '../lib/mirror.js';
-import { getSite, SITES } from '../lib/providers.js';
+import { getSite, SITES, qualifyModelId } from '../lib/providers.js';
 
 const port = Number(process.argv[2] || process.env.WEBCODE_PORT || 8931);
 const cfg = {
@@ -72,7 +72,11 @@ let front = null;
 const relay = createRelay({
   ...cfg,
   logger: console,
-  executor: (prompt, opts) => driver.sendPrompt(prompt, opts),
+  executor: (prompt, opts) => {
+    const m = opts?.meta || null;
+    const qualified = qualifyModelId(m?.model, m?.siteId);
+    return driverFor(m?.siteId).sendPrompt(prompt, { ...opts, model: qualified });
+  },
   driverStatus,
   loginTrigger: (siteId) => driverFor(siteId || 'deepseek').openLogin(),
   loginAndReport: async (siteId) => {

@@ -214,7 +214,7 @@ export function apply(ctx, config = {}) {
   if (!(settingsService && typeof settingsService.get === 'function' && typeof settingsService.set === 'function')) {
     settingsService = null;
   }
-  const defaultConfig = { extraPrompt: '', defaultModel: 'deepseek', previewRefreshRate: 5000, thinkMode: 'auto' };
+  const defaultConfig = { extraPrompt: '', defaultModel: 'deepseek', previewRefreshRate: 5000, thinkMode: 'auto', subAgentMode: 'own' };
   const configManager = {
     get() {
       // settingsService 已在初始化时校验 get/set 双全；此处仍防御式包裹
@@ -898,8 +898,12 @@ function imageMarkdown(images) {
     const model = resolvedModel.id;
     const siteId = resolvedModel.siteId;
     const agentId = options.agentId ?? options.agentName ?? options.agent ?? null;
+    // 子代理会话模式（设置页「会话与子代理」）：own = 每个 agentId 独立网页会话
+    // （同账号新对话，互不污染主对话）；share = 子代理与主会话共用同一网页对话。
+    const subAgentMode = settings.subAgentMode === 'share' ? 'share' : 'own';
+    const keyAgentId = subAgentMode === 'own' ? agentId : null;
     const keyPath = options.sessionId && cfg.contextMode === 'session' && !options.purpose
-      ? [String(options.sessionId), agentId ? String(agentId) : ''].filter(Boolean).join('::')
+      ? [String(options.sessionId), keyAgentId ? String(keyAgentId) : ''].filter(Boolean).join('::')
       : null;
     const recordPreset = (prompt) => {
       // Record every real agent turn (no aux purpose): this is the exact

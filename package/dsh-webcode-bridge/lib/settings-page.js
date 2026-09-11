@@ -52,6 +52,13 @@ button:hover { background: #1d4ed8; }
     </select>
     <div class="hint">手动覆盖网页端的「深度思考」开关。自动=按模型属性（DeepSeek 默认开启深度思考）；始终开启/关闭则无视模型。</div>
 
+    <label for="subAgentMode">子代理网页会话</label>
+    <select id="subAgentMode">
+      <option value="own">独立（推荐）：每个子代理自己的新网页对话</option>
+      <option value="share">共用：所有子代理与主会话共用一个网页对话</option>
+    </select>
+    <div class="hint">同一 DSH 会话里并行 agent 的网页会话分配方式。</div>
+
     <button type="submit">保存设置</button>
   </form>
   <div id="status"></div>
@@ -72,6 +79,7 @@ button:hover { background: #1d4ed8; }
       document.getElementById('defaultModel').value = MODEL_IDS[data.defaultModel] || data.defaultModel || 'deepseek:deepseek';
       document.getElementById('previewRefreshRate').value = data.previewRefreshRate || 5000;
       document.getElementById('thinkMode').value = ['on', 'off', 'auto'].includes(data.thinkMode) ? data.thinkMode : 'auto';
+      document.getElementById('subAgentMode').value = data.subAgentMode === 'share' ? 'share' : 'own';
     } catch (e) {
       statusEl.textContent = '加载设置失败: ' + e.message;
       statusEl.className = 'error';
@@ -85,6 +93,7 @@ button:hover { background: #1d4ed8; }
       defaultModel: document.getElementById('defaultModel').value,
       previewRefreshRate: parseInt(document.getElementById('previewRefreshRate').value, 10) || 5000,
       thinkMode: document.getElementById('thinkMode').value,
+      subAgentMode: document.getElementById('subAgentMode').value,
     };
     try {
       const res = await fetch(API_BASE + '/settings', {

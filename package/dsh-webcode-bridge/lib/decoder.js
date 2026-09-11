@@ -421,8 +421,12 @@
   // ---------- GLM（chatglm.cn /chatglm/backend-api/assistant/stream）----------
   // 真实帧（glm-free-api 同构，标准 SSE）：data: {conversation_id, status, parts:[{status, content:[
   //   {status, type:'text'|'image'|'code'|'quote_result', text, image:[{image_url}]}]}]}
-  // text 片段增量式出现（同 part 内 status init→finish 累积）；image 在 finish 时整幅给出。
+  // ⚠ text 是**累积全文**而非增量：同一条目在后帧里重复给出「从头到当前」的
+  //   完整文本（真机 2026-09-11 实测一句话被原样输出两遍——末两个 update/finish
+  //   帧各带全文）。这里按 part:content 槽位做累积差分，只外发新增后缀；
+  //   纯增量流（t 恒为新增后缀）与累积流在 diff 下语义一致，两种都兼容。
   class GlmDecoder extends JsonLinesDecoder {
+    constructor(options) { super(options); this.seen = new Map(); }
     push(chunk) {
       this.buf += chunk;
       this.buf = this.buf.replace(/\r\n/g, '\n');
@@ -447,14 +451,30 @@
       if (j.error) { this.failed = true; return; }
       if (j.status === 'finish') this.done = true;
       if (!Array.isArray(j.parts)) return;
-      for (const part of j.parts) {
+      for (let pi = 0; pi < j.parts.length; pi++) {
+        const part = j.parts[pi];
         if (!isRecord(part) || !Array.isArray(part.content)) continue;
-        for (const c of part.content) {
+        for (let ci = 0; ci < part.content.length; ci++) {
+          const c = part.content[ci];
           if (!isRecord(c)) continue;
           const type = String(c.type || '');
           if (type === 'text') {
             const t = typeof c.text === 'string' ? c.text : '';
-            this.emitText(t);
+            const key = pi + ':' + ci;
+            const prev = this.seen.get(key) || '';
+            if (t === prev) continue;                       // 累积流：末帧重复全文，跳过
+            if (t.startsWith(prev)) {
+              // 累积/增量 alike：只发新增后缀
+              this.seen.set(key, t);
+              if (t.length > prev.length) this.emitText(t.slice(prev.length));
+            } else if (prev.startsWith(t)) {
+              // 比已发内容更短的帧 = 迟到的旧帧，丢弃
+              continue;
+            } else {
+              // 与已发内容无前缀关系 = 新片段（glm-free-api 的增量语义），追加
+              this.seen.set(key, prev + t);
+              this.emitText(t);
+            }
           } else if (type === 'image' && Array.isArray(c.image)) {
             for (const im of c.image) {
               if (isRecord(im) && typeof im.image_url === 'string' && im.image_url) {

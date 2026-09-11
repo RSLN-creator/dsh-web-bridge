@@ -116,12 +116,19 @@ test('mirror 同源改写静态域资源，且不污染 bootstrap 自身常量',
   // 3) bootstrap 自身常量保持原始 origin（未被二次改写）
   assert.ok(html.includes('var ASSETS=["assets.example.com"]'), 'bootstrap 的 ASSETS 应为原始 host');
   // 4) 声明过的静态域被转发（该域是测试用的假域名，必然连不上上游：
-  //    502 = 路由承认并尝试转发；404 才代表「域未声明」。真机可达时是 200。
+  //    502 = 路由承认并尝试转发；404 才代表「域被拒绝」。真机可达时是 200。
   const asset = await fetch('http://127.0.0.1:' + relayPort + '/__static/assets.example.com/app/main.js');
   assert.notEqual(asset.status, 404, '声明过的静态域不应被拒绝');
-  // 5) 未声明的静态域必须拒绝
-  const denied = await fetch('http://127.0.0.1:' + relayPort + '/__static/evil.example.com/x.js');
-  assert.equal(denied.status, 404);
+  // 5) 0.9.9 起改写不再依赖白名单：未声明但**公网**的域同样代理（qwen 的
+  //    assets.alicdn.com、GLM 的 at/o.alicdn.com 当年就是白名单漏掉的）——
+  //    测试域连不上上游，502 = 路由承认并尝试转发。
+  const undeclared = await fetch('http://127.0.0.1:' + relayPort + '/__static/evil.example.com/x.js');
+  assert.equal(undeclared.status, 502, '公网未声明域应尝试代理而不是 404');
+  // 6) 内网/回环 host 必须拒绝（防本机 SSRF）
+  for (const bad of ['localhost', '127.0.0.1', '192.168.1.1', '10.0.0.2', 'METADATA.local']) {
+    const denied = await fetch('http://127.0.0.1:' + relayPort + '/__static/' + bad + '/x.js');
+    assert.equal(denied.status, 404, '内网/回环 host 应拒绝: ' + bad);
+  }
 });
 
 test('mirror 站内 302 重定向留在镜像命名空间内', async (t) => {

@@ -1,6 +1,43 @@
 # Harness Web Bridge 路线
 
-## 当前版本 0.9.8
+## 当前版本 0.9.9
+
+0.9.9（多站点 tab 适配 + 设置页按真实需求重构）：针对「除 DeepSeek 外 kimi/qwen
+打不开、glm 空白、chatgpt 渲染出错、退出视图再进加载很久、设置里找不到登录管理」
+五条真机反馈。
+
+1. **镜像同源化从白名单改为全量（`lib/mirror.js`）。** qwen 的主资源域
+   `assets.alicdn.com`、GLM 的 at/o.alicdn.com（图标字体）等当年不在
+   staticOrigins 白名单里，crossorigin 脚本被非法 ACAO 拒绝 → 整页空白/渲染
+   出错。现在标签属性语境（src/href/poster/srcset）与 CSS url() 里的**一切绝对
+   资源 URL** 一律改写到 `/__static/<host>/…` 同源转发；运行时 fetch/XHR 仍按
+   ASSETS 清单；内网/回环 host 拒绝代理（防本机 SSRF）。providers.js 补齐
+   qwen/glm 实测静态域。真机复验：glm 镜像外部引用归零，qwen 只剩行内 JS
+   运行时赋值（无 crossorigin，直接加载，无害）。
+2. **standalone 桥多站点路由修复（`bin/bridge-standalone.js`）。** executor
+   写死 deepseek 驱动，`zai:auto`/`glm:auto` 全部 MODEL_SITE_MISMATCH。现按
+   meta.siteId 路由（与 DSH 插件路径同规则）；真机 glm:auto 一句话对话实测通。
+3. **GLM 累积帧去重（`lib/decoder.js`）。** GLM 流帧的 text 是**累积全文**而非
+   增量（真机一句话被原样输出两遍——末两个 update/finish 帧各带全文）。按
+   part:content 槽位做累积差分：相同帧跳过、前缀扩展只发新增后缀、无关片段追加，
+   三种语义（累积/增量/片段）全兼容。
+4. **右侧栏 iframe 保活（`lib/client.cjs`）。** 旧实现每次挂载都重设 src
+   （`?ts=` 时间戳）——侧栏每开合一次整页重载，站点应用初始化数秒。现在访问过
+   的站点 frame 全部常驻 DOM 按 display 切换，重进零加载；刷新按钮才强制重载。
+5. **设置页按真实需求重构（`lib/client.cjs`）。** 修复了旧 Settings 组件的卡片
+   括号错乱（连接卡片提前闭合，登录管理渲染不出来）；新结构：**账户与登录管理**
+   （每站点一行：状态 + 登录/更换账户 + 独立窗口，等待真实结果回显）置顶 →
+   模型管理 → 连接 → **速度观测**（HTML/CSS 条形图：首字/思考/正文/速度/总耗时）
+   → **会话与子代理**（subAgentMode：独立=每个子代理自己的新网页对话 / 共用=
+   与主会话同对话，own 为默认；buildTurn 按 keyPath 尊重该设置）→ 首轮提示词
+   （固定模板只读展示 + 全局指令为唯一可编辑段）。**网页历史导入 UI 移除**
+   （后端路由保留，测试仍在用）。
+
+已知问题：z.ai（zai:auto）的 SSE 是 `chat:completion` 包装帧，`openai-sse` 解码器
+对不上导致单轮静默等满 240s 超时——需要真机抓流后写专用解码器（experimental 标
+注保持）。chatgpt.com 的 WAF/登录墙对镜像代理天然敏感，建议独立窗口打开。
+
+## 0.9.8
 
 0.9.8（流式收尾回归修复 + 两轮结构优化）：0.9.7 收尾后做「长期真实调用」复跑，
 发现 0.9.6 的流式循环重写里 `textSent`（已外发正文）从字符串被改成了数字下标，

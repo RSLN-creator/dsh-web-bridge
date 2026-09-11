@@ -33,30 +33,48 @@ export function createMirror(options = {}) {
     pathname === prefix.slice(0, -1) || pathname.startsWith(prefix));
 
   // ---- 静态资源同源转发 ------------------------------------------------
-  // 站点 HTML 用绝对 URL + crossorigin 引用静态域（DeepSeek 的
-  // fe-static.deepseek.com），浏览器因此以 CORS 模式请求；而该域返回的
-  // Access-Control-Allow-Origin 是字面量通配（非法值），脚本被硬性拒绝，
-  // 页面退化成「页面资源加载异常」。这里把资源 URL 改写成镜像自己的
-  // <mountPrefix>/__static/<host>/<path> 并同源转发——既不做 CORS 判定，
-  // 也让 @font-face 这类必须 CORS 的资源可用。
+  // 站点 HTML 用绝对 URL + crossorigin 引入脚本/样式（DeepSeek 的
+  // fe-static.deepseek.com、qwen 的 assets.alicdn.com、GLM 的 at/o.alicdn.com…），
+  // 浏览器因此以 CORS 模式请求；而不少域返回的 Access-Control-Allow-Origin 是
+  // 字面量通配（非法值），脚本被硬性拒绝，页面退化成空白/「资源加载异常」。
+  // 因此**标签属性语境里的一切绝对资源 URL 一律改写**到镜像自己的
+  // <mountPrefix>/__static/<host>/<path> 同源转发——不再维护逐站白名单
+  // （白名单模式在 qwen/glm/kimi 上反复漏域，正是多站点 tab 空白的根因）。
+  // 只有标签属性与 CSS url() 会被改写；行内 JS 字符串里的接口地址不动，
+  // 运行时 fetch/XHR 仍由 bootstrap 按 ASSETS 清单（providers.js staticOrigins）
+  // 改写。内网/回环主机拒绝代理，防本机 SSRF。
   const STATIC_SEG = '/__static/';
-  const assetHosts = new Set(assetOrigins.map((o) => {
-    try { return new URL(String(o)).host; } catch { return ''; }
-  }).filter(Boolean));
+  const PRIVATE_HOST = /^(localhost$|127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|\[::1\]$|.*\.local$)/i;
 
-  /** 把文本里指向静态域的绝对 URL 改写成同源路径。 */
+  /** 绝对资源 URL → 同源镜像路径；本站绝对地址收敛进 mountPrefix，内网原样返回。 */
+  function toProxyUrl(u) {
+    try {
+      const url = new URL(String(u), upstreamOrigin);
+      if (url.protocol !== 'https:' && url.protocol !== 'http:') return u;
+      const tail = url.pathname + url.search + url.hash;
+      if (url.host === upstreamHost) return mountPrefix + tail;
+      if (PRIVATE_HOST.test(url.hostname)) return u;
+      return mountPrefix + STATIC_SEG + url.host + tail;
+    } catch { return u; }
+  }
+
+  function rewriteProxyAttr(_m, attr, quote, url) {
+    return attr + quote + toProxyUrl(url) + quote;
+  }
+
+  /** 把标签属性语境（src/href/poster/srcset）与 CSS url() 里的绝对 URL 改写成同源路径。 */
   function rewriteAssetUrls(text) {
-    let out = String(text);
-    for (const origin of assetOrigins) {
-      const from = String(origin).replace(/\/$/, '');
-      let host = '';
-      try { host = new URL(from).host; } catch { continue; }
-      const to = mountPrefix + STATIC_SEG + host;
-      out = out.split(from + '/').join(to + '/');
-      out = out.split('"' + from + '"').join('"' + to + '"');
-      out = out.split("'" + from + "'").join("'" + to + "'");
-      out = out.split('(' + from + ')').join('(' + to + ')');
-    }
+    let out = String(text)
+      .replace(/(\s(?:src|href|poster)\s*=\s*)(["']?)(https?:\/\/[^"'\s>]+)\2/gi, rewriteProxyAttr)
+      .replace(/url\(\s*(["']?)(https?:\/\/[^)'"\s]+)\1\s*\)/gi, (_m, q, u) => 'url(' + q + toProxyUrl(u) + q + ')');
+    // srcset 值是「URL 描述符, URL 描述符」列表，逐段处理
+    out = out.replace(/(\ssrcset\s*=\s*)(["'])([^"']+)\2/gi, (_m, attr, quote, value) =>
+      attr + quote + value.split(',').map((part) => {
+        const t = part.trim();
+        if (!/^https?:\/\//i.test(t)) return part;
+        const sp = t.indexOf(' ');
+        return sp < 0 ? toProxyUrl(t) : toProxyUrl(t.slice(0, sp)) + t.slice(sp);
+      }).join(', ') + quote);
     return out;
   }
 
@@ -386,15 +404,16 @@ export function createMirror(options = {}) {
     if (isLocal(pathname)) return false;
     if (!loopbackOnly(req, res)) return true;
 
-    // 静态资源同源转发（见上方 rewriteAssetUrls 的说明）
+    // 静态资源同源转发（见上方 rewriteAssetUrls 的说明）。任意公网 host 都接受，
+    // 内网/回环/畸形 host 拒绝（防本机 SSRF）。
     if (pathname.startsWith(STATIC_SEG)) {
       const rest = pathname.slice(STATIC_SEG.length);
       const cut = rest.indexOf('/');
       const host = cut < 0 ? rest : rest.slice(0, cut);
       const assetPath = cut < 0 ? '/' : rest.slice(cut);
-      if (!assetHosts.has(host)) {
+      if (!/^[a-z0-9.-]+$/i.test(host) || PRIVATE_HOST.test(host)) {
         res.writeHead(404, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-        res.end(JSON.stringify({ error: { message: 'mirror: unknown asset host ' + host } }));
+        res.end(JSON.stringify({ error: { message: 'mirror: host not allowed' } }));
         return true;
       }
       return proxyAsset(req, res, 'https://' + host, assetPath, search);
