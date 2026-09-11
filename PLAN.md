@@ -1,6 +1,53 @@
 # Harness Web Bridge 路线
 
-## 当前版本 0.9.7
+## 当前版本 0.9.8
+
+0.9.8（流式收尾回归修复 + 两轮结构优化）：0.9.7 收尾后做「长期真实调用」复跑，
+发现 0.9.6 的流式循环重写里 `textSent`（已外发正文）从字符串被改成了数字下标，
+而收尾处 `finalText.startsWith(textSent)`、`finalText.slice(textSent.length)`、
+`stripProtocolText(textSent)` 仍按字符串用——这正是「回复缺失/没法同一对话继续」
+比 0.9.3 更糟的直接原因。四条真机症状全部定位并修复：
+
+1. **纯文本回复必抛 `STREAM_REWRITE`**（`"完整回复".startsWith("123")` 恒假 →
+   整轮作废、游标不前进、下一轮重复发增量）：恢复 `textSent` 的字符串语义，
+   保留 0.9.6 的单调边界逻辑（`lib/index.js`）。
+2. **带调用的回复正文块变成数字**：`stripProtocolText(下标)` 返回 `String(下标)`
+   ——解析出调用而流式探测没开块时，助手文本只剩一个数。修复后正文块恒为
+   已发散文原文。
+3. **收尾 tail 用 `slice(textSent.length)`**（数字没有 `.length` → `slice(0)`），
+   整段正文重发一遍。修复后只补发未发的尾巴。
+4. **协议原文在工具名分片到达前漏进正文**：0.9.6 用 `knownName`（要求名字已到）
+   门控正文边界，但名字在参数分片里后到；改为按 `transport` 形态即停（名字不
+   匹配工具表时不开调用块，JSON 配平后游标越过，这段最终仍会送达）。
+   另补 `findProtocolStart` 对「```json 围栏 + `{"name","arguments"}`（无
+   mcp_action）」的 transport 判定——解析器认、探测不认的 0.9.4 式泄漏。
+5. **网页部分断流（end.text 为空但增量已流出）按增量收尾**，不再误判空回复。
+
+护栏：`test/stream-tail.test.mjs` 六项（纯文本不抛 STREAM_REWRITE、正文块=
+散文原文、围栏形状不泄漏、`5 < 10` 结尾不截断、断流按增量收尾、增量与块内容
+一致）。真机验证：`node test-mock/run-real-longrun.mjs`（真实 Edge + 真实网页
+会话 + 真实工具闭环），0.9.8 前后各跑一次均 PASS——同会话 5 轮全部
+`fresh=false`（无整段重建）、一轮 13 个调用全解析执行、追问「总行数」答出与
+本地真值一致的数字（5606/5606）、报告文件落盘、无协议泄漏。
+
+两轮独立结构优化（每轮后全量 `pnpm test` 复验）：
+
+| 指标 | 0.9.7 基线 | 第一轮（复用/职责分离） | 第二轮（可读性） |
+| --- | --- | --- | --- |
+| `lib/index.js` 行数 | 1105 | 949 | 1053（含 ~105 行 0.9.8 修复与注释） |
+| 内联设置页 HTML | 101 行 | 抽出 `lib/settings-page.js` | — |
+| 块开关舞蹈（开思考/开正文/关思考） | 8 处内联 | 每循环一次定义，12 个调用点单行化 | — |
+| `usage`+`finish` 收尾对 | 4 处重复 | — | `finishChunks()`，3 处收敛 |
+| 空回复判定表达式 | 3 处重复 | — | `assertNonEmpty()` |
+| 流式 8 字符消歧尾巴 | 魔数 `-8` | — | `PROSE_TAIL_CHARS` |
+
+登录链路（0.9.5 已修，本次复核）：设置面板（client.cjs `LoginSites`，
+`wait:true` + 300s 超时）→ `POST /__webcode/login` → `loginAndReport` →
+`openLogin()`（already-logged-in 快速路径 / 清单实例锁重试 / 结果回传）。
+真机长跑预检 `connect` 返回 `loggedIn:true`；未登录时长跑脚本会自动开有头
+窗口等人工登录后再继续。
+
+## 0.9.7
 
 0.9.7（工具调用「能执行」收尾）：针对「有些工具用 DeepSeek 在新对话里执行不了」
 这条反馈，把属于桥的那一半彻底修掉，并给出一条可回归的验证剧本。

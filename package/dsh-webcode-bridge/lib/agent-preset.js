@@ -353,7 +353,12 @@ export function findProtocolStart(text, from = 0) {
     || suffix.match(/<\s*(?:tool_call|tool_calls|calls|function|stories|invoke)\b[^>]*?\bname\s*=\s*"([\w.-]+)"/i)?.[1]
     || suffix.match(/"name"\s*:\s*"([\w.-]+)"/)?.[1]
     || '';
-  const transport = /^<\s*(?:tool_call|tool_calls|calls|function|stories|invoke)\b|^\*\*Calling:|\*\*Calling:|"mcp_action"\s*:\s*"call"|^\s*\{\s*"tool"/i.test(suffix);
+  // 围栏 + {"name","arguments"}（无 mcp_action）：2026-09-08 真机 f3fa97fd 起
+  // 的第二轮高频形状，parseAgentReply 的 fenceRe 会把它当真调用执行，边界探测
+  // 必须同样认得，否则协议原文先以 text-delta 泄进 UI（0.9.6 的 transport 门
+  // 只认 mcp_action，漏了这一形状）。
+  const fenceCallAhead = /^```/.test(suffix) && /"arguments"\s*:/.test(suffix.slice(0, 400));
+  const transport = /^<\s*(?:tool_call|tool_calls|calls|function|stories|invoke)\b|^\*\*Calling:|\*\*Calling:|"mcp_action"\s*:\s*"call"|^\s*\{\s*"tool"/i.test(suffix) || fenceCallAhead;
   return { index, name, transport };
 }
 

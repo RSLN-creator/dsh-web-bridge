@@ -57,6 +57,7 @@
 ## 验证和边界
 
 - `pnpm test`：回归、解析和 Harness 适配契约（含镜像同源改写护栏）。
+- `node test-mock/run-real-longrun.mjs`：长期真实调用验证——真实 Edge + 真实网页会话跑多轮工具闭环（未登录自动开有头窗口等人工登录），断言同一网页会话连续、回复完整、无协议泄漏；说明见 [路线](PLAN.md) 0.9.8 一节。
 - `node test-mock/run-m2b-driver.js`：真实 Edge 加模拟站点 JSON/SSE。
 - `node test-mock/run-m2c-webapi.js`：控制面、预览和跨站拒绝。
 - 已真实跑通本地 `providers.js` 读取、审查、工具结果回注、刷新续聊；详见 [验收](doc/verify.md)。

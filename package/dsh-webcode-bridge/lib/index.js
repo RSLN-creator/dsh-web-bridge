@@ -20,6 +20,7 @@ import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart,
 import { createMirror } from './mirror.js';
 import { textOfBlocks } from './flatten.js';
 import { estimateTokens } from './metrics.js';
+import { renderSettingsPage } from './settings-page.js';
 
 export const name = 'webcode-bridge';
 
@@ -59,6 +60,9 @@ const DEFAULTS = {
 // 直接可见 GLM/ChatGPT/Kimi/Qwen/豆包/Grok/Claude/Gemini 的模型。
 const WEB_MODELS = listAllModels();
 
+/** 正文流式时保留的「消歧尾巴」字符数：协议标记可能分片到达（<t → <tool_call>），
+ *  最后 8 个字符先扣住不发，等下一个增量消歧；收尾时由 tail 补发。 */
+const PROSE_TAIL_CHARS = 8;
 const log = (...a) => console.log('[webcode-bridge]', ...a);
 const warn = (...a) => console.warn('[webcode-bridge]', ...a);
 
@@ -312,25 +316,40 @@ export function apply(ctx, config = {}) {
         let thinkIndex = -1;
         let textIndex = -1;
         let nextIndex = 0;
+        // 块开关的三种状态组合只在这里定义一次；闭包直接改写上面的 let 状态。
+        // 0.9.6 的「块内容发成数字」正是同一舞蹈散落多处、漏改一处造成的。
+        const openThink = function* () {
+          if (thinkOpen) return;
+          thinkIndex = nextIndex++;
+          yield { type: 'block-start', index: thinkIndex, blockType: 'reasoning' };
+          thinkOpen = true;
+        };
+        const openText = function* () {
+          if (textOpen) return;
+          yield* closeThink();
+          textIndex = nextIndex++;
+          yield { type: 'block-start', index: textIndex, blockType: 'text' };
+          textOpen = true;
+        };
+        const closeThink = function* () {
+          if (!thinkOpen) return;
+          yield { type: 'block-end', index: thinkIndex, block: { type: 'reasoning', text: thinkAcc } };
+          thinkOpen = false;
+        };
         const images = [];
         let end = null;
         for (;;) {
           const ev = await ch.next();
           if (ev.think) {
             thinkAcc += ev.think;
-            if (!thinkOpen) { thinkIndex = nextIndex++; yield { type: 'block-start', index: thinkIndex, blockType: 'reasoning' }; thinkOpen = true; }
+            yield* openThink();
             yield { type: 'reasoning-delta', index: thinkIndex, text: ev.think };
             continue;
           }
           if (ev.image) { images.push(ev.image); continue; }
           if (ev.delta) {
             acc += ev.delta;
-            if (!textOpen) {
-              if (thinkOpen) { yield { type: 'block-end', index: thinkIndex, block: { type: 'reasoning', text: thinkAcc } }; thinkOpen = false; }
-              textIndex = nextIndex++;
-              yield { type: 'block-start', index: textIndex, blockType: 'text' };
-              textOpen = true;
-            }
+            yield* openText();
             yield { type: 'text-delta', index: textIndex, text: ev.delta };
           } else if (ev.err) {
             throw ev.err;
@@ -341,7 +360,7 @@ export function apply(ctx, config = {}) {
             if (full && full !== acc) {
               if (full.startsWith(acc)) {
                 const rest = full.slice(acc.length);
-                if (rest) { acc = full; if (!textOpen) { if (thinkOpen) { yield { type: 'block-end', index: thinkIndex, block: { type: 'reasoning', text: thinkAcc } }; thinkOpen = false; } textIndex = nextIndex++; yield { type: 'block-start', index: textIndex, blockType: 'text' }; textOpen = true; } yield { type: 'text-delta', index: textIndex, text: rest }; }
+                if (rest) { acc = full; yield* openText(); yield { type: 'text-delta', index: textIndex, text: rest }; }
               } else {
                 acc = full; // diverged: block-end below carries the truth
               }
@@ -352,29 +371,27 @@ export function apply(ctx, config = {}) {
         const endImages = Array.isArray(end?.images) && end.images.length ? end.images : images;
         // 只出图不出字的回复是合法的（识图模式的常见形态），不能在追加图片
         // markdown 之前就按「空回复」判死。
-        if (!acc.trim() && !thinkAcc.trim() && endImages.length === 0) throw new Error('webcode relay: empty response from web AI');
+        assertNonEmpty(acc, thinkAcc, endImages);
         const imageMd = imageMarkdown(endImages);
         if (imageMd) {
           acc += imageMd;
-          if (!textOpen) {
-            if (thinkOpen) { yield { type: 'block-end', index: thinkIndex, block: { type: 'reasoning', text: thinkAcc } }; thinkOpen = false; }
-            textIndex = nextIndex++;
-            yield { type: 'block-start', index: textIndex, blockType: 'text' };
-            textOpen = true;
-          }
+          yield* openText();
           yield { type: 'text-delta', index: textIndex, text: imageMd };
         }
         turn.commit();
         if (textOpen) yield { type: 'block-end', index: textIndex, block: { type: 'text', text: acc } };
-        if (thinkOpen) yield { type: 'block-end', index: thinkIndex, block: { type: 'reasoning', text: thinkAcc } };
-        yield { type: 'usage', usage: { inputTokens: estimateTokens(turn.prompt), outputTokens: estimateTokens(acc + thinkAcc) } };
-        yield { type: 'finish', reason: { kind: 'stop' } };
+        yield* closeThink();
+                yield* finishChunks(turn, acc + thinkAcc, 'stop');
         await settled;
         return;
       }
 
       let end = null;
       let acc = '';
+      // 已外发的正文原文（字符串，acc 的前缀）。0.9.6 曾把它改成「已发到的下标」
+      // （数字），但收尾处的 startsWith/slice/stripProtocolText 仍按字符串用——
+      // 纯文本回复必抛 STREAM_REWRITE 整轮作废、带调用时正文块变成数字。
+      // 恢复 0.9.4 的字符串语义，只保留 0.9.6 的单调边界逻辑。
       let textSent = '';
       let textOpen = false;
       let thinkAcc = '';
@@ -401,6 +418,25 @@ export function apply(ctx, config = {}) {
       let lastBoundary = -1;
       const callSeq = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
       const callId = i => `call-webcode-${String(options?.sessionId || 'stateless')}-${callSeq}-${i}`;
+      // 与 pure-chat 路径同一组块开关帮助函数（闭包改写上方 let 状态）。
+      const openThink = function* () {
+        if (thinkOpen) return;
+        thinkIndex = nextIndex++;
+        yield { type: 'block-start', index: thinkIndex, blockType: 'reasoning' };
+        thinkOpen = true;
+      };
+      const closeThink = function* () {
+        if (!thinkOpen) return;
+        yield { type: 'block-end', index: thinkIndex, block: { type: 'reasoning', text: thinkAcc } };
+        thinkOpen = false;
+      };
+      const openText = function* () {
+        if (textOpen) return;
+        yield* closeThink();
+        textIndex = nextIndex++;
+        yield { type: 'block-start', index: textIndex, blockType: 'text' };
+        textOpen = true;
+      };
       // 协议边界探测走 findProtocolStart（与 parseAgentReply 共用形态知识）。
       // 0.9.3 及以前这里是一段只认半角标签 / ``` / **Calling: / 裸 { 的行内正则，
       // 认不出 DeepSeek 网页版真实产出的全角 <invoke 形态：boundary 恒为 -1，
@@ -440,26 +476,24 @@ export function apply(ctx, config = {}) {
           // 是拦不住的，实测半成品在尾巴之后时照样漏进正文。
           const markerAt = partialProtocolAt(acc);
           // 有已开块但参数还没配平，且正文已经追上该调用起点 → 必须停在那里等参数。
-          const holdingCall = !complete && pendingCalls.length > 0 && lastBoundary >= 0 && textSent >= lastBoundary;
+          const holdingCall = !complete && pendingCalls.length > 0 && lastBoundary >= 0 && textSent.length >= lastBoundary;
           // 正文外发区间（单调不减）：
-          //  • 刚认出调用 → 调用起点之前的散文全部补发，并停在该起点；
+          //  • 疑似调用形态（transport=true，含名字未到的分片窗口）→ 停在该起点。
+          //    名字通常在参数分片里后到，若等 knownName 才停，`<tool_call>{"mcp_action"`
+          //    这段会先漏进正文（0.9.6 的泄漏回归）。名字不匹配工具表时不开调用块，
+          //    JSON 配平后游标越过，这段最终仍会作为正文送达——只是不再边到边漏。
           //  • 有一个已开块但参数还没配平 → 停在该调用起点（绝不越过，否则
           //    `</tool_call>{"mcp_action":…` 会被当散文发出去）；
           //  • 其余 → 发到半成品标记之前；没有半成品标记就全发（短尾巴留给
           //    下一次增量消歧）。
-          const proseLimit = recognizedCall ? boundary
+          const proseLimit = (rest.index >= 0 && rest.transport) ? boundary
             : (holdingCall && lastBoundary >= 0) ? Math.min(lastBoundary, markerAt >= 0 ? markerAt : lastBoundary)
-            : (markerAt >= 0 ? markerAt : Math.max(0, acc.length - 8));
-          const safeEnd = Math.max(textSent, proseLimit);
+            : (markerAt >= 0 ? markerAt : Math.max(0, acc.length - PROSE_TAIL_CHARS));
+          const safeEnd = Math.max(textSent.length, proseLimit);
           const proseChunk = safeEnd > textSent.length ? acc.slice(textSent.length, safeEnd) : '';
           if (proseChunk) {
-            if (!textOpen) {
-              if (thinkOpen) { yield { type: 'block-end', index: thinkIndex, block: { type: 'reasoning', text: thinkAcc } }; thinkOpen = false; }
-              textIndex = nextIndex++;
-              yield { type: 'block-start', index: textIndex, blockType: 'text' };
-              textOpen = true;
-            }
-            textSent = safeEnd;
+            yield* openText();
+            textSent = acc.slice(0, safeEnd);
             yield { type: 'text-delta', index: textIndex, text: proseChunk };
           }
           if (recognizedCall) {
@@ -471,7 +505,7 @@ export function apply(ctx, config = {}) {
             // 散文块到此为止。块内容必须与已外发的 text-delta 完全一致（textSent
             // 是「已发到的下标」而不是文本本身），否则 Harness 会收到一个数字当
             // 块内容（实测 textEnd.block.text 变成 3）。
-            if (textOpen) { yield { type: 'block-end', index: textIndex, block: { type: 'text', text: acc.slice(0, textSent) } }; textOpen = false; }
+            if (textOpen) { yield { type: 'block-end', index: textIndex, block: { type: 'text', text: textSent } }; textOpen = false; }
             yield { type: 'block-start', index: opened.index, blockType: 'tool-call' };
             yield { type: 'tool-call-delta', index: opened.index, id: opened.id, name: opened.name, argumentsDelta: '' };
           }
@@ -485,9 +519,11 @@ export function apply(ctx, config = {}) {
         break;
       }
       await settled;
-      let finalText = (end?.text ?? acc) || '';
+      // 网页侧部分断流时 decoder 可能带回空 text——已解出的正文以流式增量为准，
+      // 不能让空串把已流出的内容判成「空回复」或触发 STREAM_REWRITE。
+      let finalText = (end?.text ?? '') || acc || '';
       const endImages = Array.isArray(end?.images) && end.images.length ? end.images : genImages;
-      if (!finalText.trim() && !thinkAcc.trim() && endImages.length === 0) throw new Error('webcode relay: empty response from web AI');
+      assertNonEmpty(finalText, thinkAcc, endImages);
 
       const { calls } = parseAgentReply(finalText);
       const valid = calls.filter((c) => tools.some((t) => t?.name === c.name));
@@ -499,7 +535,7 @@ export function apply(ctx, config = {}) {
       const unknownNames = calls.map((c) => c.name).filter((n) => !tools.some((t) => t?.name === n));
       if (!valid.length && unknownNames.length) {
         turn.commit();
-        if (thinkOpen) yield { type: 'block-end', index: thinkIndex, block: { type: 'reasoning', text: thinkAcc } };
+        yield* closeThink();
         const available = tools.map((t) => t?.name).filter(Boolean);
         const notice = `TOOL_UNKNOWN: 网页发出了本会话不存在的工具调用（${[...new Set(unknownNames)].join(', ')}）。`
           + `本会话只有这些工具：${available.join(', ') || '（无）'}。`
@@ -520,7 +556,7 @@ export function apply(ctx, config = {}) {
       }
       if (valid.length) {
         turn.commit();
-        if (thinkOpen) yield { type: 'block-end', index: thinkIndex, block: { type: 'reasoning', text: thinkAcc } };
+        yield* closeThink();
         if (textOpen && !pendingCalls.length) {
           const imageMd = imageMarkdown(endImages);
           if (imageMd) { textSent += imageMd; yield { type: 'text-delta', index: textIndex, text: imageMd }; }
@@ -548,17 +584,16 @@ export function apply(ctx, config = {}) {
           yield { type: 'tool-call-delta', index, id, ...(reuse ? {} : { name: valid[i].name }), argumentsDelta: args };
           yield { type: 'block-end', index, block: { type: 'tool-call', id, name: valid[i].name, arguments: args } };
         }
-        yield { type: 'usage', usage: { inputTokens: estimateTokens(turn.prompt), outputTokens: estimateTokens(finalText + thinkAcc) } };
-        yield { type: 'finish', reason: { kind: 'tool-calls' } };
+                yield* finishChunks(turn, finalText + thinkAcc, 'tool-calls');
         return;
       }
 
       if (!textOpen) {
         turn.commit();
-        if (thinkOpen) yield { type: 'block-end', index: thinkIndex, block: { type: 'reasoning', text: thinkAcc } };
+        yield* closeThink();
         const imageMd = imageMarkdown(endImages);
         const out = imageMd ? finalText + imageMd : finalText;
-        if (!out.trim()) throw new Error('webcode relay: empty response from web AI');
+        assertNonEmpty(out, '', []);
         yield* emitText(out, turn.prompt);
         return;
       }
@@ -569,9 +604,8 @@ export function apply(ctx, config = {}) {
       const tail = finalText.slice(textSent.length);
       if (tail) yield { type: 'text-delta', index: textIndex, text: tail };
       yield { type: 'block-end', index: textIndex, block: { type: 'text', text: finalText } };
-      if (thinkOpen) yield { type: 'block-end', index: thinkIndex, block: { type: 'reasoning', text: thinkAcc } };
-      yield { type: 'usage', usage: { inputTokens: estimateTokens(turn.prompt), outputTokens: estimateTokens(finalText + thinkAcc) } };
-      yield { type: 'finish', reason: { kind: 'stop' } };
+      yield* closeThink();
+            yield* finishChunks(turn, finalText + thinkAcc, 'stop');
     },
   };
   llm.registerAdapter([cfg.providerId], adapter);
@@ -583,6 +617,19 @@ async function* emitText(text, prompt) {
   yield { type: 'block-end', index: 0, block: { type: 'text', text } };
   yield { type: 'usage', usage: { inputTokens: estimateTokens(prompt), outputTokens: estimateTokens(text) } };
   yield { type: 'finish', reason: { kind: 'stop' } };
+}
+
+/** 三处相同的「空回复」判定：正文、思考、图片任一非空即合法（识图轮只出图）。 */
+function assertNonEmpty(text, thinkText, images) {
+  if (!String(text ?? '').trim() && !String(thinkText ?? '').trim() && !(Array.isArray(images) && images.length)) {
+    throw new Error('webcode relay: empty response from web AI');
+  }
+}
+
+/** 每轮收尾的 usage + finish 事件对（outputTokens 口径：正文+思考一起估）。 */
+function* finishChunks(turn, outputText, kind) {
+  yield { type: 'usage', usage: { inputTokens: estimateTokens(turn.prompt), outputTokens: estimateTokens(outputText) } };
+  yield { type: 'finish', reason: { kind } };
 }
 
 /** 网页生成的图片 → markdown（harness 块协议无 image 块，用文本携带）。 */
@@ -980,106 +1027,7 @@ function imageMarkdown(images) {
         kind: 'exact',
         path: '/__webcode/settings-page',
         handler: (req, res) => {
-          const html = `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<title>Webcode Bridge 设置</title>
-<style>
-body { font-family: system-ui, sans-serif; background: #f8fafc; padding: 20px; max-width: 600px; margin: 0 auto; }
-.card { background: #fff; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); padding: 24px; }
-h1 { font-size: 20px; margin-top: 0; }
-label { display: block; margin: 16px 0 6px; font-weight: 600; }
-textarea, select, input { width: 100%; padding: 8px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; box-sizing: border-box; }
-textarea { min-height: 80px; font-family: inherit; }
-button { background: #2563eb; color: white; border: none; padding: 10px 20px; border-radius: 6px; font-size: 16px; cursor: pointer; margin-top: 16px; width: 100%; }
-button:hover { background: #1d4ed8; }
-#status { margin-top: 12px; padding: 8px; border-radius: 6px; }
-.success { background: #dcfce7; color: #166534; }
-.error { background: #fee2e2; color: #991b1b; }
-.hint { font-size: 13px; color: #6b7280; margin-top: 4px; }
-</style>
-</head>
-<body>
-<div class="card">
-  <h1>⚙️ Webcode Bridge 设置</h1>
-  <form id="settingsForm">
-    <label for="extraPrompt">全局指令（首轮注入）</label>
-    <textarea id="extraPrompt" placeholder="例如：请始终使用中文回答..."></textarea>
-    <div class="hint">这段文本会追加到每个新网页会话的第一条用户消息之前。</div>
-
-    <label for="defaultModel">默认模型</label>
-    <select id="defaultModel">
-      ${WEB_MODELS.map((m) => `<option value="${m.id}">${m.name}（${m.siteName}${m.experimental ? ' · 实验' : ''}）</option>`).join('\n      ')}
-    </select>
-    <div class="hint">新建会话时默认选择的模型。已接入：DeepSeek、GLM、ChatGPT、Kimi、通义千问、豆包、Grok、Claude、Gemini。</div>
-
-    <label for="previewRefreshRate">预览刷新率 (毫秒)</label>
-    <input type="number" id="previewRefreshRate" min="1000" max="30000" step="500" value="5000">
-    <div class="hint">控制预览面板自动刷新的间隔。</div>
-
-    <label for="thinkMode">深度思考</label>
-    <select id="thinkMode">
-      <option value="auto">自动（按所选模型的默认思考行为）</option>
-      <option value="on">始终开启（强制打开网页「深度思考」开关）</option>
-      <option value="off">始终关闭（追求速度）</option>
-    </select>
-    <div class="hint">手动覆盖网页端的「深度思考」开关。自动=按模型属性（DeepSeek 默认开启深度思考）；始终开启/关闭则无视模型。</div>
-
-    <button type="submit">保存设置</button>
-  </form>
-  <div id="status"></div>
-</div>
-<script>
-  const API_BASE = '/__webcode';
-  // 裸模型 id（历史设置值，如 'deepseek-web'）→ 站点限定 id（'deepseek:deepseek'）
-  const MODEL_IDS = ${JSON.stringify(Object.fromEntries(WEB_MODELS.map((m) => [m.id.split(':').pop(), m.id])))};
-  const form = document.getElementById('settingsForm');
-  const statusEl = document.getElementById('status');
-
-  async function loadSettings() {
-    try {
-      const res = await fetch(API_BASE + '/settings');
-      if (!res.ok) throw new Error('加载失败');
-      const data = await res.json();
-      document.getElementById('extraPrompt').value = data.extraPrompt || '';
-      document.getElementById('defaultModel').value = MODEL_IDS[data.defaultModel] || data.defaultModel || 'deepseek:deepseek';
-      document.getElementById('previewRefreshRate').value = data.previewRefreshRate || 5000;
-      document.getElementById('thinkMode').value = ['on', 'off', 'auto'].includes(data.thinkMode) ? data.thinkMode : 'auto';
-    } catch (e) {
-      statusEl.textContent = '加载设置失败: ' + e.message;
-      statusEl.className = 'error';
-    }
-  }
-
-  form.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const payload = {
-      extraPrompt: document.getElementById('extraPrompt').value,
-      defaultModel: document.getElementById('defaultModel').value,
-      previewRefreshRate: parseInt(document.getElementById('previewRefreshRate').value, 10) || 5000,
-      thinkMode: document.getElementById('thinkMode').value,
-    };
-    try {
-      const res = await fetch(API_BASE + '/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) throw new Error('保存失败');
-      const result = await res.json();
-      statusEl.textContent = '✅ 设置已保存';
-      statusEl.className = 'success';
-    } catch (e) {
-      statusEl.textContent = '❌ ' + e.message;
-      statusEl.className = 'error';
-    }
-  });
-
-  loadSettings();
-</script>
-</body>
-</html>`;
+          const html = renderSettingsPage(WEB_MODELS);
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
           res.end(html);
         }
