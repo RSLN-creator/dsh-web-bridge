@@ -16,7 +16,7 @@ import { createRelay } from './relay.js';
 import { createOpenAiFront } from './openai.js';
 import { createBrowserDriver } from './browser-driver.js';
 import { createWebControl, buildSessionEvents, mainLineOf } from './web-control.js';
-import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, readCallAt, partialProtocolAt } from './agent-preset.js';
+import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, readCallAt, partialProtocolAt, coerceArguments } from './agent-preset.js';
 import { createMirror } from './mirror.js';
 import { textOfBlocks } from './flatten.js';
 import { estimateTokens } from './metrics.js';
@@ -491,17 +491,22 @@ export function apply(ctx, config = {}) {
 
       const { calls } = parseAgentReply(finalText);
       const valid = calls.filter((c) => tools.some((t) => t?.name === c.name));
-      // 解析不出可执行调用、但原文明显是「想调用工具」：这是长跑里最隐蔽的一种
-      // 静默失败——模型自认为发了调用，桥这侧当作散文收束，任务从此不动，用户
-      // 只看到「跑着跑着就不动了」。宁可报一个能自解释的错（错误文本会作为这轮
-      // 结果回到会话里，下一轮模型据此改写形状），也不假装正常结束。
+      // 网页调了本会话没有的工具（真机里模型调过未登记的 write / subagent）。
+      // 旧实现静默过滤 → 剩下空回复被当收束 → 任务从此不动。这里**不抛错**而是
+      // 把「可用工具清单 + 请重试」作为这一轮的回复交回会话：错误文本会作为助手
+      // 消息留在会话里，下一轮模型据此改正，任务不会停摆（抛错会整轮作废、
+      // 界面上只看到一次失败，用户得手动再催）。
       const unknownNames = calls.map((c) => c.name).filter((n) => !tools.some((t) => t?.name === n));
       if (!valid.length && unknownNames.length) {
-        turn.invalidate?.();
-        const err = new Error(`TOOL_UNKNOWN: 网页发出了本会话没有的工具调用（${[...new Set(unknownNames)].join(', ')}）`
-          + `；本会话可用工具：${tools.map((t) => t?.name).filter(Boolean).join(', ')}`);
-        err.code = 'TOOL_UNKNOWN';
-        throw err;
+        turn.commit();
+        if (thinkOpen) yield { type: 'block-end', index: thinkIndex, block: { type: 'reasoning', text: thinkAcc } };
+        const available = tools.map((t) => t?.name).filter(Boolean);
+        const notice = `TOOL_UNKNOWN: 网页发出了本会话不存在的工具调用（${[...new Set(unknownNames)].join(', ')}）。`
+          + `本会话只有这些工具：${available.join(', ') || '（无）'}。`
+          + '请改用上面列出的工具名重新发起调用；如果任务不需要工具，请直接给出结论。';
+        warn(notice);
+        yield* emitText(notice, turn.prompt);
+        return;
       }
       // 流式期间已开块的调用必须与最终解析结果**逐个对齐**（名字与顺序）。不对齐
       // 说明协议形状在中途漂移，参数落到了错误的块上；宁可作废这一轮重来，也不能
@@ -533,7 +538,12 @@ export function apply(ctx, config = {}) {
           const reuse = pendingCalls[i] || null;
           const id = reuse ? reuse.id : callId(i);
           const index = reuse ? reuse.index : nextIndex++;
-          const args = JSON.stringify(valid[i].arguments ?? {});
+          // 参数形状纠偏：网页高频把数字写成字符串、把数组写成单对象（真机 64 次
+          // 工具报错全部属于这一类）。只按 schema 显式声明的类型做无歧义纠偏。
+          const target = tools.find((t) => t?.name === valid[i].name) || null;
+          const { args: fixedArgs, coerced } = coerceArguments(valid[i].arguments, target?.parameters);
+          if (coerced.length) log(`coerced args for ${valid[i].name}: ${coerced.join(', ')}`);
+          const args = JSON.stringify(fixedArgs);
           if (!reuse) yield { type: 'block-start', index, blockType: 'tool-call' };
           yield { type: 'tool-call-delta', index, id, ...(reuse ? {} : { name: valid[i].name }), argumentsDelta: args };
           yield { type: 'block-end', index, block: { type: 'tool-call', id, name: valid[i].name, arguments: args } };

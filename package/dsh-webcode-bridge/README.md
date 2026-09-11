@@ -1,13 +1,27 @@
 # Harness Web Bridge
 
-已登录的 DeepSeek 网页作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.9.6。
+已登录的 DeepSeek 网页作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.9.7。
 
-安装：`pnpm pack` 后执行 `dsh plugin --profile web add ./dsh-webcode-bridge-0.9.6.tgz`，重启 `dsh web`。需要 Node.js 20+、系统 Edge；无需浏览器扩展。
+安装：`pnpm pack` 后执行 `dsh plugin --profile web add ./dsh-webcode-bridge-0.9.7.tgz`，重启 `dsh web`。需要 Node.js 20+、系统 Edge；无需浏览器扩展。
 
 原生「设置 > 网页桥接」管理登录与启用开关。默认沿用 `~/.dsh/webcode-edge-profile`。
 模型分组 Harness Web Bridge 暴露全部内容服务站点（`site:model` 限定 id）；DeepSeek
 站点只提供唯一模型 `DeepSeek`（深度思考），旧 id（`flash`/`vision`/`deepseek-web`/
 `deepseek-reasoner`）保留为别名。0.9.5 新增 `zai`（Z.ai）。
+
+## 0.9.7
+
+**工具调用「能执行」。** 真机 64 次工具报错全部是参数形状漂移（数字写成字符串
+`"10"`、数组写成单对象、布尔写成字符串）。新增 `coerceArguments`：按工具 schema
+**显式声明的类型**做定向纠偏，只做无歧义的方向，解析失败一律原样保留交给 DSH 报错。
+网页调了本会话不存在的工具时，不再整轮作废，而是把「TOOL_UNKNOWN + 本会话可用工具
+清单 + 请重试」作为这一轮的回复交回会话，下一轮模型自纠。
+
+**关于「某些工具在 DeepSeek 下执行不了」。** 桥只负责把网页发来的调用正确解析、
+纠偏、交付；**一个会话能用哪些工具由 DSH 的会话预设决定**——极简模式实测只注册
+`pwsh`，此时 `subagent`/`write`/`edit` 本来就不可用。要跑多工具任务请把预设切到
+标准模式。新增 `test/tool-loop.test.mjs` 把网页五种真实调用形状（`<tool_call>` /
+全角 DSML / 裸 `<invoke>` / ```json 围栏 / `**Calling:**`）固定成回归。
 
 ## 0.9.6
 

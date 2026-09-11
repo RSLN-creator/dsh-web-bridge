@@ -165,6 +165,79 @@ export function serializeDelta(messages, sent, toolResultsSent = 0, knownNames) 
   return { text: text || '[系统] 上一次回复未成功接收，请重新回复。', consumed: msgs.length, toolResultsSent: results };
 }
 
+/**
+ * 参数形状纠偏：把网页模型「明显打错类型」的参数按 schema 修回来。
+ *
+ * 真机证据（13 份会话转录，64 次工具报错**全部**是这一类）：
+ *   - `invalid arguments: "offset" must be a number; "limit" must be a number`（24 次）
+ *     → 网页把数字写成字符串 `"10"`
+ *   - `invalid arguments: "questions" must be an array`（6 次）
+ *     → 数组被写成单个对象
+ *   - `"run_in_background" must be a boolean`、`"timeoutMs" must be a number`
+ *
+ * 模型看不到 schema 里 `{"type":"number"}` 这种约束有多硬，而 DSH 会严格拒绝。
+ * 这些形状的**正确值没有歧义**（`"10"` 就是 10，`true`/`"true"` 就是布尔真），
+ * 所以按 schema 声明做定向纠偏是安全的；不做任何猜测：
+ *   · 只在 schema **显式声明了该参数的类型**、且当前值类型不符时才动；
+ *   · 只做无歧义的方向（字符串→数字/布尔/数组、字符串→对象、标量→数组）；
+ *   · 数字/布尔解析失败就原样保留，交给 DSH 报它自己的错，桥不吞不猜。
+ *
+ * @param {object} args 网页解析出的参数
+ * @param {object} schema 该工具的 parameters（JSON Schema）
+ * @returns {{args: object, coerced: string[]}} coerced 是被改动过的参数名
+ */
+export function coerceArguments(args, schema) {
+  const out = (args && typeof args === 'object' && !Array.isArray(args)) ? { ...args } : {};
+  const coerced = [];
+  const props = schema && typeof schema === 'object' && schema.properties && typeof schema.properties === 'object'
+    ? schema.properties : null;
+  if (!props) return { args: out, coerced };
+  for (const [key, spec] of Object.entries(props)) {
+    if (!(key in out)) continue;
+    const want = spec && typeof spec === 'object' ? spec.type : null;
+    const value = out[key];
+    if (value === null || value === undefined) continue;
+    const typeOf = Array.isArray(value) ? 'array' : typeof value;
+    if (want === typeOf) continue;
+    switch (want) {
+      case 'number': case 'integer': {
+        if (typeof value !== 'string') break;
+        const n = Number(value.trim());
+        if (Number.isFinite(n)) { out[key] = want === 'integer' ? Math.trunc(n) : n; coerced.push(key); }
+        break;
+      }
+      case 'boolean': {
+        if (typeof value === 'string') {
+          const s = value.trim().toLowerCase();
+          if (s === 'true' || s === 'false') { out[key] = s === 'true'; coerced.push(key); }
+        } else if (typeof value === 'number' && (value === 0 || value === 1)) { out[key] = value === 1; coerced.push(key); }
+        break;
+      }
+      case 'array': {
+        if (typeof value === 'string') {
+          const t = value.trim();
+          if (t.startsWith('[')) {
+            try { const parsed = JSON.parse(t); if (Array.isArray(parsed)) { out[key] = parsed; coerced.push(key); } } catch { /* keep */ }
+          }
+        } else if (typeof value === 'object') { out[key] = [value]; coerced.push(key); }
+        break;
+      }
+      case 'object': {
+        if (typeof value === 'string' && value.trim().startsWith('{')) {
+          try { const parsed = JSON.parse(value); if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) { out[key] = parsed; coerced.push(key); } } catch { /* keep */ }
+        }
+        break;
+      }
+      case 'string': {
+        if (typeof value === 'number' || typeof value === 'boolean') { out[key] = String(value); coerced.push(key); }
+        break;
+      }
+      default: break;
+    }
+  }
+  return { args: out, coerced };
+}
+
 /** 从 text[start]（应为 '{'）做花括号配对（跳过字符串内的括号），配平即试解析。 */
 function jsonObjectAt(text, start) {
   const src = String(text ?? '');

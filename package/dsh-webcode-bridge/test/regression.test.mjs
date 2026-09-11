@@ -481,7 +481,7 @@ test('一轮回复里连发多个工具调用：每个各自一块、id 唯一�
   } finally { await dispose(); }
 });
 
-test('网页调用了本会话不存在的工具 → TOOL_UNKNOWN，不静默当收束', async () => {
+test('网页调用了本会话不存在的工具 → 回报可用工具清单，不整轮作废也不静默收束', async () => {
   let adapter;
   const driver = {
     status: () => ({ running: true }), close: async () => {}, resetConversation: async () => {},
@@ -494,13 +494,19 @@ test('网页调用了本会话不存在的工具 → TOOL_UNKNOWN，不静默当
   };
   const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
   const user = text => ({ role: 'user', content: [{ type: 'text', text }] });
-  // 只登记 pwsh：模型却调 subagent → 必须报错，而不是当成普通文本收束
+  // 只登记 pwsh：模型却调 subagent。抛错会让整轮作废、用户得手动再催；
+  // 正确行为是把「可用工具清单 + 请重试」作为这一轮回复交回会话。
   const tools = [{ name: 'pwsh', description: 'run', parameters: {} }];
   try {
-    await assert.rejects(
-      async () => { for await (const _ of adapter.stream({ sessionId: 'tu', model: 'deepseek:deepseek', messages: [user('跑')], tools })) { /* drain */ } },
-      /TOOL_UNKNOWN/,
-    );
+    const chunks = [];
+    for await (const c of adapter.stream({ sessionId: 'tu', model: 'deepseek:deepseek', messages: [user('跑')], tools })) chunks.push(c);
+    const textEnd = chunks.find(c => c.type === 'block-end' && c.block?.type === 'text');
+    assert.ok(textEnd, '必须给出文本回复（不能整轮作废）');
+    assert.match(textEnd.block.text, /TOOL_UNKNOWN/);
+    assert.match(textEnd.block.text, /subagent/, '要点名网页用错的工具');
+    assert.match(textEnd.block.text, /pwsh/, '要给出本会话真正可用的工具名');
+    assert.equal(chunks.at(-1).reason?.kind, 'stop', '正常收束，下一轮模型可自纠');
+    assert.ok(!chunks.some(c => c.type === 'block-end' && c.block?.type === 'tool-call'), '不得把不存在的工具交给 Harness 执行');
   } finally { await dispose(); }
 });
 

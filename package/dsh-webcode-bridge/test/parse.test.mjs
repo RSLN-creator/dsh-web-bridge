@@ -1,7 +1,7 @@
 // parse.test.mjs — parseAgentReply gate. Real DeepSeek web output shape
 // (<tool_call> fences), legacy ```json fences, <function>, bare-object and the
 // legacy {"tool":...} whole-reply fallback. Run: node test/parse.test.mjs
-import { parseAgentReply, buildPreset, findProtocolStart, readCallAt, partialProtocolAt, normalizeDsml } from '../lib/agent-preset.js';
+import { parseAgentReply, buildPreset, findProtocolStart, readCallAt, partialProtocolAt, normalizeDsml, coerceArguments } from '../lib/agent-preset.js';
 // DeepSeek 网页版与 OpenAI 一样常把 arguments 输出为转义 JSON 字符串；
 // 用 JSON.stringify 构造真实围栏，保证转义与真实模型输出一致。
 const strArgsFence = (name, args, opt = {}) => JSON.stringify({ mcp_action: 'call', name, purpose: 'x', arguments: JSON.stringify(args), ...opt });
@@ -107,6 +107,52 @@ const streamCases = [
     } },
 ];
 for (const c of streamCases) {
+  let ok = false;
+  try { ok = c.run() === true; } catch (e) { console.log('   threw', e.message); }
+  if (ok) { pass++; console.log('PASS', c.name); } else { fail++; console.log('FAIL', c.name); }
+}
+
+// ---- 参数形状纠偏：真机 64 次工具报错全部属于这一类 ----------------------------
+// 会话 5d08018b / 8e9c538a / 89775655 的原文报错：
+//   "offset" must be a number; "limit" must be a number  (24 次)
+//   "questions" must be an array                          (6 次)
+//   "run_in_background" must be a boolean / "timeoutMs" must be a number
+// 模型看不到 schema 里的类型约束有多硬，而 DSH 会严格拒绝。这些形状的正确值没有
+// 歧义，按 schema 声明定向纠偏；没有声明类型或无法无歧义解析时一律不动。
+const coerceCases = [
+  { name: 'coerceArguments 数字字符串 → number/integer（真机 read 的 offset/limit）',
+    run() {
+      const schema = { type: 'object', properties: { offset: { type: 'integer' }, limit: { type: 'number' }, path: { type: 'string' } } };
+      const r = coerceArguments({ offset: '10', limit: '25.5', path: 'a.js' }, schema);
+      return r.args.offset === 10 && r.args.limit === 25.5 && r.args.path === 'a.js'
+        && r.coerced.sort().join(',') === 'limit,offset';
+    } },
+  { name: 'coerceArguments 单对象 → 数组（真机 ask_user_question 的 questions）',
+    run() {
+      const schema = { type: 'object', properties: { questions: { type: 'array' } } };
+      const one = { question: 'q', header: 'h' };
+      const r = coerceArguments({ questions: one }, schema);
+      return Array.isArray(r.args.questions) && r.args.questions.length === 1 && r.args.questions[0] === one;
+    } },
+  { name: 'coerceArguments 字符串布尔/数字 → boolean（真机 run_in_background / timeoutMs）',
+    run() {
+      const schema = { type: 'object', properties: { run_in_background: { type: 'boolean' }, timeoutMs: { type: 'number' } } };
+      const r = coerceArguments({ run_in_background: 'false', timeoutMs: '30000' }, schema);
+      return r.args.run_in_background === false && r.args.timeoutMs === 30000;
+    } },
+  { name: 'coerceArguments 不做猜测：无 schema 声明/不合法值/类型本来就对 → 原样保留',
+    run() {
+      const noSchema = coerceArguments({ offset: '10' }, undefined);
+      const badNumber = coerceArguments({ offset: 'abc' }, { properties: { offset: { type: 'number' } } });
+      const alreadyOk = coerceArguments({ offset: 10, flag: true }, { properties: { offset: { type: 'number' }, flag: { type: 'boolean' } } });
+      const noType = coerceArguments({ x: '10' }, { properties: { x: {} } });
+      return noSchema.args.offset === '10' && noSchema.coerced.length === 0
+        && badNumber.args.offset === 'abc' && badNumber.coerced.length === 0
+        && alreadyOk.coerced.length === 0
+        && noType.args.x === '10' && noType.coerced.length === 0;
+    } },
+];
+for (const c of coerceCases) {
   let ok = false;
   try { ok = c.run() === true; } catch (e) { console.log('   threw', e.message); }
   if (ok) { pass++; console.log('PASS', c.name); } else { fail++; console.log('FAIL', c.name); }
