@@ -216,16 +216,86 @@ function jsonObjectIn(text) {
  *      (opplean / web-agent style — what DeepSeek's web UI tends to emit).
  * Falls back to the strict whole-reply {"tool":...} shape for compat.
  */
+/**
+ * DeepSeek 网页版的 DSML 变形归一：竖线全角化成对出现（<tool_calls>，
+ * U+FF5C）、或丢开头 <。reference/deepseek-free-api 的 strip_dsml_markup 用
+ * chr(0xff5c) 处理同一问题。把 DSML 前缀整体剥掉还原成裸 XML 标签。
+ *
+ * ⚠ 必须与 parseAgentReply 内联的那段替换保持一致——两处都认同一批形态，
+ *   一旦漂移就会出现「解析认得出、边界探测认不出」的泄漏（0.9.4 修的正是
+ *   这个：全角 DSML 被 parseAgentReply 收下，却被流式探测放过，协议原文
+ *   已作为 text-delta 发给显示层）。test/protocol-leak.test.mjs 用真机夹具
+ *   锁住两者的一致性。
+ */
+export function normalizeDsml(text) {
+  return String(text ?? '')
+    .replace(/<[\uFF5C|]+\s*DSML\s*[\uFF5C|]+/gi, '<')
+    .replace(/<\/[\uFF5C|]+\s*DSML\s*[\uFF5C|]+/gi, '</')
+    // 丢开头 < 的裸标记（<invoke …）：只在后跟已知标记名时补 <，避免误伤正文
+    .replace(/(^|[^\w<])[\uFF5C|]+\s*DSML\s*[\uFF5C|]+(?=(?:tool_calls|calls|invoke|parameter)\b)/gi, '$1<');
+}
+
+/** 协议文本起点的锚点。命中最早的一个即为边界。 */
+const PROTOCOL_ANCHORS = [
+  /<\s*\/?\s*(?:tool_call|tool_calls|calls|function|stories|invoke)\b/i, // 半角标签
+  /<[\uFF5C|]*\s*DSML\s*[\uFF5C|]*/i,                              // <（真机主形态）
+  /[\uFF5C|]+\s*DSML\s*[\uFF5C|]+/i,                               // 丢开头 < 的 ｜DSML｜
+  /```/,                                                           // ```json 围栏
+  /\*\*Calling:/i,                                                 // 网页 Calling 渲染
+  /(?:^|\n)[ \t]*\{/,                                              // 裸 JSON 对象行
+];
+
+/**
+ * 流式协议边界探测：协议文本从哪个下标开始，以及能认出的工具名。
+ *
+ * 与 parseAgentReply 共用同一套形态知识，但只做定位、不做完整解析——它要在
+ * 流式途中被每个 delta 反复调用，必须廉价且无副作用。调用方拿到 index 后应
+ * 立即停止把该下标之后的文本当作正文外发；name 只在确实是真工具时才有意义
+ * （由调用方对工具表校验）。
+ *
+ * @param {string} text 累积的网页回复文本
+ * @returns {{index: number, name: string, transport: boolean}}
+ *          index=-1 表示尚未出现协议边界。
+ */
+export function findProtocolStart(text) {
+  const raw = String(text ?? '');
+  let index = -1;
+  for (const re of PROTOCOL_ANCHORS) {
+    const m = re.exec(raw);
+    if (m && (index < 0 || m.index < index)) index = m.index;
+  }
+  if (index < 0) return { index: -1, name: '', transport: false };
+
+  // 名字与传输形态都在归一化后的文本上判定，才能同时覆盖全角 DSML 与半角标签。
+  const suffix = normalizeDsml(raw.slice(index));
+  const name = suffix.match(/\*\*Calling:\*\*\s*`([\w.-]+)`/)?.[1]
+    || suffix.match(/<\s*(?:tool_call|tool_calls|calls|function|stories|invoke)\b[^>]*?\bname\s*=\s*"([\w.-]+)"/i)?.[1]
+    || suffix.match(/"name"\s*:\s*"([\w.-]+)"/)?.[1]
+    || '';
+  const transport = /^<\s*(?:tool_call|tool_calls|calls|function|stories|invoke)\b|^\*\*Calling:|\*\*Calling:|"mcp_action"\s*:\s*"call"|^\s*\{\s*"tool"/i.test(suffix);
+  return { index, name, transport };
+}
+
+/**
+ * 切掉一段文本里的协议部分，只留散文。
+ *
+ * 只用于「本轮已确认存在工具调用」时的兜底：正常路径下流式边界探测已经把
+ * 协议文本挡在 text-delta 之外，这里是探测漏掉未知形态时的第二道防线，
+ * 保证 DSH 会话里存下来的助手文本是干净的散文。
+ */
+export function stripProtocolText(text) {
+  const raw = String(text ?? '');
+  const { index } = findProtocolStart(raw);
+  return index < 0 ? raw : raw.slice(0, index).trimEnd();
+}
+
 export function parseAgentReply(text) {
   if (!text) return { calls: [], text: '' };
   let s = String(text);
-  // 网页端流式噪声：DeepSeek 网页版偶发把协议标记输出成 <|DSML|…> 的变形——
-  // 竖线全角化成对出现（<｜｜DSML｜｜tool_calls>，U+FF5C）、丢开头 <。reference/
-  // deepseek-free-api 的 strip_dsml_markup 用 chr(0xff5c) 归一化处理同一问题。
-  // 这里把 DSML 前缀整体剥掉还原成裸 XML 标签，交给后面的 tag/invoke 正则。
-  s = s.replace(/<[\uFF5C|]+\s*DSML\s*[\uFF5C|]+/gi, '<').replace(/<\/[\uFF5C|]+\s*DSML\s*[\uFF5C|]+/gi, '</')
-    // 丢开头 < 的裸标记（｜DSML｜invoke …）：只在后跟已知标记名时补 <，避免误伤正文
-    .replace(/(^|[^\w<])[\uFF5C|]+\s*DSML\s*[\uFF5C|]+(?=(?:tool_calls|invoke|parameter)\b)/gi, '\$1<');
+  // 网页端流式噪声：DeepSeek 网页版偶发把协议标记输出成 <…> 的变形——
+  // 竖线全角化成对出现（<tool_calls>，U+FF5C）、丢开头 <。归一化与流式
+  // 边界探测（findProtocolStart）共用 normalizeDsml，两处不再各写一份正则。
+  s = normalizeDsml(s);
   const calls = [];
   const seen = new Set();
   // 同一个调用可能被多条规则各匹配一次（fence / 标签 / 裸对象 / invoke 兜底）。

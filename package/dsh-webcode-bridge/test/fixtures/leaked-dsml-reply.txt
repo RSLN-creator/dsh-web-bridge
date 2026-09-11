@@ -1,0 +1,11 @@
+I'll start by inspecting the project state.
+
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="pwsh">
+<｜｜DSML｜｜ parameter name="command" string="true">Get-Location; Write-Output "---"; Get-ChildItem -Force | Select-Object Mode,LastWriteTime,Name | Format-Table -AutoSize</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="description" string="true">Show working directory and top-level files</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ invoke name="pwsh">
+<｜｜DSML｜｜ parameter name="command" string="true">git log --oneline -25; Write-Output "=== STATUS ==="; git status --short</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="description" string="true">Show recent commits and working tree status</｜｜DSML｜｜ parameter>
+</｜｜

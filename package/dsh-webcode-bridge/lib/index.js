@@ -16,7 +16,7 @@ import { createRelay } from './relay.js';
 import { createOpenAiFront } from './openai.js';
 import { createBrowserDriver } from './browser-driver.js';
 import { createWebControl, buildSessionEvents, mainLineOf } from './web-control.js';
-import { serializeFirstTurn, serializeDelta, parseAgentReply } from './agent-preset.js';
+import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText } from './agent-preset.js';
 import { createMirror } from './mirror.js';
 import { textOfBlocks } from './flatten.js';
 import { estimateTokens } from './metrics.js';
@@ -372,7 +372,12 @@ export function apply(ctx, config = {}) {
       let pendingCall = null;
       const callSeq = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
       const callId = i => `call-webcode-${String(options?.sessionId || 'stateless')}-${callSeq}-${i}`;
-      const marker = value => value.search(/<\s*(?:tool_call|function|stories)|```|\*\*Calling:|(?:^|\n)\s*\{/i);
+      // 协议边界探测走 findProtocolStart（与 parseAgentReply 共用形态知识）。
+      // 0.9.3 及以前这里是一段只认半角标签 / ``` / **Calling: / 裸 { 的行内正则，
+      // 认不出 DeepSeek 网页版真实产出的全角 <invoke 形态：boundary 恒为 -1，
+      // 协议原文被当正文一路 text-delta 发出去，等收尾 parseAgentReply 认出调用时
+      // 已经晚了——真机会话里助手文本存的正是整段 <…>（见 2026-09-11
+      // 会话 8e9c538a 的 assistant/message，已固化为 test/fixtures）。
       for (;;) {
         const ev = await ch.next();
         if (ev.think) {
@@ -384,7 +389,7 @@ export function apply(ctx, config = {}) {
         if (ev.image) { genImages.push(ev.image); continue; }
         if (ev.delta) {
           acc += ev.delta;
-          const boundary = marker(acc);
+          const { index: boundary, name: candidate, transport } = findProtocolStart(acc);
           // Keep a short suffix until the next delta disambiguates a marker.
           const safeEnd = boundary < 0 ? Math.max(0, acc.length - 32) : boundary;
           if (safeEnd > textSent.length && !pendingCall) {
@@ -399,10 +404,6 @@ export function apply(ctx, config = {}) {
             yield { type: 'text-delta', index: textIndex, text: delta };
           }
           if (boundary >= 0 && !pendingCall) {
-            const suffix = acc.slice(boundary);
-            const candidate = suffix.match(/\*\*Calling:\*\*\s*`([\w.-]+)`/)?.[1]
-              || suffix.match(/"(?:name|tool)"\s*:\s*"([\w.-]+)"/)?.[1];
-            const transport = /^<\s*(tool_call|function|stories)|^\*\*Calling:|"mcp_action"\s*:\s*"call"|^\s*\{\s*"tool"/i.test(suffix);
             if (transport && candidate && tools.some(t => t.name === candidate)) {
               if (textOpen) yield { type: 'block-end', index: textIndex, block: { type: 'text', text: textSent } };
               const index = nextIndex++;
@@ -434,7 +435,9 @@ export function apply(ctx, config = {}) {
         if (textOpen && !pendingCall) {
           const imageMd = imageMarkdown(endImages);
           if (imageMd) { textSent += imageMd; yield { type: 'text-delta', index: textIndex, text: imageMd }; }
-          yield { type: 'block-end', index: textIndex, block: { type: 'text', text: textSent } };
+          // 兜底：边界探测若漏掉某种未知形态，这里仍保证写进会话的助手文本是散文。
+          // 正常路径下 textSent 已被 boundary 截过，stripProtocolText 是恒等变换。
+          yield { type: 'block-end', index: textIndex, block: { type: 'text', text: stripProtocolText(textSent) } };
         }
         for (let i = 0; i < valid.length; i++) {
           // id carries the session so harness-side streams / logs can be traced
