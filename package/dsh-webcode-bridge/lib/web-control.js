@@ -16,7 +16,7 @@
 //     `fetch` inside the logged-in tab and only distilled JSON comes back.
 //   • Responses never echo tokens; errors are fixed-text; bodies are bounded.
 
-import { listAllModels } from './providers.js';
+import { listAllModels, SITES } from './providers.js';
 
 const MAX_BODY_BYTES = 256 * 1024;
 const LOOPBACK_HOST = /^(127\.0\.0\.1|\[::1\]|localhost)(:\d+)?$/i;
@@ -178,11 +178,48 @@ export function createWebControl(deps = {}) {
       return { ok: true, ...info };
     },
     'POST login': async (body) => {
+      const siteId = String(body?.siteId || '').trim();
+      const wait = body?.wait !== false;     // 默认等待；显式 {wait:false} 才是旧的即开即回
+      // 优先走「等结果」的入口：设置页需要知道这次登录到底成没成，
+      // 否则失败只会写进宿主控制台，界面永远停在「未登录」。
+      const loginAndReport = relay?.config?.loginAndReport;
+      if (loginAndReport && wait) {
+        const r = await loginAndReport(siteId || 'deepseek', { timeoutMs: body?.timeoutMs });
+        return {
+          ok: r?.ok === true,
+          siteId: r?.siteId,
+          siteName: r?.siteName,
+          loggedIn: r?.loggedIn ?? null,
+          alreadyLoggedIn: r?.alreadyLoggedIn === true,
+          ms: r?.ms ?? null,
+          message: r?.ok ? (r?.note || '登录完成') : (r?.error || '登录失败'),
+        };
+      }
       const loginTrigger = relay?.config?.loginTrigger;
       if (!loginTrigger) return { ok: false, error: 'no driver' };
-      const siteId = String(body?.siteId || '').trim() || undefined;
-      loginTrigger(siteId).catch((err) => warn('login flow error:', err?.message));
+      loginTrigger(siteId || undefined).catch((err) => warn('login flow error:', err?.message));
       return { ok: true, message: '登录窗口打开中，请在该窗口完成一次性登录' };
+    },
+    // 设置页「登录网站」下拉的数据源：站点清单 + 各自登录态，不启动浏览器。
+    'GET login-sites': async () => {
+      const state = relay?.config?.driverStatus?.() ?? null;
+      const byId = new Map((state?.sites || []).map((s) => [s.siteId, s]));
+      return {
+        ok: true,
+        mainSiteId: state?.siteId || 'deepseek',
+        sites: SITES.map((st) => {
+          const s = byId.get(st.id);
+          return {
+            siteId: st.id,
+            siteName: st.name,
+            origin: st.origin,
+            initialized: s?.initialized === true,
+            loggedIn: s?.loggedIn ?? null,
+            loginState: s?.loginState || 'idle',
+            lastLogin: s?.lastLogin || null,
+          };
+        }),
+      };
     },
     'POST sessions': async (body) => {
       const r = await driver.listSessions(Math.min(200, Math.max(1, Number(body?.count) || 100)));

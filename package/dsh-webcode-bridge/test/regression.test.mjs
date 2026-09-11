@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import { apply } from '../lib/index.js';
+import { createWebControl } from '../lib/web-control.js';
 import { serializeFirstTurn, serializeDelta, parseAgentReply } from '../lib/agent-preset.js';
 import '../lib/decoder.js';
 
@@ -387,3 +389,185 @@ test('decoder：reasoning_* 增量思考 op 也走 onThink 暴露', () => {
   assert.equal(out.complete, true);
   assert.ok(think.join('').includes('先按依赖树'), 'reasoning op 应经 onThink 暴露');
 });
+
+// ---- 「跑到一半突然停止」：部分流必须保留内容，而不是整轮丢弃 ----------------
+// 真机证据：会话 94f70e1a / 3144813e / 89775655 的 turn/end 都是
+// reason.kind === 'error' 且 error.code === 'UNKNOWN'，对应驱动里
+// 「web capture ended incomplete」这条抛错——解码器已经解出正文（有时还是一
+// 段完整的工具调用），却因为网页没发 FINISHED/close 被整段扔掉。用户看到的是
+// 「回复到一半突然停止、工具也不执行」。解码层现在把已解出的内容带出来并标
+// partial，由驱动层决定是否可用。
+
+test('decoder：未收到 FINISHED 但已解出正文 → partial=true 且保留全文', () => {
+  const deltas = [];
+  const decoder = new globalThis.WebCodeDeepSeekStreamDecoder({ onDelta: (t) => deltas.push(t) });
+  const push = (value) => decoder.push('data: ' + JSON.stringify(value) + '\n\n');
+  push({ v: { response: { role: 'ASSISTANT', message_id: '7', status: 'WIP', fragments: [{ type: 'RESPONSE', content: '我先读一下 ' }] } } });
+  push({ o: 'APPEND', p: 'response/fragments/-1/content', v: 'README.md。' });
+  // 没有 SET response/status=FINISHED，也没有 event: close —— 网页掉流了。
+  const out = decoder.finish();
+  assert.equal(out.complete, false, '没到 FINISHED 就不能声称完整');
+  assert.equal(out.partial, true, '已经解出正文 → 必须标 partial 供上层决策');
+  assert.equal(out.reason, 'stream_ended_before_finished');
+  assert.equal(out.status, 'WIP');
+  assert.equal(out.text, '我先读一下 README.md。', '已解出的正文必须带出来，不能丢');
+  assert.equal(deltas.join(''), '我先读一下 README.md。');
+});
+
+test('decoder：连响应帧都没有（纯失败）→ partial=false，不得假装有内容', () => {
+  const decoder = new globalThis.WebCodeDeepSeekStreamDecoder({ onDelta: () => {} });
+  decoder.push('data: ' + JSON.stringify({ v: { response: { role: 'ASSISTANT', message_id: '8', status: 'WIP', fragments: [] } } }) + '\n\n');
+  const out = decoder.finish();
+  assert.equal(out.complete, false);
+  assert.equal(out.partial, false, '没有任何正文/思考/图片 → 不构成部分可用');
+  assert.equal(out.reason, 'stream_ended_before_finished');
+  assert.equal(out.text, '');
+});
+
+test('decoder：解析失败（invalid_stream）不因 partial 被伪装成可交付', () => {
+  const decoder = new globalThis.WebCodeDeepSeekStreamDecoder({ onDelta: () => {} });
+  decoder.push('data: ' + JSON.stringify({ v: { response: { role: 'ASSISTANT', message_id: '9', status: 'WIP', fragments: [{ type: 'RESPONSE', content: '半句' }] } } }) + '\n\n');
+  // 非法的 JSON 帧 → failed=true
+  decoder.push('data: {not json\n\n');
+  const out = decoder.finish();
+  assert.equal(out.complete, false);
+  assert.equal(out.reason, 'invalid_stream', '结构坏掉必须是 invalid_stream，不能被 partial 掩盖');
+});
+
+// ---- 「跑着跑着不动了」：调用不存在/游标被描述变化顶掉，都不得静默 -------------
+// 真机证据：会话 e2e63eb6 里助手尝试调用本会话不存在的 write 工具；会话 5d08018b /
+// 8e9c538a / 89775655 大量 turns 以 error 收尾。早期实现把「解析出的调用名不在本次
+// 工具表里」直接过滤掉，剩下的空回复被当成收束——任务从此静止。
+
+test('网页调用了本会话不存在的工具 → TOOL_UNKNOWN，不静默当收束', async () => {
+  let adapter;
+  const driver = {
+    status: () => ({ running: true }), close: async () => {}, resetConversation: async () => {},
+    sendTurn: async (key, prompt, opts) => {
+      const text = '<tool_call>\n{"mcp_action": "call", "name": "subagent", "arguments": {"prompt": "x"}}\n</tool_call>';
+      opts.onDelta?.(text);
+      return { text };
+    },
+    sendPrompt: async () => ({ text: '' }),
+  };
+  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  const user = text => ({ role: 'user', content: [{ type: 'text', text }] });
+  // 只登记 pwsh：模型却调 subagent → 必须报错，而不是当成普通文本收束
+  const tools = [{ name: 'pwsh', description: 'run', parameters: {} }];
+  try {
+    await assert.rejects(
+      async () => { for await (const _ of adapter.stream({ sessionId: 'tu', model: 'deepseek:deepseek', messages: [user('跑')], tools })) { /* drain */ } },
+      /TOOL_UNKNOWN/,
+    );
+  } finally { await dispose(); }
+});
+
+test('工具描述措辞变化不得顶掉会话游标（否则每轮都在重建首轮＝上下文像不动）', async () => {  let adapter; const turns = [];
+  const driver = {
+    status: () => ({ running: true }), close: async () => {}, resetConversation: async () => {},
+    sendTurn: async (key, prompt, opts) => { turns.push({ fresh: opts.fresh === true, prompt }); opts.onDelta?.('答'); return { text: '答' }; },
+    sendPrompt: async (prompt, opts) => { turns.push({ fresh: true, prompt }); return { text: '答' }; },
+  };
+  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  const user = text => ({ role: 'user', content: [{ type: 'text', text }] });
+  const tools1 = [{ name: 'pwsh', description: '第一版描述', parameters: { type: 'object', properties: { command: { type: 'string' } } } }];
+  const tools2 = [{ name: 'pwsh', description: '第二版措辞完全不同的描述', parameters: { type: 'object', properties: { command: { type: 'string', description: '新加的字段说明' } } } }];
+  const base = { sessionId: 'fp', model: 'deepseek:deepseek' };
+  try {
+    for await (const _ of adapter.stream({ ...base, messages: [user('一')], tools: tools1 })) { /* drain */ }
+    for await (const _ of adapter.stream({ ...base, messages: [user('一'), { role: 'assistant', content: [{ type: 'text', text: '答' }] }, user('二')], tools: tools2 })) { /* drain */ }
+    assert.equal(turns[0].fresh, true, '首轮是 fresh');
+    assert.equal(turns[1].fresh, false, '只有描述变化（工具名集合不变）时必须沿用同一网页会话');
+    assert.ok(!turns[1].prompt.includes('一'), '增量轮不得重发首轮全文');
+    // 工具名集合真的变了 → 才允许重建
+    for await (const _ of adapter.stream({ ...base, messages: [user('一'), { role: 'assistant', content: [{ type: 'text', text: '答' }] }, user('二'), { role: 'assistant', content: [{ type: 'text', text: '答' }] }, user('三')], tools: [...tools2, { name: 'read', description: 'r', parameters: {} }] })) { /* drain */ }
+    assert.equal(turns[2].fresh, true, '工具集合变化应重建网页会话');
+  } finally { await dispose(); }
+});
+
+// ---- 控制面：登录必须可选站点、且把真实结果带回界面 ------------------------
+// 真机现象：设置页点「登录」没有任何回执，退出一次之后想重登任何站点都找不到
+// 入口（界面里只有写死 deepseek 的一行）。这里直接打控制面的 HTTP 路由。
+
+function withServer(relayConfig, fn) {
+  let control = null;
+  const server = http.createServer((req, res) => {
+    const u = new URL(req.url, 'http://127.0.0.1');
+    control.handle(req, res, u.pathname).then((handled) => {
+      if (!handled) { res.writeHead(404, { 'content-type': 'application/json' }); res.end('{"ok":false}'); }
+    }).catch(() => { try { res.writeHead(500).end(); } catch { /* already sent */ } });
+  });
+  control = createWebControl({
+    relay: { config: relayConfig, status: () => ({ consent: true }) },
+    driver: { status: () => ({ running: true, siteId: 'deepseek' }) },
+    logger: { log() {}, warn() {} },
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', async () => {
+      const port = server.address().port;
+      const post = async (path, body) => {
+        const r = await fetch(`http://127.0.0.1:${port}${path}`, {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body ?? {}),
+        });
+        return { status: r.status, json: await r.json() };
+      };
+      const get = async (path) => {
+        const r = await fetch(`http://127.0.0.1:${port}${path}`);
+        return { status: r.status, json: await r.json() };
+      };
+      try { await fn({ post, get }); } finally { server.close(); resolve(); }
+    });
+  });
+}
+
+test('POST login 等待真实结果并按站点路由（不再是 fire-and-forget）', async () => {
+  const seen = [];
+  await withServer({
+    loginAndReport: async (siteId) => {
+      seen.push(siteId);
+      return { ok: true, siteId, siteName: 'Z.ai', loggedIn: true, alreadyLoggedIn: false, ms: 1234, note: '登录完成，已切回无头运行' };
+    },
+    driverStatus: () => ({ siteId: 'deepseek', sites: [] }),
+  }, async ({ post }) => {
+    const r = await post('/__webcode/login', { siteId: 'zai', wait: true });
+    assert.equal(r.status, 200);
+    assert.deepEqual(seen, ['zai'], '登录请求必须路由到所选站点');
+    assert.equal(r.json.ok, true);
+    assert.equal(r.json.loggedIn, true);
+    assert.equal(r.json.siteId, 'zai');
+    assert.ok(r.json.message.includes('登录完成'));
+  });
+});
+
+test('POST login 失败时把原因带回界面（ok=false + message）', async () => {
+  await withServer({
+    loginAndReport: async (siteId) => ({ ok: false, siteId, error: 'login wait timed out', ms: 300001 }),
+    driverStatus: () => ({ siteId: 'deepseek', sites: [] }),
+  }, async ({ post }) => {
+    const r = await post('/__webcode/login', { siteId: 'deepseek' });
+    assert.equal(r.json.ok, false);
+    assert.ok(r.json.message.includes('timed out'), '失败原因必须回传，而不是只写控制台');
+  });
+});
+
+test('GET login-sites 列出全部站点（含 z.ai）且不启动浏览器', async () => {
+  await withServer({
+    driverStatus: () => ({ siteId: 'deepseek', sites: [{ siteId: 'glm', siteName: '智谱清言 (GLM)', initialized: true, loggedIn: true, loginState: 'ready', lastLogin: { at: 1 } }] }),
+  }, async ({ get }) => {
+    const r = await get('/__webcode/login-sites');
+    assert.equal(r.status, 200);
+    const ids = r.json.sites.map(s => s.siteId);
+    assert.ok(ids.includes('zai'), '站点清单必须含 z.ai');
+    assert.ok(ids.includes('deepseek') && ids.includes('gemini'));
+    const glm = r.json.sites.find(s => s.siteId === 'glm');
+    assert.equal(glm.loggedIn, true);
+    assert.equal(glm.origin, 'https://chatglm.cn');
+    // 只读状态查询，不得触发 connect / 启动浏览器
+    const zai = r.json.sites.find(s => s.siteId === 'zai');
+    assert.equal(zai.initialized, false);
+    assert.equal(zai.loggedIn, null);
+  });
+});
+
+
+

@@ -149,6 +149,14 @@ export function createBrowserDriver(options = {}) {
   let transitioning = false;
   let active = null;
   let lastFinished = null;
+  // 登录流程的可观测状态：控制面 POST login 现在会等它结束并把结果带回去，
+  // 设置页因此能显示「登录中… / 已登录 / 失败原因」，而不是永远显示「登录」。
+  let loginState = 'idle';   // idle | launching | waiting-for-login | already-logged-in | ready | error
+  let lastLogin = null;      // { ok, at, ms, error, message }
+  // 「部分流」自愈次数：网页没送 FINISHED 但正文已经解出来的轮次。UI 用它区分
+  // 「网页掉流但内容保住了」和「真的失败了」。
+  let recoveredTurns = 0;
+  let lastRecovered = null;  // { at, reason, status, chars }
   let Decoders = null;
   let loggedIn = null;
   let selectedModel = null;
@@ -203,6 +211,10 @@ export function createBrowserDriver(options = {}) {
       selectedModel,
       siteId,
       profileDir: cfg.profileDir,
+      loginState,
+      lastLogin,
+      recoveredTurns,
+      lastRecovered,
       lastTurn,
       lastRate: deriveLastRate(lastFinished, selectedModel),
       conversations: Object.fromEntries(conversations),
@@ -284,9 +296,30 @@ export function createBrowserDriver(options = {}) {
     return true;
   }
 
+  /** 持久 profile 的 Chromium 单实例锁文件。浏览器被强杀 / 上次启动中途失败时
+   *  这些文件会留下来，下一次 launchPersistentContext 直接抛
+   *  「ProcessSingleton」类错误——表现为「退出过一次之后不管哪里都无法登录」。
+   *  只有在本次进程确认没有活着的 ctx 时才清理（有 ctx 说明锁是真被持有的）。 */
+  const SINGLETON_FILES = ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'lockfile'];
+  function clearStaleProfileLocks() {
+    if (ctx) return [];
+    const removed = [];
+    for (const name of SINGLETON_FILES) {
+      const p = path.join(cfg.profileDir, name);
+      try {
+        if (!fs.existsSync(p)) continue;
+        fs.rmSync(p, { force: true });
+        removed.push(name);
+      } catch (err) { warn('stale lock remove failed', name, err?.message); }
+    }
+    if (removed.length) warn('cleared stale profile locks:', removed.join(', '));
+    return removed;
+  }
+
   async function launch({ headless } = {}) {
     if (!cfg.executablePath) throw new Error('system Edge not found — install Edge or set executablePath');
     fs.mkdirSync(cfg.profileDir, { recursive: true });
+    clearStaleProfileLocks();
     ctx = await chromium.launchPersistentContext(cfg.profileDir, {
       executablePath: cfg.executablePath,
       headless: headless ?? cfg.headless,
@@ -560,8 +593,19 @@ export function createBrowserDriver(options = {}) {
           throw err;
         }
       }
-      if (!result.complete) throw new Error('web capture ended incomplete: ' + (result.reason || 'unknown'));
+      if (!result.complete && !result.partial) throw new Error('web capture ended incomplete: ' + (result.reason || 'unknown'));
       if (!result.text?.trim()) throw new Error('empty response from web AI');
+      if (!result.complete) {
+        // 部分流：正文/思考/图片已拿到，但网页没发 FINISHED/close。把已有内容当
+        // 本轮结果交出去（上层会解析工具协议、执行、回填），下一轮再让模型续写。
+        // 旧实现直接抛错——模型已输出的正文与完整工具调用被整段丢弃，界面上就是
+        // 「跑到一半突然停止」，且工具循环再也不会继续。
+        recoveredTurns += 1;
+        lastRecovered = { at: Date.now(), reason: result.reason || 'unknown', status: result.status || null, chars: String(result.text || '').length };
+        warn(`partial web stream accepted (${result.reason}, status=${result.status || 'n/a'}, `
+          + `${String(result.text || '').length} chars, ${(result.images || []).length} image(s)) — `
+          + 'content preserved; the next turn will continue from here');
+      }
       lastTurn = { sessionId: sessionIdFromUrl(page.url()), url: safeUrl(page.url()), at: Date.now() };
       const endAt = performance.now();
       const fin = lastFinished;
@@ -912,20 +956,53 @@ export function createBrowserDriver(options = {}) {
     }, key);
   }
 
+  /**
+   * 一次性登录（有头 Edge → 完成后切回无头）。
+   *
+   * 返回 { ok, loggedIn, siteId, alreadyLoggedIn, ms, note } —— 旧实现只
+   * fire-and-forget，控制面立刻回「登录窗口打开中」，真实失败全被吞掉；用户看到
+   * 的现象是「点了登录没反应，之后哪儿都登不上」。现在把结果带回控制面。
+   *
+   * @param {{onState?: (s: string) => void}} [opts]
+   */
   async function openLogin({ onState } = {}) {
     if (busy || transitioning) throw new Error('driver busy with a web turn — login refused');
     transitioning = true;
+    const t0 = Date.now();
+    const report = (s) => { loginState = s; try { onState?.(s); } catch {} };
+    report('idle');
     try {
+      // 已经登录过的 profile：无需再走「打开窗口 + 人工登录」，直接核验一次。
+      // （换账户时用户会先点网页里的退出，此时输入框消失，仍会正常进入登录流程。）
+      if (ctx && page && !page.isClosed?.()) {
+        try {
+          const stillIn = await page.locator(SEL.input).count() > 0;
+          if (stillIn) {
+            loggedIn = true;
+            report('already-logged-in');
+            lastLogin = { ok: true, at: Date.now(), ms: Date.now() - t0, alreadyLoggedIn: true, message: '登录态仍有效，无需重新登录' };
+            return { ok: true, loggedIn: true, alreadyLoggedIn: true, siteId, ms: lastLogin.ms, note: lastLogin.message };
+          }
+        } catch { /* fall through to the headed login flow */ }
+      }
       try { if (ctx) await ctx.close(); } catch {}
       ctx = null; page = null;
       log('opening headed window for login');
-      await launch({ headless: false });
+      report('launching');
+      await launch({ headless: false }).catch(async (err) => {
+        // 上一次浏览器被强杀留下的单实例锁：清掉再试一次（clearStaleProfileLocks
+        // 在 ctx 为空时才动手，这里 ctx 已置空，是安全的）。
+        warn('headed launch failed, retrying after lock cleanup:', err?.message);
+        await new Promise((r) => setTimeout(r, 800));
+        ctx = null; page = null;
+        await launch({ headless: false });
+      });
       try { await page.goto(cfg.site, { waitUntil: 'domcontentloaded', timeout: 45_000 }); } catch {}
-      onState?.('waiting-for-login');
-      const t0 = Date.now();
+      report('waiting-for-login');
+      const t1 = Date.now();
       for (;;) {
         await new Promise((r) => setTimeout(r, 1500));
-        if (Date.now() - t0 > cfg.loginTimeoutMs) throw new Error('login wait timed out');
+        if (Date.now() - t1 > cfg.loginTimeoutMs) throw new Error('login wait timed out');
         try {
           if (page.isClosed?.()) throw new Error('login window was closed before login completed');
           const u = new URL(page.url());
@@ -941,7 +1018,14 @@ export function createBrowserDriver(options = {}) {
       ctx = null; page = null;
       await launch({ headless: true });
       await gotoFreshChat();
-      onState?.('ready');
+      loggedIn = true;
+      report('ready');
+      lastLogin = { ok: true, at: Date.now(), ms: Date.now() - t0, alreadyLoggedIn: false, message: '登录完成，已切回无头运行' };
+      return { ok: true, loggedIn: true, alreadyLoggedIn: false, siteId, ms: lastLogin.ms, note: lastLogin.message };
+    } catch (err) {
+      report('error');
+      lastLogin = { ok: false, at: Date.now(), ms: Date.now() - t0, error: String(err?.message || err) };
+      throw err;
     } finally {
       transitioning = false;
     }

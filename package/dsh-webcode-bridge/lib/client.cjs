@@ -25,7 +25,7 @@ window.__ModuleLoader__.load({
 
     const MODEL_NAMES = { deepseek: 'DeepSeek' };
     // 站点显示名 + 多站点模型目录（打开时从 /__webcode/models 拉取）
-    const SITE_NAMES = { deepseek: 'DeepSeek', glm: '智谱清言', chatgpt: 'ChatGPT', kimi: 'Kimi', qwen: '通义千问', doubao: '豆包', grok: 'Grok', claude: 'Claude', gemini: 'Gemini' };
+    const SITE_NAMES = { deepseek: 'DeepSeek', glm: '智谱清言', chatgpt: 'ChatGPT', kimi: 'Kimi', qwen: '通义千问', doubao: '豆包', grok: 'Grok', claude: 'Claude', gemini: 'Gemini', zai: 'Z.ai (GLM 海外版)' };
 
     function Metrics({ metrics }) {
       if (!metrics) return h('span', null, '尚无调用记录');
@@ -170,6 +170,78 @@ window.__ModuleLoader__.load({
           h('button', { disabled: pending, onClick: () => onLogin(s.siteId) }, s.loggedIn === true ? '更换账户' : '登录'))));
     }
 
+    /**
+     * 「登录网站」：显式选择要登录/换账户的站点，而不是只认 DeepSeek。
+     *
+     * 旧界面只有一行「账户」写死 deepseek，其余站点藏在下面的状态列表里——用户
+     * 退出一次之后想重新登任何站点都找不到入口。这里给一个站点选择器 + 明确的
+     * 结果回执（成功/失败/超时都显示，不再是 fire-and-forget）。
+     */
+    function LoginSites({ sites, refresh }) {
+      const [siteId, setSiteId] = React.useState('deepseek');
+      const [busy, setBusy] = React.useState(false);
+      const [result, setResult] = React.useState(null);
+      const [error, setError] = React.useState('');
+      // 站点清单以控制面为准（providers.js 是唯一真源）；状态回退用 status.sites。
+      const list = (sites && sites.length ? sites : [])
+        .map(s => ({
+          siteId: s.siteId,
+          name: SITE_NAMES[s.siteId] || s.siteName || s.siteId,
+          loggedIn: s.loggedIn,
+          loginState: s.loginState,
+          busy: s.busy,
+          origin: s.origin,
+        }))
+        .sort((a, b) => (a.siteId === 'deepseek' ? -1 : b.siteId === 'deepseek' ? 1 : a.name.localeCompare(b.name)));
+      const current = list.find(s => s.siteId === siteId) || null;
+      async function doLogin() {
+        setBusy(true); setError(''); setResult(null);
+        try {
+          // 后端要打开有头 Edge 等人工登录，超时必须放宽（等待上限 300s）。
+          const r = await api('login', { siteId, wait: true, timeoutMs: 300000 }, 330000);
+          setResult({
+            ok: r.loggedIn === true,
+            siteId: r.siteId || siteId,
+            text: (r.alreadyLoggedIn ? '已登录，无需重复登录' : (r.message || '登录完成'))
+              + (r.ms ? '（' + Math.round(r.ms / 1000) + 's）' : ''),
+          });
+          await refresh?.();
+        } catch (e) { setError(e.message); }
+        finally { setBusy(false); }
+      }
+      async function openWindow() {
+        setBusy(true); setError('');
+        try { await api('window', { siteId, action: 'open' }, 120000); await refresh?.(); }
+        catch (e) { setError(e.message); }
+        finally { setBusy(false); }
+      }
+      const options = list.length
+        ? list.map(s => h('option', { key: s.siteId, value: s.siteId },
+            s.name + (s.loggedIn === true ? ' · 已登录' : s.loggedIn === false ? ' · 未登录' : '')))
+        : [h('option', { key: 'deepseek', value: 'deepseek' }, 'DeepSeek')];
+      return h('div', { className: 'hwb-login-sites' },
+        h('div', { className: 'hwb-row' },
+          h('span', { className: 'hwb-row-label' }, '登录网站'),
+          h('div', { className: 'hwb-row-main' },
+            h('select', {
+              className: 'hwb-model-select', value: siteId, disabled: busy,
+              onChange: e => { setSiteId(e.target.value); setResult(null); setError(''); },
+            }, options),
+            h('button', { disabled: busy || !siteId, onClick: doLogin },
+              busy ? '等待登录完成…' : (current?.loggedIn === true ? '更换账户' : '登录所选网站')),
+            h('button', {
+              disabled: busy,
+              title: '在独立窗口中打开该站点真实网页（可登录、可聊天，与桥共用登录态）',
+              onClick: openWindow,
+            }, '独立窗口打开'))),
+        h('p', { className: 'hwb-hint indent' },
+          '登录会打开一个真实 Edge 窗口；请在该窗口完成一次性登录（扫码/验证码/密码均可），'
+          + '检测到已登录后会自动切回无头运行。登录态按站点分开保存在各自 profile 里，互不串号。'),
+        busy ? h('p', { className: 'hwb-hint indent' }, '正在等待 ' + (current?.name || siteId) + ' 登录完成（最长 5 分钟）…') : null,
+        result ? h('p', { className: 'hwb-hint indent', role: 'status' },
+          (result.ok ? '✓ ' : '✗ ') + (SITE_NAMES[result.siteId] || result.siteId) + '：' + result.text) : null,
+        error ? h('p', { role: 'alert', className: 'hwb-hint indent' }, '登录失败：' + error) : null);
+    }
     function Settings() {
       const [status, setStatus] = React.useState(null);
       const [error, setError] = React.useState('');
@@ -265,9 +337,9 @@ window.__ModuleLoader__.load({
                 : '首次使用时请勾选授权一次；关闭后所有网页调用都会被拒绝。'))),
           h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '账户'),
             h('div', { className: 'hwb-row-main' },
-              h('span', null, driver?.loggedIn ? 'DeepSeek 网页账号已登录（本地浏览器配置）' : driver?.needLogin ? '未登录（需要先登录一次）' : '待检查'),
-              h('button', { disabled: pending || relay?.busy, onClick: () => action('login', { siteId: 'deepseek' }) },
-                driver?.loggedIn ? '更换账户' : '登录账户（首次授权）')))),
+              h('span', null, driver?.loggedIn ? 'DeepSeek 网页账号已登录（本地浏览器配置）' : driver?.needLogin ? '未登录（需要先登录一次）' : '待检查'))),
+          // 「登录网站」：可选任意内容服务站点登录/换账户（不再写死 DeepSeek）
+          h(LoginSites, { sites, refresh: () => api('status').then(s => setStatus(s)).catch(() => {}) })),
         h('div', { className: 'hwb-card' },
           h('h3', { className: 'hwb-group first' }, '内容服务站点'),
           h(SiteRows, { sites, pending, onLogin: siteId => action('login', { siteId }) })),
@@ -291,6 +363,7 @@ window.__ModuleLoader__.load({
         const [siteId, setSiteId] = React.useState('deepseek');
         const [frameSrc, setFrameSrc] = React.useState('');
         const [frameReady, setFrameReady] = React.useState(false);
+        const [frameStatus, setFrameStatus] = React.useState(null);
         const [connectError, setConnectError] = React.useState('');
         const [winBusy, setWinBusy] = React.useState(false);
         const [winOpen, setWinOpen] = React.useState(null); // siteId whose window is open
@@ -308,6 +381,7 @@ window.__ModuleLoader__.load({
         React.useEffect(() => {
           let alive = true;
           setFrameReady(false);
+          setFrameStatus(null);
           api('connect', { siteId }, 90000).then(() => {
             if (alive) setFrameSrc(browserSrc + '__webcode/site/' + siteId + '/?ts=' + Date.now());
           }).catch(e => { if (alive) setConnectError(e.message); });
@@ -328,6 +402,9 @@ window.__ModuleLoader__.load({
           setConnectError(''); setFrameReady(false);
           setFrameSrc(browserSrc + '__webcode/site/' + siteId + '/?ts=' + Date.now());
         }
+        // 镜像侧返回非 2xx（如站点 CDN 拒绝反向代理、站点不可达）时，iframe 里会是
+        // 一张说明页；同时在不遮挡页面的位置给一条能直接照做的提示。
+        const frameBlocked = Number(frameStatus) >= 400;
         return h('div', { className: 'hwb-conversation' },
           h('div', { className: 'hwb-sitebar', role: 'tablist', 'aria-label': '内容服务站点' },
             h('div', { className: 'hwb-sitebar-tabs' },
@@ -347,13 +424,24 @@ window.__ModuleLoader__.load({
           connectError && h('div', { className: 'hwb-error', role: 'status' },
             '浏览器视图未能连接：' + connectError + ' ',
             h('button', { className: 'hwb-retry', onClick: reloadFrame }, '重试')),
+          frameBlocked && h('div', { className: 'hwb-error', role: 'status' },
+            SITE_NAMES[siteId] + ' 拒绝了右栏镜像请求（HTTP ' + frameStatus + '）：该站点前面的 CDN / 风控层'
+            + '把来自本机脚本的请求判成了机器人，与登录态无关。',
+            h('button', { className: 'hwb-retry', onClick: toggleWindow }, '改用独立窗口打开'),
+            h('button', { className: 'hwb-retry', onClick: reloadFrame }, '重试')),
           frameSrc && h('iframe', {
             className: 'hwb-browser-frame',
             src: frameSrc,
             title: SITE_NAMES[siteId] + ' 网页对话',
             referrerPolicy: 'no-referrer',
             sandbox: 'allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads',
-            onLoad: () => { setFrameReady(true); setConnectError(''); },
+            onLoad: (e) => {
+              setFrameReady(true); setConnectError('');
+              // 同源 iframe：能直接读到镜像返回的状态码，用它区分「站点应用」
+              // 和「上游拒绝」两种页面（后者镜像会换成一张说明页 + 502）。
+              try { setFrameStatus(Number(e?.target?.contentWindow?.location?.status) || null); }
+              catch { setFrameStatus(null); }
+            },
             onError: () => { setFrameReady(false); setConnectError('网页代理加载失败，请确认中继服务已启动'); },
           }),
           frameSrc && !frameReady && !connectError && h('div', { className: 'hwb-frame-status' }, '正在加载 ' + SITE_NAMES[siteId] + ' 网页…（加载后可直接在右侧操作，生成任务由网页原生执行）'));
@@ -361,7 +449,7 @@ window.__ModuleLoader__.load({
 
     function apply(ctx) {
       const style = document.createElement('style');
-      style.textContent = '.hwb-settings{max-width:760px;padding:20px;color:inherit;display:flex;flex-direction:column;gap:14px}.hwb-settings h2{font-size:20px;letter-spacing:0;margin:0 0 2px}.hwb-lead{font-size:12px;opacity:.72;margin:0;line-height:1.6}.hwb-card{border:1px solid #8884;border-radius:10px;padding:2px 16px 8px;background:transparent}.hwb-group{font-size:12px;font-weight:600;opacity:.72;margin:12px 0 0}.hwb-group.first{margin-top:12px}.hwb-row{display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap;padding:11px 0;border-bottom:1px solid #8883}.hwb-row:last-child{border-bottom:0}.hwb-row-label{flex:0 0 128px;min-width:96px;font-size:13px;padding-top:2px}.hwb-row-main{flex:1;min-width:240px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}.hwb-row button{padding:5px 12px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;cursor:pointer}.hwb-consent{display:flex;align-items:center;gap:8px}.hwb-hint{font-size:12px;opacity:.72;margin:4px 0 0;line-height:1.5}.hwb-hint.indent{margin:6px 0 8px 128px}.hwb-model-select{min-width:220px;max-width:340px;padding:6px 8px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit}.hwb-sites{display:flex;flex-direction:column}.hwb-site-row{display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid #8883}.hwb-site-row:last-child{border-bottom:0}.hwb-site-row.busy{opacity:.55}.hwb-site-name{flex:1;font-size:13px}.hwb-site-state{font-size:12px;padding:1px 8px;border-radius:10px;border:1px solid #8885}.hwb-site-state.ok{color:#2e7d32;border-color:#2e7d3280}.hwb-site-state.bad{color:#93443e;border-color:#93443e80}.hwb-site-row button{padding:4px 12px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;cursor:pointer}.hwb-metrics{display:flex;flex-direction:column;gap:2px;min-width:220px}.hwb-metrics-head{font-size:12px;margin-bottom:4px}.hwb-metrics-row{display:flex;justify-content:space-between;gap:16px;font-variant-numeric:tabular-nums}.hwb-badge{display:inline-block;padding:0 6px;border-radius:4px;font-size:11px;border:1px solid #8885;margin-right:8px}.hwb-badge.measured{color:#2e7d32;border-color:#2e7d3280}.hwb-preset{padding:12px 0;border-bottom:1px solid #8883}.hwb-preset:last-child{border-bottom:0}.hwb-preset summary{cursor:pointer;font-size:13px}.hwb-import{display:flex;flex-direction:column;gap:8px}.hwb-import select{padding:6px 8px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit}.hwb-import-row{display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid #8883}.hwb-import-title{flex:1;font-size:13px}.hwb-prompt-input{width:100%;min-height:80px;padding:8px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;font:inherit;line-height:1.5;resize:vertical}.hwb-preset pre{max-height:280px;overflow:auto;font-size:12px;line-height:1.5;padding:10px;border:1px solid #8883;border-radius:6px;white-space:pre-wrap;word-break:break-word}.hwb-conversation{height:100%;width:100%;min-height:0;overflow:hidden;background:#fff;position:relative;display:flex;flex-direction:column}.hwb-retry{padding:4px 10px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;cursor:pointer}.hwb-error{padding:8px;font-size:12px;color:#93443e;background:#fff}.hwb-sitebar{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid #8883;background:var(--ds-bg,#fff)}.hwb-sitebar-tabs{display:flex;gap:6px;flex:1;min-width:0;overflow-x:auto;scrollbar-width:thin;padding-bottom:1px}.hwb-sitebar button{padding:3px 10px;border:1px solid #8885;border-radius:999px;background:transparent;color:inherit;cursor:pointer;font-size:12px;white-space:nowrap;transition:background .15s,color .15s,border-color .15s}.hwb-sitebar button:hover{border-color:#8888;background:#8881}.hwb-sitebar button.active{background:#2563eb;color:#fff;border-color:#2563eb}.hwb-icon-btn{flex:0 0 auto;align-self:center;width:26px;height:26px;display:grid;place-items:center;padding:0;border:1px solid #8885;border-radius:7px;background:transparent;color:inherit;cursor:pointer;font-size:14px;line-height:1}.hwb-icon-btn:hover{background:#8882}.hwb-win-btn{flex:0 0 auto;align-self:center;padding:4px 10px;border:1px solid #2563eb80;border-radius:8px;background:#2563eb0d;color:#2563eb;cursor:pointer;font-size:12px;white-space:nowrap;transition:background .15s}.hwb-win-btn:hover{background:#2563eb1a}.hwb-win-btn.open{background:#2563eb;color:#fff}.hwb-win-btn:disabled{opacity:.5;cursor:default}.hwb-sitebar-tabs::-webkit-scrollbar{height:4px}.hwb-sitebar-tabs::-webkit-scrollbar-thumb{background:#8884;border-radius:2px}to{transform:translateX(0);opacity:1}}to{transform:translateX(24px);opacity:0}}';
+      style.textContent = '.hwb-settings{max-width:760px;padding:20px;color:inherit;display:flex;flex-direction:column;gap:14px}.hwb-settings h2{font-size:20px;letter-spacing:0;margin:0 0 2px}.hwb-lead{font-size:12px;opacity:.72;margin:0;line-height:1.6}.hwb-card{border:1px solid #8884;border-radius:10px;padding:2px 16px 8px;background:transparent}.hwb-group{font-size:12px;font-weight:600;opacity:.72;margin:12px 0 0}.hwb-group.first{margin-top:12px}.hwb-row{display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap;padding:11px 0;border-bottom:1px solid #8883}.hwb-row:last-child{border-bottom:0}.hwb-row-label{flex:0 0 128px;min-width:96px;font-size:13px;padding-top:2px}.hwb-row-main{flex:1;min-width:240px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}.hwb-row button{padding:5px 12px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;cursor:pointer}.hwb-consent{display:flex;align-items:center;gap:8px}.hwb-hint{font-size:12px;opacity:.72;margin:4px 0 0;line-height:1.5}.hwb-hint.indent{margin:6px 0 8px 128px}.hwb-model-select{min-width:220px;max-width:340px;padding:6px 8px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit}.hwb-sites{display:flex;flex-direction:column}.hwb-site-row{display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid #8883}.hwb-site-row:last-child{border-bottom:0}.hwb-site-row.busy{opacity:.55}.hwb-site-name{flex:1;font-size:13px}.hwb-site-state{font-size:12px;padding:1px 8px;border-radius:10px;border:1px solid #8885}.hwb-site-state.ok{color:#2e7d32;border-color:#2e7d3280}.hwb-site-state.bad{color:#93443e;border-color:#93443e80}.hwb-site-row button{padding:4px 12px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;cursor:pointer}.hwb-login-sites{display:flex;flex-direction:column;border-top:1px solid #8883;margin-top:4px}.hwb-login-sites .hwb-row{border-bottom:0}.hwb-metrics{display:flex;flex-direction:column;gap:2px;min-width:220px}.hwb-metrics-head{font-size:12px;margin-bottom:4px}.hwb-metrics-row{display:flex;justify-content:space-between;gap:16px;font-variant-numeric:tabular-nums}.hwb-badge{display:inline-block;padding:0 6px;border-radius:4px;font-size:11px;border:1px solid #8885;margin-right:8px}.hwb-badge.measured{color:#2e7d32;border-color:#2e7d3280}.hwb-preset{padding:12px 0;border-bottom:1px solid #8883}.hwb-preset:last-child{border-bottom:0}.hwb-preset summary{cursor:pointer;font-size:13px}.hwb-import{display:flex;flex-direction:column;gap:8px}.hwb-import select{padding:6px 8px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit}.hwb-import-row{display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid #8883}.hwb-import-title{flex:1;font-size:13px}.hwb-prompt-input{width:100%;min-height:80px;padding:8px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;font:inherit;line-height:1.5;resize:vertical}.hwb-preset pre{max-height:280px;overflow:auto;font-size:12px;line-height:1.5;padding:10px;border:1px solid #8883;border-radius:6px;white-space:pre-wrap;word-break:break-word}.hwb-conversation{height:100%;width:100%;min-height:0;overflow:hidden;background:#fff;position:relative;display:flex;flex-direction:column}.hwb-retry{padding:4px 10px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;cursor:pointer}.hwb-error{padding:8px;font-size:12px;color:#93443e;background:#fff}.hwb-sitebar{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid #8883;background:var(--ds-bg,#fff)}.hwb-sitebar-tabs{display:flex;gap:6px;flex:1;min-width:0;overflow-x:auto;scrollbar-width:thin;padding-bottom:1px}.hwb-sitebar button{padding:3px 10px;border:1px solid #8885;border-radius:999px;background:transparent;color:inherit;cursor:pointer;font-size:12px;white-space:nowrap;transition:background .15s,color .15s,border-color .15s}.hwb-sitebar button:hover{border-color:#8888;background:#8881}.hwb-sitebar button.active{background:#2563eb;color:#fff;border-color:#2563eb}.hwb-icon-btn{flex:0 0 auto;align-self:center;width:26px;height:26px;display:grid;place-items:center;padding:0;border:1px solid #8885;border-radius:7px;background:transparent;color:inherit;cursor:pointer;font-size:14px;line-height:1}.hwb-icon-btn:hover{background:#8882}.hwb-win-btn{flex:0 0 auto;align-self:center;padding:4px 10px;border:1px solid #2563eb80;border-radius:8px;background:#2563eb0d;color:#2563eb;cursor:pointer;font-size:12px;white-space:nowrap;transition:background .15s}.hwb-win-btn:hover{background:#2563eb1a}.hwb-win-btn.open{background:#2563eb;color:#fff}.hwb-win-btn:disabled{opacity:.5;cursor:default}.hwb-sitebar-tabs::-webkit-scrollbar{height:4px}.hwb-sitebar-tabs::-webkit-scrollbar-thumb{background:#8884;border-radius:2px}to{transform:translateX(0);opacity:1}}to{transform:translateX(24px);opacity:0}}';
       document.head.appendChild(style);
       const browserStyle = document.createElement('style');
       browserStyle.textContent = '.hwb-browser-frame{display:block;width:100%;height:100%;min-height:0;border:0;background:#fff}.hwb-frame-status{position:absolute;inset:0;display:grid;place-items:center;background:#fff;color:#7a8494;font-size:12px;pointer-events:none}';

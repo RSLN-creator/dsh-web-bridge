@@ -1,10 +1,42 @@
 # Harness Web Bridge 路线
 
-## 当前版本 0.9.4
+## 当前版本 0.9.5
 
-0.9.4（协议文本不再进助手文本：截在正确的层）：
+0.9.5（真机故障取证后的五修 + z.ai）：本机 13 份真实会话转录逐事件统计后定位
+（取证全文见 [故障取证](doc/incident-2026-09-11.md)）：
 
-真机会话里助手消息存的是整段协议原文（正文里出现 `<tool_call>` / 全角
+1. **「跑到一半突然停止」= 部分流被整段丢弃。** 12 次 `turn/end` 的 error 全是
+   `web capture ended incomplete`：网页没发 `FINISHED`/`close` 就断流，而解码器
+   旧判据要求两帧齐全，于是已经解出的正文与完整工具调用被一起扔掉。现在解码器
+   把已解出内容带出来并标 `partial`，驱动层接受这一轮（记 `recoveredTurns`），
+   只有真的什么都没有或结构坏掉才失败。
+2. **工具调用失败全是参数形状漂移**（64 次报错无一例外）：`"offset" must be a
+   number`、`"questions" must be an array`、缺 `description`/`command`。另加了
+   `TOOL_UNKNOWN`：网页调了本会话不存在的工具（真机调用过未登记的 `write`）时，
+   旧实现静默过滤 → 空回复被当收束 → 任务从此不动；现在报错并把可用工具名带回
+   会话，下一轮可自纠。
+3. **「退出一次后哪儿都登不上」= 写死 deepseek 的入口 + fire-and-forget 登录 +
+   持久 profile 残留单实例锁。** 登录现在返回真实结果、控制面默认等待、
+   启动前清 `SingletonLock`/`SingletonCookie` 等残留锁（仅在确认无活着的 ctx 时），
+   有头启动失败自动清锁重试一次；设置页新增「登录网站」站点选择器。
+4. **「上下文不会动」= 游标指纹认了工具描述的措辞。** 指纹改为只锁工具**名集合**，
+   描述/schema 变化不再顶掉游标、不再每轮重建首轮；`contextWindow` 从一律 1e6
+   收敛为按站点保守值（DeepSeek 128k、其余 64k，可覆盖），让 DSH 的压缩能触发。
+5. **「预览除 deepseek 外都能开」= 镜像被 CloudFront 判成机器人。** 实测
+   `chat.deepseek.com` 经反代返回 403 `Request blocked…`（glm/kimi/qwen/grok/zai
+   全 200）。镜像补常规浏览器指纹头、不再剥 `sec-fetch-*`，识别 CDN/WAF 错误页并
+   换成「为什么 + 改用独立窗口」的说明页；站内 302（豆包 `/` → `/chat/`）改写为
+   带镜像前缀，不再落在命名空间外变空壳。
+
+新增站点 **z.ai**（`https://chat.z.ai`，OpenAI 兼容 SSE，静态域
+`z-cdn.chatglm.cn`，别名 `zai`/`z-ai`/`chat.z.ai`），实测镜像 200。
+
+回归：本地 8 个测试文件全绿（`node test/<f>.test.mjs` 逐个跑；`pnpm test` 在本
+沙箱会因 pnpm 依赖自检无 TTY 而中止，与代码无关）。
+
+## 0.9.4
+
+0.9.4（协议文本不再进助手文本：截在正确的层）：真机会话里助手消息存的是整段协议原文（正文里出现 `<tool_call>` / 全角
 DSML 标记加 JSON），既占屏幕又打断阅读。真因不在渲染，而在**流式边界探测与解析器
 各认一套形态**：
 

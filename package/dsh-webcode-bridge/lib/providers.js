@@ -121,6 +121,23 @@ export const CLAUDE = site({
   ],
 });
 
+// z.ai（智谱 GLM 的海外站点）：与 chatglm.cn 同源模型、不同域与不同前端。
+// 浏览器端为 OpenAI 兼容 SSE（/api/chat/completions），故复用 'openai-sse'
+// 解码器；选择器用「特征选择器」而不是站点版本 class（改版频繁，特征更稳）。
+export const ZAI = site({
+  id: 'zai', name: 'Z.ai (GLM 海外版)', origin: 'https://chat.z.ai',
+  // 静态资源域：z.ai 的前端包/字体放在独立域上，跨域 + 非法 ACAO 会被浏览器
+  // 拒绝执行（与 DeepSeek 同一类问题）。纳入同源转发（lib/mirror.js）。
+  staticOrigins: ['https://z-cdn.chatglm.cn'],
+  completionPaths: ['/api/chat/completions', '/api/v1/chat/completions'],
+  input: 'textarea#chat-input, textarea[placeholder], textarea',
+  attachSelector: "input[type='file']",
+  decoder: 'openai-sse', stream: true, experimental: true,
+  models: [
+    { id: 'auto', name: 'Z.ai · 网页当前模型', labels: ['GLM', 'Z.ai'] },
+  ],
+});
+
 // Gemini 的 RPC 流不是稳定契约 — 用 DOM 终态抓取兜底（decoder: 'dom'）。
 export const GEMINI = site({
   id: 'gemini', name: 'Gemini (Google)', origin: 'https://gemini.google.com',
@@ -134,7 +151,7 @@ export const GEMINI = site({
 });
 
 /** 全部内容服务（顺序即 OpenAI /models 列表顺序）。 */
-export const SITES = Object.freeze([DEEPSEEK, GLM, CHATGPT, KIMI, QWEN, DOUBAO, GROK, CLAUDE, GEMINI]);
+export const SITES = Object.freeze([DEEPSEEK, GLM, CHATGPT, KIMI, QWEN, DOUBAO, GROK, CLAUDE, GEMINI, ZAI]);
 
 /** 全站点模型目录（'site:model' 限定 id + 能力元数据）——DSH 模型选择器与
  *  OpenAI /v1/models 共用这一份，保证两边模型列表一致。 */
@@ -170,6 +187,7 @@ const ALIASES = Object.freeze({
   glm: 'glm:auto', 'glm-4.5': 'glm:auto', 'glm-4.6': 'glm:auto',
   kimi: 'kimi:auto', qwen: 'qwen:auto', doubao: 'doubao:auto',
   grok: 'grok:auto', claude: 'claude:auto', gemini: 'gemini:auto',
+  zai: 'zai:auto', 'z-ai': 'zai:auto', 'chat.z.ai': 'zai:auto', 'glm-zai': 'zai:auto',
 });
 
 export const DEFAULT_MODEL_ID = 'deepseek-web';

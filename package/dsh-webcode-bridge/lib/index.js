@@ -41,6 +41,13 @@ const DEFAULTS = {
   // 旧值 300s 只比单轮 240s 多 60s，排在第二位的请求几乎必然「刚开始跑就超时」，
   // 长任务里的并行分支会成片失败。900s 足够跨过 2-3 轮排队。
   queueTimeoutMs: 900_000,
+  // 登录（有头 Edge 人工登录）的等待上限。控制面 POST login 会等到这一步结束
+  // 才回结果，所以这里必须比驱动自身的浏览器启动留出余量。
+  loginTimeoutMs: 300_000,
+  // 每个站点向 DSH 声明的上下文窗口。网页 composer 的真实上限未知，声明过大
+  // 会让 DSH 的压缩永不触发（transcript 只增不减）；这里给保守值，越界时由
+  // PROMPT_TRUNCATED 回读校验报错而不是静默截断。
+  contextWindowBySite: { deepseek: 128_000 },
   site: 'https://chat.deepseek.com/',
   profileDir: path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 'webcode-edge-profile'),
   headless: true,
@@ -255,7 +262,14 @@ export function apply(ctx, config = {}) {
     async resolveModel(provider, model) {
       const m = resolveWebModel(model);
       if (!m) throw new Error('[webcode-bridge] 未知模型: ' + model);
-      return { provider, id: model || m.id, name: m.name, context: { contextWindow: 1_000_000 } };
+      // 网页 composer 的真实上限未知（历史欠账），声明 1_000_000 会让 DSH 的
+      // 上下文压缩永远不触发、transcript 只增不减——「上下文不动/被撑爆」的一
+      // 部分来源。按站点给一个诚实的保守值：DeepSeek 网页实测能稳定收下十万级
+      // 字符，按 CJK≈0.7 token/字符折算留出余量取 128k；其余站点 64k
+      // （每个都有 PROMPT_TRUNCATED 回读校验兜底，越界会报错而不是静默截断）。
+      const contextWindow = cfg.contextWindowBySite?.[m.siteId]
+        ?? (m.siteId === 'deepseek' ? 128_000 : 64_000);
+      return { provider, id: model || m.id, name: m.name, context: { contextWindow } };
     },
     async prepareCall(provider, model, signal) {
       const info = await this.resolveModel(provider, model, signal);
@@ -425,6 +439,18 @@ export function apply(ctx, config = {}) {
 
       const { calls } = parseAgentReply(finalText);
       const valid = calls.filter((c) => tools.some((t) => t?.name === c.name));
+      // 解析不出可执行调用、但原文明显是「想调用工具」：这是长跑里最隐蔽的一种
+      // 静默失败——模型自认为发了调用，桥这侧当作散文收束，任务从此不动，用户
+      // 只看到「跑着跑着就不动了」。宁可报一个能自解释的错（错误文本会作为这轮
+      // 结果回到会话里，下一轮模型据此改写形状），也不假装正常结束。
+      const unknownNames = calls.map((c) => c.name).filter((n) => !tools.some((t) => t?.name === n));
+      if (!valid.length && unknownNames.length) {
+        turn.invalidate?.();
+        const err = new Error(`TOOL_UNKNOWN: 网页发出了本会话没有的工具调用（${[...new Set(unknownNames)].join(', ')}）`
+          + `；本会话可用工具：${tools.map((t) => t?.name).filter(Boolean).join(', ')}`);
+        err.code = 'TOOL_UNKNOWN';
+        throw err;
+      }
       if (pendingCall && valid[0]?.name !== pendingCall.name) {
         turn.invalidate?.();
         throw new Error('TOOL_PROTOCOL_INVALID: 工具参数不完整或调用顺序不一致');
@@ -513,6 +539,7 @@ function imageMarkdown(images) {
     profileDir: cfg.profileDir,
     headless: cfg.headless !== false,
     requestTimeoutMs: cfg.requestTimeoutMs,
+    loginTimeoutMs: cfg.loginTimeoutMs,
     logger: console,
   });
 
@@ -530,6 +557,7 @@ function imageMarkdown(images) {
         profileDir: path.join(cfg.profileDir, 'sites', siteId),
         headless: cfg.headless !== false,
         requestTimeoutMs: cfg.requestTimeoutMs,
+        loginTimeoutMs: cfg.loginTimeoutMs,
         logger: console,
       }));
     }
@@ -629,13 +657,31 @@ function imageMarkdown(images) {
       // 聚合全部内容服务的登录/运行状态：未初始化的站点给占位（不启动浏览器）。
       const sites = SITES.map((st) => {
         const d = st.id === 'deepseek' ? driver : drivers.get(st.id);
-        if (!d) return { siteId: st.id, siteName: st.name, initialized: false, running: false, busy: false, loggedIn: null, needLogin: false, selectedModel: null, window: null };
+        if (!d) return { siteId: st.id, siteName: st.name, origin: st.origin, initialized: false, running: false, busy: false, loggedIn: null, needLogin: false, selectedModel: null, window: null, loginState: 'idle', lastLogin: null };
         const s = d.status();
-        return { siteId: st.id, siteName: st.name, initialized: true, running: s.running, busy: s.busy, loggedIn: s.loggedIn, needLogin: s.needLogin, selectedModel: s.selectedModel, window: s.window ?? null };
+        return { siteId: st.id, siteName: st.name, origin: st.origin, initialized: true, running: s.running, busy: s.busy, loggedIn: s.loggedIn, needLogin: s.needLogin, selectedModel: s.selectedModel, window: s.window ?? null, loginState: s.loginState ?? 'idle', lastLogin: s.lastLogin ?? null };
       });
       return { ...base, sites };
     },
     loginTrigger: (siteId) => driverFor(siteId || 'deepseek').openLogin(),
+    // 设置页「登录网站」用：等这次登录真正结束（成功/失败/超时）再把结果带回
+    // 控制面。旧动作是 fire-and-forget，失败只能进控制台，界面永远显示未登录。
+    loginAndReport: async (siteId, { timeoutMs } = {}) => {
+      const sid = getSite(siteId) ? siteId : 'deepseek';
+      const d = driverFor(sid);
+      const ms = Math.max(10_000, Number(timeoutMs) || cfg.loginTimeoutMs);
+      const t0 = Date.now();
+      let timer = null;
+      try {
+        const result = await Promise.race([
+          d.openLogin(),
+          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`login timed out after ${ms}ms`)), ms); }),
+        ]);
+        return { ok: true, siteId: sid, siteName: getSite(sid)?.name, ms: Date.now() - t0, ...(result || {}) };
+      } catch (err) {
+        return { ok: false, siteId: sid, siteName: getSite(sid)?.name, ms: Date.now() - t0, error: String(err?.message || err) };
+      } finally { if (timer) clearTimeout(timer); }
+    },
     siteConnect: (siteId) => driverFor(getSite(siteId) ? siteId : 'deepseek'),
     // 展示窗口动作（有头 Edge）：侧栏「独立窗口」按钮走这里，与登录共用
     // 同一持久 profile——窗口里直接可聊，自动化轮次驱动同一页面。
@@ -765,7 +811,18 @@ function imageMarkdown(images) {
         commit() {},
       };
     }
-    const fingerprint = count => createHash('sha256').update(JSON.stringify({ model, system: options.system, tools: options.tools, extraPrompt, messages: messages.slice(0, count) })).digest('hex');
+    // 游标指纹只锁「真正决定网页侧提示词内容」的东西：模型、系统提示词、
+    // 全局指令、工具**名字集合**、以及已经发出去的消息。
+    //
+    // 旧实现把 options.tools 整个对象 JSON.stringify 进指纹——工具描述的措辞
+    // 一变（宿主升级、动态描述、参数 schema 里字段顺序变化）指纹就变，游标被
+    // 判为陈旧、下一轮改走「整段重建」，网页那一侧于是被重开一个新会话。
+    // 真机表现：一切正常但上下文像「不动了」（每轮都在重建首轮），并且网页会话
+    // 槽被反复切换。名字集合一致就沿用同一网页会话。
+    const toolNameKey = Array.isArray(options.tools)
+      ? options.tools.map((t) => String(t?.name || '')).filter(Boolean).sort().join(',')
+      : '';
+    const fingerprint = count => createHash('sha256').update(JSON.stringify({ model, system: options.system, tools: toolNameKey, extraPrompt, messages: messages.slice(0, count) })).digest('hex');
     let st = sessionState.get(keyPath);
     if (st && (messages.length <= st.sent || st.fingerprint !== fingerprint(st.sent))) st = null;
     const fresh = !st;
@@ -822,6 +879,7 @@ function imageMarkdown(images) {
       ['sessions', 'sessions'], ['history', 'history'],
       ['workspaces', 'workspaces'], ['import', 'import'],
       ['settings', 'settings'], ['models', 'models'],
+      ['login-sites', 'login-sites'],
     ];
     for (const [, suffix] of routes) {
       try {

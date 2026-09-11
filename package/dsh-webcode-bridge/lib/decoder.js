@@ -112,14 +112,28 @@
     }
     finish() {
       this.consume(this.sse.finish());
-      if (this.failed) return { complete: false, reason: 'invalid_stream' };
+      const collected = {
+        text: this.response ? this.response.fragments.filter((f) => f.type === 'RESPONSE').map((f) => f.content).join('').trim() : '',
+        thinking: this.response ? this.response.fragments.filter((f) => f.type === 'THINK' || f.type === 'THINKING').map((f) => f.content).join('').trim() : '',
+        images: this.response ? this.response.fragments.filter((f) => f.image).map((f) => f.image) : [],
+      };
+      if (this.failed) return { complete: false, reason: 'invalid_stream', ...collected };
       if (!this.receivedClose || !this.response || this.response.status !== 'FINISHED') {
-        return { complete: false, reason: 'incomplete' };
+        // 流没送到 FINISHED / close：网页端掉流、被合流截断、或用户切走页面。
+        // 旧实现直接 complete:false，把已经解码出来的正文与（可能完整的）工具
+        // 调用全部丢掉——真机表现就是「回复到一半突然停止，工具也不执行了」。
+        // 正文/思考/图片任何一项非空都算「部分可用」，把 partial 标出来交给
+        // 驱动层决定（它知道工具协议是否完整），而不是在解码层判死。
+        const partial = Boolean(collected.text || collected.thinking || collected.images.length);
+        return {
+          complete: false,
+          partial,
+          reason: this.response ? 'stream_ended_before_finished' : 'no_response_frames',
+          status: this.response?.status || null,
+          ...collected,
+        };
       }
-      const text = this.response.fragments.filter((f) => f.type === 'RESPONSE').map((f) => f.content).join('');
-      const thinking = this.response.fragments.filter((f) => f.type === 'THINK' || f.type === 'THINKING').map((f) => f.content).join('');
-      const images = this.response.fragments.filter((f) => f.image).map((f) => f.image);
-      return { complete: true, text: text.trim(), thinking: thinking.trim(), images };
+      return { complete: true, ...collected };
     }
     consume(events) { for (const ev of events) this.consumeEvent(ev); }
     consumeEvent(ev) {

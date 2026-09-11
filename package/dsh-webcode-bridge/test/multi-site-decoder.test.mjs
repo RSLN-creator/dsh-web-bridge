@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import '../lib/decoder.js';
-import { qualifyModelId, resolveWebModel, listAllModels } from '../lib/providers.js';
+import { qualifyModelId, resolveWebModel, listAllModels, SITES } from '../lib/providers.js';
 
 const D = globalThis.WebCodeStreamDecoders;
 
@@ -19,9 +19,26 @@ test('listAllModels：全站点目录含 DeepSeek/GLM/ChatGPT/Kimi/Qwen 与兼�
   assert.ok(ids.has('deepseek:deepseek') && !ids.has('deepseek:flash') && !ids.has('deepseek:vision'));
   assert.ok(ids.has('glm:auto') && ids.has('chatgpt:auto') && ids.has('kimi:auto'));
   assert.ok(ids.has('qwen:auto') && ids.has('deepseek-web'));
+  // z.ai（GLM 海外站点）已入目录，且别名可解析
+  assert.ok(ids.has('zai:auto'), '目录应包含 zai:auto');
+  assert.equal(resolveWebModel('zai').siteId, 'zai');
+  assert.equal(resolveWebModel('z-ai').siteId, 'zai');
   const m = resolveWebModel('glm:auto');
   assert.equal(m.siteId, 'glm');
   assert.equal(m.id, 'auto');
+});
+
+test('z.ai：站点契约（origin / SSE 端点 / 解码器 / 静态域）', () => {
+  const z = resolveWebModel('zai:auto');
+  assert.equal(z.siteId, 'zai');
+  assert.equal(z.origin, 'https://chat.z.ai');
+  assert.equal(z.decoder, 'openai-sse');
+  const st = SITES.find(s => s.id === 'zai');
+  assert.ok(st, 'SITES 必须包含 zai');
+  assert.ok(st.completionPaths.includes('/api/chat/completions'));
+  assert.deepEqual([...st.staticOrigins], ['https://z-cdn.chatglm.cn']);
+  // 解码器注册表里确实有这个 kind（否则驱动会静默拿不到 decoder）
+  assert.equal(typeof D['openai-sse'], 'function');
 });
 
 test('glm：parts[].content[] 嵌套结构的正文与图片（glm-free-api 同构帧）', () => {
