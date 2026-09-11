@@ -20,6 +20,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const decoderPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'decoder.js');
+// SSE 原始帧抓包目录（WEBCODE_SSE_DEBUG=<dir> 时启用，仅用于新站点解码器取证）。
+const SSE_DEBUG_DIR = process.env.WEBCODE_SSE_DEBUG || null;
 function loadDecoderRegistry(explicitPath) {
   const p = explicitPath || decoderPath;
   const code = fs.readFileSync(p, 'utf8');
@@ -259,13 +261,21 @@ export function createBrowserDriver(options = {}) {
           },
           onImage: (img) => {
             if (img) active.images.push(img);
-            try { active.onImage?.(img); } catch {}
+            try { active.onImage?.(img) } catch {}
           },
         });
       }
       return;
     }
     if (active.captureId && m.captureId !== active.captureId) return;
+    // SSE 原始帧抓包（WEBCODE_SSE_DEBUG=<dir> 时启用）：新站点解码器对不上时，
+    // 用真实流写解码器的第一手证据，而不是猜。
+    if (SSE_DEBUG_DIR && m.phase === 'chunk' && m.text) {
+      try {
+        if (!active.debugFile) active.debugFile = path.join(SSE_DEBUG_DIR, `sse-${siteId}-${Date.now()}.log`);
+        fs.appendFileSync(active.debugFile, m.text);
+      } catch { /* debug only */ }
+    }
     if (m.phase === 'chunk' && active.decoder) active.decoder.push(m.text);
     if (m.phase === 'end' && active.decoder) {
       const result = active.decoder.finish();
@@ -329,9 +339,12 @@ export function createBrowserDriver(options = {}) {
   function killOrphanEdgeForProfile() {
     if (process.platform !== 'win32') return;
     try {
+      // 统一成全反斜杠再匹配：调用方传混合分隔符（C:\Users\x/.dsh/…）时
+      // -like 永远匹配不上（真机踩过）。
+      const dir = String(cfg.profileDir).replace(/\//g, '\\').replace(/'/g, "''");
       const script =
         `$procs = Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" | ` +
-        `Where-Object { $_.CommandLine -like '*${cfg.profileDir.replace(/'/g, "''")}*' }; ` +
+        `Where-Object { $_.CommandLine -like '*${dir}*' }; ` +
         `foreach ($p in $procs) { Invoke-CimMethod -InputObject $p -MethodName Terminate | Out-Null; Write-Output $p.ProcessId }`;
       const out = child_process.execFileSync('powershell.exe', ['-NoProfile', '-Command', script], { timeout: 30_000, encoding: 'utf8' });
       const pids = out.split(/\s+/).filter(Boolean);
@@ -381,7 +394,7 @@ export function createBrowserDriver(options = {}) {
       // 或上次会话崩溃/进程被强杀残留。先经 CDP 优雅回收（能杀干净且不留
       // 半死状态），再退回强杀孤儿，最后清锁重试一次。
       const msg = String(err?.message || err);
-      if (!/has been closed|ProcessSingleton|SingletonLock|Target closed|singleton/i.test(msg)) throw err;
+      if (!/has been closed|ProcessSingleton|SingletonLock|Target closed|singleton|exitCode=21/i.test(msg)) throw err;
       warn('launch failed with stale profile lock — attempting self-heal:', msg.slice(0, 160));
       ctx = null; page = null;
       await releaseOrphanByCDP();
@@ -619,7 +632,22 @@ export function createBrowserDriver(options = {}) {
       }
       throwIfAborted();
       if (active) active.t0 = performance.now();
-      await input.press('Enter');
+      // 发送方式按站点契约：定义了 sendButton 的站点（如 z.ai 的
+      // #send-message-button）点按钮提交——这些站点对程序化 Enter 不响应
+      // （真机 2026-09-12：z.ai 轮次静默挂死正因 Enter 不触发发送）；
+      // 其余站点维持 Enter。按钮点击失败回落 Enter，不发半截消息。
+      if (SEL.sendButton) {
+        const btn = page.locator(SEL.sendButton).first();
+        try {
+          if (await btn.count()) {
+            const btnBefore = await btn.isEnabled().catch(() => true);
+            if (btnBefore) await btn.click({ timeout: 5000 }).catch(async () => { await input.press('Enter'); });
+            else await input.press('Enter');
+          } else await input.press('Enter');
+        } catch { await input.press('Enter').catch(() => {}); }
+      } else {
+        await input.press('Enter');
+      }
 
       let result;
       if (site.decoder === 'dom') {
@@ -1100,9 +1128,14 @@ export function createBrowserDriver(options = {}) {
   // 「独立窗口」与「右栏预览」共享同一登录会话，这是 iframe 方案做不到的
   // （DeepSeek 等站点 CSP 拒绝 iframe，参考 webcode 也用独立窗口承载）。
   // 生成期间可用：busy 锁只挡写操作（登录/导入），窗口打开不与轮次互斥。
-  async function openWindow({ width, height, url } = {}) {
+  async function openWindow({ width, height, url, offset = 0 } = {}) {
     await ensure();
     throwIfTransitioning();
+    // 已开着窗口：聚焦弹到最前（跳回已有窗口），不重新停靠/goto 覆盖现场。
+    if (ctx && headed && page && !page.isClosed()) {
+      await page.bringToFront().catch(() => {});
+      return { ok: true, alreadyOpen: true, ...windowState() };
+    }
     const w = Math.max(360, Math.min(3840, Math.round(Number(width) || 0)) || 1000);
     const h = Math.max(480, Math.min(2160, Math.round(Number(height) || 0)) || 900);
     if (ctx && !headed) {
@@ -1124,13 +1157,15 @@ export function createBrowserDriver(options = {}) {
         const screens = (await bcdp.send('SystemInfo.getInfo'))?.displayInfo || [];
         await bcdp.detach().catch(() => {});
         const screen = screens.find((d) => d.isPrimary) || screens[0];
+        // 多窗口错位：第 N 个窗口向右上错开 N*36px，避免新窗完全盖住旧窗。
+        const off = Math.max(0, Math.min(6, Math.round(Number(offset) || 0))) * 36;
         const bounds = screen?.bounds ? {
-          left: Math.round(screen.bounds.left + (screen.bounds.width - w) / 2 + screen.bounds.width / 4),
-          top: screen.bounds.top || 0,
+          left: Math.round(screen.bounds.left + (screen.bounds.width - w) / 2 + screen.bounds.width / 4) + off,
+          top: Math.max(0, (screen.bounds.top || 0) - off),
           width: w,
           height: Math.min(h, (screen.bounds.height || h) - 40),
           windowState: 'normal',
-        } : { left: 0, top: 0, width: w, height: h, windowState: 'normal' };
+        } : { left: off, top: off, width: w, height: h, windowState: 'normal' };
         const cdp = await ctx.newCDPSession(page);
         const { windowId } = await cdp.send('Browser.getWindowForTarget');
         await cdp.send('Browser.setWindowBounds', { windowId, bounds });

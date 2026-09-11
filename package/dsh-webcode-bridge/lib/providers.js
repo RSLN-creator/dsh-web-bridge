@@ -28,7 +28,7 @@ export const DEEPSEEK = site({
   // default + ref_file_ids，由网页自行路由。因此不再拆成三个模型 id，
   // 带图能力对本模型自动生效（有图就传，无图不受限）。
   models: [
-    { id: 'deepseek', name: 'DeepSeek（深度思考 · 1M 上下文）', labels: ['专家模式', 'DeepSeek'], thinking: true, context: 1_000_000 },
+    { id: 'deepseek', name: 'chat.deepseek.com · DeepSeek（1M）', labels: ['专家模式', 'DeepSeek'], thinking: true, context: 1_000_000 },
   ],
 });
 
@@ -45,7 +45,7 @@ export const GLM = site({
   // 模型更新极快,硬编码清单必然过时——2026-09-08 用户实测 GLM 网页已到
   // 5.x,旧目录还在 4.5/4.6)。在右侧网页里手动选模型,桥按当前网页状态对话。
   models: [
-    { id: 'auto', name: '智谱清言 · GLM-5.3（网页当前模型）', labels: ['GLM'], context: 1_000_000 },
+    { id: 'auto', name: 'chatglm.cn · GLM-5.3', labels: ['GLM'], context: 1_000_000 },
   ],
 });
 
@@ -56,7 +56,7 @@ export const CHATGPT = site({
   attachSelector: "input[type='file']",
   decoder: 'chatgpt', stream: true,
   models: [
-    { id: 'auto', name: 'ChatGPT · 网页当前模型', labels: ['ChatGPT'], context: 196_000 },
+    { id: 'auto', name: 'chatgpt.com · 网页当前模型', labels: ['ChatGPT'], context: 196_000 },
   ],
 });
 
@@ -71,7 +71,7 @@ export const KIMI = site({
   attachSelector: "input[type='file']",
   decoder: 'kimi', stream: true,
   models: [
-    { id: 'auto', name: 'Kimi · K3（网页当前模型）', labels: ['Kimi'], context: 1_000_000 },
+    { id: 'auto', name: 'kimi.com · Kimi K3', labels: ['Kimi'], context: 1_000_000 },
   ],
 });
 
@@ -84,7 +84,7 @@ export const QWEN = site({
   attachSelector: "input[type='file']",
   decoder: 'openai-sse', stream: true, experimental: true,
   models: [
-    { id: 'auto', name: '通义千问 · Qwen4 架构（网页当前模型）', labels: ['Qwen'], context: 1_000_000 },
+    { id: 'auto', name: 'chat.qwen.ai · Qwen4 架构', labels: ['Qwen'], context: 1_000_000 },
   ],
 });
 
@@ -95,7 +95,7 @@ export const DOUBAO = site({
   attachSelector: "input[type='file']",
   decoder: 'doubao', stream: true, experimental: true,
   models: [
-    { id: 'auto', name: '豆包 · 网页当前模型', labels: ['豆包'], context: 256_000 },
+    { id: 'auto', name: 'doubao.com · 网页当前模型', labels: ['豆包'], context: 256_000 },
   ],
 });
 
@@ -106,7 +106,7 @@ export const GROK = site({
   attachSelector: "input[type='file']",
   decoder: 'grok', stream: true,
   models: [
-    { id: 'auto', name: 'Grok · 网页当前模型', labels: ['Grok'], context: 256_000 },
+    { id: 'auto', name: 'grok.com · 网页当前模型', labels: ['Grok'], context: 256_000 },
   ],
 });
 
@@ -117,7 +117,7 @@ export const CLAUDE = site({
   attachSelector: "input[type='file']",
   decoder: 'claude', stream: true,
   models: [
-    { id: 'auto', name: 'Claude · 网页当前模型', labels: ['Claude'], context: 200_000 },
+    { id: 'auto', name: 'claude.ai · 网页当前模型', labels: ['Claude'], context: 200_000 },
   ],
 });
 
@@ -128,13 +128,17 @@ export const ZAI = site({
   id: 'zai', name: 'Z.ai (GLM 海外版)', origin: 'https://chat.z.ai',
   // 静态资源域：z.ai 的前端包/字体放在独立域上，跨域 + 非法 ACAO 会被浏览器
   // 拒绝执行（与 DeepSeek 同一类问题）。纳入同源转发（lib/mirror.js）。
+  // api.z.ai 是前端调后端的绝对域（真机 probe-net 实测），不代理则页面提示
+  // 「无法连接到服务」。
   staticOrigins: ['https://z-cdn.chatglm.cn', 'https://api.z.ai'],
   completionPaths: ['/api/chat/completions', '/api/v1/chat/completions'],
   input: 'textarea#chat-input, textarea[placeholder], textarea',
+  // z.ai 对程序化 Enter 不响应，必须点发送按钮（真机 2026-09-12：轮次静默挂死正因如此）。
+  sendButton: '#send-message-button',
   attachSelector: "input[type='file']",
   decoder: 'openai-sse', stream: true, experimental: true,
   models: [
-    { id: 'auto', name: 'Z.ai · GLM-5.3-Flash（网页当前模型）', labels: ['GLM', 'Z.ai'], context: 1_000_000 },
+    { id: 'auto', name: 'chat.z.ai · GLM-5.3-Flash', labels: ['GLM', 'Z.ai'], context: 1_000_000 },
   ],
 });
 
@@ -146,7 +150,7 @@ export const GEMINI = site({
   attachSelector: "input[type='file']",
   decoder: 'dom', stream: false, experimental: true,
   models: [
-    { id: 'auto', name: 'Gemini · 网页当前模型', labels: ['Gemini'], context: 1_000_000 },
+    { id: 'auto', name: 'gemini.google.com · 网页当前模型', labels: ['Gemini'], context: 1_000_000 },
   ],
 });
 

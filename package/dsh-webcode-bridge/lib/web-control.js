@@ -136,7 +136,10 @@ export function createWebControl(deps = {}) {
       const sid = String(state?.siteId || 'deepseek');
       // 顶层 window 字段来自 deepseek 主驱动;聚合 sites 里各站点窗口各自带
       const siteWindow = state?.window ?? state?.sites?.find((s) => s.siteId === sid)?.window ?? null;
-      return { ok: true, siteId: sid, window: siteWindow };
+      // 聚合各站点窗口：面板按站点行各自显示「已开独立窗口」，不再只认 deepseek。
+      const windows = {};
+      for (const s of state?.sites || []) if (s?.window?.open) windows[s.siteId] = s.window;
+      return { ok: true, siteId: sid, window: siteWindow, windows };
     },
     'POST interact': async body => {
       if (!relay?.status().consent) return { ok: false, error: '请在设置中启用网页自动化' };
@@ -199,6 +202,15 @@ export function createWebControl(deps = {}) {
       if (!loginTrigger) return { ok: false, error: 'no driver' };
       loginTrigger(siteId || undefined).catch((err) => warn('login flow error:', err?.message));
       return { ok: true, message: '登录窗口打开中，请在该窗口完成一次性登录' };
+    },
+    'POST verify-login': async (body) => {
+      // 显式检测某站点登录态：connect 幂等且轻量（已启动时只查页面输入框），
+      // 给设置面板「检测」按钮用——用户在独立窗口里登录完后能立即确认结果。
+      const siteId = String(body?.siteId || 'deepseek').trim();
+      const target = relay?.config?.siteConnect?.(siteId);
+      if (!target) return { ok: false, error: 'no driver' };
+      const r = await target.connect();
+      return { ok: true, siteId, loggedIn: r?.loggedIn ?? null };
     },
     // 设置页「登录网站」下拉的数据源：站点清单 + 各自登录态，不启动浏览器。
     'GET login-sites': async () => {

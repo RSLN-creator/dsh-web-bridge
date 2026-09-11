@@ -458,9 +458,25 @@
           const c = part.content[ci];
           if (!isRecord(c)) continue;
           const type = String(c.type || '');
-          if (type === 'text') {
+          if (type === 'think') {
+            // GLM-5.3 思考内容：content[].type='think'，字段名 think。过程中为纯增量
+            // delta（真机抓包：28078 字符思维链拆成 861 个 delta），finish 帧却带
+            // 累积全文——与 text 一样走差分，全量重复帧被 startsWith 吸收。
+            const t = typeof c.think === 'string' ? c.think : '';
+            const tKey = 'think:' + type;
+            const prevT = this.seen.get(tKey) || '';
+            if (t && t !== prevT) {
+              if (t.startsWith(prevT)) {
+                this.seen.set(tKey, t);
+                if (t.length > prevT.length) this.emitThink(t.slice(prevT.length));
+              } else if (prevT.startsWith(t)) { /* 迟到的旧帧 */ }
+              else { this.seen.set(tKey, prevT + t); this.emitThink(t); }
+            }
+          } else if (type === 'text') {
             const t = typeof c.text === 'string' ? c.text : '';
-            const key = pi + ':' + ci;
+            // 槽位 key 用 type 而不是 content 索引：GLM 的 finish 帧会把
+            // think/text 合并进同一条 content 数组，索引在帧间会漂移（真机实测）。
+            const key = type;
             const prev = this.seen.get(key) || '';
             if (t === prev) continue;                       // 累积流：末帧重复全文，跳过
             if (t.startsWith(prev)) {

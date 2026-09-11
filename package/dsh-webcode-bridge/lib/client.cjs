@@ -139,6 +139,9 @@ window.__ModuleLoader__.load({
         .map(s => ({ siteId: s.siteId, loggedIn: s.loggedIn, initialized: s.initialized, busy: s.busy }))
         .sort((a, b) => (a.siteId === 'deepseek' ? -1 : b.siteId === 'deepseek' ? 1 : siteName(a.siteId).localeCompare(siteName(b.siteId))));
       const setResult = (sid, r) => setResults(prev => ({ ...prev, [sid]: r }));
+      const [winSites, setWinSites] = React.useState({});
+      const refreshWins = () => api('window').then(w => setWinSites(w?.windows || {})).catch(() => {});
+      React.useEffect(() => { refreshWins(); }, []);
       async function doLogin(sid) {
         setBusySite(sid); setResult(sid, null);
         try {
@@ -153,13 +156,24 @@ window.__ModuleLoader__.load({
         } catch (e) { setResult(sid, { ok: false, text: e.message }); }
         finally { setBusySite(null); }
       }
+      async function checkLogin(sid) {
+        // 在独立窗口里登录完后点这里立即确认结果（connect 幂等且轻量）。
+        setBusySite(sid); setResult(sid, null);
+        try {
+          const r = await api('verify-login', { siteId: sid }, 90000);
+          setResult(sid, { ok: r.loggedIn === true, text: r.loggedIn === true ? '已检测到登录态' : r.loggedIn === false ? '仍未登录（请在独立窗口完成登录后再检测）' : '待检查（先打开一次站点）' });
+          await onRefresh?.();
+        } catch (e) { setResult(sid, { ok: false, text: e.message }); }
+        finally { setBusySite(null); }
+      }
       async function toggleWindow(sid) {
         setBusySite(sid); setResult(sid, null);
         try {
-          const w = await api('window').catch(() => null);
-          const isOpen = w?.window?.open && w.siteId === sid;
-          await api('window', { siteId: sid, action: isOpen ? 'close' : 'open' }, 120000);
-          setResult(sid, { ok: true, text: isOpen ? '独立窗口已收起，回到无头运行' : '独立窗口已打开（与桥共用登录态）' });
+          const isOpen = !!winSites[sid]?.open;
+          const r = await api('window', { siteId: sid, action: isOpen ? 'close' : 'open' }, 120000);
+          if (r?.alreadyOpen) setResult(sid, { ok: true, text: '窗口已存在——已聚焦弹到最前' });
+          else setResult(sid, { ok: true, text: isOpen ? '独立窗口已收起，回到无头运行' : '独立窗口已打开（与桥共用登录态）' });
+          await refreshWins();
           await onRefresh?.();
         } catch (e) { setResult(sid, { ok: false, text: e.message }); }
         finally { setBusySite(null); }
@@ -315,7 +329,7 @@ window.__ModuleLoader__.load({
       const [frames, setFrames] = React.useState({});   // siteId → { src, ready, status }
       const [connectError, setConnectError] = React.useState('');
       const [winBusy, setWinBusy] = React.useState(false);
-      const [winOpen, setWinOpen] = React.useState(null);
+      const [winOpen, setWinOpen] = React.useState({}); // siteId → window 聚合
       const winState = () => api('window').then(w => {
         const openSite = w?.window?.open ? w.siteId : null;
         setWinOpen(openSite);
@@ -323,7 +337,7 @@ window.__ModuleLoader__.load({
       }).catch(() => null);
       React.useEffect(() => {
         let alive = true;
-        winState().then(s => { if (alive && s) setSiteId(s); });
+        winState().then(w => { const open = Object.keys(w?.windows || {}); if (alive && open.length && !open.includes(siteId)) setSiteId(open[0]); });
         const poll = setInterval(() => winState(), 5000);
         return () => { alive = false; clearInterval(poll); };
       }, []);
@@ -345,7 +359,7 @@ window.__ModuleLoader__.load({
       async function toggleWindow() {
         setWinBusy(true); setConnectError('');
         try {
-          const target = winOpen === siteId ? 'close' : 'open';
+          const target = winOpen[siteId]?.open ? 'close' : 'open';
           await api('window', { siteId, action: target });
           await winState();
         } catch (e) { setConnectError(e.message); }
@@ -370,10 +384,10 @@ window.__ModuleLoader__.load({
             'aria-label': '刷新右侧网页', onClick: reloadFrame,
           }, '\u21bb'),
           h('button', {
-            className: 'hwb-win-btn' + (winOpen === siteId ? ' open' : ''), disabled: winBusy,
-            title: winOpen === siteId ? '收起独立窗口（回到无头运行）' : '在独立窗口中打开真实网页（可登录、可聊天、与桥共用会话）',
-            'aria-pressed': winOpen === siteId, onClick: toggleWindow,
-          }, winBusy ? '窗口切换中…' : winOpen === siteId ? '✓ 已开独立窗口 · 点击收回' : '⧉ 独立窗口打开')),
+            className: 'hwb-win-btn' + (winOpen[siteId]?.open ? ' open' : ''), disabled: winBusy,
+            title: winOpen[siteId]?.open ? '收起该站点的独立窗口（回到无头运行）' : '在独立窗口中打开真实网页（已开的窗口会聚焦弹到最前，不会覆盖）',
+            'aria-pressed': !!winOpen[siteId]?.open, onClick: toggleWindow,
+          }, winBusy ? '窗口切换中…' : winOpen[siteId]?.open ? '✓ 已开独立窗口 · 点击收回' : '⧉ 独立窗口打开')),
         connectError && h('div', { className: 'hwb-error', role: 'status' },
           '浏览器视图未能连接：' + connectError + ' ',
           h('button', { className: 'hwb-retry', onClick: reloadFrame }, '重试')),
@@ -441,7 +455,7 @@ window.__ModuleLoader__.load({
           guide: [{
             order: 55,
             title: () => 'Web Bridge',
-            description: () => 'DeepSeek 网页会话（已登录的真实网页，可读可写）',
+            description: () => '内容服务真实网页会话（已登录站点直接可用；生成与工具调用走网页原生流程）',
           }],
         });
         if (typeof offType === 'function') disposers.push(offType);

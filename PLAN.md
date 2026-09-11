@@ -1,5 +1,38 @@
 # Harness Web Bridge 路线
 
+## 当前版本 0.11.0
+
+0.11.0（GLM 思维链 + 登录态检测 + 窗口聚焦 + 命名对齐网址）：针对「Kimi 登录后
+没法验证登录态」「独立窗口应跳回已有窗口而不是覆盖」「非 DeepSeek 站点的思维链
+显示与模型命名」三条反馈。
+
+1. **GLM 思维链（decoder.js）。** 真机抓包（WEBCODE_SSE_DEBUG，见 browser-driver）
+   证实 GLM-5.3 的思考内容在 content[].type='think'、字段名 think、过程为纯增量
+   delta，而 finish 帧把 think/text 都带成**累积全文**——帧间 content 数组索引
+   还会漂移（think/text 合并）。GlmDecoder 改为按 type 记差分槽，合成用例 +
+   真机抓包形状均锁定（multi-site-decoder.test.mjs）。
+2. **登录态检测（web-control.js + client.cjs）。** 新增 POST verify-login：
+   connect 幂等轻量回查站点输入框；设置面板每站点新增「检测」按钮——在独立
+   窗口里登录完点一下即可确认，不再「情况没法验证」。
+3. **独立窗口跳回/聚焦。** GET window 返回 windows 聚合表（每站点各自状态）；
+   对已开窗口再次点「独立窗口」→ bringToFront 聚焦弹前（alreadyOpen），
+   不重新停靠/goto 覆盖现场；新窗口按已开数量向右上错位 36px/个，不互相遮挡。
+4. **zai 发送契约。** z.ai 对程序化 Enter 不响应（轮次静默挂死的根因之一），
+   契约新增 sendButton '#send-message-button'；驱动对定义了 sendButton 的站点
+   点按钮提交，失败回落 Enter。
+5. **模型命名改为「网址名 · 真实模型名」**：chat.deepseek.com · DeepSeek（1M）、
+   chatglm.cn · GLM-5.3、kimi.com · Kimi K3、chat.qwen.ai · Qwen4 架构、
+   chat.z.ai · GLM-5.3-Flash 等；thinkMode 默认值改为 'on'（深度思考全开，
+   GLM/Z.ai 网页端默认已在思考档）。侧栏与设置页说明词同步。
+6. **取证工具**：WEBCODE_SSE_DEBUG=<dir> 抓各站原始 SSE 帧；test-mock/
+   probe-composer.mjs、probe-net.mjs、probe-zai-send.mjs 三个真机探针
+   （composer 开关清单 / 真实请求+响应体 / 发送链路）。
+
+已知边界：z.ai guest 会话不启动生成（发送链路已通：建会话+气泡出现，但无任何
+生成请求）——需真实账号登录后才能抓到生成流写 zai 专用解码器；qwen 思考档
+（.qwen-thinking-selector，默认「自动」）与联网开关的自动化未校准，保持网页
+自身默认。
+
 ## 当前版本 0.10.0
 
 0.10.0（孤儿 Edge 自愈 + 模型目录对齐 2026-09 网页版）：针对「豆包窗口开过一次后

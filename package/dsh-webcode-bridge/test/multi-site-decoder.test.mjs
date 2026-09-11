@@ -68,6 +68,24 @@ test('glm：parts[].content[] 嵌套结构的正文与图片（glm-free-api 同�
   assert.equal(images[0].url, 'https://glm.example/a.png');
 });
 
+test('glm：type=think 思维链增量 + finish 帧累积全文不重复（真机 2026-09-12 抓包形状）', () => {
+  const th = [], tx = [];
+  const decoder = new D.glm({ onThink: (t) => th.push(t), onDelta: (t) => tx.push(t) });
+  const SEP = String.fromCharCode(10) + String.fromCharCode(10);
+  const frame = (obj) => decoder.push('data: ' + JSON.stringify(obj) + SEP);
+  frame({ status: 'processing', parts: [{ status: 'processing', content: [{ type: 'think', think: 'Let me think' }] }] });
+  frame({ status: 'processing', parts: [{ status: 'processing', content: [{ type: 'think', think: ' step by step' }] }] });
+  frame({ status: 'processing', parts: [{ status: 'processing', content: [{ type: 'text', text: '答案是' }] }] });
+  frame({ status: 'finish', parts: [{ status: 'finish', content: [
+    { type: 'think', think: 'Let me think step by step' },
+    { type: 'text', text: '答案是 42' }] }] });
+  const out = decoder.finish();
+  assert.equal(out.thinking, 'Let me think step by step');
+  assert.equal(out.text, '答案是 42');
+  assert.equal(th.join(''), 'Let me think step by step');
+  assert.equal(tx.join(''), '答案是 42');
+});
+
 test('kimi：cmpl 事件正文 + all_done 收尾（Kimi-Free-API 同构帧）', () => {
   const deltas = [];
   const decoder = new D.kimi({ onDelta: (t) => deltas.push(t) });

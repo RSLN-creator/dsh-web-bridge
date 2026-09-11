@@ -214,7 +214,7 @@ export function apply(ctx, config = {}) {
   if (!(settingsService && typeof settingsService.get === 'function' && typeof settingsService.set === 'function')) {
     settingsService = null;
   }
-  const defaultConfig = { extraPrompt: '', defaultModel: 'deepseek', previewRefreshRate: 5000, thinkMode: 'auto', subAgentMode: 'own' };
+  const defaultConfig = { extraPrompt: '', defaultModel: 'deepseek', previewRefreshRate: 5000, thinkMode: 'on', subAgentMode: 'own' };
   const configManager = {
     get() {
       // settingsService 已在初始化时校验 get/set 双全；此处仍防御式包裹
@@ -804,7 +804,12 @@ function imageMarkdown(images) {
     windowOpener: (siteId, action, opts = {}) => {
       const d = driverFor(getSite(siteId) ? siteId : 'deepseek');
       if (action === 'close') return d.closeWindow();
-      return d.openWindow(opts);
+      // 多窗口错位：统计已开的窗口数作为停靠偏移，新窗不盖旧窗。
+      let openCount = 0;
+      try {
+        for (const s of (relay ? relay.config.driverStatus().sites : []) || []) if (s?.window?.open) openCount++;
+      } catch { /* 非关键路径 */ }
+      return d.openWindow({ ...opts, offset: openCount });
     },
     sessionImport: (dir) => driver.importStorageFromProfile(dir),
     onHttp: (req, res) => {
