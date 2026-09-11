@@ -19,3 +19,6 @@ package/dsh-webcode-bridge/test-mock/.test-build/
 
 # 打包/探针输出（tgz、真机探针日志），不入库
 package/output/
+
+# 本地暂存（排查脚本、npm 缓存、tgz 解包验证），历史上从未入库
+.tmp/
