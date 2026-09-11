@@ -254,17 +254,25 @@ const PROTOCOL_ANCHORS = [
  * （由调用方对工具表校验）。
  *
  * @param {string} text 累积的网页回复文本
+ * @param {number} [from] 只从该下标之后开始找（流式已消化的协议区间不再重复命中；
+ *        不传等价于从头找，保持既有调用方语义不变）
  * @returns {{index: number, name: string, transport: boolean}}
  *          index=-1 表示尚未出现协议边界。
  */
-export function findProtocolStart(text) {
+export function findProtocolStart(text, from = 0) {
   const raw = String(text ?? '');
+  const base = Math.max(0, Number(from) || 0);
+  if (base >= raw.length) return { index: -1, name: '', transport: false };
+  // 偏移用 slice 实现：PROTOCOL_ANCHORS 里的正则没有 g 标志，设 lastIndex 对
+  // exec 完全无效（实测「从 84 开始找」仍返回 8，游标永远推不动 → 死循环）。
+  const scoped = base > 0 ? raw.slice(base) : raw;
   let index = -1;
   for (const re of PROTOCOL_ANCHORS) {
-    const m = re.exec(raw);
+    const m = re.exec(scoped);
     if (m && (index < 0 || m.index < index)) index = m.index;
   }
   if (index < 0) return { index: -1, name: '', transport: false };
+  index += base;
 
   // 名字与传输形态都在归一化后的文本上判定，才能同时覆盖全角 DSML 与半角标签。
   const suffix = normalizeDsml(raw.slice(index));
@@ -274,6 +282,90 @@ export function findProtocolStart(text) {
     || '';
   const transport = /^<\s*(?:tool_call|tool_calls|calls|function|stories|invoke)\b|^\*\*Calling:|\*\*Calling:|"mcp_action"\s*:\s*"call"|^\s*\{\s*"tool"/i.test(suffix);
   return { index, name, transport };
+}
+
+/**
+ * 从协议起点取「一个完整调用对象的原文」——流式期间用它判断某个调用是否已经
+ * 写完整，以及给它做去重签名。
+ *
+ * 网页把同一个调用分多次增量吐出时，边界探测每个 delta 都会在同一位置命中；
+ * 只有「参数 JSON 已经配平」才算这个调用真正出现（一次），否则每来一个 delta
+ * 就会重复开一个块。返回 null 表示还没写完（继续等）。
+ *
+ * @param {string} text 累积文本
+ * @param {number} start 协议起点下标
+ * @returns {{raw: string, end: number}|null}
+ */
+export function readCallAt(text, start) {
+  const src = String(text ?? '');
+  const from = Math.max(0, Number(start) || 0);
+  const open = src.indexOf('{', from);
+  if (open < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let i = open; i < src.length; i++) {
+    const c = src[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '{') depth++;
+    else if (c === '}') {
+      depth--;
+      if (depth === 0) {
+        const raw = src.slice(open, i + 1);
+        try {
+          const obj = JSON.parse(raw);
+          if (obj && typeof obj === 'object' && !Array.isArray(obj)) return { raw, end: i + 1 };
+        } catch { /* 还没配平/还没写完 */ }
+        return null; // 配平但 JSON 非法：判定为未完成，等更多增量
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * 正文尾部出现「协议标记写到一半」的位置。
+ *
+ * 流式期间标记是一个字符一个字符到的：`<` → `<t` → `<to` → `<tool_call>`。
+ * 边界探测（findProtocolStart）只认完整标记，所以这段半成品必须**扣住不发**，
+ * 否则它会作为正文发给界面并写进会话（真机 0.9.2 的协议泄漏正是这个形态：
+ * `<tool_cal` 被当散文发出，紧接着 `</tool_call>{"mcp_action":…` 也漏了出去）。
+ *
+ * 只扫尾部有限长度（标记最长约 16 字符）。返回需要扣住的起点下标，-1 表示没有。
+ *
+ * @param {string} text 累积文本
+ * @param {number} [scope] 只看尾部多少字符（默认 24）
+ * @returns {number}
+ */
+export function partialProtocolAt(text, scope = 24) {
+  const raw = String(text ?? '');
+  const s = normalizeDsml(raw);
+  const n0 = Math.min(s.length, Math.max(2, scope));
+  const prefixes = ['<tool_call', '<tool_calls', '<invoke', '<parameter', '<function', '<stories', '**Calling:'];
+  // 半成品标记的起点下标（归一化串上算出来的，再映射回原串）。
+  const locate = (n) => {
+    const tail = s.slice(s.length - n);
+    const at = raw.lastIndexOf(tail);
+    return at >= 0 ? at : Math.max(0, raw.length - n);
+  };
+  for (let n = 2; n <= n0; n++) {
+    const tail = s.slice(s.length - n);
+    if (/[<*]$/.test(tail)) continue;   // 纯前缀（`<` / `**`），继续看更长的
+    if (prefixes.some(p => p.startsWith(tail))) return locate(n);
+  }
+  // 结尾是「刚起头的标签」（`<` / `</` / `<div` 这类还可能是协议标签的前缀）
+  if (/(^|[^<])(<\/?|<\/?[A-Za-z_][\w-]*)$/.test(s.slice(-scope))) {
+    const m = /<\/?[A-Za-z_][\w-]*$|<\/?$/.exec(s.slice(-scope));
+    if (m) {
+      const at = raw.lastIndexOf(m[0]);
+      if (at >= 0) return at;
+    }
+  }
+  return -1;
 }
 
 /**

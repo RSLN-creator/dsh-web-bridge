@@ -1,13 +1,22 @@
 # Harness Web Bridge
 
-已登录的 DeepSeek 网页作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.9.5。
+已登录的 DeepSeek 网页作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.9.6。
 
-安装：`pnpm pack` 后执行 `dsh plugin --profile web add ./dsh-webcode-bridge-0.9.5.tgz`，重启 `dsh web`。需要 Node.js 20+、系统 Edge；无需浏览器扩展。
+安装：`pnpm pack` 后执行 `dsh plugin --profile web add ./dsh-webcode-bridge-0.9.6.tgz`，重启 `dsh web`。需要 Node.js 20+、系统 Edge；无需浏览器扩展。
 
 原生「设置 > 网页桥接」管理登录与启用开关。默认沿用 `~/.dsh/webcode-edge-profile`。
 模型分组 Harness Web Bridge 暴露全部内容服务站点（`site:model` 限定 id）；DeepSeek
 站点只提供唯一模型 `DeepSeek`（深度思考），旧 id（`flash`/`vision`/`deepseek-web`/
 `deepseek-reasoner`）保留为别名。0.9.5 新增 `zai`（Z.ai）。
+
+## 0.9.6
+
+**一轮连发多个工具调用不再出错。** 复现真机形状（模型一轮里连发 3 个 `read`）后，
+把流式协议边界的三处缺陷一次改掉：同一个调用被开成 32 个块并整轮作废；游标推进后
+又命中更早的收尾标签，`</tool_call>{"mcp_action":…` 整段漏回正文；把非调用的裸 `{`
+当截断点导致正文下标卡死、流式循环挂住。现在边界**单调不减**、按边界下标去重、
+用 `partialProtocolAt()` 扣住 `<t`/`<tool_cal`/`**Calling:` 这类半成品标记。
+顺带修掉调用块关闭时把下标当块内容发出去（`block.text` 变成数字）。
 
 ## 0.9.5
 

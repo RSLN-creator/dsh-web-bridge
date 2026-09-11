@@ -16,7 +16,7 @@ import { createRelay } from './relay.js';
 import { createOpenAiFront } from './openai.js';
 import { createBrowserDriver } from './browser-driver.js';
 import { createWebControl, buildSessionEvents, mainLineOf } from './web-control.js';
-import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText } from './agent-preset.js';
+import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, readCallAt, partialProtocolAt } from './agent-preset.js';
 import { createMirror } from './mirror.js';
 import { textOfBlocks } from './flatten.js';
 import { estimateTokens } from './metrics.js';
@@ -383,7 +383,22 @@ export function apply(ctx, config = {}) {
       let textIndex = -1;
       let nextIndex = 0;
       const genImages = [];
-      let pendingCall = null;
+      // 流式期间已经开块的调用（按出现顺序）。一次回复可以含多个调用，所以这里
+      // 必须是列表而不是单个 pendingCall——旧实现只记第一个，模型连发三个 read
+      // 时后面两个的参数增量全被丢掉，收尾比对 pendingCall.name !== valid[0].name
+      // 直接抛 TOOL_PROTOCOL_INVALID，整轮作废（真机 2026-09-10 轨迹里正是
+      // 「一轮连发 3 个 read、只有第 1 个留下」）。
+      const pendingCalls = [];
+      // 已经消化掉的协议区间终点（不含）。定位用 findProtocolStart(acc, protocolFrom)：
+      // 不能在找到一个调用后继续从头扫，否则同一个边界反复命中，同一个调用被开两次块。
+      // 不匹配已知工具时（模型在散文里引用或举例说明调用格式）**不**推进这个游标，
+      // 那段文字会照常作为正文发出，而不是被静默吃掉。
+      let protocolFrom = 0;
+      // 已开块的调用，按「协议边界下标」去重：同一个调用在流式期间会被反复命中
+      // 同一个边界（参数还没配平时游标不推进），只有开过一次块才不会再开。
+      const openedAtIndex = new Map();
+      // 目前为止见过的最大协议边界下标（单调不减）：正文外发永远不得越过它。
+      let lastBoundary = -1;
       const callSeq = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
       const callId = i => `call-webcode-${String(options?.sessionId || 'stateless')}-${callSeq}-${i}`;
       // 协议边界探测走 findProtocolStart（与 parseAgentReply 共用形态知识）。
@@ -403,29 +418,66 @@ export function apply(ctx, config = {}) {
         if (ev.image) { genImages.push(ev.image); continue; }
         if (ev.delta) {
           acc += ev.delta;
-          const { index: boundary, name: candidate, transport } = findProtocolStart(acc);
-          // Keep a short suffix until the next delta disambiguates a marker.
-          const safeEnd = boundary < 0 ? Math.max(0, acc.length - 32) : boundary;
-          if (safeEnd > textSent.length && !pendingCall) {
-            const delta = acc.slice(textSent.length, safeEnd);
+          // 未消化的部分里找协议起点（半角/全角标签、围栏、Calling、裸 JSON 行）。
+          // 只有在「该调用的参数 JSON 已经配平」时才认它——否则同一个调用会被
+          // 每一个 delta 重复命中，一轮里被开成几十个块（真机连发 3 个 read 时
+          // 实测开出了 32 个）。
+          const rest = findProtocolStart(acc, protocolFrom);
+          // 单调边界：游标推进后，后续搜索可能又命中**更早**的收尾标签
+          // （`</tool_call>` 也是锚点），此时绝不能把 safeEnd 回退——那会把已经
+          // 发过的协议原文再当正文发一遍（实测把 `</tool_call>{"mcp_action":...`
+          // 整段吐进助手文本）。取历史最大值即可。
+          const boundary = rest.index < 0 ? -1 : Math.max(rest.index, lastBoundary);
+          // 认出一个调用的条件：传输形态（标签/围栏/Calling/裸对象）+ 工具名在本次
+          // 工具表里。**不要求参数 JSON 已配平**——真机的参数是流式分片到达的，
+          // 早期就把调用块开出来（名字先到、参数后补）是 0.7.1 起就有的契约：
+          // Harness 能在流完之前显示「正在调用 read」。
+          const knownName = rest.transport && !!rest.name && tools.some(t => t?.name === rest.name);
+          const recognizedCall = knownName && !openedAtIndex.has(boundary);
+          const complete = (recognizedCall || openedAtIndex.has(boundary)) ? readCallAt(acc, boundary) : null;
+          // 半成品标记的起点（`<t`、`<tool_cal`、`**Calling:` 前缀…）：正文最多发到
+          // 它之前。**必须用「位置」而不是「扣留多少字符」**——用固定 32 字符尾巴
+          // 是拦不住的，实测半成品在尾巴之后时照样漏进正文。
+          const markerAt = partialProtocolAt(acc);
+          // 有已开块但参数还没配平，且正文已经追上该调用起点 → 必须停在那里等参数。
+          const holdingCall = !complete && pendingCalls.length > 0 && lastBoundary >= 0 && textSent >= lastBoundary;
+          // 正文外发区间（单调不减）：
+          //  • 刚认出调用 → 调用起点之前的散文全部补发，并停在该起点；
+          //  • 有一个已开块但参数还没配平 → 停在该调用起点（绝不越过，否则
+          //    `</tool_call>{"mcp_action":…` 会被当散文发出去）；
+          //  • 其余 → 发到半成品标记之前；没有半成品标记就全发（短尾巴留给
+          //    下一次增量消歧）。
+          const proseLimit = recognizedCall ? boundary
+            : (holdingCall && lastBoundary >= 0) ? Math.min(lastBoundary, markerAt >= 0 ? markerAt : lastBoundary)
+            : (markerAt >= 0 ? markerAt : Math.max(0, acc.length - 8));
+          const safeEnd = Math.max(textSent, proseLimit);
+          const proseChunk = safeEnd > textSent.length ? acc.slice(textSent.length, safeEnd) : '';
+          if (proseChunk) {
             if (!textOpen) {
               if (thinkOpen) { yield { type: 'block-end', index: thinkIndex, block: { type: 'reasoning', text: thinkAcc } }; thinkOpen = false; }
               textIndex = nextIndex++;
               yield { type: 'block-start', index: textIndex, blockType: 'text' };
               textOpen = true;
             }
-            textSent += delta;
-            yield { type: 'text-delta', index: textIndex, text: delta };
+            textSent = safeEnd;
+            yield { type: 'text-delta', index: textIndex, text: proseChunk };
           }
-          if (boundary >= 0 && !pendingCall) {
-            if (transport && candidate && tools.some(t => t.name === candidate)) {
-              if (textOpen) yield { type: 'block-end', index: textIndex, block: { type: 'text', text: textSent } };
-              const index = nextIndex++;
-              pendingCall = { name: candidate, id: callId(0), index };
-              yield { type: 'block-start', index, blockType: 'tool-call' };
-              yield { type: 'tool-call-delta', index, id: pendingCall.id, name: candidate, argumentsDelta: '' };
-            }
+          if (recognizedCall) {
+            // 同一个调用在流式期间会被反复命中同一个边界，按边界下标去重保证只开一次块。
+            lastBoundary = boundary;
+            const opened = { name: rest.name, id: callId(pendingCalls.length), index: nextIndex++, at: boundary };
+            openedAtIndex.set(boundary, opened);
+            pendingCalls.push(opened);
+            // 散文块到此为止。块内容必须与已外发的 text-delta 完全一致（textSent
+            // 是「已发到的下标」而不是文本本身），否则 Harness 会收到一个数字当
+            // 块内容（实测 textEnd.block.text 变成 3）。
+            if (textOpen) { yield { type: 'block-end', index: textIndex, block: { type: 'text', text: acc.slice(0, textSent) } }; textOpen = false; }
+            yield { type: 'block-start', index: opened.index, blockType: 'tool-call' };
+            yield { type: 'tool-call-delta', index: opened.index, id: opened.id, name: opened.name, argumentsDelta: '' };
           }
+          // 参数已配平：把游标推到该调用对象末尾，后续边界从这里往后找，
+          // 否则下一个 delta 仍命中同一个调用（真机连发 3 个 read 时开出 32 个块）。
+          if (complete && complete.end > protocolFrom) protocolFrom = complete.end;
           continue;
         }
         if (ev.err) throw ev.err;
@@ -451,14 +503,20 @@ export function apply(ctx, config = {}) {
         err.code = 'TOOL_UNKNOWN';
         throw err;
       }
-      if (pendingCall && valid[0]?.name !== pendingCall.name) {
+      // 流式期间已开块的调用必须与最终解析结果**逐个对齐**（名字与顺序）。不对齐
+      // 说明协议形状在中途漂移，参数落到了错误的块上；宁可作废这一轮重来，也不能
+      // 让 Harness 收到「名字对、参数错」的调用。
+      const mismatch = pendingCalls.findIndex((p, i) => valid[i]?.name !== p.name);
+      if (mismatch >= 0) {
         turn.invalidate?.();
-        throw new Error('TOOL_PROTOCOL_INVALID: 工具参数不完整或调用顺序不一致');
+        throw new Error('TOOL_PROTOCOL_INVALID: 工具参数不完整或调用顺序不一致'
+          + `（流式已开块：${pendingCalls.map(p => p.name).join(', ') || '无'}；`
+          + `解析结果：${valid.map(c => c.name).join(', ') || '无'}）`);
       }
       if (valid.length) {
         turn.commit();
         if (thinkOpen) yield { type: 'block-end', index: thinkIndex, block: { type: 'reasoning', text: thinkAcc } };
-        if (textOpen && !pendingCall) {
+        if (textOpen && !pendingCalls.length) {
           const imageMd = imageMarkdown(endImages);
           if (imageMd) { textSent += imageMd; yield { type: 'text-delta', index: textIndex, text: imageMd }; }
           // 兜底：边界探测若漏掉某种未知形态，这里仍保证写进会话的助手文本是散文。
@@ -468,13 +526,13 @@ export function apply(ctx, config = {}) {
         for (let i = 0; i < valid.length; i++) {
           // id carries the session so harness-side streams / logs can be traced
           // back to the web conversation that produced the call.
-          // 0.7.1：流式期间已提前开块的 pendingCall 必须在这里复用同一个
-          // index/id 补发参数并关闭——真实会话（2026-09-08 f3fa97fd）暴露
-          // 旧实现另开新 index 重发一遍，Harness 收到同 id 两条调用：先空
-          // 参数执行一次（INVALID_ARGS 假错误），再真参数重复执行。
-          const reuse = i === 0 && pendingCall;
-          const id = reuse ? pendingCall.id : callId(i);
-          const index = reuse ? pendingCall.index : nextIndex++;
+          // 0.7.1：流式期间已提前开块的调用必须在这里复用同一个 index/id 补发参数
+          // 并关闭——真实会话（2026-09-08 f3fa97fd）暴露旧实现另开新 index 重发一遍，
+          // Harness 收到同 id 两条调用：先空参数执行一次（INVALID_ARGS 假错误），
+          // 再真参数重复执行。现在按位置复用，所以第 2、3 个调用同样不会重复。
+          const reuse = pendingCalls[i] || null;
+          const id = reuse ? reuse.id : callId(i);
+          const index = reuse ? reuse.index : nextIndex++;
           const args = JSON.stringify(valid[i].arguments ?? {});
           if (!reuse) yield { type: 'block-start', index, blockType: 'tool-call' };
           yield { type: 'tool-call-delta', index, id, ...(reuse ? {} : { name: valid[i].name }), argumentsDelta: args };

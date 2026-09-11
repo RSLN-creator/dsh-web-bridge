@@ -439,6 +439,48 @@ test('decoder：解析失败（invalid_stream）不因 partial 被伪装成可�
 // 8e9c538a / 89775655 大量 turns 以 error 收尾。早期实现把「解析出的调用名不在本次
 // 工具表里」直接过滤掉，剩下的空回复被当成收束——任务从此静止。
 
+test('一轮回复里连发多个工具调用：每个各自一块、id 唯一、不重复、不丢参数', async () => {
+  const DEBUG = process.env.WEBCODE_DEBUG_STREAM === '1';
+  let adapter;
+  const reply = [
+    '先并行读三处。',
+    '<tool_call>{"mcp_action":"call","name":"read","arguments":{"path":"a.js"}}</tool_call>',
+    '<tool_call>{"mcp_action":"call","name":"read","arguments":{"path":"b.js"}}</tool_call>',
+    '<tool_call>{"mcp_action":"call","name":"read","arguments":{"path":"c.js"}}</tool_call>',
+  ].join('\n');
+  const driver = {
+    status: () => ({ running: true }), close: async () => {}, resetConversation: async () => {},
+    sendTurn: async (key, prompt, opts) => {
+      for (const piece of reply.match(/[\s\S]{1,7}/g)) { if (DEBUG) console.error('piece ' + JSON.stringify(piece)); opts.onDelta?.(piece); }
+      return { text: reply };
+    },
+    sendPrompt: async () => ({ text: '' }),
+  };
+  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  const user = text => ({ role: 'user', content: [{ type: 'text', text }] });
+  const tools = [{ name: 'read', description: 'r', parameters: {} }];
+  try {
+    const chunks = [];
+    for await (const c of adapter.stream({ sessionId: 'multi', model: 'deepseek:deepseek', messages: [user('读三个文件')], tools })) {
+      if (DEBUG && (c.type === 'block-end' || c.type === 'text-delta')) console.error('CHUNK ' + JSON.stringify(c));
+      chunks.push(c);
+    }
+    const blocks = chunks.filter(c => c.type === 'block-end' && c.block?.type === 'tool-call');
+    assert.equal(blocks.length, 3, '三个调用各应有一块（旧实现只留第一个，其余整轮作废）');
+    assert.deepEqual(blocks.map(b => JSON.parse(b.block.arguments).path), ['a.js', 'b.js', 'c.js']);
+    const ids = blocks.map(b => b.block.id);
+    assert.equal(new Set(ids).size, 3, 'id 必须互不相同');
+    for (const id of ids) {
+      const endCount = chunks.filter(c => c.type === 'block-end' && c.block?.id === id).length;
+      assert.equal(endCount, 1, 'id ' + id + ' 不应重复交付（否则 Harness 会执行两遍）');
+    }
+    const textEnd = chunks.find(c => c.type === 'block-end' && c.block?.type === 'text');
+    assert.ok(textEnd.block.text.includes('先并行读三处'), '协议之前的散文要保留');
+    assert.ok(!textEnd.block.text.includes('tool_call'), '协议文本不得进助手正文');
+    assert.equal(chunks.at(-1).reason?.kind, 'tool-calls');
+  } finally { await dispose(); }
+});
+
 test('网页调用了本会话不存在的工具 → TOOL_UNKNOWN，不静默当收束', async () => {
   let adapter;
   const driver = {

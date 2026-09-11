@@ -1,7 +1,7 @@
 // parse.test.mjs — parseAgentReply gate. Real DeepSeek web output shape
 // (<tool_call> fences), legacy ```json fences, <function>, bare-object and the
 // legacy {"tool":...} whole-reply fallback. Run: node test/parse.test.mjs
-import { parseAgentReply, buildPreset } from '../lib/agent-preset.js';
+import { parseAgentReply, buildPreset, findProtocolStart, readCallAt, partialProtocolAt, normalizeDsml } from '../lib/agent-preset.js';
 // DeepSeek 网页版与 OpenAI 一样常把 arguments 输出为转义 JSON 字符串；
 // 用 JSON.stringify 构造真实围栏，保证转义与真实模型输出一致。
 const strArgsFence = (name, args, opt = {}) => JSON.stringify({ mcp_action: 'call', name, purpose: 'x', arguments: JSON.stringify(args), ...opt });
@@ -62,5 +62,55 @@ for (const c of cases) {
 // preset must teach the <tool_call> fence this parser accepts
 const preset = buildPreset({ tools: [{ name: 'pwsh', description: 'PowerShell', parameters: {} }] });
 if (!preset.includes('<tool_call>')) { fail++; console.log('FAIL preset teaches <tool_call>'); } else { pass++; console.log('PASS preset teaches <tool_call>'); }
+
+// ---- 流式辅助函数：偏移定位 / 完整性判定 / 半成品标记 --------------------------
+// 这三个函数共同决定「哪些文字算正文」。0.9.5 之前它们的错误直接表现为协议原文
+// 漏进助手消息，或同一条流式里把同一个调用开成几十个块（=工具重复执行）。
+const streamCases = [
+  { name: 'findProtocolStart 偏移定位（半成品 <tool_cal 不算边界，完整标签才算）',
+    run() {
+      const a = '正文。<t';
+      const b = '正文。<tool_call>{"name":"read"}';
+      const r1 = findProtocolStart(a, 0);
+      const r2 = findProtocolStart(b, 0);
+      return r1.index === -1 && r2.index === 3 && r2.name === 'read' && r2.transport === true;
+    } },
+  { name: 'findProtocolStart 从偏移处继续找（不重复命中同一个边界）',
+    run() {
+      const s = '<tool_call>{"name":"read"}</tool_call>\n<tool_call>{"name":"pwsh"}';
+      const first = findProtocolStart(s, 0);
+      const second = findProtocolStart(s, first.index + 1);
+      return first.index === 0 && second.index > first.index;
+    } },
+  { name: 'readCallAt 只在 JSON 配平时返回（流式分片不会提前开块）',
+    run() {
+      const partial = '<tool_call>{"mcp_action":"call","name":"read","arguments":{"path":';
+      const whole = '<tool_call>{"mcp_action":"call","name":"read","arguments":{"path":"a.js"}}</tool_call>';
+      return readCallAt(partial, 0) === null && readCallAt(whole, 0)?.raw.includes('"a.js"') === true;
+    } },
+  { name: 'partialProtocolAt 指出半成品标记起点（协议不得漏进正文）',
+    run() {
+      const s = '先并行读三处。\n<tool_cal';
+      const at = partialProtocolAt(s);
+      return at === s.indexOf('<tool_cal');
+    } },
+  { name: 'partialProtocolAt 对普通正文返回 -1（不误扣）',
+    run() {
+      return partialProtocolAt('这是一段普通回复，没有协议。') === -1
+        && partialProtocolAt('compare a < b and c > d') === -1;
+    } },
+  { name: 'normalizeDsml 与 findProtocolStart 形态一致（全角 DSML 也算边界）',
+    run() {
+      const full = '正文\uFF5CDSML\uFF5Ctool_calls\uFF5E';
+      const norm = normalizeDsml(full);
+      return norm.includes('<') && findProtocolStart(full).index >= 0;
+    } },
+];
+for (const c of streamCases) {
+  let ok = false;
+  try { ok = c.run() === true; } catch (e) { console.log('   threw', e.message); }
+  if (ok) { pass++; console.log('PASS', c.name); } else { fail++; console.log('FAIL', c.name); }
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
