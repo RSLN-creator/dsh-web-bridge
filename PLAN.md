@@ -1,7 +1,35 @@
 # Harness Web Bridge 路线
 
-## 当前版本 0.9.0
+## 当前版本 0.9.4
 
+0.9.4（协议文本不再进助手文本：截在正确的层）：
+
+真机会话里助手消息存的是整段协议原文（正文里出现 `<tool_call>` / 全角
+DSML 标记加 JSON），既占屏幕又打断阅读。真因不在渲染，而在**流式边界探测与解析器
+各认一套形态**：
+
+- `parseAgentReply` 有 DSML 归一化，所以工具照常执行；
+- 流式那句行内 `marker()` 只认半角标签 / 围栏 / Calling / 裸 `{`，
+  对全角 DSML 恒返回 -1，于是协议原文被当正文一路 text-delta
+  发出去、写进会话。
+
+显示层折叠救不了它：那段是正文段落，不是 `<pre>`。修正落在桥接层：
+
+- 新增 `findProtocolStart()`（`lib/agent-preset.js`）：与 `parseAgentReply` 共用同一套
+  形态知识，探测协议起点与工具名；流式循环改用它，
+  协议文本从此不再进 text-delta；
+- 新增 `stripProtocolText()`：下游兜底，保证写进会话的助手文本是散文；
+- `parseAgentReply` 改用共享的 `normalizeDsml()`，两处不再各写一份正则。
+
+**工具闭环一字不改**：解析仍吃原文（`parseAgentReply(finalText)`），只是
+“发往界面”的那一侧被截断。真机夹具 `test/fixtures/leaked-dsml-reply.txt`
+（从会话转录原样抽出）与 `test/protocol-leak.test.mjs`（9 项）锁住三件事：
+探测命中、解析照旧拿到完整调用、探测与解析形态不得漂移。
+
+注：0.9.1–0.9.3 的“显示层折叠”已整体回退（`git stash`，可恢复）
+——它对不上真机形态（只扫 `<pre>`，而泄漏的是正文段落）。
+
+## 0.9.0
 0.9.0（官方右侧栏 + 多站点真实可开）：三处收敛。
 
 1. **右侧栏改用 DSH 官方实现**：`@deepseek-ai/dsh-client-ui-sidebar-right` 的

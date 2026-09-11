@@ -1,8 +1,8 @@
 # Harness Web Bridge
 
-已登录的 DeepSeek 网页作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.5.0。
+已登录的 DeepSeek 网页作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.9.4。
 
-安装：`pnpm pack` 后执行 `dsh plugin --profile web add ./dsh-webcode-bridge-0.4.1.tgz`，重启 `dsh web`。需要 Node.js 20+、系统 Edge；无需浏览器扩展。
+安装：`pnpm pack` 后执行 `dsh plugin --profile web add ./dsh-webcode-bridge-0.9.4.tgz`，重启 `dsh web`。需要 Node.js 20+、系统 Edge；无需浏览器扩展。
 
 原生「设置 > 网页桥接」管理登录与启用开关。默认沿用 `~/.dsh/webcode-edge-profile`。模型分组 Harness Web Bridge 提供 flash（快速）、vision（识图）、deepseek（专家）。旧模型 ID 保留别名兼容。
 
@@ -14,4 +14,22 @@
 
 本地 OpenAI 兼容 HTTP 地址 `http://127.0.0.1:8931/v1` 目前提供文本问答及模型选择；原生工具循环通过 Harness provider `webcode` 接入。
 
+## 0.9.4
+
+协议文本不再进助手文本：截在正确的层。
+
+真机会话里助手消息存的是整段协议原文（正文里出现 `<tool_call>` / 全角
+DSML 标记加 JSON）。真因不在渲染，而在流式边界探测与解析器各认一套形态：
+`parseAgentReply` 有 DSML 归一化，所以工具照常执行；而流式那句行内 `marker()`
+只认半角标签 / 围栏 / Calling / 裸 `{`，对全角 DSML 恒返回 -1，于是协议原文被当
+正文一路发出去。显示层折叠救不了它（那段是正文段落，不是 `<pre>`）。
+
+- `findProtocolStart()`（`lib/agent-preset.js`）：与 `parseAgentReply` 共用同一套形态
+  知识，探测协议起点与工具名；流式循环改用它。
+- `stripProtocolText()`：下游兜底，保证写进会话的助手文本是散文。
+- `normalizeDsml()`：归一化收为一处，探测与解析不再各写一份正则。
+
+**工具闭环一字不改**：解析仍吃原文，只是“发往界面”的那一侧被截断。
+回归：`test/protocol-leak.test.mjs`（9 项，真机夹具 `test/fixtures/leaked-dsml-reply.txt`）锁住
+探测命中、解析照旧拿到完整调用、探测与解析形态不得漂移。
 MIT。SSE 解码协议参考 MIT 项目 three-water666/webcode。产品展示名更新，安装包名及 provider ID 保持兼容。
