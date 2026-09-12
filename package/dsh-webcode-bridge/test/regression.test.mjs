@@ -158,6 +158,20 @@ test('首轮保留全部历史与工具结果', () => {
   const delta = serializeDelta([{ role: 'tool', tool_call_id: 'a', name: 'read', content: '文件内容' }], 0);
   assert.ok(delta.text.includes('文件内容'));
 });
+test('goal 与 compact 在首轮和增量轮保留工程意图', () => {
+  const goal = { role: 'user', content: [{ type: 'text', text: '/goal 查找本项目安全问题' }] };
+  const first = serializeFirstTurn({ messages: [goal] });
+  const delta = serializeDelta([{ role: 'user', content: '旧问题' }, goal], 1).text;
+  for (const text of [first, delta]) {
+    assert.ok(text.includes('[DSH 目标命令] 查找本项目安全问题'));
+    assert.ok(text.includes('可验证结果'));
+    assert.ok(!text.includes('/goal'));
+  }
+  const compact = serializeDelta([{ role: 'user', content: '/compact 保留未完成任务' }], 0).text;
+  assert.ok(compact.includes('[DSH 压缩命令] 保留未完成任务'));
+  assert.ok(compact.includes('必要文件路径'));
+  assert.equal(serializeDelta([{ role: 'user', content: '解释 /goal 的用法' }], 0).text, '解释 /goal 的用法');
+});
 test('普通 JSON 示例不触发工具执行', () => {
   // 散文中的参数示例（无 name/arguments 调用形状）不触发执行
   assert.equal(parseAgentReply('例子：```json\n{"command":"view","path":"README.md"}\n```').calls.length, 0);

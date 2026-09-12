@@ -89,11 +89,29 @@ export function serializeFirstTurn(options = {}) {
   const text = messages.filter(Boolean).map(m => {
     if (m.role === 'assistant') return '[assistant] ' + textOfBlocks(m.content) + '\n' + (Array.isArray(m.content) ? m.content.filter(b => b.type === 'tool-call').map(b => JSON.stringify(b)).join('\n') : '');
     if (m.role === 'system') return '[system] ' + textOfBlocks(m.content);
+    if (m.role === 'user') {
+      const raw = textOfBlocks(m.content);
+      const directive = normalizeHarnessDirective(raw);
+      return directive || serializeDelta([m], 0, 0, names).text;
+    }
     return serializeDelta([m], 0, 0, names).text;
   }).join('\n\n');
   const preset = buildPreset(options);
   const transport = options.tools?.length ? '\n[本地工具传输协议]\n必须使用 <tool_call>{"mcp_action":"call","name":"实际工具名","arguments":{}}</tool_call> 发起工具调用。工具名和参数必须严格匹配上面的 schema。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。' : '';
   return [preset, '[会话开始]', text || '（用户未提供文字）', transport].filter(Boolean).join('\n\n');
+}
+
+/** Preserve DSH slash-command intent across the web model boundary. */
+export function normalizeHarnessDirective(text) {
+  const raw = String(text ?? '').trim();
+  if (!raw) return '';
+  const goal = raw.match(/^\/goal\s*(.*)$/is);
+  if (goal) return '[DSH 目标命令] ' + (goal[1].trim() || '请完成当前目标')
+    + '\n请把它当作需要完成的工程目标：先使用可用本地工具获取真实依据，再持续执行直到得到可验证结果；不要只解释如何做。';
+  const compact = raw.match(/^\/compact\s*(.*)$/is);
+  if (compact) return '[DSH 压缩命令] ' + (compact[1].trim() || '压缩当前上下文')
+    + '\n请保留当前目标、关键决定、已完成工作、待办事项和必要文件路径，删除重复过程，并以简洁状态继续工作。';
+  return '';
 }
 
 function resultBlock({ name, status, output, error }, withTrain) {
@@ -143,7 +161,10 @@ export function serializeDelta(messages, sent, toolResultsSent = 0, knownNames) 
       if (Array.isArray(m.content)) {
         for (const b of m.content) {
           if (!b) continue;
-          if (b.type === 'text' && typeof b.text === 'string' && b.text.trim()) segs.push(b.text.trim());
+          if (b.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
+            const directive = normalizeHarnessDirective(b.text);
+            segs.push(directive || b.text.trim());
+          }
           else if (b.type === 'tool-result') {
             const name = idToName.get(b.toolCallId ?? '') ?? (b.toolName ?? 'unknown');
             let status = 'success';
@@ -157,7 +178,10 @@ export function serializeDelta(messages, sent, toolResultsSent = 0, knownNames) 
             segs.push(resultBlock({ name, status, output, error }, results % TRAIN_EVERY === 0));
           }
         }
-      } else if (typeof m.content === 'string' && m.content.trim()) segs.push(m.content.trim());
+      } else if (typeof m.content === 'string' && m.content.trim()) {
+        const directive = normalizeHarnessDirective(m.content);
+        segs.push(directive || m.content.trim());
+      }
     }
     // assistant messages (text / tool-call blocks) are already on the web side
   }
