@@ -11,6 +11,9 @@ export function createMirror(options = {}) {
     // 前缀；两者一起决定 HTML/CSS 里绝对资源 URL 如何改写成同源路径。
     assetOrigins = [],
     mountPrefix = '',
+    getCookies = null,
+    setCookies = null,
+    getUserAgent = null,
   } = options;
   const upstreamOrigin = new URL(siteOrigin).origin.replace(/\/$/, '');
   const upstreamHost = new URL(upstreamOrigin).host;
@@ -428,6 +431,15 @@ export function createMirror(options = {}) {
       headers[key] = value;
     }
     if (req.headers.cookie) headers.cookie = req.headers.cookie;
+    else if (typeof getCookies === 'function') {
+      try {
+        const cookies = await getCookies(upstreamOrigin);
+        if (Array.isArray(cookies) && cookies.length) headers.cookie = cookies.map(c => c.name + '=' + c.value).join('; ');
+      } catch { /* best effort */ }
+    }
+    if (typeof getUserAgent === 'function') {
+      try { const ua = await getUserAgent(); if (ua) headers['user-agent'] = String(ua); } catch {}
+    }
     browserFingerprintHeaders(headers, upstreamOrigin);
 
     let body;
@@ -484,6 +496,9 @@ export function createMirror(options = {}) {
     }
     const cookies = upstream.headers.getSetCookie?.() || [];
     if (cookies.length) out['set-cookie'] = cookies.map(rewriteCookie);
+    if (cookies.length && typeof setCookies === 'function') {
+      try { await setCookies(cookies, upstreamOrigin); } catch { /* best effort */ }
+    }
     out['x-webcode-mirror'] = '1';
 
     const contentType = String(out['content-type'] || '');

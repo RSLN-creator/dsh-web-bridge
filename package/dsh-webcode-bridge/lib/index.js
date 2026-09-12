@@ -216,6 +216,14 @@ function frontClaims(pathname) {
 
 export function apply(ctx, config = {}) {
   const cfg = { ...DEFAULTS, ...(config || {}) };
+  // Stable fingerprint surfaced in /__webcode/status so a packed installation
+  // can be compared with the workspace build without restarting the GUI here.
+  if (!cfg.buildHash) {
+    let version = 'unknown';
+    try { version = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version || version; } catch {}
+    cfg.buildHash = createHash('sha256').update('dsh-webcode-bridge@' + version).digest('hex').slice(0, 12);
+    cfg.version = version;
+  }
   const sessionState = new Map();
   let buildTurn;
   let lastPresetInfo = null;   // the most recent first-turn prompt (settings-page preview)
@@ -922,6 +930,9 @@ function imageMarkdown(images) {
     logger: console,
     assetOrigins: getSite('deepseek')?.staticOrigins || [],
     mountPrefix: '',
+    getCookies: (origin) => driver.profileCookies(origin),
+    setCookies: (headers, origin) => driver.writeProfileCookies(headers, origin),
+    getUserAgent: () => driver.userAgent(),
   });
   // 多站点侧栏视图：每个内容服务一个 mirror 实例（各自 origin + 对应 driver 的
   // 登录态 token），懒创建；路径前缀 /__webcode/site/<siteId>/…。
@@ -936,6 +947,9 @@ function imageMarkdown(images) {
         logger: console,
         assetOrigins: st.staticOrigins || [],
         mountPrefix: '/__webcode/site/' + sid,
+        getCookies: (origin) => driverFor(sid).profileCookies(origin),
+        setCookies: (headers, origin) => driverFor(sid).writeProfileCookies(headers, origin),
+        getUserAgent: () => driverFor(sid).userAgent(),
       }));
     }
     return mirrors.get(sid);

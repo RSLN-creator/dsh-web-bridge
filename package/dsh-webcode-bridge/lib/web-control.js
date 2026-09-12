@@ -148,6 +148,7 @@ export function createWebControl(deps = {}) {
     'GET diagnostics': async () => ({ ok: true, ...(await driver.diagnostics()) }),
     'GET status': async () => ({
       ok: true,
+      build: { hash: config.buildHash || null, version: config.version || null },
       relay: relay ? (({ running, consent, consentPersistent, requireConsent, busy, queueLength, activeRequests, lastError, metrics }) => ({
         running, consent, consentPersistent, requireConsent, busy, queueLength, activeRequests, lastError, metrics,
       }))(relay.status()) : null,

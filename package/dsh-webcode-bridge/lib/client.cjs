@@ -249,6 +249,7 @@ window.__ModuleLoader__.load({
       }
       const relay = status?.relay;
       const driver = status?.driver;
+      const build = status?.build;
       const sites = driver?.sites;
       const consent = relay?.consent === true;
       const metrics = relay?.metrics;
@@ -259,6 +260,7 @@ window.__ModuleLoader__.load({
       const showThink = defaultSiteId === 'deepseek';
       return h('section', { className: 'hwb-settings' },
         h('h2', null, 'Harness Web Bridge'),
+        build?.hash && h('p', { className: 'hwb-build' }, '构建指纹：' + build.hash + (build.version ? ' · v' + build.version : '')),
         h('p', { className: 'hwb-lead' }, '用已登录的 Edge 网页驱动内容服务：右侧直接显示可操作的真实网页，模型生成与工具调用均以网页原生流程执行，与 API 调用同源。'),
 
         h('div', { className: 'hwb-card' },
@@ -326,6 +328,7 @@ window.__ModuleLoader__.load({
 
     function Conversation({ browserSrc }) {
       const [siteId, setSiteId] = React.useState('deepseek');
+      const [siteStatuses, setSiteStatuses] = React.useState({});
       // iframe 保活：每个访问过的站点一个 frame，全部常驻 DOM，用 display 切换。
       // 旧实现每次挂载都重设 src（?ts= 时间戳）——侧栏每开合一次就整页重载，
       // 站点应用初始化要好几秒，用户看到的就是「退出视图回去都要加载很久」。
@@ -346,10 +349,24 @@ window.__ModuleLoader__.load({
       }).catch(() => null);
       React.useEffect(() => {
         let alive = true;
+        const refreshSites = () => api('status').then(s => {
+          const rows = s?.driver?.sites || [];
+          if (alive) setSiteStatuses(Object.fromEntries(rows.map(row => [row.siteId, row])));
+        }).catch(() => {});
+        refreshSites();
+        const statusTimer = setInterval(refreshSites, 5000);
         winState().then(w => { const open = Object.keys(w?.windows || {}); if (alive && open.length && !open.includes(siteId)) setSiteId(open[0]); });
         const poll = setInterval(() => winState(), 5000);
-        return () => { alive = false; clearInterval(poll); };
+        return () => { alive = false; clearInterval(poll); clearInterval(statusTimer); };
       }, []);
+      const siteStatus = siteStatuses[siteId] || null;
+      const statusLabel = row => {
+        if (!row || row.loggedIn == null) return '待检查';
+        if (row.loggedIn === true) return row.loggedInCached ? '已登录(缓存)' : '已登录';
+        return '未登录';
+      };
+      const statusClass = row => row?.loggedIn === true ? 'ok' : row?.loggedIn === false ? 'bad' : 'idle';
+      const shouldGuide = row => row && row.initialized === false && row.loggedIn !== true;
       const ensureFrame = React.useCallback((sid, force) => {
         setFrames(prev => {
           if (prev[sid] && !force) return prev;   // 已有存活 frame：直接复用，不重载
@@ -359,12 +376,15 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         let alive = true;
         setConnectError('');
-        if (!frames[siteId]) {
+        // Wait for the first status snapshot before deciding whether to mount a
+        // site frame; otherwise an uninitialized site can race the status poll
+        // and briefly boot a browser before its guide state arrives.
+        if (siteStatuses[siteId] && !frames[siteId] && !shouldGuide(siteStatuses[siteId])) {
           api('connect', { siteId }, 90000).then(() => { if (alive) ensureFrame(siteId); })
             .catch(e => { if (alive) setConnectError(e.message); });
         }
         return () => { alive = false; };
-      }, [siteId, frames, ensureFrame]);
+      }, [siteId, frames, ensureFrame, siteStatuses[siteId]?.initialized, siteStatuses[siteId]?.loggedIn]);
       async function toggleWindow() {
         setWinBusy(true); setConnectError('');
         try {
@@ -391,7 +411,7 @@ window.__ModuleLoader__.load({
             Object.entries(SITE_NAMES).map(([sid, name]) => h('button', {
               key: sid, role: 'tab', 'aria-selected': sid === siteId, className: sid === siteId ? 'active' : '',
               onClick: () => setSiteId(sid),
-            }, name))),
+            }, h('span', null, name), h('span', { className: 'hwb-tab-state ' + statusClass(siteStatuses[sid]) }, statusLabel(siteStatuses[sid]))))),
           h('button', {
             className: 'hwb-icon-btn', title: '刷新右侧网页（重新加载镜像页面）',
             'aria-label': '刷新右侧网页', onClick: reloadFrame,
@@ -405,6 +425,10 @@ window.__ModuleLoader__.load({
         connectError && !frameBlocked && h('div', { className: 'hwb-error', role: 'status' },
           '浏览器视图未能连接：' + connectError + ' ',
           h('button', { className: 'hwb-retry', onClick: reloadFrame }, '重试')),
+        shouldGuide(siteStatus) && h('div', { className: 'hwb-guide', role: 'status' },
+          h('strong', null, siteName(siteId) + ' 尚未初始化'),
+          h('p', null, '请先在设置页点击“登录”或“检测”，完成一次真实网页核验后再打开右栏。网络不可达或地区受限时，请使用独立窗口确认。'),
+          h('button', { className: 'hwb-retry', onClick: () => api('window', { siteId, action: 'open' }).then(winState).catch(e => setConnectError(e.message)) }, '打开独立窗口')),
         frameBlocked && h('div', { className: 'hwb-error', role: 'status' },
           siteName(siteId) + ' 拦截了内嵌镜像（HTTP ' + active.status + '），与登录态无关——请用「独立窗口」打开；若仍未登录，请先在上方完成登录。',
           h('button', { className: 'hwb-retry', onClick: toggleWindow }, '改用独立窗口打开'),
@@ -440,7 +464,7 @@ window.__ModuleLoader__.load({
       browserStyle.textContent = '.hwb-browser-frame{display:block;width:100%;height:100%;min-height:0;border:0;background:#fff}.hwb-frame-status{position:absolute;inset:0;display:grid;place-items:center;background:#fff;color:#7a8494;font-size:12px;pointer-events:none}';
       document.head.appendChild(browserStyle);
       const cornerStyle = document.createElement('style');
-      cornerStyle.textContent = '.hwb-corner-btn{width:28px;height:28px;display:grid;place-items:center;border:1px solid #8884;border-radius:7px;background:transparent;color:inherit;cursor:pointer;padding:0}.hwb-corner-btn:hover{background:#8882}';
+      cornerStyle.textContent = '.hwb-corner-btn{width:28px;height:28px;display:grid;place-items:center;border:1px solid #8884;border-radius:7px;background:transparent;color:inherit;cursor:pointer;padding:0}.hwb-corner-btn:hover{background:#8882}.hwb-tab-state{font-size:10px;margin-left:4px;opacity:.8}.hwb-tab-state.ok{color:#2e7d32}.hwb-tab-state.bad{color:#93443e}.hwb-tab-state.idle{color:#7a8494}.hwb-guide{padding:24px;text-align:center;background:#fff;color:#394150}.hwb-guide p{font-size:12px;line-height:1.7;opacity:.75}.hwb-build{font-size:11px;opacity:.6;margin:-8px 0 0}';
       document.head.appendChild(cornerStyle);
       const disposers = [() => style.remove(), () => browserStyle.remove(), () => cornerStyle.remove()];
       const warn = (what, e) => console.warn('[webcode-bridge] ' + what + ' failed:', e && e.message ? e.message : e);
@@ -468,7 +492,7 @@ window.__ModuleLoader__.load({
           guide: [{
             order: 55,
             title: () => 'Web Bridge',
-            description: () => '内容服务真实网页会话（已登录站点直接可用；生成与工具调用走网页原生流程）',
+            description: () => '打开内容服务的真实网页',
           }],
         });
         if (typeof offType === 'function') disposers.push(offType);

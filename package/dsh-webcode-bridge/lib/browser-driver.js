@@ -294,6 +294,25 @@ export function createBrowserDriver(options = {}) {
       window: windowState(),
     };
   }
+  async function profileCookies(origin = siteUrl) {
+    if (!ctx || typeof ctx.cookies !== 'function') return [];
+    try { return await ctx.cookies(origin); } catch { return []; }
+  }
+  async function writeProfileCookies(setCookieHeaders, origin = siteUrl) {
+    if (!ctx || typeof ctx.addCookies !== 'function') return;
+    const url = String(origin).replace(/\/$/, '') + '/';
+    const list = [];
+    for (const raw of Array.isArray(setCookieHeaders) ? setCookieHeaders : []) {
+      const first = String(raw).split(';', 1)[0];
+      const eq = first.indexOf('=');
+      if (eq <= 0) continue;
+      list.push({ name: first.slice(0, eq).trim(), value: first.slice(eq + 1).trim(), url });
+    }
+    if (list.length) await ctx.addCookies(list);
+  }
+  async function userAgent() {
+    try { return page && !page.isClosed?.() ? await page.evaluate(() => navigator.userAgent) : null; } catch { return null; }
+  }
 
   function defaultEdgePath() {
     for (const c of [
@@ -1544,7 +1563,7 @@ export function createBrowserDriver(options = {}) {
   }
   function safeUrl(url) { try { return String(new URL(url)); } catch { return null; } }
 
-  return { sendPrompt, sendTurn, resetConversation, conversationFor, connect, interact, openLogin, openWindow, closeWindow, importStorageFromProfile, status, close, diagnostics, getToken, get page() { return page; }, webApi, listSessions, fetchHistory, screenshotBase64 };
+  return { sendPrompt, sendTurn, resetConversation, conversationFor, connect, interact, openLogin, openWindow, closeWindow, importStorageFromProfile, status, close, diagnostics, getToken, profileCookies, writeProfileCookies, userAgent, get page() { return page; }, webApi, listSessions, fetchHistory, screenshotBase64 };
 }
 
 function abortError() {
