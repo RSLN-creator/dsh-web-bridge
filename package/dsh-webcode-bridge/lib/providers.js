@@ -56,7 +56,7 @@ export const CHATGPT = site({
   attachSelector: "input[type='file']",
   decoder: 'chatgpt', stream: true,
   models: [
-    { id: 'auto', name: 'ChatGPT（网页当前模型）', labels: ['ChatGPT'], context: 196_000 },
+    { id: 'auto', name: 'ChatGPT', labels: ['ChatGPT'], context: 196_000 },
   ],
 });
 
@@ -89,7 +89,7 @@ export const QWEN = site({
   attachSelector: "input[type='file']",
   decoder: 'openai-sse', stream: true, experimental: true,
   models: [
-    { id: 'auto', name: 'Qwen（网页当前模型）', labels: ['Qwen'], context: 1_000_000 },
+    { id: 'auto', name: 'Qwen', labels: ['Qwen'], context: 1_000_000 },
   ],
 });
 
@@ -100,7 +100,7 @@ export const DOUBAO = site({
   attachSelector: "input[type='file']",
   decoder: 'doubao', stream: true, experimental: true,
   models: [
-    { id: 'auto', name: '豆包（网页当前模型）', labels: ['豆包'], context: 256_000 },
+    { id: 'auto', name: '豆包', labels: ['豆包'], context: 256_000 },
   ],
 });
 
@@ -111,7 +111,7 @@ export const GROK = site({
   attachSelector: "input[type='file']",
   decoder: 'grok', stream: true,
   models: [
-    { id: 'auto', name: 'Grok（网页当前模型）', labels: ['Grok'], context: 256_000 },
+    { id: 'auto', name: 'Grok', labels: ['Grok'], context: 256_000 },
   ],
 });
 
@@ -122,7 +122,7 @@ export const CLAUDE = site({
   attachSelector: "input[type='file']",
   decoder: 'claude', stream: true,
   models: [
-    { id: 'auto', name: 'Claude（网页当前模型）', labels: ['Claude'], context: 200_000 },
+    { id: 'auto', name: 'Claude', labels: ['Claude'], context: 200_000 },
   ],
 });
 
@@ -162,7 +162,7 @@ export const GEMINI = site({
   attachSelector: "input[type='file']",
   decoder: 'dom', stream: false, experimental: true,
   models: [
-    { id: 'auto', name: 'Gemini（网页当前模型）', labels: ['Gemini'], context: 1_000_000 },
+    { id: 'auto', name: 'Gemini', labels: ['Gemini'], context: 1_000_000 },
   ],
 });
 

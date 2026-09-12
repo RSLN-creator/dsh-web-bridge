@@ -333,10 +333,16 @@ window.__ModuleLoader__.load({
       const [connectError, setConnectError] = React.useState('');
       const [winBusy, setWinBusy] = React.useState(false);
       const [winOpen, setWinOpen] = React.useState({}); // siteId → window 聚合
+      // 0.9.9 的 winOpen 是「开着的站点的 siteId（字符串或 null）」，渲染读的是
+      // `winOpen === siteId`。0.11.0 把渲染改成多站点聚合 `winOpen[siteId]?.open`
+      // 并把初始值换成 {}，却漏改了这里——winState() 仍把 openSite（字符串/null）
+      // 塞进同一个 state。于是「没有独立窗口」（null）时渲染执行 null['deepseek']
+      // 直接抛 TypeError，整块右栏 React 树崩掉 → 面板全白。
+      // 现在统一成 windows 聚合对象，state 里永远是对象，读取再加一层防御。
       const winState = () => api('window').then(w => {
-        const openSite = w?.window?.open ? w.siteId : null;
-        setWinOpen(openSite);
-        return openSite;
+        const windows = (w?.windows && typeof w.windows === 'object') ? w.windows : {};
+        setWinOpen(windows);
+        return { windows, siteId: w?.siteId ?? null };
       }).catch(() => null);
       React.useEffect(() => {
         let alive = true;
@@ -362,7 +368,7 @@ window.__ModuleLoader__.load({
       async function toggleWindow() {
         setWinBusy(true); setConnectError('');
         try {
-          const target = winOpen[siteId]?.open ? 'close' : 'open';
+          const target = winIsOpen(siteId) ? 'close' : 'open';
           await api('window', { siteId, action: target });
           await winState();
         } catch (e) { setConnectError(e.message); }
@@ -375,6 +381,10 @@ window.__ModuleLoader__.load({
       }
       const active = frames[siteId];
       const frameBlocked = Number(active?.status) >= 400;
+      // 渲染期永远按「对象」读：任何异步/旧值形态（字符串、null）都不得让整块
+      // 右栏抛错变白屏——独立窗口按钮只是面板里的一个控件，它坏了也不该拖垮面板。
+      const winOf = sid => (winOpen && typeof winOpen === 'object' ? winOpen[sid] : null);
+      const winIsOpen = sid => winOf(sid)?.open === true;
       return h('div', { className: 'hwb-conversation' },
         h('div', { className: 'hwb-sitebar', role: 'tablist', 'aria-label': '内容服务站点' },
           h('div', { className: 'hwb-sitebar-tabs' },
@@ -387,10 +397,10 @@ window.__ModuleLoader__.load({
             'aria-label': '刷新右侧网页', onClick: reloadFrame,
           }, '\u21bb'),
           h('button', {
-            className: 'hwb-win-btn' + (winOpen[siteId]?.open ? ' open' : ''), disabled: winBusy,
-            title: winOpen[siteId]?.open ? '收起该站点的独立窗口（回到无头运行）' : '在独立窗口中打开真实网页（已开的窗口会聚焦弹到最前，不会覆盖）',
-            'aria-pressed': !!winOpen[siteId]?.open, onClick: toggleWindow,
-          }, winBusy ? '窗口切换中…' : winOpen[siteId]?.open ? '✓ 已开独立窗口 · 点击收回' : '⧉ 独立窗口打开')),
+            className: 'hwb-win-btn' + (winIsOpen(siteId) ? ' open' : ''), disabled: winBusy,
+            title: winIsOpen(siteId) ? '收起该站点的独立窗口（回到无头运行）' : '在独立窗口中打开真实网页（已开的窗口会聚焦弹到最前，不会覆盖）',
+            'aria-pressed': winIsOpen(siteId), onClick: toggleWindow,
+          }, winBusy ? '窗口切换中…' : winIsOpen(siteId) ? '✓ 已开独立窗口 · 点击收回' : '⧉ 独立窗口打开')),
         // 两条错误只显示一条：镜像被站点拦截时，连接类错误没有信息量，不重复刷屏。
         connectError && !frameBlocked && h('div', { className: 'hwb-error', role: 'status' },
           '浏览器视图未能连接：' + connectError + ' ',

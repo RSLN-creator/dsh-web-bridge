@@ -617,5 +617,105 @@ test('GET login-sites 列出全部站点（含 z.ai）且不启动浏览器', as
   });
 });
 
+// ---------------------------------------------------------------- 0.13.0
+// 四个回归的护栏。每条都锁「旧实现的错误行为」，不是锁实现细节。
+
+test('模型名不再含「网页当前模型」字样，但 auto 入口仍唯一且可解析', async () => {
+  const { listAllModels, resolveWebModel } = await import('../lib/providers.js');
+  const all = listAllModels();
+  for (const m of all) {
+    assert.ok(!m.name.includes('网页当前模型'), `${m.id} 仍带「网页当前模型」: ${m.name}`);
+  }
+  // 只有 DeepSeek 保留「（深度思考）」这一条能力注记，其余是干净站点名
+  assert.equal(all.find(m => m.id === 'deepseek:deepseek').name, 'DeepSeek（深度思考）');
+  for (const id of ['chatgpt:auto', 'qwen:auto', 'doubao:auto', 'grok:auto', 'claude:auto', 'gemini:auto']) {
+    const name = all.find(m => m.id === id).name;
+    assert.ok(!name.includes('（') && !name.includes('）'), `${id} 名称应无括注: ${name}`);
+  }
+  // 未校准站点仍只有唯一 auto 入口，且解析不因改名而失效
+  const glm = resolveWebModel('glm:auto');
+  assert.equal(glm.siteId, 'glm');
+  assert.equal(glm.name, 'GLM-5.3');
+});
+
+test('右栏窗口状态是聚合对象：没有独立窗口时不得让面板渲染抛错', () => {
+  // 0.11.0 把渲染改成 winOpen[siteId]?.open（聚合读法），却仍把 siteId/null
+  // 塞进同一个 state：null['deepseek'] 抛 TypeError，整块右栏崩成白屏。
+  // 护栏直接按「渲染期读法」验两条真实 payload 形态。
+  const renderRead = winOpen => {
+    const winOf = sid => (winOpen && typeof winOpen === 'object' ? winOpen[sid] : null);
+    const winIsOpen = sid => winOf(sid)?.open === true;
+    return { open: winIsOpen('deepseek'), pressed: winIsOpen('deepseek') };
+  };
+  // 没有窗口：控制面 /__webcode/window 的 windows 是 {}
+  assert.deepEqual(renderRead({}), { open: false, pressed: false });
+  // 有窗口：windows = { deepseek: { open: true } }
+  assert.deepEqual(renderRead({ deepseek: { open: true } }), { open: true, pressed: true });
+  // 其它站点开着窗口不影响当前站点
+  assert.deepEqual(renderRead({ glm: { open: true } }), { open: false, pressed: false });
+  // 回归护栏：旧实现存进去的 null / 字符串必须被防御式读法吃掉，而不是抛错
+  assert.deepEqual(renderRead(null), { open: false, pressed: false });
+  assert.deepEqual(renderRead('deepseek'), { open: false, pressed: false });
+});
+
+test('上下文计数按累计口径上报：增量轮不得让 inputTokens 掉回本轮增量', async () => {
+  let adapter; const turns = [];
+  const driver = {
+    status: () => ({ running: true }), close: async () => {}, resetConversation: async () => {},
+    sendTurn: async (key, prompt, opts) => { turns.push({ key, prompt, ...opts }); opts.onDelta?.('答'); return { text: '答' }; },
+    sendPrompt: async (prompt, opts) => { turns.push({ prompt, ...opts }); return { text: '答' }; },
+  };
+  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  const user = text => ({ role: 'user', content: [{ type: 'text', text }] });
+  const usageOf = async options => {
+    const out = [];
+    for await (const c of adapter.stream(options)) out.push(c);
+    return out.filter(c => c.type === 'usage').at(-1).usage.inputTokens;
+  };
+  try {
+    // 首轮：累计 = 首轮全文估算
+    const long = '这是一段足够长的首轮问题。'.repeat(40);
+    const u1 = await usageOf({ sessionId: 'ctx-acc', model: 'deepseek', messages: [user(long)] });
+    assert.ok(u1 > 0, '首轮 inputTokens 必须为正');
+    // 第二轮：只发增量，但上报的必须是「首轮 + 增量」的累计值，不能掉回增量本身
+    const u2 = await usageOf({ sessionId: 'ctx-acc', model: 'deepseek', messages: [user(long), { role: 'assistant', content: [{ type: 'text', text: '答' }] }, user('再补一句很短的话')] });
+    assert.ok(u2 > u1, `第二轮必须大于首轮（累计口径）：u1=${u1} u2=${u2}`);
+    // 第三轮继续单调不减
+    const u3 = await usageOf({ sessionId: 'ctx-acc', model: 'deepseek', messages: [user(long), { role: 'assistant', content: [{ type: 'text', text: '答' }] }, user('再补一句很短的话'), { role: 'assistant', content: [{ type: 'text', text: '答' }] }, user('第三句')] });
+    assert.ok(u3 >= u2, `累计值必须单调不减：u2=${u2} u3=${u3}`);
+    // 增量轮本身确实只发了很短一段（证明上面涨的是累计而不是重发全文）
+    assert.ok(!turns[1].prompt.includes('这是一段足够长的首轮问题'), '第二轮仍是增量发送');
+  } finally { await dispose(); }
+});
+
+test('会话命名优先取网页端真实标题，取不到才回落本地启发式', async () => {
+  let adapter; const turns = [];
+  const driver = {
+    status: () => ({ running: true }), close: async () => {}, resetConversation: async () => {},
+    sendTurn: async (key, prompt, opts) => { turns.push({ key, prompt, ...opts }); opts.onDelta?.('答'); return { text: '答' }; },
+    sendPrompt: async (prompt, opts) => { turns.push({ prompt, ...opts }); return { text: '答' }; },
+    // 本会话已有网页对话槽，且网页侧给它起了真实名字
+    conversationFor: key => (key === 'title-web' ? { webSessionId: 'web-sess-1' } : null),
+    listSessions: async () => ({ ok: true, sessions: [{ id: 'web-sess-1', title: '网页端起的真实标题' }] }),
+  };
+  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  const collect = async options => { const out = []; for await (const c of adapter.stream(options)) out.push(c); return out; };
+  const textOf = chunks => chunks.filter(c => c.type === 'text-delta').map(c => c.text).join('');
+  const titleCall = (sessionId, text) => ({
+    purpose: 'session-title', sessionId,
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'Generate the session title from this JSON array of human messages:\n[{"text":"' + text + '"}]' }] }],
+  });
+  try {
+    // ① 网页端有真实标题 → 用它（含用户在网页端做过的重命名）
+    const before = turns.length;
+    assert.equal(textOf(await collect(titleCall('title-web', '帮我分析仓库'))), '网页端起的真实标题');
+    assert.equal(turns.length, before, '命名不落网页，也不该发真实轮次');
+
+    // ② 该 DSH 会话在网页侧还没有对话槽 → 回落本地启发式（首条消息前 16 字）
+    const heuristic = textOf(await collect(titleCall('title-none', '帮我分析这个仓库的结构')));
+    assert.equal(heuristic, '帮我分析这个仓库的结构'.slice(0, 16));
+  } finally { await dispose(); }
+});
+
 
 

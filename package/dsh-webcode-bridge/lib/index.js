@@ -155,6 +155,9 @@ function logCall(options) {
       msgs: msgs.length,
       tools: (options.tools || []).length,
       model: options.model,
+      // 命名走网页端标题（问题④）时要能按 sessionId 对上网页对话，日志里带上它
+      // 才能事后核对「这次命名到底有没有接上网页端」。
+      sessionId: options.sessionId ?? null,
     }));
   } catch {}
 }
@@ -169,13 +172,17 @@ function logCall(options) {
 /**
  * Auxiliary calls that do not need the web page are answered locally so the
  * user does not see duplicate sends on the web side. Currently: title/naming
- * style requests (small, no tools) derived from the first user message.
+ * style requests (small, no tools).
  *
  * 只认 DSH 自己的 `purpose: 'session-title'`。旧实现还拿 system 文本里的
  * 「title/标题/命名」当判据——工作区指令里只要出现过这些词，一次真实轮次就会
  * 被本地截成前 16 个字直接返回，模型根本没被调用。
+ *
+ * 命名来源（问题④）：优先取网页端该对话的真实标题——网页侧会按首轮内容给对话
+ * 命名，用户也可以在那里手动重命名，这才是「自动重命名接入网页端」。取不到
+ * （非 DeepSeek 站点、对话尚未落库、网络失败）才退回本地启发式。
  */
-function localAnswer(options) {
+async function localAnswer(options, webTitleFor) {
   try {
     if (String(options.purpose || '') !== 'session-title') return null;
     if (Array.isArray(options.tools) && options.tools.length) return null;
@@ -183,10 +190,17 @@ function localAnswer(options) {
     let t = textOfBlocks(firstUser?.content);
     const prefix = 'Generate the session title from this JSON array of human messages:';
     if (t.startsWith(prefix)) {
-      const entries = JSON.parse(t.slice(prefix.length).trim());
-      t = Array.isArray(entries) ? entries.map(entry => typeof entry.text === 'string' ? entry.text : '').join(' ') : '';
+      try {
+        const entries = JSON.parse(t.slice(prefix.length).trim());
+        t = Array.isArray(entries) ? entries.map(entry => typeof entry.text === 'string' ? entry.text : '').join(' ') : '';
+      } catch { /* 帧文本异常时按原文处理 */ }
     }
     t = t.replace(/\s+/g, ' ').trim();
+    if (typeof webTitleFor === 'function') {
+      let webTitle = null;
+      try { webTitle = await webTitleFor(options); } catch { webTitle = null; }
+      if (webTitle) return webTitle;
+    }
     return (t.slice(0, 16) || '新会话');
   } catch {
     return null;
@@ -289,9 +303,9 @@ export function apply(ctx, config = {}) {
         log(`vision turn: ${images.length} image(s) attached (${images.map(i => i.contentType).join(',')})`);
       }
 
-      const local = localAnswer(options);
+      const local = await localAnswer(options, webConversationTitle);
       if (local !== null) {
-        yield* emitText(local, turn.prompt);
+        yield* emitText(local, turn);
         return;
       }
 
@@ -542,7 +556,7 @@ export function apply(ctx, config = {}) {
           + `本会话只有这些工具：${available.join(', ') || '（无）'}。`
           + '请改用上面列出的工具名重新发起调用；如果任务不需要工具，请直接给出结论。';
         warn(notice);
-        yield* emitText(notice, turn.prompt);
+        yield* emitText(notice, turn);
         return;
       }
       // 流式期间已开块的调用必须与最终解析结果**逐个对齐**（名字与顺序）。不对齐
@@ -595,7 +609,7 @@ export function apply(ctx, config = {}) {
         const imageMd = imageMarkdown(endImages);
         const out = imageMd ? finalText + imageMd : finalText;
         assertNonEmpty(out, '', []);
-        yield* emitText(out, turn.prompt);
+        yield* emitText(out, turn);
         return;
       }
       if (!finalText.startsWith(textSent)) throw new Error('STREAM_REWRITE: 网页重写了已输出内容');
@@ -612,12 +626,18 @@ export function apply(ctx, config = {}) {
   llm.registerAdapter([cfg.providerId], adapter);
 
   /** Valid minimal text chunk sequence. */
-async function* emitText(text, prompt) {
+async function* emitText(text, turn) {
   yield { type: 'block-start', index: 0, blockType: 'text' };
   yield { type: 'text-delta', index: 0, text };
   yield { type: 'block-end', index: 0, block: { type: 'text', text } };
-  yield { type: 'usage', usage: { inputTokens: estimateTokens(prompt), outputTokens: estimateTokens(text) } };
+  yield { type: 'usage', usage: { inputTokens: inputTokensOf(turn), outputTokens: estimateTokens(text) } };
   yield { type: 'finish', reason: { kind: 'stop' } };
+}
+
+/** 本轮上报给 DSH 的输入 token 数：turn 自带累计值就用它，否则退回本轮文本估算。
+ *  详见 buildTurn 里 cumulativeTokens 的注释（问题③：增量轮必须报累计上下文）。 */
+function inputTokensOf(turn) {
+  return Number.isFinite(turn?.inputTokens) ? turn.inputTokens : estimateTokens(turn?.prompt ?? '');
 }
 
 /** 三处相同的「空回复」判定：正文、思考、图片任一非空即合法（识图轮只出图）。 */
@@ -629,7 +649,7 @@ function assertNonEmpty(text, thinkText, images) {
 
 /** 每轮收尾的 usage + finish 事件对（outputTokens 口径：正文+思考一起估）。 */
 function* finishChunks(turn, outputText, kind) {
-  yield { type: 'usage', usage: { inputTokens: estimateTokens(turn.prompt), outputTokens: estimateTokens(outputText) } };
+  yield { type: 'usage', usage: { inputTokens: inputTokensOf(turn), outputTokens: estimateTokens(outputText) } };
   yield { type: 'finish', reason: { kind } };
 }
 
@@ -678,6 +698,34 @@ function imageMarkdown(images) {
       }));
     }
     return drivers.get(siteId);
+  }
+
+  /**
+   * 问题④：DSH 的自动命名（purpose='session-title'）此前完全走本地启发式——把首条
+   * 用户消息截前 16 字，网页端给对话起的真实名字（以及用户在那里做的重命名）永远
+   * 传不回来。这里把命名接到网页端：找到本 DSH 会话对应的网页对话，读它在网页侧的
+   * 真实标题。
+   *
+   * 只读、且只读已经在跑的驱动：命名是旁路调用，绝不能为了取一个标题去懒创建浏览器
+   * （那会为一个名字拉起一整个 Edge profile）。取不到就返回 null，调用方回落本地
+   * 启发式——命名失败不该影响会话本身。
+   */
+  async function webConversationTitle(options) {
+    const sessionId = options?.sessionId;
+    if (!sessionId) return null;
+    let siteId = 'deepseek';
+    try { siteId = resolveWebModel(options?.model || configManager.get().defaultModel || cfg.modelId).siteId; } catch { /* 用默认站点 */ }
+    // 命名调用没有 agentId：对应的是本会话的主网页对话槽（key = sessionId）。
+    const d = siteId === 'deepseek' ? driver : drivers.get(siteId);
+    if (!d || typeof d.listSessions !== 'function' || typeof d.conversationFor !== 'function') return null;
+    const conv = d.conversationFor(String(sessionId));
+    const webSessionId = conv?.webSessionId;
+    if (!webSessionId) return null;
+    const dir = await d.listSessions(100);
+    const hit = (dir?.sessions || []).find((s) => s.id === webSessionId);
+    const title = String(hit?.title || '').replace(/\s+/g, ' ').trim();
+    if (!title || title === '(无标题)') return null;
+    return title;
   }
 
   // ---- web-side control plane (sessions / naming / sync / preview) -----
@@ -935,6 +983,7 @@ function imageMarkdown(images) {
       recordPreset(prompt);
       return {
         prompt,
+        inputTokens: estimateTokens(prompt),
         meta: { model: siteId + ':' + model, siteId, thinkMode },
         async attach() {
           const imgs = imagesOfMessages(messages);
@@ -958,13 +1007,21 @@ function imageMarkdown(images) {
     let st = sessionState.get(keyPath);
     if (st && (messages.length <= st.sent || st.fingerprint !== fingerprint(st.sent))) st = null;
     const fresh = !st;
-    st ||= { sent: 0, toolResults: 0 };
+    st ||= { sent: 0, toolResults: 0, tokens: 0 };
     const delta = serializeDelta(messages, st.sent, st.toolResults);
     let prompt;
     if (fresh) { prompt = serializeFirstTurn({ ...options, extraPrompt }); recordPreset(prompt); }
     else prompt = delta.text;
+    // 上下文计数口径（问题③根因）：网页这一侧是「首轮全文 + 后续增量」，模型
+    // 实际看到的上下文 = 本会话已发出去的全部文本之和。旧实现把 usage.inputTokens
+    // 报成 estimateTokens(turn.prompt)，增量轮里 turn.prompt 只是本轮那一小段增量；
+    // GUI 上下文表取最近一次 usage 的 inputTokens，于是每开新一轮就掉回接近 0，
+    // 看起来「清空重新开始」。这里改成累计值（单调不减）。
+    const deltaTokens = estimateTokens(prompt);
+    const cumulativeTokens = fresh ? deltaTokens : (st.tokens || 0) + deltaTokens;
     return {
       prompt,
+      inputTokens: cumulativeTokens,
       meta: {
         sessionKey: keyPath, fresh, model: siteId + ':' + model, siteId, thinkMode,
         // 网页会话丢失时的整段重放文本（见 executor 的 WEB_SESSION_LOST 分支）
@@ -983,7 +1040,7 @@ function imageMarkdown(images) {
         // 旧写法对已存在键 set 不改变插入序，淘汰会先丢掉最老的热会话，
         // 表现为长会话莫名重新整段重发。
         sessionState.delete(keyPath);
-        sessionState.set(keyPath, { sent: messages.length, toolResults: delta.toolResultsSent, fingerprint: fingerprint(messages.length) });
+        sessionState.set(keyPath, { sent: messages.length, toolResults: delta.toolResultsSent, fingerprint: fingerprint(messages.length), tokens: cumulativeTokens });
         if (sessionState.size > 512) sessionState.delete(sessionState.keys().next().value);
       },
     };
