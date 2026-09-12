@@ -162,6 +162,52 @@ export function createBrowserDriver(options = {}) {
   let lastRecovered = null;  // { at, reason, status, chars }
   let Decoders = null;
   let loggedIn = null;
+  // 重启前最后一次核验的登录态（持久化在各站点 profile）：进程内存里的 loggedIn
+  // 重启即归零，没有这份缓存，面板每次重启都把所有站点打回「待检查」，
+  // 用户只能逐站点手动核验（cookies 明明还在 profile 里）。
+  const loginStatePath = () => path.join(cfg.profileDir, 'webcode-login-state.json');
+  let cachedLogin = null;    // { loggedIn, at, message } | null
+  try { cachedLogin = JSON.parse(fs.readFileSync(loginStatePath(), 'utf8')); } catch { /* first run */ }
+  if (!cachedLogin || typeof cachedLogin !== 'object' || typeof cachedLogin.loggedIn !== 'boolean') cachedLogin = null;
+  function persistLoginState(entry) {
+    cachedLogin = entry;
+    try {
+      fs.mkdirSync(cfg.profileDir, { recursive: true });
+      fs.writeFileSync(loginStatePath(), JSON.stringify(entry));
+    } catch (e) { warn('login state save failed:', e?.message); }
+  }
+  /** 轮次/连接路径的高频持久化入口：值没变且 60s 内写过就不重复落盘。 */
+  function rememberLogin(v) {
+    const val = v === true;
+    if (cachedLogin && cachedLogin.loggedIn === val && Date.now() - (cachedLogin.at || 0) < 60_000) return;
+    persistLoginState({ loggedIn: val, at: Date.now(), message: val ? '页面核验：输入框在' : '页面核验：未见登录态' });
+  }
+  /**
+   * 统一的「这个页面算不算已登录」判定。旧实现只看 SEL.input 是否存在，而
+   * z.ai 游客页自带完整输入框（真机实测 textarea + 发送按钮都在），未登录
+   * 也被记成已登录。站点可在 providers.js 声明 loginProbe：
+   *   bad — 命中即判未登录（如游客页可见的「登录」按钮）；
+   *   ok  — 命中即判已登录（登录后才有的元素）；都没有时回退输入框判定。
+   */
+  async function judgeLoggedIn(p) {
+    if (!p || p.isClosed?.()) return false;
+    const probe = site.loginProbe;
+    if (probe?.bad) {
+      try {
+        const bad = p.locator(probe.bad).first();
+        if (await bad.count() && await bad.isVisible().catch(() => false)) return false;
+      } catch { /* bad 特征坏了不阻塞判定 */ }
+    }
+    if (probe?.ok) {
+      try { if (await p.locator(probe.ok).first().count()) return true; } catch { /* 同上 */ }
+    }
+    return await p.locator(SEL.input).count() > 0;
+  }
+  /** 当前页面捕获链自检：binding + 捕获脚本必须真实存在于文档（见 installPage）。 */
+  async function captureChainAlive(p) {
+    if (!p || p.isClosed?.()) return false;
+    return p.evaluate(() => typeof window.__webcodeChunk === 'function' && window.__webcodeCaptureInstalled === true).catch(() => false);
+  }
   let selectedModel = null;
   let dsUi = null; // DeepSeek 网页 UI 代际缓存：'classic' | 'unified'（见 detectDeepSeekUi）
   let requestMetadata = null;
@@ -210,6 +256,10 @@ export function createBrowserDriver(options = {}) {
       running: Boolean(ctx),
       busy,
       loggedIn,
+      // loggedIn 为 null（本进程从未核验）时回退到重启前的持久值，面板据此
+      // 显示「已登录(缓存)」而不是「待检查」；loggedInCached 标记数据来源。
+      loggedInCached: loggedIn == null && cachedLogin?.loggedIn === true,
+      loginCheckedAt: lastLogin?.at ?? cachedLogin?.at ?? null,
       needLogin: loggedIn === false,
       selectedModel,
       siteId,
@@ -379,11 +429,15 @@ export function createBrowserDriver(options = {}) {
       executablePath: cfg.executablePath,
       headless: headless ?? cfg.headless,
       args: [
-        '--no-first-run', '--no-default-browser-check', '--disable-blink-features=AutomationControlled',
-        // 记录调试端口到 profile 的 DevToolsActivePort：本进程意外退出后，下一次
-        // 启动可以经 CDP 优雅关掉孤儿浏览器、释放单实例锁（不需要管理员权限）。
-        '--remote-debugging-port=0',
-      ],
+      '--no-first-run', '--no-default-browser-check', '--disable-blink-features=AutomationControlled',
+      // 记录调试端口到 profile 的 DevToolsActivePort：本进程意外退出后，下一次
+      // 启动可以经 CDP 优雅关掉孤儿浏览器、释放单实例锁（不需要管理员权限）。
+      '--remote-debugging-port=0',
+      // Edge 在上次进程被强杀后启动时会自动恢复旧标签页；这些恢复页没有捕获
+      // 绑定，被当成 driver 页后整条流捕获都是死的（2026-09-12 DeepSeek 240s
+      // 超时的根因）。抑制恢复气泡，下面再把恢复页一律关掉。
+      '--hide-crash-restore-bubble',
+    ],
       viewport: { width: 640, height: 900 },
       ...(cfg.storageState ? { storageState: cfg.storageState } : {}),
     });
@@ -403,7 +457,12 @@ export function createBrowserDriver(options = {}) {
       clearStaleProfileLocks();
       ctx = await launchOnce();
     }
-    page = ctx.pages()[0] || (await ctx.newPage());
+    // 绝不复用 ctx.pages() 里的现成页（Edge 会话恢复页 / about:blank 残页）：
+    // 恢复页的文档已经加载完，capture binding 与 init script 都不在上面，
+    // 「发得出去收不回」。永远开干净新页，现成页一律关掉。
+    const stalePages = ctx.pages();
+    page = await ctx.newPage();
+    for (const stale of stalePages) { try { await stale.close(); } catch {} }
     ctx.on('close', () => {
       ctx = null; page = null;
       failActive(`WEB_BROWSER_CLOSED: 浏览器已关闭 — 下一轮会自动重启`, 'WEB_BROWSER_CLOSED');
@@ -419,7 +478,10 @@ export function createBrowserDriver(options = {}) {
     // 无头转有头窗口保留在当前形态重开一页；无头会话则回到无头。
     const targetHeadless = ctx ? headed : cfg.headless !== false;
     if (ctx) {
-      try { page = await ctx.newPage(); await installPage(); } catch { ctx = null; page = null; }
+      try {
+        page = await ctx.newPage();
+        if ((await installPage()) === false) throw new Error('capture self-check failed');
+      } catch { ctx = null; page = null; }
       if (page) return;
     }
     if (!Decoders) Decoders = loadDecoderRegistry(cfg.decoderPath);
@@ -454,12 +516,27 @@ export function createBrowserDriver(options = {}) {
     const init = captureInit(paths);
     await p.addInitScript(init);
     try { await p.evaluate(init); } catch { /* 页面尚未可用时忽略 */ }
+    // 注入自检：binding 与捕获脚本必须在**当前文档**真实存在。exposeBinding
+    // 被静默吞错、init 脚本注入竞争时，页面照样能用但整条捕获是死的——
+    // 发出去收不回，只能白等 240s 超时（2026-09-12 DeepSeek 断流事故）。
+    if (!(await captureChainAlive(p))) {
+      await p.exposeBinding('__webcodeChunk', (source, captureId, phase, text) => {
+        onPageCapture({ captureId, phase, text });
+      }).catch(() => {});
+      try { await p.evaluate(init); } catch {}
+      if (!(await captureChainAlive(p))) {
+        warn('capture chain self-check FAILED — stream capture is dead on this page; reopening next turn');
+        return false;
+      }
+    }
+    return true;
   }
 
   async function connect() {
     await ensure();
     if (!busy && new URL(page.url()).origin !== new URL(cfg.site).origin) loggedIn = await gotoFreshChat();
     else loggedIn = await page.locator(SEL.input).count() > 0;
+    rememberLogin(loggedIn);
     return { ok: true, loggedIn };
   }
 
@@ -490,12 +567,11 @@ export function createBrowserDriver(options = {}) {
     if (!u || u.origin !== root.origin || u.pathname !== '/') {
       await page.goto(cfg.site, { waitUntil: 'domcontentloaded', timeout: 45_000 });
     }
-    try {
-      await page.waitForSelector(SEL.input, { timeout: 20_000 });
-      return true;
-    } catch {
-      return false; // likely not logged in
-    }
+    // 输入框在≠已登录（z.ai 游客页有完整输入框），统一走登录判定。
+    await page.waitForSelector(SEL.input, { timeout: 20_000 }).catch(() => {});
+    const ok = await judgeLoggedIn(page);
+    rememberLogin(ok);
+    return ok;
   }
 
   async function uploadImages(files) {
@@ -543,6 +619,14 @@ export function createBrowserDriver(options = {}) {
       // 会让本轮的严格模型校验误判为 MODEL_UI_CHANGED。
       requestMetadata = null;
       await ensure();
+      // 发送前的最后一道捕获自检：binding 缺失的页面「发得出去收不回」，只能
+      // 白等超时。发现死捕获就换干净页再来（登录态在 profile，不受影响）。
+      if (!(await captureChainAlive(page))) {
+        warn('capture chain missing before turn — reopening a clean page');
+        try { await page.close(); } catch {}
+        page = null;
+        await ensure();
+      }
       throwIfAborted();
 
       if (navigate === 'fresh') {
@@ -561,8 +645,8 @@ export function createBrowserDriver(options = {}) {
           if (!page.url().startsWith(target)) {
             await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 45_000 });
           }
-          await page.waitForSelector(SEL.input, { timeout: 20_000 });
-          ready = true;
+          await page.waitForSelector(SEL.input, { timeout: 20_000 }).catch(() => {});
+          ready = await judgeLoggedIn(page);
         } catch { ready = false; }
         throwIfAborted();
         if (!ready) {
@@ -608,9 +692,22 @@ export function createBrowserDriver(options = {}) {
           timer: null, firstThinkAt: null, firstResponseAt: null, t0: null,
         };
       });
-      timer = setTimeout(() => {
+      timer = setTimeout(async () => {
         const a = finishActive();
-        const err = new Error(`web turn timed out after ${cfg.requestTimeoutMs}ms`);
+        // 超时必须带页面现场：「网页没生成」和「捕获链死了」修法完全不同，
+        // 黑盒超时只能瞎猜（2026-09-12 断流事故：页面早有全文、捕获从未建立）。
+        const scene = await page?.evaluate?.(() => {
+          const last = [...document.querySelectorAll('.markdown, [data-message-author-role="assistant"], .ds-markdown')].pop();
+          return {
+            captureAlive: typeof window.__webcodeChunk === 'function' && window.__webcodeCaptureInstalled === true,
+            replyChars: last ? (last.innerText || '').length : 0,
+          };
+        }).catch(() => null);
+        const detail = !scene ? '页面不可用'
+          : (scene.captureAlive ? '捕获链在' : '捕获链缺失')
+            + (scene.replyChars ? `，页面已有 ${scene.replyChars} 字回复未回传` : '，页面无回复文本');
+        warn('turn timeout scene:', JSON.stringify(scene));
+        const err = new Error(`web turn timed out after ${cfg.requestTimeoutMs}ms（${detail}）`);
         if (a) a.reject(err); else warn(err.message);
       }, cfg.requestTimeoutMs);
       if (active) active.timer = timer;
@@ -1067,9 +1164,9 @@ export function createBrowserDriver(options = {}) {
       // （换账户时用户会先点网页里的退出，此时输入框消失，仍会正常进入登录流程。）
       if (ctx && page && !page.isClosed?.()) {
         try {
-          const stillIn = await page.locator(SEL.input).count() > 0;
-          if (stillIn) {
+          if (await judgeLoggedIn(page)) {
             loggedIn = true;
+            persistLoginState({ loggedIn: true, at: Date.now(), message: '快速核验：登录态有效' });
             report('already-logged-in');
             lastLogin = { ok: true, at: Date.now(), ms: Date.now() - t0, alreadyLoggedIn: true, message: '登录态仍有效，无需重新登录' };
             return { ok: true, loggedIn: true, alreadyLoggedIn: true, siteId, ms: lastLogin.ms, note: lastLogin.message };
@@ -1091,15 +1188,28 @@ export function createBrowserDriver(options = {}) {
       try { await page.goto(cfg.site, { waitUntil: 'domcontentloaded', timeout: 45_000 }); } catch {}
       report('waiting-for-login');
       const t1 = Date.now();
+      let healed = 0;
       for (;;) {
         await new Promise((r) => setTimeout(r, 1500));
         if (Date.now() - t1 > cfg.loginTimeoutMs) throw new Error('login wait timed out');
+        if (!page || page.isClosed?.()) {
+          // 登录窗口被关/页面丢失：旧实现 page.isClosed?.() 直接 TypeError
+          //（豆包/Kimi 真机报「Cannot read properties of null (reading 'isClosed')」），
+          // 用户只看到「请求失败」。先自愈重开一次——cookies 在 profile 里，
+          // 已完成的登录不丢；重开也失败才按可读错误收场。
+          if (++healed > 2) throw new Error('登录窗口已关闭且无法重开，登录未完成');
+          warn('login window lost mid-flow — reopening');
+          try {
+            await ensure();
+            await page.goto(cfg.site, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+            report('waiting-for-login');
+            continue;
+          } catch (e) { throw new Error('登录窗口已关闭，登录未完成（' + String(e?.message || e).slice(0, 80) + '）'); }
+        }
         try {
-          if (page.isClosed?.()) throw new Error('login window was closed before login completed');
           const u = new URL(page.url());
           if (/sign|login/i.test(u.pathname)) continue;
-          const input = await page.$(SEL.input);
-          if (input) break;
+          if (await judgeLoggedIn(page)) break;
         } catch (err) {
           throw err;
         }
@@ -1110,12 +1220,14 @@ export function createBrowserDriver(options = {}) {
       await launch({ headless: true });
       await gotoFreshChat();
       loggedIn = true;
+      persistLoginState({ loggedIn: true, at: Date.now(), message: '人工登录完成' });
       report('ready');
       lastLogin = { ok: true, at: Date.now(), ms: Date.now() - t0, alreadyLoggedIn: false, message: '登录完成，已切回无头运行' };
       return { ok: true, loggedIn: true, alreadyLoggedIn: false, siteId, ms: lastLogin.ms, note: lastLogin.message };
     } catch (err) {
       report('error');
       lastLogin = { ok: false, at: Date.now(), ms: Date.now() - t0, error: String(err?.message || err) };
+      persistLoginState({ loggedIn: false, at: Date.now(), message: String(err?.message || err).slice(0, 120) });
       throw err;
     } finally {
       transitioning = false;
@@ -1174,7 +1286,10 @@ export function createBrowserDriver(options = {}) {
     } catch (err) { warn('window dock failed (window stays at default position):', err?.message); }
     const target = url || cfg.site;
     try { await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => {}); } catch { /* already there */ }
-    try { loggedIn = await page.locator(SEL.input).count() > 0 || !/sign|login/i.test(new URL(page.url()).pathname); } catch { loggedIn = null; }
+    // 与登录同一套判定（z.ai 游客页有输入框，旧「URL 不含 login 即已登录」
+    // 会把未登录记成已登录）。
+    loggedIn = await judgeLoggedIn(page);
+    if (loggedIn) persistLoginState({ loggedIn: true, at: Date.now(), message: '独立窗口核验' });
     log(`headed window open ${w}x${h} → ${target}`);
     return { ok: true, ...windowState() };
   }

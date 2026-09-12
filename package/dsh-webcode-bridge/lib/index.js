@@ -773,9 +773,16 @@ function imageMarkdown(images) {
       // 聚合全部内容服务的登录/运行状态：未初始化的站点给占位（不启动浏览器）。
       const sites = SITES.map((st) => {
         const d = st.id === 'deepseek' ? driver : drivers.get(st.id);
-        if (!d) return { siteId: st.id, siteName: st.name, origin: st.origin, initialized: false, running: false, busy: false, loggedIn: null, needLogin: false, selectedModel: null, window: null, loginState: 'idle', lastLogin: null };
+        if (!d) {
+          // 重启后未懒创建的站点：登录缓存直接读站点 profile 的落盘状态，
+          // 否则面板永远「待检查」，用户只能逐站点手动核验（问题③的另一半）。
+          let cached = null;
+          try { cached = JSON.parse(fs.readFileSync(path.join(cfg.profileDir, 'sites', st.id, 'webcode-login-state.json'), 'utf8')); } catch { /* 未初始化过 */ }
+          const has = cached && typeof cached.loggedIn === 'boolean';
+          return { siteId: st.id, siteName: st.name, origin: st.origin, initialized: false, running: false, busy: false, loggedIn: has ? cached.loggedIn : null, loggedInCached: has && cached.loggedIn === true, loginCheckedAt: has ? cached.at : null, needLogin: has && cached.loggedIn === false, selectedModel: null, window: null, loginState: 'idle', lastLogin: null };
+        }
         const s = d.status();
-        return { siteId: st.id, siteName: st.name, origin: st.origin, initialized: true, running: s.running, busy: s.busy, loggedIn: s.loggedIn, needLogin: s.needLogin, selectedModel: s.selectedModel, window: s.window ?? null, loginState: s.loginState ?? 'idle', lastLogin: s.lastLogin ?? null };
+        return { siteId: st.id, siteName: st.name, origin: st.origin, initialized: true, running: s.running, busy: s.busy, loggedIn: s.loggedIn, loggedInCached: s.loggedInCached === true, loginCheckedAt: s.loginCheckedAt ?? null, needLogin: s.needLogin, selectedModel: s.selectedModel, window: s.window ?? null, loginState: s.loginState ?? 'idle', lastLogin: s.lastLogin ?? null };
       });
       return { ...base, sites };
     },

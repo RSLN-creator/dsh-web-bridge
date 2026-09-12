@@ -62,9 +62,12 @@ try {
     const diag = await driver.diagnostics();
     const ui = diag?.ui ?? 'classic';
     const meta = diag?.requestMetadata ?? {};
-    const expect = expectedRequestMetadata(model, { ui, wantThink: model === 'deepseek' });
+        // 0.11.0 起 flash/deepseek 是同一个模型（唯一 DeepSeek · thinking:true），期望恒为开思考。
+    const expect = expectedRequestMetadata(model, { ui, wantThink: true });
     // 新会话首条本应带 model_type；续聊消息网页发 null（沿用会话模型）——都算通过。
-    const mtOk = meta.model_type == null ? ui === 'unified' : meta.model_type === expect.model_type;
+    // 期望为 null（unified 下该键不校验）时跳过，与驱动 runTurn 的 strict 核验同语义。
+    const mtOk = expect.model_type == null ? true
+      : (meta.model_type == null ? ui === 'unified' : meta.model_type === expect.model_type);
     const thinkOk = expect.thinking_enabled == null ? true : meta.thinking_enabled === expect.thinking_enabled;
     const hasReply = !!((acc || r.text).trim());
     assert(`model.${model}.请求元数据符合所选模式（${ui}）`, mtOk && thinkOk && hasReply,

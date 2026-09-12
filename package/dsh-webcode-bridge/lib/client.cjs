@@ -183,8 +183,11 @@ window.__ModuleLoader__.load({
         list.map(s => h('div', { key: s.siteId, className: 'hwb-site-block' },
           h('div', { className: 'hwb-site-row' + (busySite === s.siteId || s.busy ? ' busy' : '') },
             h('span', { className: 'hwb-site-name' }, siteName(s.siteId)),
-            h('span', { className: 'hwb-site-state ' + (s.loggedIn === true ? 'ok' : s.loggedIn === false ? 'bad' : 'idle') },
-              s.loggedIn === true ? '已登录' : s.loggedIn === false ? '未登录' : '待检查'),
+            h('span', {
+              className: 'hwb-site-state ' + (s.loggedIn === true ? 'ok' : s.loggedIn === false ? 'bad' : 'idle'),
+              title: s.loggedInCached ? '来自重启前的核验缓存（登录态存在 profile 里）；点「登录」或「检测」即时核验' : undefined,
+            },
+              s.loggedIn === true ? (s.loggedInCached ? '已登录(缓存)' : '已登录') : s.loggedIn === false ? '未登录' : '待检查'),
             h('button', { disabled: busySite !== null, onClick: () => doLogin(s.siteId) },
               busySite === s.siteId ? '等待登录完成…' : s.loggedIn === true ? '更换账户' : '登录'),
             h('button', {
@@ -388,12 +391,12 @@ window.__ModuleLoader__.load({
             title: winOpen[siteId]?.open ? '收起该站点的独立窗口（回到无头运行）' : '在独立窗口中打开真实网页（已开的窗口会聚焦弹到最前，不会覆盖）',
             'aria-pressed': !!winOpen[siteId]?.open, onClick: toggleWindow,
           }, winBusy ? '窗口切换中…' : winOpen[siteId]?.open ? '✓ 已开独立窗口 · 点击收回' : '⧉ 独立窗口打开')),
-        connectError && h('div', { className: 'hwb-error', role: 'status' },
+        // 两条错误只显示一条：镜像被站点拦截时，连接类错误没有信息量，不重复刷屏。
+        connectError && !frameBlocked && h('div', { className: 'hwb-error', role: 'status' },
           '浏览器视图未能连接：' + connectError + ' ',
           h('button', { className: 'hwb-retry', onClick: reloadFrame }, '重试')),
         frameBlocked && h('div', { className: 'hwb-error', role: 'status' },
-          siteName(siteId) + ' 拒绝了右栏镜像请求（HTTP ' + active.status + '）：该站点前面的 CDN / 风控层'
-          + '把来自本机脚本的请求判成了机器人，与登录态无关。',
+          siteName(siteId) + ' 拦截了内嵌镜像（HTTP ' + active.status + '），与登录态无关——请用「独立窗口」打开；若仍未登录，请先在上方完成登录。',
           h('button', { className: 'hwb-retry', onClick: toggleWindow }, '改用独立窗口打开'),
           h('button', { className: 'hwb-retry', onClick: reloadFrame }, '重试')),
         // 所有已访问站点的 frame 常驻 DOM（隐藏保活），只显示当前站点的。

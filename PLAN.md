@@ -1,6 +1,45 @@
 # Harness Web Bridge 路线
 
-## 当前版本 0.11.0
+## 当前版本 0.12.0
+
+0.12.0（断流根修 + 登录链路四修 + 面板缓存态 + 命名简化）：针对「DeepSeek 返回
+内容不显示（240s 超时）」「豆包/Kimi 明明登录了却报『请求失败』」「z.ai 没登录
+却显示登录完成」「每次重启都要手动逐站点重新验证」四条真机反馈。
+
+1. **DeepSeek 断流根修（browser-driver.js）。** CDP 取证实锤：轮次所在的页面是
+   Edge 会话恢复冒出的「野生页」，其上捕获 binding 与 init script **均未注入**
+   （`__webcodeChunk` undefined）——网页端回复完整生成、SSE 流完全可读，桥却
+   一个字节收不到，只能白等 240s 超时。三层修复：launch 永远开干净新页并把
+   恢复页/残页一律关闭（`--hide-crash-restore-bubble` + `ctx.newPage()`）；
+   installPage 尾部注入自检（binding+捕获脚本必须真实存在于当前文档，失败重装
+   再失败显式报警）；每轮发送前再自检一次，死捕获直接换干净页，绝不带着收不回
+   的通道发送。超时错误现在携带页面现场（捕获链死活 + 是否已有未回传回复），
+   黑盒超时不再靠猜。
+2. **登录失败真因透传（web-control.js）。** POST login 失败时错误文本此前只放
+   `message` 字段，而面板 `api()` 只认 `data.error`——豆包/Kimi 的
+   「Cannot read properties of null (reading 'isClosed')」被吞成「请求失败」。
+   现在失败响应同时携带 `error` 字段，面板显示真实原因。
+3. **登录窗口 page 丢失自愈（browser-driver.js）。** openLogin 等待循环里
+   `page.isClosed?.()` 在 page 变 null 时直接 TypeError（豆包 27s / Kimi 10.7s
+   即失败）。现在判空先行：窗口丢失先自愈重开一次（cookies 在 profile，进度
+   不丢），重开失败才按可读错误「登录窗口已关闭，登录未完成」收场。
+4. **登录判定收紧 + z.ai 误报根修（browser-driver.js + providers.js）。**
+   「页面有输入框 = 已登录」对 z.ai 必然误报（真机实测游客页 textarea 与
+   发送按钮齐全）。新增统一判定 judgeLoggedIn + 站点级 loginProbe 契约
+   （bad=未登录特征、ok=登录特征）；z.ai 声明游客页可见「登录/Sign in」按钮为
+   bad 特征。openLogin 快速核验 / 等待循环 / openWindow / gotoFreshChat /
+   runTurn 就绪判定全部收口到同一判定——「更换账户」对 z.ai 也终于能进入
+   真登录流程。
+5. **登录态持久化（browser-driver.js + index.js + client.cjs）。** 各站点
+   profile 落盘 `webcode-login-state.json`（登录态 + 核验时间），driver 与
+   未懒创建站点都回读；重启后面板显示「已登录(缓存)」而不是「待检查」，cookies
+   本来就在 profile 里，不再逐站点手动重验。即时核验仍点「登录/检测」。
+6. **面板文案**：右栏镜像拦截说明换短句且与连接类错误不再同屏重复；模型描述
+   去掉「网址 ·」前缀，对齐其他供应商的简洁风（站点名在 optgroup 分组里）：
+   DeepSeek（深度思考）、GLM-5.3、Kimi K3 等。
+7. **doctor 修正（test-mock/real-verify.mjs）**：0.11.0 合并单模型后 flash=deepseek
+   别名，wantThink 恒为 true；期望 model_type 为 null 时按驱动 strict 核验同
+   语义跳过。真机 8/8 通过。
 
 0.11.0（GLM 思维链 + 登录态检测 + 窗口聚焦 + 命名对齐网址）：针对「Kimi 登录后
 没法验证登录态」「独立窗口应跳回已有窗口而不是覆盖」「非 DeepSeek 站点的思维链

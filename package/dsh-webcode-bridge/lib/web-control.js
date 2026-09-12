@@ -187,16 +187,20 @@ export function createWebControl(deps = {}) {
       // 否则失败只会写进宿主控制台，界面永远停在「未登录」。
       const loginAndReport = relay?.config?.loginAndReport;
       if (loginAndReport && wait) {
-        const r = await loginAndReport(siteId || 'deepseek', { timeoutMs: body?.timeoutMs });
-        return {
-          ok: r?.ok === true,
-          siteId: r?.siteId,
-          siteName: r?.siteName,
-          loggedIn: r?.loggedIn ?? null,
-          alreadyLoggedIn: r?.alreadyLoggedIn === true,
-          ms: r?.ms ?? null,
-          message: r?.ok ? (r?.note || '登录完成') : (r?.error || '登录失败'),
-        };
+      const r = await loginAndReport(siteId || 'deepseek', { timeoutMs: body?.timeoutMs });
+      const message = r?.ok ? (r?.note || '登录完成') : (r?.error || '登录失败');
+      return {
+        ok: r?.ok === true,
+        siteId: r?.siteId,
+        siteName: r?.siteName,
+        loggedIn: r?.loggedIn ?? null,
+        alreadyLoggedIn: r?.alreadyLoggedIn === true,
+        ms: r?.ms ?? null,
+        message,
+        // 失败原因必须同时落在 error 字段:面板 api() 只认 data.error,
+        // 只写 message 会把真实原因(超时/窗口被关/profile 锁)吞成「请求失败」。
+        ...(r?.ok ? {} : { error: message }),
+      };
       }
       const loginTrigger = relay?.config?.loginTrigger;
       if (!loginTrigger) return { ok: false, error: 'no driver' };
