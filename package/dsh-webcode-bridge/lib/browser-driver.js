@@ -29,69 +29,87 @@ function loadDecoderRegistry(explicitPath) {
   return globalThis.WebCodeStreamDecoders;
 }
 
-/** 捕获脚本：按站点 completionPaths 拦截 SSE（XHR drain + fetch tee）。 */
+/** 捕获脚本：按站点 completionPaths 拦截 SSE（XHR drain + fetch tee）。
+ *  自愈守护：站点埋点 SDK 会把 window.fetch **恢复成原生引用**（GLM 真机实锤：
+ *  installed=true 而 fetch 包装出链，整条流静默丢失），单次包装挡不住。包装带
+ *  __wcCap 特征标记，守护每 500ms 查一次，丢失立即重装——导航后脚本重跑，
+ *  守护只存在于当前文档，不会累积。 */
 function captureInit(paths) {
   const list = JSON.stringify(paths.length ? paths : ['/api/v0/chat/completion']);
   return `
 (function () {
-  if (window.__webcodeCaptureInstalled) return;
+  if (window.__webcodeCaptureInstalled) { try { install(); } catch {} return; }
   window.__webcodeCaptureInstalled = true;
   const TARGETS = ${list};
   const hit = (u) => TARGETS.some((t) => String(u || '').includes(t));
-  const origOpen = XMLHttpRequest.prototype.open;
-  const origSend = XMLHttpRequest.prototype.send;
-  function emit(id, phase, text) { try { window.__webcodeChunk(id, phase, text || ''); } catch {} }
+  const emit = (id, phase, text) => { try { window.__webcodeChunk(id, phase, text || ''); } catch {} };
   function newId() { return 'cap-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2); }
-  XMLHttpRequest.prototype.open = function (method, url) {
-    try { this.__wcInfo = { method: String(method || '').toUpperCase(), url: String(url || '') }; } catch {}
-    return origOpen.apply(this, arguments);
-  };
-  XMLHttpRequest.prototype.send = function () {
-    const info = this.__wcInfo;
-    if (info && info.method === 'POST' && hit(info.url)) {
-      const id = newId();
-      let lastLen = 0;
-      const drain = () => {
-        try {
-          const t = typeof this.responseText === 'string' ? this.responseText : '';
-          if (t.length > lastLen) { emit(id, 'chunk', t.slice(lastLen)); lastLen = t.length; }
-        } catch {}
-      };
-      const timer = setInterval(drain, 30);
-      emit(id, 'start', '');
-      this.addEventListener('loadend', () => { clearInterval(timer); drain(); emit(id, 'end', ''); });
+  function install() {
+    // ---- fetch：不是我们的包装（或已是）都要保证最外层带 __wcCap 标记 ----
+    if (!(window.fetch && window.fetch.__wcCap)) {
+      const origFetch = window.fetch ? window.fetch.bind(window) : null;
+      if (origFetch) {
+        const wrapped = async function (input, init) {
+          const resp = await origFetch(input, init);
+          try {
+            const url = typeof input === 'string' ? input : (input && input.url) || '';
+            const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+            if (method === 'POST' && hit(url) && resp.ok && resp.body) {
+              const id = newId();
+              emit(id, 'start', '');
+              const [forPage, forCapture] = resp.body.tee();
+              const reader = forCapture.getReader();
+              const dec = new TextDecoder();
+              (async () => {
+                try {
+                  for (;;) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    emit(id, 'chunk', dec.decode(value, { stream: true }));
+                  }
+                } catch {}
+                emit(id, 'end', '');
+              })();
+              return new Response(forPage, { status: resp.status, statusText: resp.statusText, headers: resp.headers });
+            }
+          } catch {}
+          return resp;
+        };
+        wrapped.__wcCap = true;
+        window.fetch = wrapped;
+      }
     }
-    return origSend.apply(this, arguments);
-  };
-  const origFetch = window.fetch ? window.fetch.bind(window) : null;
-  if (origFetch) {
-    window.fetch = async function (input, init) {
-      const resp = await origFetch(input, init);
-      try {
-        const url = typeof input === 'string' ? input : (input && input.url) || '';
-        const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
-        if (method === 'POST' && hit(url) && resp.ok && resp.body) {
+    // ---- XHR：open/send 成对重装（标记挂在 send 上判断）----
+    if (!(XMLHttpRequest.prototype.send && XMLHttpRequest.prototype.send.__wcCap)) {
+      const origOpen = XMLHttpRequest.prototype.open;
+      const origSend = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.open = function (method, url) {
+        try { this.__wcInfo = { method: String(method || '').toUpperCase(), url: String(url || '') }; } catch {}
+        return origOpen.apply(this, arguments);
+      };
+      const wrappedSend = function () {
+        const info = this.__wcInfo;
+        if (info && info.method === 'POST' && hit(info.url)) {
           const id = newId();
-          emit(id, 'start', '');
-          const [forPage, forCapture] = resp.body.tee();
-          const reader = forCapture.getReader();
-          const dec = new TextDecoder();
-          (async () => {
+          let lastLen = 0;
+          const drain = () => {
             try {
-              for (;;) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                emit(id, 'chunk', dec.decode(value, { stream: true }));
-              }
+              const t = typeof this.responseText === 'string' ? this.responseText : '';
+              if (t.length > lastLen) { emit(id, 'chunk', t.slice(lastLen)); lastLen = t.length; }
             } catch {}
-            emit(id, 'end', '');
-          })();
-          return new Response(forPage, { status: resp.status, statusText: resp.statusText, headers: resp.headers });
+          };
+          const timer = setInterval(drain, 30);
+          emit(id, 'start', '');
+          this.addEventListener('loadend', () => { clearInterval(timer); drain(); emit(id, 'end', ''); });
         }
-      } catch {}
-      return resp;
-    };
+        return origSend.apply(this, arguments);
+      };
+      wrappedSend.__wcCap = true;
+      XMLHttpRequest.prototype.send = wrappedSend;
+    }
   }
+  install();
+  setInterval(() => { try { install(); } catch {} }, 500);
 })();
 `;
 }
@@ -1287,7 +1305,8 @@ export function createBrowserDriver(options = {}) {
     const target = url || cfg.site;
     try { await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => {}); } catch { /* already there */ }
     // 与登录同一套判定（z.ai 游客页有输入框，旧「URL 不含 login 即已登录」
-    // 会把未登录记成已登录）。
+    // 会把未登录记成已登录）；先等输入框渲染完再判，避免瞬时误判未登录。
+    await page.waitForSelector(SEL.input, { timeout: 15_000 }).catch(() => {});
     loggedIn = await judgeLoggedIn(page);
     if (loggedIn) persistLoginState({ loggedIn: true, at: Date.now(), message: '独立窗口核验' });
     log(`headed window open ${w}x${h} → ${target}`);

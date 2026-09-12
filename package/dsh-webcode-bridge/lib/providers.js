@@ -78,9 +78,14 @@ export const KIMI = site({
 export const QWEN = site({
   id: 'qwen', name: '通义千问 (Qwen)', origin: 'https://chat.qwen.ai',
   staticOrigins: ['https://g.alicdn.com', 'https://img.alicdn.com', 'https://assets.alicdn.com'],
-  // 浏览器端为 OpenAI 兼容 SSE（LLMs2API 实测拦截 /api/ + chat 的 POST 流）
-  completionPaths: ['/api/chat'],
+  // 浏览器端为 OpenAI 兼容 SSE。2026-09-12 真机：流端点已迁到
+  // /api/v2/chat/completions（v2 + completions，含 /api/chat 的旧串不再命中），
+  // 子串匹配同时覆盖新旧端点。
+  completionPaths: ['/api/chat', '/chat/completions'],
   input: 'textarea#chat-input, textarea[placeholder], textarea',
+  // Qwen Studio（2026-09-12 真机）：程序化 Enter 不触发发送（消息停在框里），
+  // 发送按钮是稳定特征 class .send-button（aria=发送）——与 z.ai 同类问题。
+  sendButton: '.send-button',
   attachSelector: "input[type='file']",
   decoder: 'openai-sse', stream: true, experimental: true,
   models: [
@@ -139,9 +144,10 @@ export const ZAI = site({
   decoder: 'openai-sse', stream: true, experimental: true,
   // 登录判定特征：z.ai 游客页自带完整输入框（真机 2026-09-12 实测：未登录
   // 时 textarea + #send-message-button 都在，「有输入框=已登录」必然误报），
-  // 未登录特征是可见的「登录/Sign in」按钮；bad 命中 → 判未登录。
+  // 未登录特征是可见的「登录」按钮；bad 命中 → 判未登录。注意 :text-matches
+  // 对嵌套 span 按钮不命中（真机实测 count=0），has-text 才稳定。
   loginProbe: {
-    bad: 'button:text-matches("^\\s*(登录|log\\s*in|sign\\s*in)\\s*$", "i"), a:text-matches("^\\s*(登录|log\\s*in|sign\\s*in)\\s*$", "i")',
+    bad: 'button:has-text("登录"), a:has-text("登录"), button:has-text("Sign in"), a:has-text("Sign in")',
   },
   models: [
     { id: 'auto', name: 'GLM-5.3-Flash (Z.ai)', labels: ['GLM', 'Z.ai'], context: 1_000_000 },

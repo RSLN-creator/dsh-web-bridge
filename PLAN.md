@@ -40,6 +40,23 @@
 7. **doctor 修正（test-mock/real-verify.mjs）**：0.11.0 合并单模型后 flash=deepseek
    别名，wantThink 恒为 true；期望 model_type 为 null 时按驱动 strict 核验同
    语义跳过。真机 8/8 通过。
+8. **捕获自愈守护（captureInit 重写）。** 逐站点真机验证又揪出第三类断流：
+   GLM 的埋点 SDK 会把 window.fetch **恢复成原生引用**（installed=true 而包装
+   出链，流静默丢失）。包装带 `__wcCap` 特征标记 + 守护每 500ms 查丢重装，
+   对全部站点通用；重复 tee 由 onPageCapture 的 captureId 过滤兜底。GLM 真机
+   复验 200/3.8s 含思维链。
+9. **Qwen v2 端点 + decoder 适配（providers.js + decoder.js）。** 真机实测：
+   流端点已迁 `/api/v2/chat/completions`（旧 `/api/chat` 不再命中）；发送需点
+   `.send-button`（Enter 不触发，与 z.ai 同类）。decoder 适配：结束帧无
+   finish_reason，以 delta.status='finished' 收束；思考摘要在
+   delta.extra.summary_thought.content。Qwen 真机复验 200/OK。
+10. **z.ai loginProbe 用 has-text。** `:text-matches` 对嵌套 span 按钮不命中
+    （真机 count=0），改 `has-text` 稳定命中；误报方向安全（宁可提示登录也不
+    误判已登录）。z.ai 真机复验：快速诚实报 NEED_LOGIN。
+11. **逐站点真机验证结论（2026-09-12）**：deepseek ✓（doctor 8/8 + 10 轮工具
+    闭环 longrun PASS，13 次真实工具执行、跨轮记忆回读精确）、glm ✓、qwen ✓；
+    kimi / doubao / zai 的 profile 均无有效登录态，桥诚实报 NEED_LOGIN——在
+    面板点「登录」完成一次人工登录即可（TypeError 已修，不再吞错）。
 
 0.11.0（GLM 思维链 + 登录态检测 + 窗口聚焦 + 命名对齐网址）：针对「Kimi 登录后
 没法验证登录态」「独立窗口应跳回已有窗口而不是覆盖」「非 DeepSeek 站点的思维链

@@ -287,9 +287,16 @@
       if (t) { this.text += t; try { this.onDelta?.(t); } catch {} }
       const th = (typeof delta.reasoning_content === 'string' ? delta.reasoning_content : '') ||
                  (typeof delta.reasoning === 'string' ? delta.reasoning : '');
-      if (th) { this.think += th; try { this.onThink?.(th); } catch {} }
+      if (th) { this.think += th; try { this.onThink?.(th) } catch {} }
+      // Qwen v2（2026-09-12 真机抓包）：思考摘要在 delta.extra.summary_thought.content
+      // （字符串数组），结束帧无 finish_reason，以 delta.status='finished' 收束。
+      const st = delta?.extra?.summary_thought?.content;
+      if (Array.isArray(st)) {
+        const t2 = st.filter((x) => typeof x === 'string').join('');
+        if (t2) { this.think += t2; try { this.onThink?.(t2); } catch {} }
+      }
       for (const img of imagesIn(delta)) { this.images.push(img); try { this.onImage?.(img); } catch {} }
-      if (ch?.finish_reason) this.done = true;
+      if (ch?.finish_reason || delta?.status === 'finished') this.done = true;
     }
   }
 
