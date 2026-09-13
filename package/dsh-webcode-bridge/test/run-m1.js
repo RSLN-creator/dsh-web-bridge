@@ -34,12 +34,22 @@ const ok = (name, cond, detail = '') => {
 const turns = []; // every message the "web page" received: {key, message, fresh}
 let replyScript = ['...'];
 let replyIdx = 0;
+// 增量分片模式：非 null 时逐片喂 onDelta（模拟真实 SSE 到达次序）再返回全文。
+// 一次性返回全文走的是「终块路径」，流式分片的边界探测逻辑根本测不到——
+// 0.12.2 真机双调用泄漏正是只发生在增量路径。
+let replyDeltas = null;
 
 function scriptedDriver() {
   return {
-    async sendTurn(key, message, { fresh = false, images } = {}) {
+    async sendTurn(key, message, { fresh = false, images, onDelta } = {}) {
       turns.push({ key, message, fresh, images });
       const text = replyScript[Math.min(replyIdx++, replyScript.length - 1)];
+      if (replyDeltas) {
+        for (const piece of replyDeltas) {
+          await new Promise((r) => setTimeout(r, 5));
+          onDelta?.(piece);
+        }
+      }
       return { text, sessionId: fresh ? 'sess-web-' + turns.filter((t) => t.fresh).length : 'sess-web-1', metrics: { endToEndMs: 1200, firstResponseMs: 300, thinkingMs: 500, responseMs: 900 } };
     },
     async sendPrompt(message) { turns.push({ key: '__adhoc__', message, fresh: true }); return { text: 'adhoc-reply', sessionId: 'sess-adhoc' }; },
@@ -243,6 +253,78 @@ try {
   const r5 = await collect(adapter.stream(baseOptions([{ role: 'user', content: [{ type: 'text', text: '纯文本' }] }])));
   ok('plain text streams when no call fences', r5.filter((c) => c.type === 'text-delta').map((c) => c.text).join('').includes('普通文字回答'));
 
+  // ---- streaming two-call reply in the REAL DeepSeek shapes (0.12.2 leak regression) ----
+  // 真机 goal 会话 f2cc5438 turn1 step1 的实际分片次序：散文 + 两个 <tool_call>
+  // 围栏。旧实现泄漏根因：第一个调用 JSON 配平、protocolFrom 越过、闭标签未到、
+  // 下一锚点未现（rest.index=-1）的窗口里，else 分支把「句子+围栏」整段当正文
+  // 重发——用户看到句子重复 + 协议原文泄漏进会话。
+  const leakSentence = '我将开始探查项目结构与技术栈，然后系统性地做安全审计。';
+  replyDeltas = [
+    leakSentence + '\n\n',
+    '<tool_call>\n',
+    '{"mcp_action": "call", "name": "read", "purpose": "查看 PLAN 标题", "arguments": {"path": "PLAN.md"}}',
+    '\n</tool_call>\n\n',
+    '<tool_call>\n',
+    '{"mcp_action": "call", "name": "read", "purpose": "读 settings", "arguments": {"path": "package.json"}}',
+    '\n</tool_call>',
+  ];
+  replyScript = [replyDeltas.join('')];
+  const rstream = await collect(adapter.stream(baseOptions([{ role: 'user', content: [{ type: 'text', text: '连续读两个文件' }] }])));
+  const streamText = rstream.filter((c) => c.type === 'text-delta').map((c) => c.text).join('');
+  ok('stream 2-call: no protocol text leaked', !streamText.includes('tool_call') && !streamText.includes('mcp_action'), JSON.stringify(streamText.slice(0, 80)));
+  ok('stream 2-call: no duplicated prose', streamText.split(leakSentence).length - 1 === 1, 'count=' + (streamText.split(leakSentence).length - 1));
+  const streamCalls = rstream.filter((c) => c.type === 'tool-call-delta');
+  // 流式开块契约（0.7.1）：每个调用 = 开块 delta（带 name、空参数）+ 终块补参
+  // delta（带 argumentsDelta、复用 id 不再带 name）。
+  const streamOpens = streamCalls.filter((d) => d.name);
+  const streamArgs = streamCalls.filter((d) => d.argumentsDelta);
+  ok('stream 2-call: both calls replayed in order', streamOpens.length === 2
+    && streamOpens.every((d) => d.name === 'read')
+    && JSON.parse(streamArgs[0].argumentsDelta).path === 'PLAN.md'
+    && JSON.parse(streamArgs[1].argumentsDelta).path === 'package.json', streamCalls.map((d) => d.name + ':' + String(d.argumentsDelta).slice(0, 12)).join(' | '));
+  const streamTextBlocks = rstream.filter((c) => c.type === 'block-end' && c.block?.type === 'text');
+  ok('stream 2-call: text blocks carry clean prose only', streamTextBlocks.every((c) => !String(c.block.text).includes('tool_call') && !String(c.block.text).includes('mcp_action')), streamTextBlocks.map((c) => JSON.stringify(String(c.block.text).slice(0, 40))).join(' | '));
+  replyDeltas = null;
+
+  // ---- DSML closing-tag变形（0.12.2 真机第二轮实锤）：调用无 </tool_call> 闭合， ----
+  // 直接跟 </｜｜DSML｜｜ parameter/invoke/calls> 收尾标签——调用必须解出、标签必须拦住。
+  replyDeltas = [
+    '`reference/` 是第三方参考资料。我需要聚焦项目自身代码。\n\n',
+    '<tool_call>\n',
+    '{"mcp_action": "call", "name": "read", "purpose": "列出项目自身源码", "arguments": {"path": "lib"}}',
+    '\n</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>',
+  ];
+  replyScript = [replyDeltas.join('')];
+  const rd = await collect(adapter.stream(baseOptions([{ role: 'user', content: [{ type: 'text', text: '聚焦源码' }] }])));
+  const dsmlText = rd.filter((c) => c.type === 'text-delta').map((c) => c.text).join('');
+  ok('dsml closer: no protocol leak', !dsmlText.includes('DSML') && !dsmlText.includes('tool_call') && !dsmlText.includes('mcp_action'), JSON.stringify(dsmlText.slice(0, 80)));
+  const dsmlCalls = rd.filter((c) => c.type === 'tool-call-delta');
+  const dsmlArgs = dsmlCalls.filter((d) => d.argumentsDelta);
+  ok('dsml closer: call replayed', dsmlCalls.filter((d) => d.name).length === 1 && dsmlArgs.length === 1 && JSON.parse(dsmlArgs[0].argumentsDelta).path === 'lib', dsmlCalls.map((d) => d.name + ':' + String(d.argumentsDelta).slice(0, 12)).join(' | '));
+  replyDeltas = null;
+
+  // ---- DSML 三闭包标签组（0.12.3 真机 goal 轮形态）：每个调用后跟 ----
+  // parameter/invoke/calls 三个闭标签；闭标签边界的 transport 会因**下一个**调用的
+  // mcp_action 而为 true——旧实现在闭标签上也开块（真机流式开块 8 vs 解析 5 →
+  // TOOL_PROTOCOL_INVALID 整轮作废，goal 空转）。现在闭标签只消费不开块。
+  const goalSentence = '继续深入。我将检查扩展、设置存储、以及敏感信息与路径处理。';
+  const dsmlTail = '\n</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>\n\n';
+  replyDeltas = [
+    goalSentence + '\n\n',
+    '<tool_call>\n{"mcp_action": "call", "name": "read", "purpose": "a", "arguments": {"path": "A"}}' + dsmlTail,
+    '<tool_call>\n{"mcp_action": "call", "name": "read", "purpose": "b", "arguments": {"path": "B"}}' + dsmlTail,
+    '<tool_call>\n{"mcp_action": "call", "name": "read", "purpose": "c", "arguments": {"path": "C"}}\n</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>',
+  ];
+  replyScript = [replyDeltas.join('')];
+  const rgoal = await collect(adapter.stream(baseOptions([{ role: 'user', content: [{ type: 'text', text: '继续安全审计' }] }])));
+  const goalText = rgoal.filter((c) => c.type === 'text-delta').map((c) => c.text).join('');
+  ok('goal loop shape: no protocol leak', !goalText.includes('DSML') && !goalText.includes('tool_call') && !goalText.includes('mcp_action'), JSON.stringify(goalText.slice(0, 80)));
+  ok('goal loop shape: sentence not repeated', goalText.split(goalSentence).length - 1 === 1, 'count=' + (goalText.split(goalSentence).length - 1));
+  const goalOpens = rgoal.filter((c) => c.type === 'tool-call-delta' && c.name);
+  const goalArgs = rgoal.filter((c) => c.type === 'tool-call-delta' && c.argumentsDelta).map((d) => JSON.parse(d.argumentsDelta).path);
+  ok('goal loop shape: 3 calls, no double-open, order kept', goalOpens.length === 3 && goalArgs.join(',') === 'A,B,C', `opens=${goalOpens.length} args=${goalArgs.join(',')}`);
+  replyDeltas = null;
+
   // ---- aux title call stays local (no web send) ----
   const beforeAux = turns.length;
   await collect(adapter.stream({ system: '生成会话标题', messages: [{ role: 'user', content: [{ type: 'text', text: '帮我给会话起个标题' }] }], purpose: 'session-title' }));
@@ -272,6 +354,11 @@ try {
   ok('settings route: empty global prompt by default', JSON.parse(sset0.body()).extraPrompt === '', JSON.parse(sset0.body()).extraPrompt);
   const sset1 = await callRoute('/__webcode/settings', mockReq('POST', { body: JSON.stringify({ extraPrompt: '先读文件再下结论' }) }), mockRes());
   ok('settings route: global prompt saved', JSON.parse(sset1.body()).extraPrompt === '先读文件再下结论');
+  // 子代理站点分流（0.12.5）：合法站点收下、未知值回落 follow（防轮次路由到未知站点）
+  const ssetSub1 = await callRoute('/__webcode/settings', mockReq('POST', { body: JSON.stringify({ subAgentSite: 'glm' }) }), mockRes());
+  ok('settings route: subAgentSite accepts valid site', JSON.parse(ssetSub1.body()).subAgentSite === 'glm', JSON.parse(ssetSub1.body()).subAgentSite);
+  const ssetSub2 = await callRoute('/__webcode/settings', mockReq('POST', { body: JSON.stringify({ subAgentSite: 'not-a-site' }) }), mockRes());
+  ok('settings route: subAgentSite unknown value falls back to follow', JSON.parse(ssetSub2.body()).subAgentSite === 'follow', JSON.parse(ssetSub2.body()).subAgentSite);
   replyScript = ['已按全局指令执行。'];
   await collect(adapter.stream({ ...baseOptions([{ role: 'user', content: [{ type: 'text', text: '按全局指令执行' }] }]), sessionId: 'dsh-session-global' }));
   const tGlob = turns[turns.length - 1] || {};

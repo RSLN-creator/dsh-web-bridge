@@ -16,7 +16,7 @@ import { createRelay } from './relay.js';
 import { createOpenAiFront } from './openai.js';
 import { createBrowserDriver } from './browser-driver.js';
 import { createWebControl, buildSessionEvents, mainLineOf } from './web-control.js';
-import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, readCallAt, partialProtocolAt, coerceArguments } from './agent-preset.js';
+import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, readCallAt, partialProtocolAt, coerceArguments, normalizeDsml } from './agent-preset.js';
 import { createMirror } from './mirror.js';
 import { textOfBlocks } from './flatten.js';
 import { estimateTokens } from './metrics.js';
@@ -236,7 +236,7 @@ export function apply(ctx, config = {}) {
   if (!(settingsService && typeof settingsService.get === 'function' && typeof settingsService.set === 'function')) {
     settingsService = null;
   }
-  const defaultConfig = { extraPrompt: '', defaultModel: 'deepseek', previewRefreshRate: 5000, thinkMode: 'on', subAgentMode: 'own' };
+  const defaultConfig = { extraPrompt: '', defaultModel: 'deepseek', previewRefreshRate: 5000, thinkMode: 'on', subAgentMode: 'own', subAgentSite: 'follow' };
   const configManager = {
     get() {
       // settingsService 已在初始化时校验 get/set 双全；此处仍防御式包裹
@@ -416,6 +416,11 @@ export function apply(ctx, config = {}) {
       // 纯文本回复必抛 STREAM_REWRITE 整轮作废、带调用时正文块变成数字。
       // 恢复 0.9.4 的字符串语义，只保留 0.9.6 的单调边界逻辑。
       let textSent = '';
+      // 已作为 text-delta 外发的正文拼接（不含从未外发的协议区间）。块收口必须
+      // 发「本块开启之后新增的部分」而不是累计值——一轮多调用会开多个文本块，
+      // 发累计值用户就会看到同一句话重复 N 次（0.12.3 真机 goal 轮实锤）。
+      let proseSent = '';
+      let proseBlockStart = 0;
       let textOpen = false;
       let thinkAcc = '';
       let thinkOpen = false;
@@ -457,6 +462,7 @@ export function apply(ctx, config = {}) {
         if (textOpen) return;
         yield* closeThink();
         textIndex = nextIndex++;
+        proseBlockStart = proseSent.length;
         yield { type: 'block-start', index: textIndex, blockType: 'text' };
         textOpen = true;
       };
@@ -478,63 +484,86 @@ export function apply(ctx, config = {}) {
         if (ev.delta) {
           acc += ev.delta;
           // 未消化的部分里找协议起点（半角/全角标签、围栏、Calling、裸 JSON 行）。
-          // 只有在「该调用的参数 JSON 已经配平」时才认它——否则同一个调用会被
-          // 每一个 delta 重复命中，一轮里被开成几十个块（真机连发 3 个 read 时
-          // 实测开出了 32 个）。
           const rest = findProtocolStart(acc, protocolFrom);
           // 单调边界：游标推进后，后续搜索可能又命中**更早**的收尾标签
           // （`</tool_call>` 也是锚点），此时绝不能把 safeEnd 回退——那会把已经
           // 发过的协议原文再当正文发一遍（实测把 `</tool_call>{"mcp_action":...`
           // 整段吐进助手文本）。取历史最大值即可。
           const boundary = rest.index < 0 ? -1 : Math.max(rest.index, lastBoundary);
-          // 认出一个调用的条件：传输形态（标签/围栏/Calling/裸对象）+ 工具名在本次
-          // 工具表里。**不要求参数 JSON 已配平**——真机的参数是流式分片到达的，
-          // 早期就把调用块开出来（名字先到、参数后补）是 0.7.1 起就有的契约：
-          // Harness 能在流完之前显示「正在调用 read」。
-          const knownName = rest.transport && !!rest.name && tools.some(t => t?.name === rest.name);
-          const recognizedCall = knownName && !openedAtIndex.has(boundary);
-          const complete = (recognizedCall || openedAtIndex.has(boundary)) ? readCallAt(acc, boundary) : null;
           // 半成品标记的起点（`<t`、`<tool_cal`、`**Calling:` 前缀…）：正文最多发到
           // 它之前。**必须用「位置」而不是「扣留多少字符」**——用固定 32 字符尾巴
           // 是拦不住的，实测半成品在尾巴之后时照样漏进正文。
           const markerAt = partialProtocolAt(acc);
-          // 有已开块但参数还没配平，且正文已经追上该调用起点 → 必须停在那里等参数。
-          const holdingCall = !complete && pendingCalls.length > 0 && lastBoundary >= 0 && textSent.length >= lastBoundary;
+          // 已被解析消费的协议区间 [textSent 边界, protocolFrom) 不是正文：外发下标
+          // 从 protocolFrom 起算。0.12.2 真机（goal 会话 f2cc5438 turn1 step1）实锤：
+          // 第一个调用的 JSON 配平、protocolFrom 已越过，但闭标签未到、下一个锚点
+          // 未出现（rest.index=-1）时，else 分支把「句子+整个围栏」当正文重新发出
+          // ——这就是用户看到的「句子重复 + <tool_call> 原文泄漏」。
+          const from = Math.max(textSent.length, protocolFrom);
+          // 标签族锚点（<tool_call、</tool_call、全角 DSML 开/闭）之后一律不是正文：
+          // transport 依赖 "mcp_action"/工具名在**后文**出现，闭标签永远不满足它。
+          // 只认首字符是标签族（<、全角｜、丢头 ｜DSML）——裸 ``` 与裸 { 行（散文
+          // 代码块）不受影响，照常外发。
+          const tagAhead = rest.index >= 0 && /[<\uFF5C|]/.test(acc[rest.index]);
+          // 开启形状边界：围栏/标签开头/```/裸调用 JSON 行/Calling。闭标签（</tool_call>
+          // 等）的 transport 也会为 true（下一个调用的 mcp_action 在后文），但它不是
+          // 新调用的起点——0.12.3 真机 goal 轮实锤：在闭标签上开块 + 真围栏到达再开
+          // 一块，同一调用双块，流式开块 read×8 vs 最终解析 ×5 → TOOL_PROTOCOL_INVALID
+          // 整轮作废，goal 从此空转。
+          const openerBoundary = rest.index >= 0 && /^\s*(?:<\s*(?:tool_call|tool_calls|function|stories|invoke)\b|```|\{\s*["\{]|\*\*Calling:)/i.test(normalizeDsml(acc.slice(boundary, boundary + 24)));
+          // 流式开块只认「该边界的调用对象已经配平」：块名取自配平 JSON 本身，与
+          // 收尾 parseAgentReply 同源，名字/数量在结构上不可能错位。代价是不再在
+          // 参数流式途中提前显示「正在调用 X」（0.7.1 契约让位于可靠性——错位
+          // 作废整轮的代价是长任务 goal 直接空转）。没被流式开块的调用由收尾
+          // 循环补发，不受影响。
+          const completed = rest.index >= 0 ? readCallAt(acc, boundary) : null;
+          let completedName = '';
+          if (completed) {
+            try { const o = JSON.parse(completed.raw); if (o && typeof o?.name === 'string') completedName = o.name; } catch { /* 还没写完或非 JSON */ }
+          }
+          const isCallObj = Boolean(completed) && (completedName !== '' || /"mcp_action"\s*:\s*"call"/.test(completed.raw));
+          const recognizedCall = isCallObj && openerBoundary && completedName !== ''
+            && tools.some(t => t?.name === completedName) && !openedAtIndex.has(boundary);
           // 正文外发区间（单调不减）：
-          //  • 疑似调用形态（transport=true，含名字未到的分片窗口）→ 停在该起点。
-          //    名字通常在参数分片里后到，若等 knownName 才停，`<tool_call>{"mcp_action"`
-          //    这段会先漏进正文（0.9.6 的泄漏回归）。名字不匹配工具表时不开调用块，
-          //    JSON 配平后游标越过，这段最终仍会作为正文送达——只是不再边到边漏。
-          //  • 有一个已开块但参数还没配平 → 停在该调用起点（绝不越过，否则
-          //    `</tool_call>{"mcp_action":…` 会被当散文发出去）；
+          //  • 疑似调用形态（transport=true）→ 停在该起点：名字通常在参数分片里后到，
+          //    若等名字才停，`<tool_call>{"mcp_action"` 会先漏进正文（0.9.6 回归）。
+          //  • 标签族锚点已出现但 transport 还认不出（参数分片未到 / 只是闭标签）
+          //    → 同样停在该锚点，等下一个增量消歧，绝不越过；
           //  • 其余 → 发到半成品标记之前；没有半成品标记就全发（短尾巴留给
           //    下一次增量消歧）。
           const proseLimit = (rest.index >= 0 && rest.transport) ? boundary
-            : (holdingCall && lastBoundary >= 0) ? Math.min(lastBoundary, markerAt >= 0 ? markerAt : lastBoundary)
+            : (rest.index >= 0 && tagAhead) ? boundary
             : (markerAt >= 0 ? markerAt : Math.max(0, acc.length - PROSE_TAIL_CHARS));
-          const safeEnd = Math.max(textSent.length, proseLimit);
-          const proseChunk = safeEnd > textSent.length ? acc.slice(textSent.length, safeEnd) : '';
-          if (proseChunk) {
+          const safeEnd = Math.max(from, proseLimit);
+          const proseChunk = safeEnd > from ? acc.slice(from, safeEnd) : '';
+          if (proseChunk && (pendingCalls.length === 0 || proseChunk.trim())) {
             yield* openText();
             textSent = acc.slice(0, safeEnd);
+            proseSent += proseChunk;
             yield { type: 'text-delta', index: textIndex, text: proseChunk };
+          } else if (proseChunk) {
+            // 调用之间的纯空白（闭标签与下一个围栏之间的换行）不是正文：静默推进
+            // 游标，不开文本块也不发 delta——否则每次调用间隙都会开一个只有换行的
+            // 文本块，把界面刷成噪音。
+            textSent = acc.slice(0, safeEnd);
           }
           if (recognizedCall) {
             // 同一个调用在流式期间会被反复命中同一个边界，按边界下标去重保证只开一次块。
             lastBoundary = boundary;
-            const opened = { name: rest.name, id: callId(pendingCalls.length), index: nextIndex++, at: boundary };
+            const opened = { name: completedName, id: callId(pendingCalls.length), index: nextIndex++, at: boundary };
             openedAtIndex.set(boundary, opened);
             pendingCalls.push(opened);
-            // 散文块到此为止。块内容必须与已外发的 text-delta 完全一致（textSent
-            // 是「已发到的下标」而不是文本本身），否则 Harness 会收到一个数字当
-            // 块内容（实测 textEnd.block.text 变成 3）。
-            if (textOpen) { yield { type: 'block-end', index: textIndex, block: { type: 'text', text: textSent } }; textOpen = false; }
+            // 散文块到此为止。块内容必须与「本块开启后外发的 text-delta」逐字一致
+            // （proseSent.slice(proseBlockStart)）：一轮多调用会开多个文本块，发累计
+            // 值用户就会看到同一句话重复 N 次。
+            if (textOpen) { yield { type: 'block-end', index: textIndex, block: { type: 'text', text: proseSent.slice(proseBlockStart) } }; textOpen = false; }
             yield { type: 'block-start', index: opened.index, blockType: 'tool-call' };
             yield { type: 'tool-call-delta', index: opened.index, id: opened.id, name: opened.name, argumentsDelta: '' };
           }
-          // 参数已配平：把游标推到该调用对象末尾，后续边界从这里往后找，
-          // 否则下一个 delta 仍命中同一个调用（真机连发 3 个 read 时开出 32 个块）。
-          if (complete && complete.end > protocolFrom) protocolFrom = complete.end;
+          // 调用对象已配平：把游标推到该对象末尾。闭标签边界的 completed 认出的
+          // 是**下一个**调用的 JSON（闭标签自己没有 JSON）——同样消费掉，不开块
+          // （收尾循环会补发），这样闭标签永远不会再挡住后续锚点。
+          if (isCallObj && completed.end > protocolFrom) protocolFrom = completed.end;
           continue;
         }
         if (ev.err) throw ev.err;
@@ -582,10 +611,10 @@ export function apply(ctx, config = {}) {
         yield* closeThink();
         if (textOpen && !pendingCalls.length) {
           const imageMd = imageMarkdown(endImages);
-          if (imageMd) { textSent += imageMd; yield { type: 'text-delta', index: textIndex, text: imageMd }; }
+          if (imageMd) { textSent += imageMd; proseSent += imageMd; yield { type: 'text-delta', index: textIndex, text: imageMd }; }
           // 兜底：边界探测若漏掉某种未知形态，这里仍保证写进会话的助手文本是散文。
-          // 正常路径下 textSent 已被 boundary 截过，stripProtocolText 是恒等变换。
-          yield { type: 'block-end', index: textIndex, block: { type: 'text', text: stripProtocolText(textSent) } };
+          // 正常路径下探测已把协议拦在外面，stripProtocolText 是恒等变换。
+          yield { type: 'block-end', index: textIndex, block: { type: 'text', text: stripProtocolText(proseSent.slice(proseBlockStart)) } };
         }
         for (let i = 0; i < valid.length; i++) {
           // id carries the session so harness-side streams / logs can be traced
@@ -833,7 +862,15 @@ function imageMarkdown(images) {
           // 重启后未懒创建的站点：登录缓存直接读站点 profile 的落盘状态，
           // 否则面板永远「待检查」，用户只能逐站点手动核验（问题③的另一半）。
           let cached = null;
-          try { cached = JSON.parse(fs.readFileSync(path.join(cfg.profileDir, 'sites', st.id, 'webcode-login-state.json'), 'utf8')); } catch { /* 未初始化过 */ }
+          // 默认驱动（deepseek）的登录态落盘在根 profile，其余站点在 sites/<id>/；
+          // 只查后者的旧实现让 DeepSeek 每次重启都显示「待检查」，用户被迫手点。
+          // 根 profile 文件只对默认站点回退——别的站点读了会把 DeepSeek 的
+          // 登录态安到自己头上。
+          const statePaths = [path.join(cfg.profileDir, 'sites', st.id, 'webcode-login-state.json')];
+          if (st.id === 'deepseek') statePaths.push(path.join(cfg.profileDir, 'webcode-login-state.json'));
+          for (const p of statePaths) {
+            try { cached = JSON.parse(fs.readFileSync(p, 'utf8')); break; } catch { /* 未初始化过 */ }
+          }
           const has = cached && typeof cached.loggedIn === 'boolean';
           return { siteId: st.id, siteName: st.name, origin: st.origin, initialized: false, running: false, busy: false, loggedIn: has ? cached.loggedIn : null, loggedInCached: has && cached.loggedIn === true, loginCheckedAt: has ? cached.at : null, needLogin: has && cached.loggedIn === false, selectedModel: null, window: null, loginState: 'idle', lastLogin: null };
         }
@@ -970,12 +1007,22 @@ function imageMarkdown(images) {
     const thinkMode = ['on', 'off', 'auto'].includes(settings.thinkMode) ? settings.thinkMode : 'auto';
     const messages = Array.isArray(options.messages) ? options.messages : [];
     const resolvedModel = resolveWebModel(options.model || defaultModel || cfg.modelId);
-    const model = resolvedModel.id;
-    const siteId = resolvedModel.siteId;
+    let model = resolvedModel.id;
+    let siteId = resolvedModel.siteId;
     const agentId = options.agentId ?? options.agentName ?? options.agent ?? null;
     // 子代理会话模式（设置页「会话与子代理」）：own = 每个 agentId 独立网页会话
     // （同账号新对话，互不污染主对话）；share = 子代理与主会话共用同一网页对话。
     const subAgentMode = settings.subAgentMode === 'share' ? 'share' : 'own';
+    // 子代理站点分流（设置页「子代理站点」）：own 模式下子代理可固定用另一站点
+    // 的独立网页会话——主线与子代理同站点时消息频率叠加，容易触发站点限流
+    // （真机实测「消息发送过于频繁」）。'follow' = 跟随主线站点。登录态按站点
+    // 各自持久（同站点共享登录，跨站点互不影响），网页会话恒相互隔离。
+    const subAgentSiteCfg = String(settings.subAgentSite || 'follow');
+    const subAgentSite = subAgentSiteCfg !== 'follow' && getSite(subAgentSiteCfg) ? subAgentSiteCfg : null;
+    if (agentId && subAgentMode === 'own' && subAgentSite && subAgentSite !== siteId) {
+      siteId = subAgentSite;
+      model = 'auto';
+    }
     const keyAgentId = subAgentMode === 'own' ? agentId : null;
     const keyPath = options.sessionId && cfg.contextMode === 'session' && !options.purpose
       ? [String(options.sessionId), keyAgentId ? String(keyAgentId) : ''].filter(Boolean).join('::')

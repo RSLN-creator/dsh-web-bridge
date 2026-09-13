@@ -1,6 +1,55 @@
 # Harness Web Bridge 路线
 
-## 当前版本 0.12.0
+## 当前版本 0.12.5
+
+0.12.2 → 0.12.5（真机驱动四连修：装了 0.12.1 之后 DeepSeek 全站不回话、goal 空转、
+DeepSeek 每次重启要手点登录、子代理同站点限流）：
+
+1. **解码器注册表加载时序（0.12.2）**：0.12.0 起启动自动登录核验先于 `ensure()`
+   直接 `launch()` 出活页，首个轮次的 `ensure()` 见 ctx/page 存活便提前返回，
+   `Decoders` 注册表从此再无加载机会——onPageCapture 只剩「no decoder for kind」
+   警告，整轮静默挂到 240s 超时。修：驱动创建时即预加载注册表 + onPageCapture
+   捕获点懒加载兜底（multi-site-decoder.test.mjs 护栏锁两道防线）。
+2. **双调用泄漏 + 句子重复（0.12.2/0.12.3）**：第一个调用的 JSON 配平、
+   protocolFrom 越过、闭标签未到、下一锚点未现（rest.index=-1）的窗口里，
+   else 分支把「句子+整个围栏」当正文重新发出——真机 goal 会话实锤「句子重复 +
+   `<tool_call>` 原文泄漏（含 `</｜｜DSML｜｜ …>` 收尾标签）」。修：正文外发下标
+   从 `protocolFrom` 起算 + 标签族锚点（开/闭/全角 DSML）一律拦住正文；块收口发
+   `proseSent.slice(proseBlockStart)`（本块新增）而不是累计值——多文本块轮次发
+   累计值就是用户看到的句子重复。调用之间的纯空白静默跳过。
+3. **流式开块契约修订（0.12.4）**：闭标签边界的 transport 会因**下一个**调用的
+   mcp_action 而为 true，旧实现在闭标签上提前开块、真围栏到达再开一块——同一
+   调用双块，真机 goal 轮「流式开块 read×8 vs 最终解析 ×5」→ TOOL_PROTOCOL_INVALID
+   整轮作废，goal 从此空转。修：**流式开块只认「该边界的调用对象已配平」**（块名
+   取自配平 JSON，与收尾 parseAgentReply 同源，结构上不可能错位）；闭标签边界只
+   消费不开块（收尾循环补发）。0.7.1「名字先到就宣布调用」的早期指示让位于可靠性。
+   regression.test.mjs 两用例按新契约重写，run-m1.js 新增真机形态三用例
+   （双调用流式 / DSML 闭包变形 / 三闭包标签组 goal 空转形态）。
+4. **no_response_frames 缓解（0.12.2）**：空流不立即收场，留 3s 窗口等 DeepSeek
+   前端自动重试的新流绑定（占位空流先到先收、真重试流被 captureId 过滤丢弃的
+   假设落地）；等不到按原样收场，代价上限 3s。报错带流首段 400 字符原文——
+   「200 包错误 JSON」与「流形态对不上」一眼可分。
+5. **DeepSeek 每次重启要手点登录（0.12.5）**：两个根因。① 驱动尚未懒创建时
+   openLogin 直接开有头登录窗口——cookies 明明有效；修为先无头快速核验，确认
+   掉登录才升级有头。② 面板对未初始化站点只查 `sites/<id>/webcode-login-state.json`，
+   而默认驱动（deepseek）的状态落盘在根 profile——路径错配让 DeepSeek 永远
+   「待检查」。根 profile 文件只对默认站点回退（别的站点读了会串状态）。
+6. **子代理站点分流（0.12.5）**：设置新增「子代理站点」（跟随主线 / 任一站点，
+   `subAgentSite`，控制面白名单校验）。own 模式下子代理轮次路由到指定站点的
+   独立网页会话——主线与子代理同站点时消息频率叠加易触发站点限流（「消息发送
+   过于频繁」）。设置页与右栏面板均含隔离说明（会话恒隔离；登录态按站点持久，
+   同站点共享、跨站点互不影响）与两个单向同步按钮（主线站点 → 子代理 /
+   子代理站点 → 主线，只同步站点选择，不迁移登录态）。
+7. **dsh plugin add TLS（环境）**：本机 SteamTools 加速对 github.com 的自签
+   证书 Node 不认（UNABLE_TO_VERIFY_LEAF_SIGNATURE），安装命令加
+   `NODE_OPTIONS=--use-system-ca` 走系统信任。
+
+0.12.5 真机矩阵：deepseek ✓（真实回话 + 0.12.5 回归）、glm ✓、qwen ✓、
+doubao ✗（登录态有效；composer 选择器 `textarea[data-testid="chat_input_input"]`
+超时不匹配——页面改版，待重校准）、kimi/zai 诚实 NEED_LOGIN、chatgpt 网络不可达、
+grok/gemini 网络不可达、claude 地区受限（均既有记录）。
+
+## 0.12.0
 
 0.12.0（断流根修 + 登录链路四修 + 面板缓存态 + 命名简化）：针对「DeepSeek 返回
 内容不显示（240s 超时）」「豆包/Kimi 明明登录了却报『请求失败』」「z.ai 没登录

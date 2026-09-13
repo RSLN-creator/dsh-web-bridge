@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import '../lib/decoder.js';
 import { qualifyModelId, resolveWebModel, listAllModels, SITES } from '../lib/providers.js';
 
@@ -156,4 +157,17 @@ test('qwen：OpenAI 兼容 SSE 仍正常（LLMs2API 实测浏览器形态）', (
   assert.equal(out.complete, true);
   assert.equal(out.text, 'Hi');
   assert.deepEqual(deltas.join(''), 'Hi');
+});
+
+test('驱动解码器注册表护栏：创建时急加载 + onPageCapture 懒加载兜底（0.12.2）', () => {
+  // 回归背景：0.12.0 起启动自动登录核验先于 ensure() 直接 launch 出活页，
+  // ensure() 提前返回，注册表永不加载 → 首个真实轮次「no decoder for kind」
+  // 静默挂到 240s 超时。这里锁住两道防线，防止再次被重构掉。
+  const src = fs.readFileSync(new URL('../lib/browser-driver.js', import.meta.url), 'utf8');
+  // 第一道：驱动创建阶段（cfg 就绪后）即预加载注册表。
+  assert.match(src, /let Decoders = null;[\s\S]{0,300}try \{ Decoders = loadDecoderRegistry\(cfg\.decoderPath\); \} catch/);
+  // 第二道：onPageCapture 在查找解码器类之前必须重试加载。
+  const onPage = src.slice(src.indexOf('function onPageCapture'), src.indexOf('function finishActive'));
+  assert.ok(onPage.length > 0, 'onPageCapture 必须存在');
+  assert.match(onPage, /if \(!Decoders\) \{ try \{ Decoders = loadDecoderRegistry\(cfg\.decoderPath\); \} catch/);
 });

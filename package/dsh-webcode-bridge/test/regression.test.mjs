@@ -266,7 +266,7 @@ test('SSE 支持 CRLF 分块和空 close 事件', () => {
   assert.deepEqual(decoder.finish(), { complete: true, text: '成功', thinking: '', images: [] });
 });
 
-test('工具名称在网页流完成前到达 Harness，参数完整后才提交', async () => {
+test('调用名先到、参数后到：配平前不开块也不泄漏协议文本，配平后恰好一块', async () => {
   let adapter, finish;
   const result = new Promise(resolve => { finish = resolve; });
   const driver = {
@@ -276,36 +276,36 @@ test('工具名称在网页流完成前到达 Harness，参数完整后才提交
   const dispose = apply({ llm: { registerAdapter: (_, value) => { adapter = value; } }, get: () => null }, { port: 0, requireConsent: false, driver });
   try {
     const stream = adapter.stream({ model: 'flash', tools: [{ name: 'read', parameters: {} }], messages: [{ role: 'user', content: '读取文件' }] });
-    assert.equal((await stream.next()).value.type, 'block-start');
-    const early = (await stream.next()).value;
-    assert.equal(early.type, 'tool-call-delta');
-    assert.equal(early.name, 'read');
-    assert.equal(early.argumentsDelta, '');
+    // 0.12.4 契约修订：流式开块只认「调用对象已配平」。早期开块（0.7.1：名字先到
+    // 就宣布调用）在真机多闭包标签形态下与最终解析错位（开块 8 vs 解析 5），
+    // TOOL_PROTOCOL_INVALID 整轮作废 → goal 空转，可靠性优先。配平前：不得开块、
+    // 不得把协议原文当正文泄漏（流里什么都不该出现）。
+    const pre = [];
+    const collector = (async () => { for await (const chunk of stream) pre.push(chunk); })();
+    await new Promise(r => setTimeout(r, 120));
+    assert.equal(pre.filter(c => c.type === 'tool-call-delta').length, 0, '参数未配平不得提前开调用块');
+    assert.equal(pre.some(c => c.type === 'text-delta' && /Calling|read/.test(c.text || '')), false, '协议形态不得作为正文泄漏');
     finish({ text: '**Calling:** `read`\n{"path":"README.md"}' });
-    const remaining = []; for await (const chunk of stream) remaining.push(chunk);
-    assert.equal(remaining.find(chunk => chunk.type === 'block-end').block.arguments, '{"path":"README.md"}');
-    // 0.7.1 回归（真实会话 f3fa97fd 复盘）：流式期间提前开块的调用，收尾时
-    // 必须复用同一块补发参数——旧实现另开新块重发，Harness 收到同 id 两条
-    // tool-call（空参数 INVALID_ARGS + 真参数重复执行）。
-    const callEnds = remaining.filter(chunk => chunk.type === 'block-end' && chunk.block?.type === 'tool-call');
-    assert.equal(callEnds.length, 1, '必须只有一个 tool-call 终块，实际 ' + callEnds.length);
-    const callStarts = remaining.filter(chunk => chunk.type === 'block-start' && chunk.blockType === 'tool-call');
-    assert.equal(callStarts.length, 0, '流中已开块，收尾不得再 block-start 新 tool-call');
-    const deltas = remaining.filter(chunk => chunk.type === 'tool-call-delta');
-    assert.equal(deltas.length, 1, '只有一个 tool-call-delta（同块补发参数）');
+    await collector;
+    const callEnds = pre.filter(chunk => chunk.type === 'block-end' && chunk.block?.type === 'tool-call');
+    assert.equal(callEnds.length, 1, '恰好一个 tool-call 终块，实际 ' + callEnds.length);
+    assert.equal(callEnds[0].block.name, 'read');
+    assert.equal(callEnds[0].block.arguments, '{"path":"README.md"}');
+    const callStarts = pre.filter(chunk => chunk.type === 'block-start' && chunk.blockType === 'tool-call');
+    assert.equal(callStarts.length, 1, '配平后只开一个 tool-call 块');
+    const deltas = pre.filter(chunk => chunk.type === 'tool-call-delta');
+    assert.equal(deltas.length, 1, '只有一个 tool-call-delta');
     assert.equal(deltas[0].argumentsDelta, '{"path":"README.md"}');
-    assert.equal(deltas[0].id, early.id, '复用流式期间已宣布的 call id');
-    assert.equal(callEnds[0].block.id, early.id, '终块 id 与流式期间一致');
   } finally { finish({ text: '' }); dispose(); }
 });
 
-test('流式多调用场景不重发：首调用复用 pendingCall 块，后续调用各一块', async () => {
+test('流式多调用：每个调用恰好一块、不重发、参数不丢', async () => {
   let adapter, finish;
   const result = new Promise(resolve => { finish = resolve; });
   const driver = {
     status: () => ({}), close: async () => {},
     sendPrompt: async (_, opts) => {
-      // 流式先到达第一个调用的开头（fence + name），足以触发 pendingCall
+      // 首个调用的 fence+不完整参数先到：配平前不得开块（0.12.4 契约）。
       opts.onDelta('```json\n{"mcp_action": "call", "name": "read", "arguments": {"path":');
       return result;
     },
@@ -313,23 +313,23 @@ test('流式多调用场景不重发：首调用复用 pendingCall 块，后续�
   const dispose = apply({ llm: { registerAdapter: (_, value) => { adapter = value; } }, get: () => null }, { port: 0, requireConsent: false, driver });
   try {
     const stream = adapter.stream({ model: 'flash', tools: [{ name: 'read', parameters: {} }, { name: 'grep', parameters: {} }], messages: [{ role: 'user', content: '读两个目标' }] });
-    await stream.next(); // block-start（pendingCall 开块）
-    const early = (await stream.next()).value;
-    assert.equal(early.type, 'tool-call-delta');
-    assert.equal(early.name, 'read', '流式期间即宣布首调用名');
+    const chunks = [];
+    const collector = (async () => { for await (const chunk of stream) chunks.push(chunk); })();
+    await new Promise(r => setTimeout(r, 120));
+    assert.equal(chunks.filter(c => c.type === 'tool-call-delta').length, 0, '参数未配平不得提前开调用块');
     finish({ text: '```json\n{"mcp_action": "call", "name": "read", "arguments": {"path": "README.md"}}\n```\n```json\n{"mcp_action": "call", "name": "grep", "arguments": {"query": "secret"}}\n```' });
-    const remaining = []; for await (const chunk of stream) remaining.push(chunk);
-    const callEnds = remaining.filter(chunk => chunk.type === 'block-end' && chunk.block?.type === 'tool-call');
+    await collector;
+    const callEnds = chunks.filter(chunk => chunk.type === 'block-end' && chunk.block?.type === 'tool-call');
     assert.equal(callEnds.length, 2, '两个调用两个终块');
     assert.deepEqual(callEnds.map(b => b.block.name), ['read', 'grep']);
     const ids = new Set(callEnds.map(b => b.block.id));
     assert.equal(ids.size, 2, '两个调用 id 不同');
-    const lateStarts = remaining.filter(chunk => chunk.type === 'block-start');
-    assert.equal(lateStarts.length, 1, '只有第二个调用新开块，首个复用流式已开块');
-    assert.equal(lateStarts[0].blockType, 'tool-call');
-    assert.equal(callEnds[0].block.id, early.id, '首调用终块 id 复用流式期间宣布的 id');
-    const readDelta = remaining.find(chunk => chunk.type === 'tool-call-delta' && chunk.argumentsDelta?.includes('README'));
-    assert.equal(readDelta.id, early.id, '首调用参数增量落在同一块');
+    const callStarts = chunks.filter(chunk => chunk.type === 'block-start' && chunk.blockType === 'tool-call');
+    assert.equal(callStarts.length, 2, '每个调用恰好一个 tool-call block-start（不重发）');
+    const readDelta = chunks.find(chunk => chunk.type === 'tool-call-delta' && chunk.argumentsDelta?.includes('README'));
+    assert.ok(readDelta, 'read 参数完整');
+    const grepDelta = chunks.find(chunk => chunk.type === 'tool-call-delta' && chunk.argumentsDelta?.includes('secret'));
+    assert.ok(grepDelta, 'grep 参数完整');
   } finally { finish({ text: '' }); dispose(); }
 });
 

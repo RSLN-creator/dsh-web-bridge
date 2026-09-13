@@ -216,6 +216,8 @@ window.__ModuleLoader__.load({
       const [subAgentMode, setSubAgentMode] = React.useState('own');
       const [subAgentSaved, setSubAgentSaved] = React.useState('own');
       const [subAgentNotice, setSubAgentNotice] = React.useState('');
+      const [subAgentSite, setSubAgentSite] = React.useState('follow');
+      const [subAgentSiteSaved, setSubAgentSiteSaved] = React.useState('follow');
       const refresh = () => api('status').then(s => setStatus(s)).catch(() => {});
       React.useEffect(() => {
         let alive = true;
@@ -229,6 +231,8 @@ window.__ModuleLoader__.load({
           setThinkSaved(['on', 'off', 'auto'].includes(s.thinkMode) ? s.thinkMode : 'auto');
           setSubAgentMode(s.subAgentMode === 'share' ? 'share' : 'own');
           setSubAgentSaved(s.subAgentMode === 'share' ? 'share' : 'own');
+          const subSite = s.subAgentSite && String(s.subAgentSite) !== 'follow' ? String(s.subAgentSite) : 'follow';
+          setSubAgentSite(subSite); setSubAgentSiteSaved(subSite);
         }).catch(() => {});
         const timer = setInterval(poll, 4000);
         return () => { alive = false; clearInterval(timer); };
@@ -313,10 +317,25 @@ window.__ModuleLoader__.load({
                 h('option', { value: 'share' }, '共用：所有子代理与主会话共用一个网页对话')),
               h('button', { disabled: pending || subAgentMode === subAgentSaved, onClick: () => saveSetting('subAgentMode', subAgentMode, r => { const v = r.subAgentMode === 'share' ? 'share' : 'own'; setSubAgentMode(v); setSubAgentSaved(v); setSubAgentNotice('已保存。对之后新开的子代理生效。'); }) }, '保存'),
               subAgentNotice && h('span', { className: 'hwb-hint' }, subAgentNotice))),
+          h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '子代理站点'),
+            h('div', { className: 'hwb-row-main' },
+              h('select', { className: 'hwb-model-select', value: subAgentSite, disabled: pending || !models,
+                onChange: e => setSubAgentSite(e.target.value) },
+                h('option', { value: 'follow' }, '跟随主线站点（默认）'),
+                ...(models ? [...new Set(models.map(m => String(m.id).split(':')[0]))].filter(s => s && s !== 'follow')
+                  .map(s => h('option', { value: s }, s)) : [])),
+              h('button', { disabled: pending || subAgentSite === subAgentSiteSaved,
+                onClick: () => saveSetting('subAgentSite', subAgentSite, r => { const v = r.subAgentSite && r.subAgentSite !== 'follow' ? String(r.subAgentSite) : 'follow'; setSubAgentSite(v); setSubAgentSiteSaved(v); setSubAgentNotice('已保存。对之后新开的子代理生效。'); }) }, '保存'),
+              h('button', { disabled: pending || !models || !defaultModel, title: '把子代理站点设为主线默认模型的站点',
+                onClick: () => { const site = String(defaultModel).split(':')[0]; if (site) { setSubAgentSite(site); setSubAgentNotice('已选 ' + site + '，请点「保存」生效。'); } } }, '主线→子代理'),
+              h('button', { disabled: pending || subAgentSite === 'follow', title: '把主线默认模型设为子代理站点的模型',
+                onClick: () => { const hit = models && models.find(m => String(m.id) === subAgentSite + ':auto'); if (hit) { saveSetting('defaultModel', hit.id, () => { setDefaultModel(hit.id); setModelSaved(hit.id); setSubAgentNotice('主线默认模型已设为 ' + hit.id + '。'); }); } } }, '子代理→主线'))),
           h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '会话隔离'),
             h('div', { className: 'hwb-row-main' }, h('span', { className: 'hwb-hint' },
               (driver?.conversationCount ?? 0) + ' 个网页会话槽。子代理（如 explore/plan/通用 agent）按 agentId 自动分到'
-              + '「同账号新对话」——同一账号下另开一个全新网页对话，互不污染主对话上下文；网页请求仍按队列逐个执行。')))),
+              + '「同账号新对话」——同一账号下另开一个全新网页对话，互不污染主对话上下文；网页请求仍按队列逐个执行。'
+              + '主线与子代理站点相互独立：同站点共享登录态（消息频率叠加，易触发站点限流，可给子代理选别的站点分流），跨站点登录互不影响；'
+              + '「主线→子代理 / 子代理→主线」按钮只单向同步站点选择，不迁移登录态。')))),
 
         h('div', { className: 'hwb-card' },
           h('h3', { className: 'hwb-group first' }, '首轮提示词'),

@@ -59,6 +59,21 @@ button:hover { background: #1d4ed8; }
     </select>
     <div class="hint">同一 DSH 会话里并行 agent 的网页会话分配方式。</div>
 
+    <label for="subAgentSite">子代理站点</label>
+    <select id="subAgentSite"></select>
+    <div class="hint">
+      子代理网页会话与主线<b>相互隔离</b>：各自独立的网页对话，上下文互不可见。
+      「跟随主线」时子代理开在主线站点——同一站点两路消息频率叠加，容易触发站点限流
+      （「消息发送过于频繁」）；给子代理选另一个站点即可分流。子代理站点的登录
+      复用与主站完全相同的一套登录逻辑（登录 / 检测 / 独立窗口），登录态按站点各自
+      持久化：与主线同站点时两者天然共享登录，跨站点互不影响。
+    </div>
+    <div style="display:flex; gap:8px; align-items:center; margin-top:8px;">
+      <button type="button" id="syncMainToSub" style="width:auto; margin-top:0; padding:6px 12px; font-size:13px;">主线站点 → 子代理</button>
+      <button type="button" id="syncSubToMain" style="width:auto; margin-top:0; padding:6px 12px; font-size:13px;">子代理站点 → 主线</button>
+      <span class="hint" style="margin-top:0;">手动单向同步「站点选择」；登录态不迁移（同站点天然共享，跨站点无法迁移）。</span>
+    </div>
+
     <button type="submit">保存设置</button>
   </form>
   <div id="status"></div>
@@ -67,6 +82,7 @@ button:hover { background: #1d4ed8; }
   const API_BASE = '/__webcode';
   // 裸模型 id（历史设置值，如 'deepseek-web'）→ 站点限定 id（'deepseek:deepseek'）
   const MODEL_IDS = ${JSON.stringify(Object.fromEntries(models.map((m) => [m.id.split(':').pop(), m.id])))};
+  const SITE_IDS = ${JSON.stringify([...new Set(models.map((m) => m.id.split(':')[0]))])};
   const form = document.getElementById('settingsForm');
   const statusEl = document.getElementById('status');
 
@@ -80,11 +96,39 @@ button:hover { background: #1d4ed8; }
       document.getElementById('previewRefreshRate').value = data.previewRefreshRate || 5000;
       document.getElementById('thinkMode').value = ['on', 'off', 'auto'].includes(data.thinkMode) ? data.thinkMode : 'auto';
       document.getElementById('subAgentMode').value = data.subAgentMode === 'share' ? 'share' : 'own';
+      const subSiteEl = document.getElementById('subAgentSite');
+      if (!subSiteEl.options.length) {
+        subSiteEl.innerHTML = '<option value="follow">跟随主线站点（默认）</option>'
+          + SITE_IDS.map((s) => '<option value="' + s + '">' + s + '</option>').join('');
+      }
+      const subSiteVal = data.subAgentSite && SITE_IDS.includes(data.subAgentSite) ? data.subAgentSite : 'follow';
+      subSiteEl.value = subSiteVal;
     } catch (e) {
       statusEl.textContent = '加载设置失败: ' + e.message;
       statusEl.className = 'error';
     }
   }
+
+  document.getElementById('syncMainToSub').addEventListener('click', () => {
+    const site = (document.getElementById('defaultModel').value || '').split(':')[0];
+    if (!site) return;
+    document.getElementById('subAgentSite').value = SITE_IDS.includes(site) ? site : 'follow';
+    statusEl.textContent = '已把子代理站点设为 ' + site + '（尚未保存，请点「保存设置」）';
+    statusEl.className = '';
+  });
+  document.getElementById('syncSubToMain').addEventListener('click', () => {
+    const site = document.getElementById('subAgentSite').value;
+    if (!site || site === 'follow') { statusEl.textContent = '子代理站点为「跟随主线」，无需同步'; statusEl.className = ''; return; }
+    const modelSel = document.getElementById('defaultModel');
+    const preferred = site + ':auto';
+    const hit = Array.from(modelSel.options).find(o => o.value === preferred) ? preferred
+      : (Array.from(modelSel.options).find(o => o.value.startsWith(site + ':')) || {}).value;
+    if (hit) {
+      modelSel.value = hit;
+      statusEl.textContent = '已把主线默认模型设为 ' + hit + '（尚未保存，请点「保存设置」）';
+      statusEl.className = '';
+    }
+  });
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -94,6 +138,7 @@ button:hover { background: #1d4ed8; }
       previewRefreshRate: parseInt(document.getElementById('previewRefreshRate').value, 10) || 5000,
       thinkMode: document.getElementById('thinkMode').value,
       subAgentMode: document.getElementById('subAgentMode').value,
+      subAgentSite: document.getElementById('subAgentSite').value || 'follow',
     };
     try {
       const res = await fetch(API_BASE + '/settings', {

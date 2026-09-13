@@ -16,7 +16,7 @@
 //     `fetch` inside the logged-in tab and only distilled JSON comes back.
 //   • Responses never echo tokens; errors are fixed-text; bodies are bounded.
 
-import { listAllModels, SITES } from './providers.js';
+import { listAllModels, SITES, getSite } from './providers.js';
 
 const MAX_BODY_BYTES = 256 * 1024;
 const LOOPBACK_HOST = /^(127\.0\.0\.1|\[::1\]|localhost)(:\d+)?$/i;
@@ -173,6 +173,12 @@ export function createWebControl(deps = {}) {
       if (!settingsStore) return { ok: false, error: 'settings store unavailable' };
       const current = settingsStore.get();
       const updated = { ...current, ...body };
+      // 子代理站点白名单：'follow' 或真实站点 id。轮次路由按它选驱动，
+      // 手改配置写入未知值会让子代理轮次全部落到「未知站点」报错。
+      if ('subAgentSite' in updated) {
+        const v = String(updated.subAgentSite ?? 'follow').trim() || 'follow';
+        updated.subAgentSite = v === 'follow' || getSite(v) ? v : 'follow';
+      }
       const result = settingsStore.set(updated);
       return { ok: true, ...result };
     },

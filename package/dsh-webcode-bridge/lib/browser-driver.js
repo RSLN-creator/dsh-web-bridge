@@ -178,7 +178,12 @@ export function createBrowserDriver(options = {}) {
   // 「网页掉流但内容保住了」和「真的失败了」。
   let recoveredTurns = 0;
   let lastRecovered = null;  // { at, reason, status, chars }
+  // 注册表必须在驱动创建时就加载（0.12.2）：启动时的自动登录核验先于 ensure()
+  // 直接 launch 出活页，首个轮次的 ensure() 见 ctx/page 存活便提前返回，注册表
+  // 再无加载机会——onPageCapture 只剩「no decoder for kind」警告，整轮静默挂到
+  // 超时（0.12.1 真机实锤：deepseek 轮 240s 无响应）。
   let Decoders = null;
+  try { Decoders = loadDecoderRegistry(cfg.decoderPath); } catch (e) { warn('decoder registry preload failed:', e?.message); }
   let loggedIn = null;
   // 重启前最后一次核验的登录态（持久化在各站点 profile）：进程内存里的 loggedIn
   // 重启即归零，没有这份缓存，面板每次重启都把所有站点打回「待检查」，
@@ -333,6 +338,11 @@ export function createBrowserDriver(options = {}) {
     if (m.phase === 'start') {
       if (!active.captureId && active.decoderKind !== 'dom') {
         active.captureId = m.captureId;
+        // 空流宽限期内等到了新流：撤掉收场定时器，按正常路径绑定新解码器。
+        if (active.retryGrace) { active.retryGrace = false; clearTimeout(active.graceTimer); active.graceTimer = null; }
+        // 兜底：预加载失败（文件被占用/磁盘抖动）时在首个 SSE 帧前重试一次，
+        // 而不是让整轮没有解码器地挂到超时。
+        if (!Decoders) { try { Decoders = loadDecoderRegistry(cfg.decoderPath); } catch (e) { warn('decoder registry load failed:', e?.message); } }
         const Cls = Decoders?.[active.decoderKind] ?? Decoders?.deepseek;
         if (!Cls) { warn('no decoder for kind', active.decoderKind); return; }
         active.decoder = new Cls({
@@ -363,9 +373,32 @@ export function createBrowserDriver(options = {}) {
         fs.appendFileSync(active.debugFile, m.text);
       } catch { /* debug only */ }
     }
-    if (m.phase === 'chunk' && active.decoder) active.decoder.push(m.text);
+    if (m.phase === 'chunk') {
+      if (m.text) active.rawHead = ((active.rawHead || '') + m.text).slice(0, 400);
+      if (active.decoder) active.decoder.push(m.text);
+    }
     if (m.phase === 'end' && active.decoder) {
       const result = active.decoder.finish();
+      const emptyStream = !result?.complete && !result?.partial
+        && !String(result?.text || '').trim() && !String(result?.thinking || '').trim()
+        && !(Array.isArray(result?.images) && result.images.length);
+      // 空流宽限重绑（no_response_frames 缓解）：DeepSeek 前端自动重试时，占位的
+      // 空/错流会先到先收（end 触发 finish），真正的重试流随后才开、被
+      // captureId 过滤丢弃——整轮报 no_response_frames，长任务反复被打死
+      // （0.12.2 真机 goal 会话 turn2 step12 实锤）。空流不立即收场：留 3s
+      // 窗口等新流绑定；等不到再按原样收场，代价上限 3s。
+      if (emptyStream && !active.retryGrace) {
+        active.retryGrace = true;
+        active.decoder = null;
+        active.captureId = null;
+        active.graceTimer = setTimeout(() => {
+          if (!active) return;
+          const resolve = active.resolve;
+          finishActive();
+          resolve(result);
+        }, 3000);
+        return;
+      }
       const resolve = active.resolve;
       finishActive();
       resolve(result);
@@ -378,6 +411,7 @@ export function createBrowserDriver(options = {}) {
     active = null;
     busy = false;
     if (a?.timer) clearTimeout(a.timer);
+    if (a?.graceTimer) clearTimeout(a.graceTimer);
     if (a) { try { a.settleResolve?.(); } catch {} }
     return a;
   }
@@ -818,7 +852,12 @@ export function createBrowserDriver(options = {}) {
           throw err;
         }
       }
-      if (!result.complete && !result.partial) throw new Error('web capture ended incomplete: ' + (result.reason || 'unknown'));
+      if (!result.complete && !result.partial) {
+        // 带上流首段原文：整流零响应帧时，「网页 200 包错误 JSON（风控/审核）」
+        // 和「流形态对不上」在报错文本里一眼可分，不用再开 SSE_DEBUG 抓包。
+        const head = lastFinished?.rawHead ? ' | 流首段: ' + String(lastFinished.rawHead).slice(0, 200) : '';
+        throw new Error('web capture ended incomplete: ' + (result.reason || 'unknown') + head);
+      }
       if (!result.text?.trim()) throw new Error('empty response from web AI');
       if (!result.complete) {
         // 部分流：正文/思考/图片已拿到，但网页没发 FINISHED/close。把已有内容当
@@ -1209,6 +1248,29 @@ export function createBrowserDriver(options = {}) {
             return { ok: true, loggedIn: true, alreadyLoggedIn: true, siteId, ms: lastLogin.ms, note: lastLogin.message };
           }
         } catch { /* fall through to the headed login flow */ }
+      }
+      // 无活页时先做一次无头快速核验（0.12.5）：旧实现在驱动尚未懒创建（fresh
+      // boot）时直接开有头登录窗口——cookies 明明有效也要用户看着登录窗口闪一道、
+      // 每次重启都被迫手点一次（真机：DeepSeek 每次重启都要点，其他站点因
+      // 「已登录(缓存)」直接绿标）。无头核验确认掉登录才升级有头人工流程。
+      if (!ctx || !page || page.isClosed?.()) {
+        report('launching');
+        try {
+          await launch({ headless: true });
+          try { await page.goto(cfg.site, { waitUntil: 'domcontentloaded', timeout: 45_000 }); } catch {}
+          if (await judgeLoggedIn(page)) {
+            loggedIn = true;
+            persistLoginState({ loggedIn: true, at: Date.now(), message: '无头快速核验：登录态有效' });
+            report('already-logged-in');
+            lastLogin = { ok: true, at: Date.now(), ms: Date.now() - t0, alreadyLoggedIn: true, message: '登录态有效（无头核验），无需打开登录窗口' };
+            return { ok: true, loggedIn: true, alreadyLoggedIn: true, siteId, ms: lastLogin.ms, note: lastLogin.message };
+          }
+          warn('headless quick verify says logged out — escalating to headed login');
+        } catch (e) {
+          warn('headless quick verify failed, falling back to headed login:', e?.message);
+        }
+        try { if (ctx) await ctx.close(); } catch {}
+        ctx = null; page = null;
       }
       try { if (ctx) await ctx.close(); } catch {}
       ctx = null; page = null;
