@@ -1,4 +1,4 @@
-﻿# Harness Web Bridge
+# Harness Web Bridge
 
 将已登录的网页 AI 接入 DeepSeek Harness：网页模型产生工具调用，由 Harness 原生权限系统执行本地工具，结果回传同一网页会话。包名 `dsh-webcode-bridge` 与 provider `webcode` 保留兼容。
 
@@ -43,7 +43,11 @@
 
 1. 把 HTML/CSS 里指向这些域的绝对 URL 改写成同源 `/__static/<host>/…`；
 2. 剥离 `integrity`（URL 变了必然失配）与 `crossorigin`；
-3. 把脚本运行时发往这些域的 `fetch`/`XHR`（埋点上报等）一并改写，避免控制台刷 CORS 错误。
+3. 把脚本运行时发往这些域的 `fetch`/`XHR`（埋点上报等）一并改写，避免控制台刷 CORS 错误；
+4. **根相对与协议相对 URL 也改写**（`/main.*.js`、`//at.alicdn.com/…`）。GLM 的 webpack 产物用根相对路径引入整包 JS，z.ai 运行时请求根相对的 `/api/config`；不改写就会落到回环根（= 默认站点 DeepSeek 的镜像），拿到 `200 text/html` 后被严格 MIME 校验拒绝执行，`#app` 永远空白——这正是「DeepSeek 右栏能开、GLM/z.ai 打不开」的直接原因；
+5. bootstrap 再装一层**运行时钩子**（`fetch`/`XHR`/`createElement`/`setAttribute`），兜住 webpack 懒加载 chunk 这类运行时才拼出来的地址。钩子带幂等守卫，已镜像的路径不会被二次加前缀。
+
+`rootPathForSpa`：个别站点的前端 router 只认根路径（当前是 z.ai）。这类站点打开该开关后，注入脚本会在站点脚本之前把 `pathname` 改写成 `/`；否则镜像页只会渲染错误边界（接口全部 200 且返回正确 JSON，纯粹是路由基线不匹配）。默认关闭，开启会破坏 SPA 深链，不要给 DeepSeek/GLM 打开。
 
 **顺序很关键**：先改写站点 HTML，再注入 bootstrap。反过来的话 bootstrap 里的 `UP`/`ASSETS` 常量会被一起改写，运行时比较永不命中（此坑已由 `test/mirror.test.mjs` 的护栏锁住）。
 

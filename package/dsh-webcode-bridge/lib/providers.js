@@ -136,6 +136,13 @@ export const ZAI = site({
   // api.z.ai 是前端调后端的绝对域（真机 probe-net 实测），不代理则页面提示
   // 「无法连接到服务」。
   staticOrigins: ['https://z-cdn.chatglm.cn', 'https://api.z.ai'],
+  // 镜像页需要看到根路径（真机证据 2026-09-13）：
+  // z.ai 的前端 router 只认根路径。同一个镜像挂在 /__webcode/site/zai/ 下时，
+  // 它的错误边界会渲染「200: An unexpected error has occurred.」——接口全部
+  // 200 + 正确 JSON，纯粹是路由基线不匹配；把 pathname 改写成 '/'（其余资源
+  // 已由镜像改写成带前缀的绝对路径，运行时根相对请求由 bootstrap 钩子补前缀）
+  // 后立刻恢复成正常界面（输入框出现）。GLM 不需要这个开关。
+  rootPathForSpa: true,
   completionPaths: ['/api/chat/completions', '/api/v1/chat/completions'],
   input: 'textarea#chat-input, textarea[placeholder], textarea',
   // z.ai 对程序化 Enter 不响应，必须点发送按钮（真机 2026-09-12：轮次静默挂死正因如此）。

@@ -56,6 +56,29 @@
   }
 
   // ---------- helpers shared by all decoders ----------
+  // 站点限流的统一判定（2026-09-13 真机修复）：
+  // 限流 hint 是流的**最后一帧**，而「流首段」这类现场取证只截前 400 字符，
+  // 真机上看到的 finish_reason 常常是 `rate_l` 这种被掐断的前缀。旧实现用
+  // `finish_reason === 'rate_limited'` 精确相等判断，一旦帧尾丢失就漏判，
+  // 整轮退化成 no_response_frames —— 长任务（含子代理）被反复打死却看不出
+  // 真因。这里改为「前缀匹配 + 服务端原话兜底」，两种证据任一命中即算限流。
+  const RATE_HINT_TEXT = /过于频繁|请求频繁|too\s*(?:many|frequent)|rate\s*limit|slow\s*down/i;
+  function rateLimitHint(hintError, rawText) {
+    const fr = String(hintError?.finish_reason || '');
+    // 前缀匹配：'rate_l' / 'rate_limited' / 'rate_limit_exceeded' 都算
+    if (fr && 'rate_limited'.startsWith(fr)) return true;
+    if (RATE_HINT_TEXT.test(fr)) return true;
+    const content = String(hintError?.content || '');
+    if (content && RATE_HINT_TEXT.test(content)) return true;
+    // 帧被截断、JSON 都解析不出来时，退回原始文本判断
+    return Boolean(rawText) && RATE_HINT_TEXT.test(String(rawText));
+  }
+  /** 从原始 hint 文本里取服务端原话（截断帧也能用）。 */
+  function rateLimitText(rawText) {
+    const m = /"content"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(String(rawText || ''));
+    return m ? m[1] : null;
+  }
+
   function imageFromValue(v) {
     if (!isRecord(v)) return null;
     const url = v.url ?? v.image?.url ?? v.image_url?.url ?? (typeof v.image === 'string' ? v.image : null);
@@ -110,6 +133,9 @@
       // finish_reason:'rate_limited'}，随后服务端撤回消息、零响应帧收流。
       // 记录之，finish() 时把它作为比 no_response_frames 更真实的失败原因。
       this.hintError = null;
+      // hint 帧的原始文本另存一份：限流帧常是流的最后一帧，帧尾被掐断时
+      // JSON.parse 会失败，只留结构化的 hintError 就什么都判不出来。
+      this.hintRaw = '';
     }
     push(chunk) {
       this.receivedChars += chunk.length;
@@ -123,7 +149,18 @@
         thinking: this.response ? this.response.fragments.filter((f) => f.type === 'THINK' || f.type === 'THINKING').map((f) => f.content).join('').trim() : '',
         images: this.response ? this.response.fragments.filter((f) => f.image).map((f) => f.image) : [],
       };
-      if (this.failed) return { complete: false, reason: 'invalid_stream', ...collected };
+      // 限流优先于 invalid_stream：限流帧本身就是流的最后一帧，帧尾被掐断时
+      // JSON.parse 必然失败、this.failed 被置位；若先按 invalid_stream 返回，
+      // 就永远看不到「消息发送过于频繁」这个真因（真机 2026-09-13 实锤）。
+      if (this.failed) {
+        if (!this.response && rateLimitHint(this.hintError, this.hintRaw)) {
+          return {
+            complete: false, partial: false, reason: 'rate_limited', status: null,
+            hint: this.hintError?.content || rateLimitText(this.hintRaw) || null, ...collected,
+          };
+        }
+        return { complete: false, reason: 'invalid_stream', hint: null, ...collected };
+      }
       if (!this.receivedClose || !this.response || this.response.status !== 'FINISHED') {
         // 流没送到 FINISHED / close：网页端掉流、被合流截断、或用户切走页面。
         // 旧实现直接 complete:false，把已经解码出来的正文与（可能完整的）工具
@@ -134,7 +171,7 @@
         // 零响应帧 + 限流 hint：归为 rate_limited 而不是笼统的 no_response_frames，
         // 驱动层据此抛 RATE_LIMITED 交给上层退避重试（hint 只在零帧时升级——
         // 若已有响应帧，hint 只是流中途的旁路提示，不影响结果归类）。
-        const rateLimited = !this.response && this.hintError?.finish_reason === 'rate_limited';
+        const rateLimited = !this.response && rateLimitHint(this.hintError, this.hintRaw);
         return {
           complete: false,
           partial,
@@ -142,7 +179,7 @@
             : rateLimited ? 'rate_limited'
             : 'no_response_frames',
           status: this.response?.status || null,
-          hint: rateLimited ? (this.hintError.content || null) : null,
+          hint: rateLimited ? (this.hintError?.content || rateLimitText(this.hintRaw) || null) : null,
           ...collected,
         };
       }
@@ -151,6 +188,11 @@
     consume(events) { for (const ev of events) this.consumeEvent(ev); }
     consumeEvent(ev) {
       if (ev.event === 'close') { this.receivedClose = true; return; }
+      if (ev.event === 'hint') {
+        // hint 帧先用原文兜底：限流帧常是流的最后一帧，帧尾可能被掐断，
+        // JSON.parse 失败时也要能认出「消息发送过于频繁」。
+        this.hintRaw = ((this.hintRaw || '') + String(ev.data || '')).slice(-2000);
+      }
       let payload;
       try { payload = JSON.parse(ev.data); } catch { this.failed = true; return; }
       if (ev.event === 'error') { this.failed = true; return; }

@@ -1067,6 +1067,9 @@ function imageMarkdown(images) {
         logger: console,
         assetOrigins: st.staticOrigins || [],
         mountPrefix: '/__webcode/site/' + sid,
+        // 站点级：前端 router 只认根路径的（z.ai）需要在页面脚本前把 pathname
+        // 改写成 '/'，否则镜像页渲染错误边界（见 providers.js 里的说明）。
+        rootPathForSpa: st.rootPathForSpa === true,
         getCookies: (origin) => driverFor(sid).profileCookies(origin),
         setCookies: (headers, origin) => driverFor(sid).writeProfileCookies(headers, origin),
         getUserAgent: () => driverFor(sid).userAgent(),

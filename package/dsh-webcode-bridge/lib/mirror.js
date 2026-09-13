@@ -11,6 +11,11 @@ export function createMirror(options = {}) {
     // 前缀；两者一起决定 HTML/CSS 里绝对资源 URL 如何改写成同源路径。
     assetOrigins = [],
     mountPrefix = '',
+    // 有些站点的前端 router 只认根路径（见 providers.js 的 z.ai 说明）。
+    // 打开后注入脚本会在页面脚本之前把 pathname 改写成 '/'——站点看到的就是
+    // 根路径；资源/接口仍走镜像前缀（静态标签已改写，运行时根相对请求由
+    // bootstrap 的 toLocal 钩子补前缀）。GLM 等站点不需要，保持默认关闭。
+    rootPathForSpa = false,
     getCookies = null,
     setCookies = null,
     getUserAgent = null,
@@ -61,23 +66,64 @@ export function createMirror(options = {}) {
     } catch { return u; }
   }
 
-  function rewriteProxyAttr(_m, attr, quote, url) {
-    return attr + quote + toProxyUrl(url) + quote;
+  /** 标签属性语境里的资源引用 → 同源镜像路径。
+   *
+   *  三种形态都要处理（真机证据 2026-09-13）：
+   *    1. 绝对 `https://host/path` —— 原本就支持；
+   *    2. 协议相对 `//host/path`（GLM 的 `//at.alicdn.com/...`、z.ai 的
+   *       `//o.alicdn.com/...`、qwen 的 logo）—— 浏览器按镜像源（回环）解析，
+   *       直接 404；
+   *    3. **根相对 `/path`**（GLM 的 webpack 产物 `/runtime.*.js` `/libs.*.js`
+   *       `/main.*.js`、z.ai 运行时的 `/api/config`）—— 浏览器解析成
+   *       `http://127.0.0.1:8931/path`，而那是**默认站点（DeepSeek）镜像的根**：
+   *       这些请求会拿到 DeepSeek 的 HTML（200 + text/html），脚本因严格 MIME
+   *       校验被拒、JSON 解析炸掉 —— 这正是「DeepSeek 右栏能开、GLM/z.ai 空白」
+   *       的根因。它们属于本站点，必须改写成 mountPrefix + path。
+   *  注意 `<base>` 解决不了这个问题：以 `/` 开头的 URL 永远相对 origin 解析。 */
+  function toProxyAny(u) {
+    if (typeof u !== 'string' || !u) return u;
+    if (u.charAt(0) === '/') {
+      if (u.charAt(1) === '/') return toProxyUrl('https:' + u);   // 协议相对
+      if (u.charAt(1) !== '/') return mountPrefix + u;            // 根相对（本站）
+    }
+    return toProxyUrl(u);
   }
 
-  /** 把标签属性语境（src/href/poster/srcset）与 CSS url() 里的绝对 URL 改写成同源路径。 */
+  /** 路径已经是镜像自己的（mountPrefix / __static / 桥的本地前缀）时不要重复加前缀。
+   *  否则一次改写过的 `/__webcode/site/glm/__static/...` 会被二次拼成
+   *  `/__webcode/site/glm/__webcode/site/glm/__static/...`。 */
+  function alreadyLocal(p) {
+    if (mountPrefix && p.startsWith(mountPrefix + '/')) return true;
+    if (p.startsWith(STATIC_SEG)) return true;
+    return LOCAL_PREFIXES.some((prefix) => p.startsWith(prefix));
+  }
+
+  function rewriteProxyAttr(_m, attr, quote, url) {
+    return attr + quote + toProxyAny(url) + quote;
+  }
+
+  /** 把标签属性语境（src/href/poster/srcset）与 CSS url() 里的资源 URL 改写成同源路径。 */
   function rewriteAssetUrls(text) {
     let out = String(text)
-      .replace(/(\s(?:src|href|poster)\s*=\s*)(["']?)(https?:\/\/[^"'\s>]+)\2/gi, rewriteProxyAttr)
-      .replace(/url\(\s*(["']?)(https?:\/\/[^)'"\s]+)\1\s*\)/gi, (_m, q, u) => 'url(' + q + toProxyUrl(u) + q + ')');
+      .replace(/(\s(?:src|href|poster)\s*=\s*)(["']?)((?:https?:)?\/\/[^"'\s>]+)\2/gi, rewriteProxyAttr)
+      .replace(/url\(\s*(["']?)((?:https?:)?\/\/[^)'"\s]+)\1\s*\)/gi, (_m, q, u) => 'url(' + q + toProxyAny(u) + q + ')');
     // srcset 值是「URL 描述符, URL 描述符」列表，逐段处理
     out = out.replace(/(\ssrcset\s*=\s*)(["'])([^"']+)\2/gi, (_m, attr, quote, value) =>
       attr + quote + value.split(',').map((part) => {
         const t = part.trim();
-        if (!/^https?:\/\//i.test(t)) return part;
+        if (!/^(?:https?:)?\/\//i.test(t)) return part;
         const sp = t.indexOf(' ');
-        return sp < 0 ? toProxyUrl(t) : toProxyUrl(t.slice(0, sp)) + t.slice(sp);
+        return sp < 0 ? toProxyAny(t) : toProxyAny(t.slice(0, sp)) + t.slice(sp);
       }).join(', ') + quote);
+    // 根相对资源（/main.*.js、/api/config…）：单列一遍，因为上面的正则只吃
+    // 「//」开头的形态。已是镜像路径的（__static / mountPrefix / 桥本地前缀）
+    // 原样保留，避免二次加前缀。mountPrefix 为空（relay 根上的默认站点）时
+    // 无需改写——那时 /path 本来就落在正确的地方。
+    if (mountPrefix) {
+      const rootRel = /(\s(?:src|href|poster)\s*=\s*)(["'])(\/(?!\/)[^"'\s>]*)\2/gi;
+      out = out.replace(rootRel, (_m, attr, quote, path) =>
+        attr + quote + (alreadyLocal(path) ? path : mountPrefix + path) + quote);
+    }
     return out;
   }
 
@@ -214,16 +260,35 @@ export function createMirror(options = {}) {
     // 仍会按绝对地址发 XHR/fetch（埋点上报等）——一并改写到同源，避免
     // 跨域被拒后在控制台刷一片 CORS 错误。
     const assetHostsLiteral = JSON.stringify(assetOrigins.map((o) => { try { return new URL(String(o)).host; } catch { return ''; } }).filter(Boolean));
-    return `<script data-webcode-mirror>(function(){
+    // 必须在站点脚本之前执行：只改地址栏里的路径，不触发加载。
+    const rootPathFix = rootPathForSpa
+      ? '<script data-webcode-rootpath>try{if(location.pathname!==\'/\')history.replaceState(null,\'\',\'/\');}catch(e){}</script>\n'
+      : '';
+    return rootPathFix + `<script data-webcode-mirror>(function(){
 	try{if(${tokenLiteral}!==null)localStorage.setItem('userToken',${tokenLiteral});}catch(e){}
 	try{if(navigator.serviceWorker)navigator.serviceWorker.register=function(){return Promise.reject(new Error('mirror: service worker disabled'));};}catch(e){}
 	var UP=${originLiteral};
 	// 只存 host：匹配与拼接都用纯字符串，避免正则转义在模板里失真。
 	var ASSETS=${assetHostsLiteral};
 	var MP=${JSON.stringify(mountPrefix + STATIC_SEG)};
-	// 绝对地址 → 同源镜像路径；null 表示无需改写。
+	var ROOT=${JSON.stringify(mountPrefix)};
+	// 资源地址 → 同源镜像路径；null 表示无需改写。
+	// 已经是镜像路径的（mountPrefix / __static / 桥的本地前缀）原样返回，
+	// 否则第二次经过 toLocal 会被拼成 /__webcode/site/glm/__webcode/site/glm/…
+	function isLocalPath(p){
+	  if(ROOT&&p.indexOf(ROOT+'/')===0)return true;
+	  if(p.indexOf('/__static/')===0)return true;
+	  return p.indexOf('/v1/')===0||p.indexOf('/bridge/')===0||p.indexOf('/webcode/')===0||p.indexOf('/__webcode/')===0;
+	}
 	function toLocal(u){
-	  if(typeof u!=='string')return null;
+	  if(typeof u!=='string'||!u)return null;
+	  // 根相对 /x：本站资源，但要加上镜像前缀，否则会落到回环根
+	  // （= 默认 DeepSeek 镜像的根）——真机 GLM 的 /runtime.*.js 就是这么被
+	  // 换成一张 text/html 的，脚本因严格 MIME 校验拒绝执行、页面永远空白。
+	  if(u.charAt(0)==='/'){
+	    if(u.charAt(1)==='/'){return toLocal('https:'+u);}
+	    if(u.charAt(1)!=='/')return isLocalPath(u)?u:(ROOT+u);
+	  }
 	  if(u.indexOf(UP)===0)return u.slice(UP.length)||'/';
 	  if(u.indexOf('https://')!==0&&u.indexOf('http://')!==0)return null;
 	  var rest=u.slice(u.indexOf('://')+3);
@@ -241,6 +306,36 @@ export function createMirror(options = {}) {
 	}catch(e){}return fetch0.call(this,input,init);};
 	var open0=XMLHttpRequest.prototype.open;
 	XMLHttpRequest.prototype.open=function(method,url){try{var m2=toLocal(url);if(m2!==null)url=m2;}catch(e){}return open0.apply(this,arguments);};
+	// 动态创建的脚本/样式/图片（webpack 的懒加载 chunk 走这条路：d.p="/" 之后
+	// 拼出 "/<chunk>.js" 再赋给 script.src）。这一步不补，首屏静态标签修好了、
+	// 后面的按需 chunk 仍会打到回环根拿到 DeepSeek 的 HTML。
+	var ce0=document.createElement.bind(document);
+	function fixProp(el,prop){
+	  try{
+	    var d=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el),prop);
+	    if(!d||!d.set||!d.get)return;
+	    Object.defineProperty(el,prop,{configurable:true,enumerable:true,
+	      get:function(){return d.get.call(this);},
+	      set:function(v){var m=toLocal(v);try{d.set.call(this,m===null?v:m);}catch(e){try{d.set.call(this,v);}catch(e2){}}}});
+	  }catch(e){}
+	}
+	document.createElement=function(tag,opt){
+	  var el=ce0(tag,opt);
+	  try{
+	    var t=String(tag||'').toLowerCase();
+	    if(t==='script'||t==='img'||t==='iframe'||t==='source')fixProp(el,'src');
+	    else if(t==='link'||t==='a')fixProp(el,'href');
+	  }catch(e){}
+	  return el;
+	};
+	var sa0=Element.prototype.setAttribute;
+	Element.prototype.setAttribute=function(name,value){
+	  try{
+	    var n=String(name||'').toLowerCase();
+	    if(n==='src'||n==='href'||n==='poster'){var m=toLocal(value);if(m!==null)value=m;}
+	  }catch(e){}
+	  return sa0.call(this,name,value);
+	};
 })();</script>
 <style data-webcode-singlecol>
 /* 侧栏单栏化：站点自带的双栏布局在窄面板里很挤——隐藏左侧导航列，
@@ -528,6 +623,10 @@ export function createMirror(options = {}) {
       // URL 改成同源后 crossorigin 不再需要；integrity 一旦不匹配会让整页脚本
       // 失效（失败面大于收益），一并剥离。
       patched = patched.replace(/\s+integrity="[^"]*"/gi, '').replace(/\s+crossorigin(?:="[^"]*")?/gi, '');
+      // 注意：不要对整段注入做 `</script` 转义 —— 那会把这两块 script 自己的
+      // 收尾标签也一起转掉，标签不闭合、整段脚本不执行（2026-09-13 真机实测：
+      // document.createElement 仍是原生的，webpack 懒加载 chunk 全部 404）。
+      // token 已在 bootstrap 里用 `\u003c` 转义过，这里无需再处理。
       const injected = bootstrap(typeof token === 'string' ? token : null);
       patched = patched.includes('</head>')
         ? patched.replace('</head>', injected + '</head>')

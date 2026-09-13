@@ -213,3 +213,49 @@ test('deepseek hint：已有响应帧时 hint 只是旁路提示，不影响部�
   assert.equal(out.text, '部分回答');
   assert.equal(out.hint, null);
 });
+
+// ---------- 限流帧被掐断（2026-09-13 子代理真机实锤） ----------
+// 真实事故：长任务派出的子代理整轮死于
+//   web capture ended incomplete: no_response_frames | 流首段: …"finish_reason":"rate_l
+// 限流 hint 是流的**最后一帧**，帧尾随连接一起被掐断，于是
+//   ① finish_reason 只剩前缀 'rate_l' —— 精确相等比较永远漏判；
+//   ② JSON 解析失败 → this.failed 置位 → 先按 invalid_stream 返回。
+// 两条路都让「消息发送过于频繁」这个真因看不见，上层拿不到 RATE_LIMITED，
+// 不会退避重试，子代理直接死掉。以下用例锁死这几种形态。
+
+test('deepseek hint：finish_reason 被截断成前缀仍判 rate_limited', () => {
+  const decoder = new D.deepseek({});
+  decoder.push('event: ready\ndata: {"request_message_id":47,"response_message_id":48,"model_type":"default"}\n\n');
+  // 帧尾丢失，但 JSON 本身仍完整
+  decoder.push('event: hint\ndata: {"type":"error","content":"消息发送过于频繁，请稍后重试","clear_response":true,"finish_reason":"rate_l');
+  const out = decoder.finish();
+  assert.equal(out.reason, 'rate_limited', '截断的 finish_reason 前缀必须仍被判为限流');
+  assert.equal(out.hint, '消息发送过于频繁，请稍后重试');
+});
+
+test('deepseek hint：hint 帧无结尾空行（流被掐断）仍判 rate_limited', () => {
+  const decoder = new D.deepseek({});
+  decoder.push('event: ready\ndata: {"request_message_id":47,"response_message_id":48}\n\n');
+  decoder.push('event: hint\ndata: {"type":"error","content":"消息发送过于频繁，请稍后重试","finish_reason":"rate_limited"}');
+  const out = decoder.finish();
+  assert.equal(out.reason, 'rate_limited');
+});
+
+test('deepseek hint：JSON 解析失败但原文含限流话术 → 优先 rate_limited 而非 invalid_stream', () => {
+  const decoder = new D.deepseek({});
+  decoder.push('event: ready\ndata: {"request_message_id":47,"response_message_id":48}\n\n');
+  // JSON 被截断：解析必然失败；真因只能从原文里认出来
+  decoder.push('event: hint\ndata: {"type":"error","content":"消息发送过于频繁，请稍后重试","clear_response":true,"finish_reason":"rate_lim');
+  const out = decoder.finish();
+  assert.equal(out.reason, 'rate_limited', 'JSON 截断不能把限流掩盖成 invalid_stream');
+  assert.equal(out.hint, '消息发送过于频繁，请稍后重试');
+});
+
+test('deepseek hint：非限流话术的截断帧仍按原语义归类（不误报限流）', () => {
+  const decoder = new D.deepseek({});
+  decoder.push('event: ready\ndata: {"request_message_id":1,"response_message_id":2}\n\n');
+  decoder.push('event: hint\ndata: {"type":"error","content":"内容审核未通过","finish_reason":"content_fil');
+  const out = decoder.finish();
+  assert.notEqual(out.reason, 'rate_limited', '审核类失败不得被误判成限流');
+  assert.equal(out.hint, null);
+});
