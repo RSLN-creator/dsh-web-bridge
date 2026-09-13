@@ -18,6 +18,7 @@ h1 { font-size: 20px; margin-top: 0; }
 label { display: block; margin: 16px 0 6px; font-weight: 600; }
 textarea, select, input { width: 100%; padding: 8px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; box-sizing: border-box; }
 textarea { min-height: 80px; font-family: inherit; }
+pre.preset { max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.55; background: #f1f3f5; border-radius: 8px; padding: 10px; margin: 8px 0 0; }
 button { background: #2563eb; color: white; border: none; padding: 10px 20px; border-radius: 6px; font-size: 16px; cursor: pointer; margin-top: 16px; width: 100%; }
 button:hover { background: #1d4ed8; }
 #status { margin-top: 12px; padding: 8px; border-radius: 6px; }
@@ -35,13 +36,23 @@ button.mini { width: auto; margin-top: 0; padding: 6px 12px; font-size: 13px; }
 <div class="card">
   <h1>⚙️ Webcode Bridge 设置</h1>
   <form id="settingsForm">
-    <label for="extraPrompt">全局指令（首轮注入）</label>
+    <label for="extraPrompt">全局指令（首轮注入，唯一可编辑的提示词部分）</label>
     <textarea id="extraPrompt" placeholder="例如：请始终使用中文回答..."></textarea>
-    <div class="hint">这段文本会追加到每个新网页会话的第一条用户消息之前。</div>
+    <div class="hint">这段文本会追加到每个新网页会话的第一条用户消息之前。保存后下方模板会立刻反映它。</div>
+
+    <label>首轮提示词（只读，默认显示）</label>
+    <div class="hint">
+      发送首条消息时注入网页的完整内容，由桥按当前会话的工具清单自动生成。
+      不同站点是**两套协议**（GLM 网页会拦截正文里的调用标签），用下面的选择框切换查看。
+    </div>
+    <select id="variantSelect" style="margin-top:6px;"></select>
+    <div id="variantNote" class="hint"></div>
+    <pre id="variantText" class="preset">加载中…</pre>
+    <div id="variantTools" class="hint"></div>
 
     <label for="defaultModel">默认模型</label>
     <select id="defaultModel">
-      ${models.map((m) => `<option value="${m.id}">${m.name}（${m.siteName}${m.experimental ? ' · 实验' : ''}）</option>`).join('\n      ')}
+      ${models.map((m) => `<option value="${m.id}">${m.name}${m.experimental ? '（实验）' : ''}</option>`).join('\n      ')}
     </select>
     <div class="hint">新建会话时默认选择的模型。已接入：DeepSeek、GLM、ChatGPT、Kimi、通义千问、豆包、Grok、Claude、Gemini。</div>
 
@@ -105,7 +116,7 @@ button.mini { width: auto; margin-top: 0; padding: 6px 12px; font-size: 13px; }
       </select>
       <input type="number" id="sendGapMs" min="0" max="600000" step="500" style="flex:1;" placeholder="毫秒（0–600000）">
     </div>
-    <div class="hint">两次向同一网站发送消息之间的最小间隔（本地回复到网页发送的等待时间）。DeepSeek 网页有「消息发送过于频繁」的滑窗限流，长任务工具循环节奏密时容易触发；设置间隔可主动避开。触发限流后桥会按 max(发送间隔, 10 秒) 起步自动退避重试（最多 2 次）。实际等待在右侧统计的「发送前等待」单独展示。</div>
+    <div class="hint">两次向同一网站<b>发送</b>之间的最小间隔（send-to-send：距上一次发出不足这个值就等满，已满足则不等待）。DeepSeek 网页有「消息发送过于频繁」的滑窗限流，长任务工具循环节奏密时容易触发；设置间隔可主动避开。触发限流后桥会按 max(发送间隔, 10 秒) 起步自动退避重试（最多 2 次）。实际等待、目标值与「距上次发送」都在右侧统计的「发送前等待」里逐项显示；该设置会落盘，<b>重启后第一轮同样生效</b>。</div>
 
     <button type="submit">保存设置</button>
   </form>
@@ -145,6 +156,44 @@ button.mini { width: auto; margin-top: 0; padding: 6px 12px; font-size: 13px; }
       statusEl.className = 'error';
     }
   }
+
+  // ---- 首轮提示词（只读模板 + 适配下拉，默认显示） --------------------------
+  // 模板由 GET /__webcode/prompt-variants 现算（与真正发出去的那一份同源）。
+  // 这里只做展示与切换，不提供编辑——可编辑的只有上面的「全局指令」。
+  let variantData = null;
+  function renderVariant(id) {
+    if (!variantData) return;
+    const v = variantData.variants.find((x) => x.id === id) || variantData.variants[0];
+    document.getElementById('variantText').textContent = v.text;
+    document.getElementById('variantNote').textContent =
+      v.note
+      + (variantData.active && variantData.active.variantId === v.id ? '（本会话最近一次实际使用的就是这一支）' : '')
+      + (variantData.active && variantData.active.variantId !== v.id
+        ? '（本会话最近一次实际使用的是「' + ((variantData.variants.find((x) => x.id === variantData.active.variantId) || {}).label || variantData.active.variantId) + '」）'
+        : '');
+    document.getElementById('variantTools').textContent = variantData.toolsSource === 'placeholder'
+      ? '当前工具清单是占位示例——发送第一条消息后会自动换成该会话的真实清单。'
+      : (variantData.active && variantData.active.tools && variantData.active.tools.length
+        ? '本会话工具：' + variantData.active.tools.join(', ') : '');
+  }
+  async function loadVariants() {
+    try {
+      const r = await fetch(API_BASE + '/prompt-variants');
+      const d = await r.json();
+      if (!d.ok) throw new Error(d.error || 'HTTP ' + r.status);
+      variantData = d;
+      const sel = document.getElementById('variantSelect');
+      sel.innerHTML = d.variants.map((v) => '<option value="' + v.id + '">' + v.label
+        + (d.active && d.active.variantId === v.id ? ' · 本会话正在用' : '') + '</option>').join('');
+      const want = (d.active && d.active.variantId) || (d.variants[0] && d.variants[0].id);
+      sel.value = want;
+      renderVariant(want);
+    } catch (e) {
+      document.getElementById('variantText').textContent = '首轮提示词加载失败：' + e.message;
+    }
+  }
+  document.getElementById('variantSelect').addEventListener('change', (e) => renderVariant(e.target.value));
+  loadVariants();
 
   document.getElementById('syncMainToSub').addEventListener('click', () => {
     const site = (document.getElementById('defaultModel').value || '').split(':')[0];
@@ -329,6 +378,8 @@ button.mini { width: auto; margin-top: 0; padding: 6px 12px; font-size: 13px; }
       const result = await res.json();
       statusEl.textContent = '✅ 设置已保存';
       statusEl.className = 'success';
+      // 全局指令改了 → 上方模板的文本也跟着变；不重拉的话用户会以为没生效。
+      loadVariants();
     } catch (e) {
       statusEl.textContent = '❌ ' + e.message;
       statusEl.className = 'error';

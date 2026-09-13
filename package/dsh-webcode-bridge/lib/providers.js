@@ -9,6 +9,108 @@
 
 const site = (s) => Object.freeze(s);
 
+/**
+ * 网页会话 URL 契约的三态（C-2）。
+ *
+ * 背景（真机 2026-09-14 取证）：驱动旧实现把「会话 id ↔ 地址」的知识硬编码成
+ * DeepSeek 的两种形状（`?chat_session_id=<id>` 与 `/a/chat/s/<id>`），于是
+ * **GLM 永远拿不到会话 id**：探针实录
+ *   page.url() = https://chatglm.cn/main/alltoolsdetail?lang=zh&cid=6aa6f08454b3a5a4e4f64a77
+ *   result.sessionId = null → rememberConversation 从不执行 →
+ *   webcode-sessions-glm.json 恒为 "{}"（deepseek 那份 6058 字节）
+ * → 每一轮都 WEB_SESSION_LOST → 上层 fresh 重开 → 用户看到「同一会话却每轮新开对话」。
+ *
+ * 而 GLM 的 SSE 首帧里 `conversation_id` 与 URL 的 `cid` 是**同一个 24 位十六进制
+ * 串**（6aa6f08454b3a5a4e4f64a77），即身份一直在，只是没人去读。
+ *
+ * 三态语义（驱动据此决定导航动作，**不允许静默降级**）：
+ *   'fresh'       —— 开新会话（首轮，或上层明确要求重开）
+ *   'resume'      —— 该站点声明了地址形状，可以直接导航回既有会话
+ *   'unsupported' —— 站点没有可用的地址形状：**必须报错交给上层整段重建**，
+ *                    绝不能默默开一个新会话并把增量发进去（那正是历史上
+ *                    「跑着跑着变傻」的根因，见 browser-driver 的 WEB_SESSION_LOST）
+ */
+export const NAVIGATION_STATES = Object.freeze(['fresh', 'resume', 'unsupported']);
+
+/**
+ * 从**地址**解析既有网页会话（'resume' 那一态的地址形状），解析不到返回 null。
+ *
+ * 每个站点只声明**自己的**形状，驱动不再写死 DeepSeek 的两种。新增站点若地址栏
+ * 里带会话 id，就在这里加一条；不带（例如只把 id 放在 SSE 帧里）就声明
+ * `conversationIdFromStream: true` 并**不**在这里编一个形状出来——
+ * 编形状的代价是导航到一个不存在的地址，比不支持更糟。
+ */
+const CONVERSATION_URL_SHAPES = Object.freeze({
+  // DeepSeek：`?chat_session_id=<id>` 与 `/a/chat/s/<id>` 两种（历史形态，勿动）
+  deepseek: [
+    (u) => u.searchParams.get('chat_session_id'),
+    (u) => u.pathname.match(/\/a\/chat\/s\/([0-9a-zA-Z-]{8,64})/)?.[1],
+  ],
+  // 智谱清言 / Z.ai：`?cid=<24 位十六进制>`。真机 2026-09-14 实录
+  //   https://chatglm.cn/main/alltoolsdetail?lang=zh&cid=6aa6f08454b3a5a4e4f64a77
+  // 且该 cid 与 SSE 首帧的 conversation_id 逐字相同（见 decoder.js 的 GlmDecoder）。
+  // 注意**不能用 `chatglm.cn/main/alltoolsdetail` 这个无 cid 的形态当会话地址**：
+  // 那是游客落地页，导航过去等于开新会话。
+  glm: [(u) => u.searchParams.get('cid')],
+  // zai **故意不在这里**：真机探针（real-probe-25-zai-url.mjs，2026-09-14）在
+  // chat.z.ai 上拿到的地址是裸根 `https://chat.z.ai/`（query 键为空、页面里没有
+  // 会话链接），而 real-probe-23 在 zai 上跑一轮直接 120s 超时（captureAlive=true、
+  // replyChars=0）——**没有取到任何会话地址形状的证据**。
+  // 按本项目一贯立场（宁可不切，也不猜着切）：编一个形状出来会让驱动导航到一个
+  // 不存在的地址，比「声明不支持 + 让上层整段重建」更糟。zai 因此落在
+  // 'unsupported' 态，并由 sessionLostCount / lastSessionLost 如实透出（C-3），
+  // 而不是像旧实现那样每轮静默新开对话。取证后续见 doc/long-term-issues.md 第 14 条。
+});
+
+/** 由地址构造「导航回既有会话」的地址（'resume' 那一态的逆运算）。 */
+const CONVERSATION_URL_BUILDERS = Object.freeze({
+  deepseek: (origin, id) => origin + '/a/chat/s/' + encodeURIComponent(id),
+  // GLM/Z.ai：`/main/alltoolsdetail?cid=<id>`；lang 交给站点自己补默认值。
+  glm: (origin, id) => origin + '/main/alltoolsdetail?cid=' + encodeURIComponent(id),
+});
+
+/** 站点是否只从流里拿会话 id（地址栏不给形状）。GLM 两者都有，这里留作扩展点。 */
+export function conversationIdFromUrl(siteId, url) {
+  const shapes = CONVERSATION_URL_SHAPES[siteId];
+  if (!shapes) return null;
+  let u;
+  try { u = new URL(url); } catch { return null; }
+  for (const pick of shapes) {
+    try { const v = pick(u); if (v) return String(v); } catch { /* 试下一种形状 */ }
+  }
+  return null;
+}
+
+/** 能否直接导航回既有会话：能则返回地址，不能则返回 null（→ 'unsupported'）。 */
+export function conversationUrlFor(siteId, origin, sessionId) {
+  const build = CONVERSATION_URL_BUILDERS[siteId];
+  if (!build || !sessionId) return null;
+  try { return build(String(origin).replace(/\/$/, ''), String(sessionId)); } catch { return null; }
+}
+
+/**
+ * GLM 系站点（智谱清言 / Z.ai）向 DSH 声明的上下文窗口（token）。
+ *
+ * 为什么是 1_000_000 而不是别的数：**这是真机实测出来的下界，不是抄来的规格**。
+ * 探针 `test-mock/real-probe-23-glm-budget.mjs` + `real-probe-24-glm-ceiling.mjs`
+ *（2026-09-14，有头 Edge + 真实登录态）把 composer 逐档灌满并回读，得到：
+ *
+ *   1000 → 1000 · 4000 → 4000 · 16000 → 16000 · 32000 → 32000 · 64000 → 64000
+ *   128000 → 128000 · 200000 → 200000 · 250000 · 400000 · 600000 · 800000
+ *   1000000 → 1000000 · 1200000 → 1200000      ← 全部逐字回读，**没有一档被截断**
+ *
+ * 即：**网页输入框在 120 万字符处仍未触顶**，所以「输入框容量」从来不是这些站点的
+ * 瓶颈（旧注释里把它当成未知数、随手写 1_000_000 当占位，方向就错了）。
+ * 按本仓库自己的估算口径（CJK≈0.7 tok/字符 + 10% 余量）折算，120 万字符 ≈ 92 万
+ * token，因此 1_000_000 是**有实测支撑的下界**，而不是乐观估计。
+ *
+ * 仍然要说清它不是什么：它**不是模型注意力窗口的规格**——那个数探针测不到（要看
+ * 站点服务端的截断行为），并且会随网页改版变化。真实语义是「本桥愿意让 transcript
+ * 长到多大」，配合 B-2 的发送前预算闸（`CONTEXT_WINDOW_EXCEEDED`）使用：越界在
+ * **发出之前**就是一条可读的报错，而不是发出去被网页静默截半截。
+ */
+const GLM_CONTEXT_WINDOW = 1_000_000;
+
 export const DEEPSEEK = site({
   id: 'deepseek', name: 'DeepSeek 网页版', origin: 'https://chat.deepseek.com',
   // **必须挂在中继根上，不能用自己的子域**（真机 2026-09-13）：DeepSeek 前端
@@ -92,9 +194,9 @@ export const GLM = site({
   models: [
     // labels 用网页逐字文本（model-picker 的精确匹配按它比对）：网页上
     // 版本条目显示 GLM-5.3，Flash 条目显示 GLM-Flash。
-    { id: 'glm-5.3', name: 'GLM-5.3', labels: ['GLM-5.3'], context: 1_000_000, acceptsImages: true },
-    { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', labels: ['GLM-Flash'], context: 1_000_000, acceptsImages: true },
-    { id: 'auto', name: '智谱清言', labels: ['GLM'], context: 1_000_000 },
+    { id: 'glm-5.3', name: 'GLM-5.3', labels: ['GLM-5.3'], context: GLM_CONTEXT_WINDOW, acceptsImages: true },
+    { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', labels: ['GLM-Flash'], context: GLM_CONTEXT_WINDOW, acceptsImages: true },
+    { id: 'auto', name: '智谱清言', labels: ['GLM'], context: GLM_CONTEXT_WINDOW },
   ],
 });
 
@@ -267,6 +369,10 @@ export const CLAUDE = site({
 // 解码器；选择器用「特征选择器」而不是站点版本 class（改版频繁，特征更稳）。
 export const ZAI = site({
   id: 'zai', name: 'Z.ai (GLM 海外版)', origin: 'https://chat.z.ai',
+  // 选择器里显示的站点键。默认等于 id，只有这里不同：站点的真实身份就是
+  // 「z.ai」这个域名（用户要的正是「一眼看出是哪个网站」），而 `zai` 只是
+  // 我们内部的路由 id。二者不同不影响解析——解析只认 id（见 resolveWebModel）。
+  shortKey: 'z.ai',
   // 静态资源域：z.ai 的前端包/字体放在独立域上，跨域 + 非法 ACAO 会被浏览器
   // 拒绝执行（与 DeepSeek 同一类问题）。纳入同源转发（lib/mirror.js）。
   // api.z.ai 是前端调后端的绝对域（真机 probe-net 实测），不代理则页面提示
@@ -309,13 +415,13 @@ export const ZAI = site({
     selected: ['button.modelSelectorButton'],
   },
   models: [
-    { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', labels: ['GLM-5.3-Flash'], context: 1_000_000, acceptsImages: true },
-    { id: 'glm-5.3', name: 'GLM-5.3', labels: ['GLM-5.3'], context: 1_000_000, acceptsImages: true },
-    { id: 'glm-5.2', name: 'GLM-5.2', labels: ['GLM-5.2'], context: 1_000_000, acceptsImages: true },
+    { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', labels: ['GLM-5.3-Flash'], context: GLM_CONTEXT_WINDOW, acceptsImages: true },
+    { id: 'glm-5.3', name: 'GLM-5.3', labels: ['GLM-5.3'], context: GLM_CONTEXT_WINDOW, acceptsImages: true },
+    { id: 'glm-5.2', name: 'GLM-5.2', labels: ['GLM-5.2'], context: GLM_CONTEXT_WINDOW, acceptsImages: true },
     // 站点默认：不切换网页模型，按页面当前选择走。名字保持干净的站点名
     //（regression.test.mjs 有护栏：模型名不得含「网页当前模型」这类元描述，
     // 也不得用括注——选择器里应当是干净名字）。
-    { id: 'auto', name: 'Z.ai', labels: ['GLM'], context: 1_000_000 },
+    { id: 'auto', name: 'Z.ai', labels: ['GLM'], context: GLM_CONTEXT_WINDOW },
   ],
 });
 
@@ -340,6 +446,37 @@ export const GEMINI = site({
 /** 全部内容服务（顺序即 OpenAI /models 列表顺序）。 */
 export const SITES = Object.freeze([DEEPSEEK, GLM, CHATGPT, KIMI, QWEN, DOUBAO, GROK, CLAUDE, GEMINI, ZAI]);
 
+/**
+ * 选择器里显示的模型名 = `站点短键/模型 id`（0.14.0）。
+ *
+ * 为什么不是只写模型名：DSH 的模型选择器**只渲染 model.name**，不拼 provider
+ * （见 dsh-client-ui-model-selection 的 option 渲染）。旧目录里 8 个站点都叫
+ * `auto`，选择器上就是一串分不清出处的「ChatGPT / Qwen / Grok」；而 `glm-5.3`
+ * 这种名字同样看不出是 chatglm.cn 还是 z.ai。带上站点短键后，每一行都自带
+ * 出处，且与 id 一一对应（`z.ai/glm-5.3` ↔ id `zai:glm-5.3`）。
+ *
+ * 注意这**只是显示名**：id 仍是 `site:model`，别名表、历史设置值、会话游标、
+ * 路由全部不动。
+ */
+export function modelDisplayName(st, m) {
+  return (st.shortKey || st.id) + '/' + m.id;
+}
+
+/**
+ * 兼容别名 id 集合（0.14.0）。
+ *
+ * `deepseek-web` 是不带站点前缀的历史 id（旧版 OpenAI 前端与旧会话用它），
+ * 它与 `deepseek:deepseek` 指向**同一个**模型，因此显示名逐字相同。若把它照
+ * 单渲染，选择器上会出现两行一模一样的 `deepseek/deepseek`——用户看到的就是
+ * 「下拉里有重复项」。
+ *
+ * 因此：**列表接口仍返回它**（历史会话、`agent-default-model` 的旧值、OpenAI
+ * 前端的 `model: 'deepseek-web'` 都依赖它解析），但**选择器下拉过滤掉它**。
+ * 这份集合是「哪些是别名」的唯一定义处：UI（client.cjs）、适配器
+ * （index.js listModels）与测试都必须从这里取，不许各自再写一份字面量。
+ */
+export const MODEL_ALIAS_IDS = Object.freeze(new Set(['deepseek-web']));
+
 /** 全站点模型目录（'site:model' 限定 id + 能力元数据）——DSH 模型选择器与
  *  OpenAI /v1/models 共用这一份，保证两边模型列表一致。 */
 export function listAllModels() {
@@ -350,7 +487,7 @@ export function listAllModels() {
         id: st.id + ':' + m.id,
         siteId: st.id,
         siteName: st.name,
-        name: m.name,
+        name: modelDisplayName(st, m),
         labels: m.labels,
         context: m.context || null,
         thinking: m.thinking === true,
@@ -364,7 +501,7 @@ export function listAllModels() {
       });
     }
   }
-  out.push({ id: 'deepseek-web', siteId: 'deepseek', siteName: DEEPSEEK.name, name: 'DeepSeek (兼容别名)', labels: [], thinking: true, vision: false, imageOut: false, experimental: false });
+  out.push({ id: 'deepseek-web', siteId: 'deepseek', siteName: DEEPSEEK.name, name: modelDisplayName(DEEPSEEK, DEEPSEEK.models[0]), labels: [], thinking: true, vision: false, imageOut: false, experimental: false });
   return out;
 }
 
@@ -395,7 +532,10 @@ function resolved(st, m) {
   return Object.freeze({
     site: st, siteId: st.id, siteName: st.name, origin: st.origin,
     decoder: st.decoder, stream: st.stream !== false, experimental: Boolean(st.experimental),
-    id: m.id, name: m.name, labels: m.labels,
+    id: m.id, name: modelDisplayName(st, m), labels: m.labels,
+    // 网页上的原始名字（不含站点短键）。model-picker 的兜底目标名用它——
+    // 网页上从来不会写 `z.ai/glm-5.3`，拿显示名去比对必然 option-not-in-list。
+    webName: m.name,
     thinking: m.thinking === true, vision: m.vision === true, imageOut: m.imageOut === true,
     acceptsImages: m.acceptsImages === true,
   });

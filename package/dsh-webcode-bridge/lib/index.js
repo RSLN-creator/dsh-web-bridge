@@ -9,7 +9,7 @@
 
 import os from 'node:os';
 import fs from 'node:fs';
-import { DEEPSEEK, resolveWebModel, listAllModels, getSite, SITES, qualifyModelId } from './providers.js';
+import { DEEPSEEK, resolveWebModel, listAllModels, getSite, SITES, qualifyModelId, MODEL_ALIAS_IDS } from './providers.js';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { createRelay } from './relay.js';
@@ -20,7 +20,7 @@ import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart,
 import { createMirror } from './mirror.js';
 import { httpFetch } from './upstream.js';
 import { textOfBlocks } from './flatten.js';
-import { estimateTokens } from './metrics.js';
+import { estimateTokens, computeSendGap, checkContextBudget } from './metrics.js';
 import { renderSettingsPage } from './settings-page.js';
 
 export const name = 'webcode-bridge';
@@ -62,8 +62,14 @@ const DEFAULTS = {
   allowedOrigins: ['http://127.0.0.1:3080', 'http://localhost:3080'],
 };
 
-/** 发送间隔（设置页「发送间隔」）：两次向同一站点发送之间的最小毫秒数。
- *  滑窗限流（「消息发送过于频繁」）的防护手段，也是 RATE_LIMITED 退避的基数。 */
+/** 发送间隔（设置页「发送间隔」）：两次向同一站点**发送**之间的最小毫秒数。
+ *  滑窗限流（「消息发送过于频繁」）的防护手段，也是 RATE_LIMITED 退避的基数。
+ *
+ *  0.14.0 语义修正：基准从「上一轮**结束**」改成「上一轮**发出**」（send-to-send），
+ *  与设置页/文档一直以来的承诺一致（旧实现在长回复下会把等待吃掉——真机实测
+ *  一轮跑 20918ms 时 10000ms 的间隔只剩 7609ms 可见）。判定逻辑收在
+ *  metrics.computeSendGap（纯函数，可离线断言）。
+ *  注意站点 id 白名单化：基准表会落盘，键名不可信来源只能是 SITES。 */
 const SEND_GAP_MAX_MS = 600_000;
 const clampSendGapMs = (v) => Math.min(SEND_GAP_MAX_MS, Math.max(0, Math.round(Number(v) || 0)));
 
@@ -247,6 +253,20 @@ function resolveLlm(ctx) {
   return null;
 }
 
+/** 适配器侧无进展看门狗抛出的错误：把「桥卡住了」变成一条带现场的明确报错。
+ *  现场由调用方（apply 作用域，能拿到 driverFor）传进来——模块级函数不得直接
+ *  引用 apply 内的绑定。这些字段正是判断「网页没生成」还是「捕获链死了」所需
+ *  的最小信息，旧实现只把它们 warn 到宿主控制台。 */
+function idleTimeoutError(timeoutMs, scene) {
+  const hint = scene
+    ? `（页面${scene.preview ? '在' : '不在'}${scene.lastRecovered ? `，最近一次部分流：${scene.lastRecovered.reason} ${scene.lastRecovered.chars} 字` : ''}）`
+    : '';
+  const err = new Error(`WEB_NO_PROGRESS: 网页侧超过 ${Math.round(timeoutMs / 1000)}s 没有任何新内容${hint} — 本轮已中止，可重试`);
+  err.code = 'WEB_NO_PROGRESS';
+  err.scene = scene;
+  return err;
+}
+
 /** Small async channel so adapter.stream() can yield deltas as they arrive. */
 function channel() {
   const buf = [];
@@ -399,11 +419,66 @@ export function apply(ctx, config = {}) {
   // "configurable" directory as well makes the GUI treat it as an endpoint-
   // gated provider and the models never surface in the main selector.
 
+  /**
+   * 站点声明的上下文窗口（token）的唯一取值处 —— resolveModel 与发送前预算闸
+   * 共用这一份，避免「声明的是一个数、闸门比的是另一个数」。
+   *
+   * 优先级：模型自带 context（providers.js 各站点，glm/zai 已是真机实测下界）
+   *        > cfg.contextWindowBySite[siteId]（运维/测试覆盖）
+   *        > deepseek 1_000_000 / 其余 64_000 的诚实兜底。
+   *
+   * 未校准站点的 64_000 是**保守值**，含义是「宁可让 DSH 早一点压缩，也不要
+   * 发出去被网页端截半截」；越界同样由 PROMPT_TRUNCATED 与预算闸双重兜底。
+   */
+  function contextWindowFor(m) {
+    return m?.context
+      ?? cfg.contextWindowBySite?.[m?.siteId]
+      ?? (m?.siteId === 'deepseek' ? 1_000_000 : 64_000);
+  }
+
+  /**
+   * 发送前预算闸（0.14.1，B-2）—— 超出声明的上下文窗口就在**发出之前**拒绝。
+   *
+   * 动机：桥声明的 contextWindow 是乐观值（glm/zai 现为实测 1M），声明偏大的代价
+   * 在旧实现里是静默的：DSH 的自动压缩永不触发 → transcript 只增不减 → 最后被网页
+   * 端截半截或撞 240s 超时。已有的 PROMPT_TRUNCATED 回读校验发生在**填写之后**，
+   * 报错只有长度差，看不出超了多少、也不知道下一步该做什么。
+   *
+   * 这里把它前移成一条可解释的报错：`CONTEXT_WINDOW_EXCEEDED`，文本里带
+   * 「本轮 N 字符 ≈ M token > 声明窗口 W」与可行建议。
+   *
+   * 边界（都有单测钉住）：拿不到窗口 → 放行（猜一个数去拒绝用户比放行更糟）；
+   * 只拒 ratio > 1，不做「接近预算就拦」的节流。
+   */
+  function assertContextBudget(prompt, modelId) {
+    let m;
+    try { m = resolveWebModel(modelId); } catch { return; }
+    const budget = checkContextBudget({
+      chars: String(prompt || '').length,
+      contextWindow: contextWindowFor(m),
+    });
+    if (!budget || budget.ok) return;
+    const pct = Math.round(budget.ratio * 100);
+    const err = new Error(
+      `CONTEXT_WINDOW_EXCEEDED: 本轮提示词 ${budget.chars} 字符 ≈ ${budget.tokens} token，`
+      + `超过 ${m.siteId} 声明的上下文窗口 ${budget.window}（${pct}%，超出约 ${budget.overflowTokens} token）。`
+      + ' 已在本轮发出前拦下，网页端未被写入。'
+      + ' 处理：新开一个会话（推荐），或在设置里调大该站点的窗口声明后重试。',
+    );
+    err.code = 'CONTEXT_WINDOW_EXCEEDED';
+    err.budget = budget;
+    warn(err.message);
+    throw err;
+  }
+
   const adapter = {
     providerInfo(provider) { return { id: provider, name: cfg.displayName }; },
     providerRetryPolicy() { return undefined; },
     async listModels(provider) {
-      return WEB_MODELS.map((m) => ({ provider, id: m.id, name: m.name }));
+      // 选择器下拉过滤兼容别名（deepseek-web 与 deepseek:deepseek 显示名逐字相同，
+      // 照单渲染就是两行同名项）。别名本身仍可被 resolveModel 解析——历史会话与
+      // OpenAI 前端的旧值依赖它，所以只过滤「展示」，不动「解析」。
+      return WEB_MODELS.filter((m) => !MODEL_ALIAS_IDS.has(m.id)).map((m) => ({ provider, id: m.id, name: m.name }));
     },
     async resolveModel(provider, model) {
       const m = resolveWebModel(model);
@@ -413,9 +488,7 @@ export function apply(ctx, config = {}) {
       // 部分来源。按站点给一个诚实的保守值：DeepSeek 网页实测能稳定收下十万级
       // 字符，按 CJK≈0.7 token/字符折算留出余量取 128k；其余站点 64k
       // （每个都有 PROMPT_TRUNCATED 回读校验兜底，越界会报错而不是静默截断）。
-      const contextWindow = m.context
-        ?? cfg.contextWindowBySite?.[m.siteId]
-        ?? (m.siteId === 'deepseek' ? 1_000_000 : 64_000);
+      const contextWindow = contextWindowFor(m);
       // inputModalities 是**护栏**，不是可选元数据：宿主只在它明确不含 'image'
       // 时调 projectImagesForTextModel() 把图片换成文字占位
       //（dsh-llm/lib/index.js 的那处判定）。声明错了方向，harness 截图会在到达
@@ -432,6 +505,8 @@ export function apply(ctx, config = {}) {
     },
     async *stream(options) {
       const turn = buildTurn(options);
+      // 发送前预算闸：在 attach/上传/写 composer 之前就拦下越界的一轮（B-2）。
+      assertContextBudget(turn.prompt, turn.meta?.model);
       logCall(options);
       const images = await turn.attach?.();
       if (images?.length) {
@@ -447,6 +522,48 @@ export function apply(ctx, config = {}) {
 
       const tools = Array.isArray(options.tools) ? options.tools : [];
       const ch = channel();
+      // 适配器侧「无进展」看门狗（0.14.0）——问题②的第二条防线。
+      //
+      // 驱动侧的 WIP 稳态收束（browser-driver.startWipWatch）负责把「网页已经写
+      // 完但没送 FINISHED」的轮次在秒级救回来。但还有一类情况它救不了：捕获链
+      // 从未建立、页面僵死、或整个 relay 卡在别处。这时 `ch.next()` 会**永远**
+      // 挂着，界面表现同样是无限「思考中」，而驱动的 240s 总超时也只在驱动自己
+      // 还在跑时才有效。
+      //
+      // 因此这里在**消费端**加超时：自上次收到任何 delta/think/image 起超过
+      // IDLE_TIMEOUT_MS 仍无事件，就主动抛错。错误文本带上驱动现场（有没有活页、
+      // 最近一次部分流收束记录），排障不必再翻宿主控制台。
+      // 用 Promise.race 而不是独立 setInterval：事件到达即返回，定时器在 finally
+      // 里清掉，一次调用一个定时器、零泄漏（旧写法若用常驻 interval，每轮都会
+      // 留下一个永不清理的计时器）。
+      const idleSiteId = turn?.meta?.siteId || 'deepseek';
+      // 现场在**超时那一刻**才采（同步调用，无页面往返）：提前采会拿到过时状态。
+      const idleScene = () => {
+        try {
+          const st = driverFor(idleSiteId)?.status?.() || null;
+          if (!st) return null;
+          return {
+            preview: st.preview === true,
+            running: st.running === true,
+            busy: st.busy === true,
+            recoveredTurns: st.recoveredTurns ?? 0,
+            lastRecovered: st.lastRecovered ?? null,
+            lastEndReason: st.lastEndReason ?? null,
+          };
+        } catch { return null; }
+      };
+      const nextWithIdle = async () => {
+        let timer = null;
+        try {
+          return await Promise.race([
+            ch.next(),
+            new Promise((_, reject) => {
+              timer = setTimeout(() => reject(idleTimeoutError(IDLE_TIMEOUT_MS, idleScene())), IDLE_TIMEOUT_MS);
+              timer.unref?.();
+            }),
+          ]);
+        } finally { if (timer) clearTimeout(timer); }
+      };
       const settled = relay
         .submit(turn.prompt, {
           signal: options.signal,
@@ -490,7 +607,7 @@ export function apply(ctx, config = {}) {
         const images = [];
         let end = null;
         for (;;) {
-          const ev = await ch.next();
+          const ev = await nextWithIdle();
           if (ev.think) {
             thinkAcc += ev.think;
             yield* openThink();
@@ -601,7 +718,7 @@ export function apply(ctx, config = {}) {
       // 已经晚了——真机会话里助手文本存的正是整段 <…>（见 2026-09-11
       // 会话 8e9c538a 的 assistant/message，已固化为 test/fixtures）。
       for (;;) {
-        const ev = await ch.next();
+        const ev = await nextWithIdle();
         if (ev.think) {
           thinkAcc += ev.think;
           if (!thinkOpen) { thinkIndex = nextIndex++; yield { type: 'block-start', index: thinkIndex, blockType: 'reasoning' }; thinkOpen = true; }
@@ -664,7 +781,12 @@ export function apply(ctx, config = {}) {
             : (markerAt >= 0 ? markerAt : Math.max(0, acc.length - PROSE_TAIL_CHARS));
           const safeEnd = Math.max(from, proseLimit);
           const proseChunk = safeEnd > from ? acc.slice(from, safeEnd) : '';
-          if (proseChunk && (pendingCalls.length === 0 || proseChunk.trim())) {
+          // 调用标签的残尸（真机 2026-09-14 会话 c7c7a03c step69：两个调用之间流出
+          // "</</" 文本块，用户看到「回复夹杂错误调用」）：不含任何字母数字的纯标签
+          // 碎片不是内容，按调用间隙的空白同型处理——静默推进游标，不开文本块。
+          // 带字母数字的（如 "</div>"、代码示例）照常外发，不受影响。
+          const tagDebris = /^[\s<>\/|\uFF5C]+$/.test(proseChunk);
+          if (proseChunk && !tagDebris && (pendingCalls.length === 0 || proseChunk.trim())) {
             yield* openText();
             textSent = acc.slice(0, safeEnd);
             proseSent += proseChunk;
@@ -678,7 +800,10 @@ export function apply(ctx, config = {}) {
           if (recognizedCall) {
             // 同一个调用在流式期间会被反复命中同一个边界，按边界下标去重保证只开一次块。
             lastBoundary = boundary;
-            const opened = { name: completedName, id: callId(pendingCalls.length), index: nextIndex++, at: boundary };
+            // raw 必须随块保存：收尾若发现权威全文与增量通道分叉（decoder 对
+            // fragments 的静默替换不补发增量），这块要用它自己配平的 JSON 收口，
+            // 否则参数就没了唯一可信出处（见下方 mismatch 分叉修复）。
+            const opened = { name: completedName, id: callId(pendingCalls.length), index: nextIndex++, at: boundary, raw: completed.raw };
             openedAtIndex.set(boundary, opened);
             pendingCalls.push(opened);
             // 散文块到此为止。块内容必须与「本块开启后外发的 text-delta」逐字一致
@@ -732,15 +857,76 @@ export function apply(ctx, config = {}) {
         yield* emitText(notice, turn);
         return;
       }
-      // 流式期间已开块的调用必须与最终解析结果**逐个对齐**（名字与顺序）。不对齐
-      // 说明协议形状在中途漂移，参数落到了错误的块上；宁可作废这一轮重来，也不能
-      // 让 Harness 收到「名字对、参数错」的调用。
+      // 流式期间已开块的调用必须与最终解析结果对齐。不对齐有两种来历：
+      // a) 协议形状中途漂移、参数会落到错误的块上（0.12.4 契约建此防线的原因）；
+      // b) 权威全文与增量通道分叉——decoder 对 fragments 的静默替换不补发增量
+      //    （lib/decoder.js consumeResponse / response/fragments SET），真机
+      //    2026-09-14 会话 c7c7a03c 两个方向都实锤：step70 canonical 多出 grep
+      //    （「流式已开块 read；解析 grep, read」）、turn2 step7 canonical 丢失
+      //    edit（「流式已开块 edit；解析结果无」），旧实现一律整轮作废，
+      //    长任务 goal 从此空转、用户手动重催。
+      // 流式块保存了开块时已配平的 JSON（p.raw，模型增量通道真实发出的形状），
+      // 所以 b 类可以修复而非作废：流式块用它自己的 JSON 收口，权威解析中没被
+      // 流式块覆盖的调用补发新块。a 类（真漂移）没有可信参数出处，仍作废。
       const mismatch = pendingCalls.findIndex((p, i) => valid[i]?.name !== p.name);
-      if (mismatch >= 0) {
+      if (mismatch >= 0 && pendingCalls.some((p) => !p.raw)) {
         turn.invalidate?.();
         throw new Error('TOOL_PROTOCOL_INVALID: 工具参数不完整或调用顺序不一致'
           + `（流式已开块：${pendingCalls.map(p => p.name).join(', ') || '无'}；`
           + `解析结果：${valid.map(c => c.name).join(', ') || '无'}）`);
+      }
+      if (mismatch >= 0) {
+        warn('tool protocol divergence — repairing from streamed JSON'
+          + `（流式已开块：${pendingCalls.map(p => p.name).join(', ') || '无'}；`
+          + `解析结果：${valid.map(c => c.name).join(', ') || '无'}）`);
+        // 第 k 个同名流式块对应第 k 个同名权威调用（同名多调用按出现序一一配对，
+        // 2026-09-10 真机一轮三个 read 的形状）；canonical 里对不上的（丢失/改名）
+        // 用流式块自己的 JSON。配对成功的优先取权威参数——它经过完整解析与抢救。
+        const nameCounters = new Map();
+        const validUsed = new Array(valid.length).fill(false);
+        for (const p of pendingCalls) {
+          const k = nameCounters.get(p.name) ?? 0;
+          nameCounters.set(p.name, k + 1);
+          let seen = -1;
+          p.paired = -1;
+          for (let i = 0; i < valid.length; i++) {
+            if (valid[i].name !== p.name) continue;
+            seen++;
+            if (seen === k) { p.paired = i; validUsed[i] = true; break; }
+          }
+        }
+        turn.commit();
+        yield* closeThink();
+        for (const p of pendingCalls) {
+          const parsed = p.paired >= 0
+            ? valid[p.paired]
+            : (parseAgentReply(p.raw).calls.find((c) => c.name === p.name) || null);
+          if (!parsed) continue; // 理论不可达：raw 在开块时已配平且带 name
+          const target = tools.find((t) => t?.name === parsed.name) || null;
+          const { args: fixedArgs, coerced } = coerceArguments(parsed.arguments, target?.parameters);
+          const { args: filledArgs, filled } = fillMissingRequired(fixedArgs, target?.parameters, parsed.purpose);
+          if (filled.length) log(`filled missing required args for ${parsed.name}: ${filled.join(', ')}`);
+          if (coerced.length) log(`coerced args for ${parsed.name}: ${coerced.join(', ')}`);
+          const args = JSON.stringify(filledArgs);
+          yield { type: 'tool-call-delta', index: p.index, id: p.id, name: parsed.name, argumentsDelta: args };
+          yield { type: 'block-end', index: p.index, block: { type: 'tool-call', id: p.id, name: parsed.name, arguments: args } };
+        }
+        for (let i = 0; i < valid.length; i++) {
+          if (validUsed[i]) continue;
+          const id = callId(pendingCalls.length + i);
+          const index = nextIndex++;
+          const target = tools.find((t) => t?.name === valid[i].name) || null;
+          const { args: fixedArgs, coerced } = coerceArguments(valid[i].arguments, target?.parameters);
+          const { args: filledArgs, filled } = fillMissingRequired(fixedArgs, target?.parameters, valid[i].purpose);
+          if (filled.length) log(`filled missing required args for ${valid[i].name}: ${filled.join(', ')}`);
+          if (coerced.length) log(`coerced args for ${valid[i].name}: ${coerced.join(', ')}`);
+          const args = JSON.stringify(filledArgs);
+          yield { type: 'block-start', index, blockType: 'tool-call' };
+          yield { type: 'tool-call-delta', index, id, name: valid[i].name, argumentsDelta: args };
+          yield { type: 'block-end', index, block: { type: 'tool-call', id, name: valid[i].name, arguments: args } };
+        }
+        yield* finishChunks(turn, finalText + thinkAcc, 'tool-calls');
+        return;
       }
       if (valid.length) {
         turn.commit();
@@ -963,12 +1149,49 @@ function imageMarkdown(images) {
       return { ok: true, sessionId: sid, messageCount: msgs.length, branchSkipped: hist.branchCount ?? 0, title: finalTitle, attached, attachError };
     },
   };
-  // 发送间隔的站点级状态：站点 id → 上一轮结束的时刻。「发送间隔」节流与
-  // 限流退避都以它为基准（同站点串行，跨站点互不影响）。
+  // 发送间隔的站点级状态：站点 id → **上一次真正发出的时刻**（send-to-send）。
+  // 为什么必须落盘（0.14.0，真机 2026-09-13 用户报「等待不是按我设置的来」）：
+  // 旧实现只有进程内存，DSH 每次重启都清空，于是**重启后第一轮零等待**——用户
+  // 设了 10 秒却发现第一条立刻发出去，这正是「好像没按设置来」的一半来源
+  //（另一半是基准取「上一轮结束」，见 metrics.computeSendGap 的注释）。
+  // 落盘文件与设置同目录（profileDir），权限 0o600，内容极小。
+  const sendStatePath = path.join(cfg.profileDir, 'webcode-send-state.json');
+  const SEND_STATE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
   const lastSendBySite = new Map();
+  (function loadSendState() {
+    try {
+      const raw = JSON.parse(fs.readFileSync(sendStatePath, 'utf8'));
+      const now = Date.now();
+      for (const [sid, at] of Object.entries(raw || {})) {
+        // 只认已知站点 + 合理时间窗：文件可能来自别的机器/很久以前，
+        // 陈旧基准没有意义（24h 前的「上一轮」不该再压住本轮）。
+        if (!getSite(sid)) continue;
+        const t = Number(at);
+        if (!Number.isFinite(t) || t <= 0 || t > now || now - t > SEND_STATE_MAX_AGE_MS) continue;
+        lastSendBySite.set(sid, t);
+      }
+    } catch { /* 首次运行或文件损坏：按「没有基准」处理即可 */ }
+  })();
+  /** 记录「刚刚真正发出」。只在发送成功那一刻调用；写失败仅 warn，绝不阻断发送。 */
+  function rememberSend(siteId, at = Date.now()) {
+    lastSendBySite.set(siteId, at);
+    try {
+      fs.mkdirSync(path.dirname(sendStatePath), { recursive: true });
+      const tmp = sendStatePath + '.tmp-' + process.pid;
+      fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(lastSendBySite)), { mode: 0o600 });
+      fs.renameSync(tmp, sendStatePath);
+    } catch (err) { warn('send-state save failed:', err?.message); }
+  }
   // 站点限流退避重试上限（RATE_LIMITED）。退避时长 = max(发送间隔, 10s) × 已重试次数，
   // 10s 下限是因为限流滑窗通常以十秒计，几十毫秒的短间隔重试只会再次撞墙。
   const RATE_LIMIT_RETRIES = 2;
+  // 适配器侧「无进展」看门狗：自上次 delta/think/image 起多久没有任何动静就
+  // 主动失败。存在的意义不是替代驱动的 240s 总超时，而是让「网页已回复但桥这
+  // 边卡住」这种**无限思考中**在 2 分钟内变成一条带页面现场的明确报错
+  //（详见 PLAN-0.14.0-HANDOFF.md 的 P1-3）。必须 > 驱动的 WIP 稳态窗口，
+  // 否则看门狗会先于稳态收束开火，把本可救回的回复判死。
+  const WIP_IDLE_MS = Math.max(300, Number(cfg.wipIdleMs) || 2500);
+  const IDLE_TIMEOUT_MS = Math.max(WIP_IDLE_MS + 1000, Number(cfg.idleTimeoutMs) || 120_000);
 
   let front = null;
   const relay = createRelay({
@@ -1016,21 +1239,27 @@ function imageMarkdown(images) {
         }
         return driverFor(siteId).sendPrompt(prompt, { signal: opts.signal, meta: m, onDelta: opts.onDelta, onThink: opts.onThink, onImage: opts.onImage, model: qualified, thinkMode });
       };
-      // 发送节流（设置页「发送间隔」）：本轮发送前把与上一轮结束的间隔补满。
-      // 等待不属于网页生成耗时，单独记 sendWaitMs（右栏统计「发送前等待」）。
+      // 发送节流（设置页「发送间隔」）：**send-to-send** 语义——本轮发送距上一次
+      // *发出* 不足设置值就补满。判定与「距上次发送」都由纯函数给出，等待本身
+      // 不属于网页生成耗时，单独记 sendWaitMs（右栏统计「发送前等待」）。
       let waitedMs = 0;
-      if (sendGapMs > 0) {
-        const wait = Math.max(0, (lastSendBySite.get(siteId) || 0) + sendGapMs - Date.now());
-        if (wait > 0) {
-          log(`send gap: waiting ${Math.round(wait / 1000)}s before next send to ${siteId}`);
-          await sleepSignal(wait, opts.signal);
-        }
-        waitedMs += wait;
+      const gapPlan = computeSendGap({ lastSendAt: lastSendBySite.get(siteId) ?? null, now: Date.now(), gapMs: sendGapMs });
+      if (gapPlan.skewed) {
+        warn(`send-state for ${siteId} is in the future (clock skew?) — treating it as "just sent"`);
       }
+      if (gapPlan.waitMs > 0) {
+        log(`send gap: waiting ${Math.round(gapPlan.waitMs / 1000)}s before next send to ${siteId}`);
+        await sleepSignal(gapPlan.waitMs, opts.signal);
+        waitedMs += gapPlan.waitMs;
+      }
+      // 基准在「本轮真正交给网页」的那一刻更新，且只在成功发出时——限流退避
+      // 与失败都不该污染它，否则下一轮的间隔会被一次失败凭空吃掉。
+      const markSent = () => rememberSend(siteId);
       try {
         let result = null;
         let retries = 0;
         for (;;) {
+          markSent();
           try { result = await attempt(m?.fresh === true); break; }
           catch (err) {
             // 站点限流（DeepSeek hint rate_limited）：消息已被服务端撤回，重发
@@ -1046,12 +1275,21 @@ function imageMarkdown(images) {
           }
         }
         if (result && typeof result === 'object') {
-          result.metrics = { ...(result.metrics || {}), sendWaitMs: Math.round(waitedMs), rateLimitRetries: retries };
+          result.metrics = {
+            ...(result.metrics || {}),
+            sendWaitMs: Math.round(waitedMs),
+            rateLimitRetries: retries,
+            // 三个可核对字段（右栏与 /status 都透出）：本轮生效的目标值、
+            // 距上次发出的实际间隔、以及实际等待。用户「设了 10s 却看不到」
+            // 的症结正是旧实现只在**等待过**时才显示，这些字段让它恒可核对。
+            gapTargetMs: sendGapMs,
+            sincePrevSendMs: gapPlan.sincePrevSendMs,
+          };
         }
         return result;
       } finally {
-        // 节流基准是「上一轮结束时刻」：成功、失败、被限流都一样重新起算。
-        lastSendBySite.set(siteId, Date.now());
+        // 基准不再在 finally 里无条件刷新——它只在 markSent() 更新（send-to-send）。
+        void 0;
       }
     },
     driverStatus: () => {
@@ -1194,6 +1432,9 @@ function imageMarkdown(images) {
     // bridge last sent (or the static skeleton before any turn)
     presetInfo: () => lastPresetInfo,
     settingsStore: configManager,
+    // B-3：把「声明窗口」的取值函数交给控制面，让 /__webcode/context-windows
+    // 列出的值与 resolveModel 声明的、预算闸比的是**同一个数**。
+    contextWindowOf: (m) => contextWindowFor(m),
   });
   const mirror = createMirror({
     siteOrigin: new URL(cfg.site).origin,
@@ -1276,6 +1517,9 @@ function imageMarkdown(images) {
       lastPresetInfo = {
         prompt,
         model,
+        // siteId 必须一起记：设置页要据此标出「本会话实际走的是哪一支适配」
+        // （默认标签形状 / glm 代码块形状），只记 prompt 就只能靠猜。
+        siteId,
         agentId,
         tools: Array.isArray(options.tools) ? options.tools.map((t) => t?.name).filter(Boolean) : [],
         at: new Date().toISOString(),
@@ -1429,7 +1673,14 @@ function imageMarkdown(images) {
       warn('webServer settings-page route failed:', e?.message);
     }
   }
-  front = createOpenAiFront(relay, cfg);
+  front = createOpenAiFront(relay, {
+    ...cfg,
+    // OpenAI 兼容前端（:8931）也必须遵守设置页的「发送间隔」。它不走 buildTurn，
+    // 因此拿不到 settings 快照——这里给一个**当场求值**的取值函数（不是快照），
+    // 设置改完立刻生效。真机 0.14.0 矩阵发现该路径 gapTargetMs 恒为 0（见
+    // doc/verify.md 的「OpenAI 前端绕过发送间隔」）。
+    sendGapMsOf: () => clampSendGapMs(configManager.get().sendGapMs),
+  });
   relay.start();
   log(`provider "${cfg.providerId}" registered; relay on http://${cfg.host}:${cfg.port}`);
   log(`web driver ready: site=${cfg.site} profile=${cfg.driver ? '(injected)' : cfg.profileDir}`);

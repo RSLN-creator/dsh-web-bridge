@@ -67,8 +67,14 @@ function publicStatus(relay) {
 }
 
 export function createOpenAiFront(relay, modelInfo) {
-  const { modelId, modelName, providerId } = modelInfo;
+  const { modelId, modelName, providerId, sendGapMsOf } = modelInfo;
   const allowedOrigins = (relay?.config?.allowedOrigins || []).map((s) => String(s).toLowerCase());
+  // 发送间隔必须**当场**读取，不能在建前端时快照：设置页改完就该立刻生效。
+  // 真机取证（2026-09-14，0.14.0 真机矩阵）：`:8931` 这条 OpenAI 兼容路径上
+  // gapTargetMs 恒为 0 —— 因为两个分支构造 meta 时都没带 sendGapMs，而 executor
+  // 的 clampSendGapMs(undefined) === 0，于是「发送间隔」在这条路径上被整体绕过，
+  // 用户设了 10s 也照样连发。适配器路径（buildTurn）一直是带上的，只有这里漏了。
+  const gapMs = () => (typeof sendGapMsOf === 'function' ? sendGapMsOf() : undefined);
 
   function sendJson(res, code, obj) {
     const body = JSON.stringify(obj);
@@ -164,7 +170,7 @@ export function createOpenAiFront(relay, modelInfo) {
       const qualified = qualifyModelId(selectedModel, selectedSiteId);
       try {
         await relay.submit(prompt, {
-          meta: { model: qualified, siteId: selectedSiteId, images, thinkMode },
+          meta: { model: qualified, siteId: selectedSiteId, images, thinkMode, sendGapMs: gapMs() },
           signal: controller.signal,
           onDelta: (t) => { try { res.write('data: ' + frame({ content: t }, null) + '\n\n'); } catch {} },
           onThink: (t) => { try { res.write('data: ' + frame({ reasoning_content: t }, null) + '\n\n'); } catch {} },
@@ -188,7 +194,7 @@ export function createOpenAiFront(relay, modelInfo) {
 
     try {
       const qualified = qualifyModelId(selectedModel, selectedSiteId);
-      const { text, thinking, images: genImages } = await relay.submit(prompt, { meta: { model: qualified, siteId: selectedSiteId, images, thinkMode }, signal: controller.signal });
+      const { text, thinking, images: genImages } = await relay.submit(prompt, { meta: { model: qualified, siteId: selectedSiteId, images, thinkMode, sendGapMs: gapMs() }, signal: controller.signal });
       if (!text.trim()) throw new Error('empty response from web AI');
       const usage = { prompt_tokens: estimateTokens(prompt), completion_tokens: estimateTokens(text), total_tokens: estimateTokens(prompt) + estimateTokens(text) };
       const parts = [{ type: 'text', text }];

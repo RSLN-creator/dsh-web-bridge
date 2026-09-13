@@ -12,9 +12,9 @@
 // {text, thinking, images}——修复“没有思考链条”“有图说没图”。
 
 import { chromium } from 'playwright-core';
-import { getSite, getContract, resolveWebModel } from './contract.js';
+import { getSite, getContract, resolveWebModel, conversationNav, conversationIdFromUrl } from './contract.js';
 import { selectWebModel, pickerUsable } from './model-picker.js';
-import { deriveLastRate } from './metrics.js';
+import { deriveLastRate, shouldSettleWip } from './metrics.js';
 import child_process from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -209,6 +209,26 @@ export function createBrowserDriver(options = {}) {
   // 「网页掉流但内容保住了」和「真的失败了」。
   let recoveredTurns = 0;
   let lastRecovered = null;  // { at, reason, status, chars }
+  // 0.14.0（用户报「网页端回复了但 harness 这边卡住」）：
+  // WIP 稳态收束的窗口——网页流以 status:'WIP' 结束且**永不发 FINISHED** 时，
+  // 旧实现只有 240s 定时器能救，界面表现就是「无限思考中」。这里用「流停
+  // **且** 页面 DOM 助手消息长度停止增长」双条件在秒级收束（判定收在
+  // metrics.shouldSettleWip，有反向单测钉住安全线）。
+  const WIP_IDLE_MS = Math.max(300, Number(cfg.wipIdleMs) || 2500);
+  // 本轮收束原因，供 /status 与右栏显示：finished | partial-wip-settled |
+  // partial-wip-settled(dom-unavailable) | timeout。null = 尚未跑过轮次。
+  let lastEndReason = null;
+  // 最近一次超时时的页面现场（captureAlive / replyChars）。旧实现只 warn 到
+  // 宿主控制台，用户与后续会话都看不到——「网页没生成」和「捕获链死了」修法
+  // 完全不同，这份现场必须能事后取到。
+  let lastTimeoutScene = null;
+  // 会话丢失（C-3）不再静默：WEB_SESSION_LOST 原先只在驱动内部抛码、由上层默默
+  // 重放首轮，用户侧**完全不可见**——真机症状就是「同一个会话每轮都新开对话」，
+  // 而面板上没有任何线索（glm 的 webcode-sessions-glm.json 恒为 "{}" 也是同一
+  // 根因）。这里记次数与最近一次现场，让「会话槽反复丢失」变成一个可核对的数字。
+  let sessionLostCount = 0;
+  let lastSessionLost = null;  // { at, reason, siteId, hasStoredSession, chars }
+  let wipWatch = null;       // { timer } 当前轮次的稳态巡检器
   // 注册表必须在驱动创建时就加载（0.12.2）：启动时的自动登录核验先于 ensure()
   // 直接 launch 出活页，首个轮次的 ensure() 见 ctx/page 存活便提前返回，注册表
   // 再无加载机会——onPageCapture 只剩「no decoder for kind」警告，整轮静默挂到
@@ -358,6 +378,14 @@ export function createBrowserDriver(options = {}) {
       lastLogin,
       recoveredTurns,
       lastRecovered,
+      // 0.14.0：「网页已回复但桥卡住」的可观测面——本轮为什么收束（finished /
+      // partial-wip-settled / timeout / dom-capture），以及超时那一刻的页面现场
+      //（captureAlive + replyChars）。旧实现只把现场 warn 到宿主控制台。
+      lastEndReason,
+      lastTimeoutScene,
+      // C-3：会话槽丢失的可核对数字（原先完全静默——用户只看到「每轮新开对话」）
+      sessionLostCount,
+      lastSessionLost,
       lastTurn,
       lastRate: deriveLastRate(lastFinished, selectedModel),
       conversations: Object.fromEntries(conversations),
@@ -415,16 +443,20 @@ export function createBrowserDriver(options = {}) {
         active.decoder = new Cls({
           onDelta: (t) => {
             if (active.firstResponseAt == null) active.firstResponseAt = performance.now();
+            // WIP 稳态的「流还在动」证据：任何一帧增量都推迟收束判定。
+            active.lastProgressAt = performance.now();
             active.text += t;
             try { active.onDelta?.(t); } catch {}
           },
           onThink: (t) => {
             if (active.firstThinkAt == null) active.firstThinkAt = performance.now();
+            active.lastProgressAt = performance.now();
             active.thinking += t;
             try { active.onThink?.(t); } catch {}
           },
           onImage: (img) => {
             if (img) active.images.push(img);
+            active.lastProgressAt = performance.now();
             try { active.onImage?.(img) } catch {}
           },
         });
@@ -446,6 +478,12 @@ export function createBrowserDriver(options = {}) {
     }
     if (m.phase === 'end' && active.decoder) {
       const result = active.decoder.finish();
+      // 把解码器认出来的会话 id 钉在结果与 active 上（C-1）：GLM/Z.ai 的身份在流
+      // 里，而 finishActive() 之后 active 就没了，必须在此之前取出来。
+      if (result && typeof result === 'object') {
+        result.conversationId = active.decoder.conversationId || null;
+      }
+      active.decoderConversationId = active.decoder.conversationId || null;
       const emptyStream = !result?.complete && !result?.partial
         && !String(result?.text || '').trim() && !String(result?.thinking || '').trim()
         && !(Array.isArray(result?.images) && result.images.length);
@@ -480,8 +518,78 @@ export function createBrowserDriver(options = {}) {
     busy = false;
     if (a?.timer) clearTimeout(a.timer);
     if (a?.graceTimer) clearTimeout(a.graceTimer);
+    // 稳态巡检器必须随之停掉：它对 active 做 DOM 采样并可能 resolve 本轮，
+    // 留着会在下一轮误判（甚至提前收束别人的轮次）。
+    if (a?.wipTimer) clearTimeout(a.wipTimer);
     if (a) { try { a.settleResolve?.(); } catch {} }
     return a;
+  }
+
+  /**
+   * WIP 稳态收束巡检器（0.14.0）——「网页端回复了但 harness 这边卡住」的主修。
+   *
+   * 背景（真机 2026-09-13 取证）：DeepSeek 网页流可能以 `status:'WIP'` 结束且
+   * **永不发 FINISHED**。解码器于是给 `{complete:false, partial:true}`，而
+   * `done` promise 只有 `phase==='end'`（此时已经过去了）或 240s 定时器能
+   * settle——一轮早就写完的回复于是把 sendTurn → relay → 适配器的
+   * `await ch.next()` 全部挂住，界面表现是**无限「思考中」**。
+   * 现场证据：recoveredTurns=1、lastRecovered.reason='stream_ended_before_finished'、
+   * status='WIP'、chars=463。
+   *
+   * 判据是双条件（见 metrics.shouldSettleWip）：**流停** 且 **页面 DOM 助手
+   * 消息长度停止增长**。任何一条还在动就绝不收束——思考阶段本就可能十几秒不吐
+   * 正文，只看流停会把正常长回复判死（反向单测钉住这条安全线）。
+   *
+   * 收尾方式刻意与既有 partial 路径同形（把已有内容当本轮结果交出去），因此
+   * 上层的工具协议解析、部分流自愈、空回复判定全部照旧，不新增第二条收尾通路。
+   */
+  function startWipWatch() {
+    if (!active || active.decoderKind === 'dom') return;   // dom 站点本就不靠流收场
+    const tick = async () => {
+      const a = active;
+      if (!a) return;
+      let domLen = null;
+      try {
+        domLen = await page?.evaluate?.(() => {
+          const last = [...document.querySelectorAll('.markdown, [data-message-author-role="assistant"], .ds-markdown')].pop();
+          return last ? (last.innerText || '').length : 0;
+        });
+      } catch { domLen = null; }
+      if (active !== a) return;                              // 轮次已结束或被替换
+      if (typeof domLen === 'number') {
+        a.domAvailable = true;
+        if (a.lastDomLen == null || domLen > a.lastDomLen) a.lastDomGrowthAt = performance.now();
+        a.lastDomLen = domLen;
+      } else {
+        // 页面取不到（关窗/导航中）：退回「仅流停」判定，并如实标注收束原因。
+        a.domAvailable = false;
+      }
+      const bodyReady = Boolean(a.text) || Boolean(a.thinking) || (Array.isArray(a.images) && a.images.length > 0);
+      if (!bodyReady || !shouldSettleWip({
+        now: performance.now(),
+        lastProgressAt: a.lastProgressAt,
+        lastDomGrowthAt: a.lastDomGrowthAt,
+        domAvailable: a.domAvailable,
+        wipIdleMs: WIP_IDLE_MS,
+      })) { a.wipTimer = setTimeout(tick, WIP_IDLE_MS); return; }
+      // 已达稳态：网页这一轮事实上结束了，只是没送 FINISHED。按已有正文收束。
+      const reason = a.domAvailable ? 'partial-wip-settled' : 'partial-wip-settled(dom-unavailable)';
+      warn(`wip steady state — settling turn with ${String(a.text || '').length} chars (${reason})`);
+      const result = a.decoder ? a.decoder.finish() : null;
+      if (!result) {
+        // 捕获链从未建立：没有可信正文，交给既有超时路径报错（不伪造结果）。
+        a.wipTimer = setTimeout(tick, WIP_IDLE_MS);
+        return;
+      }
+      const patched = result.complete ? result
+        : { ...result, complete: false, partial: true, reason: result.reason || reason };
+      a.settled_by = reason;
+      lastEndReason = reason;
+      const resolve = a.resolve;
+      finishActive();
+      resolve(patched);
+    };
+    if (active) active.wipTimer = setTimeout(tick, WIP_IDLE_MS);
   }
 
   /** 当前轮次以「页面已死」这类故障收尾：立刻失败，不要干等到 requestTimeoutMs。
@@ -939,6 +1047,15 @@ export function createBrowserDriver(options = {}) {
           onDelta, onThink, onImage, resolve, reject,
           settled, settleResolve,
           timer: null, firstThinkAt: null, firstResponseAt: null, t0: null,
+          // WIP 稳态判定用的两个时刻（见 metrics.shouldSettleWip）：
+          // lastProgressAt  = 最后一次收到 delta/think/image
+          // lastDomGrowthAt = 最后一次观察到页面助手消息**变长**
+          // 二者是「可以收束」的双条件；只满足一条绝不收束（不截断长回复）。
+          lastProgressAt: performance.now(),
+          lastDomGrowthAt: performance.now(),
+          domAvailable: true,
+          wipTimer: null,
+          settled_by: null,
         };
       });
       timer = setTimeout(async () => {
@@ -956,6 +1073,10 @@ export function createBrowserDriver(options = {}) {
           : (scene.captureAlive ? '捕获链在' : '捕获链缺失')
             + (scene.replyChars ? `，页面已有 ${scene.replyChars} 字回复未回传` : '，页面无回复文本');
         warn('turn timeout scene:', JSON.stringify(scene));
+        // 现场同时落进 status：只 warn 到控制台的话，用户与事后排查都取不到，
+        // 而这正是「页面早有全文、捕获从未建立」这类事故的唯一直接证据。
+        lastTimeoutScene = scene ? { ...scene, at: Date.now() } : { at: Date.now(), page: 'unavailable' };
+        lastEndReason = 'timeout';
         const err = new Error(`web turn timed out after ${cfg.requestTimeoutMs}ms（${detail}）`);
         if (a) a.reject(err); else warn(err.message);
       }, cfg.requestTimeoutMs);
@@ -999,6 +1120,8 @@ export function createBrowserDriver(options = {}) {
       } else {
         await input.press('Enter');
       }
+      // 发送已发出：启动 WIP 稳态巡检器（网页不发 FINISHED 时的秒级收束）。
+      startWipWatch();
 
       let result;
       if (site.decoder === 'dom') {
@@ -1060,7 +1183,7 @@ export function createBrowserDriver(options = {}) {
           + `${String(result.text || '').length} chars, ${(result.images || []).length} image(s)) — `
           + 'content preserved; the next turn will continue from here');
       }
-      lastTurn = { sessionId: sessionIdFromUrl(page.url()), url: safeUrl(page.url()), at: Date.now() };
+      lastTurn = { sessionId: turnSessionId(page.url()), url: safeUrl(page.url()), at: Date.now() };
       const endAt = performance.now();
       const fin = lastFinished;
       const t0 = fin?.t0 ?? endAt;
@@ -1074,6 +1197,10 @@ export function createBrowserDriver(options = {}) {
         thinkingMs,
         responseMs: firstResponseMs != null ? Math.max(1, Math.round(endAt - t0) - firstResponseMs) : null,
       };
+      // 本轮收束原因：稳态巡检器收束时已写好 settled_by；否则就是正常 FINISHED
+      // 或 dom 站点抄全文。透出到 /status 与右栏，用户不必再靠「卡了多久」猜。
+      lastEndReason = lastFinished?.settled_by || (site.decoder === 'dom' ? 'dom-capture' : 'finished');
+      metrics.endReason = lastEndReason;
       if (fin) Object.assign(fin, { metrics, chars: (result.text || '').length });
       return {
         text: result.text,
@@ -1094,18 +1221,36 @@ export function createBrowserDriver(options = {}) {
 
   async function sendTurn(key, message, { fresh = false, signal, onDelta, onThink, onImage, model, images, thinkMode } = {}) {
     const existing = conversationFor(key);
-    let navigate = 'fresh';
-    if (!fresh && existing?.webSessionId) {
-      const root = new URL(cfg.site);
-      navigate = root.origin + '/a/chat/s/' + encodeURIComponent(existing.webSessionId);
-    } else if (!fresh) {
-      // 上层要续聊、本地却没有对应的网页会话（store 丢了/被清过）。此时若默默
-      // 开新会话并只发增量，网页模型会在毫无前文的情况下接着答——同样是静默
-      // 丢上下文。抛码让上层重放首轮整段。
-      const err = new Error('WEB_SESSION_LOST: 本地会话槽为空 — 需要整段重建');
+    // 三态导航（C-2）：'fresh' 开新会话、'resume' 导航回既有会话、
+    // 'unsupported' 明确报错。**没有第四态**——旧实现在这里默默开新会话并把增量
+    // 发进去，网页模型在毫无前文的情况下接着答，是「跑着跑着变傻」的根因。
+    const nav = conversationNav({
+      siteId,
+      origin: new URL(cfg.site).origin,
+      fresh,
+      sessionId: existing?.webSessionId,
+    });
+    if (nav.state === 'unsupported') {
+      sessionLostCount += 1;
+      lastSessionLost = {
+        at: Date.now(),
+        reason: nav.reason,
+        siteId,
+        hasStoredSession: Boolean(existing?.webSessionId),
+        chars: String(message || '').length,
+      };
+      const err = new Error(
+        'WEB_SESSION_LOST: 会话槽' + (nav.reason === 'no-stored-session' ? '为空' : '存的会话无法导航回去')
+        + `（site=${siteId}，${nav.reason}） — 需要整段重建`,
+      );
       err.code = 'WEB_SESSION_LOST';
+      err.navReason = nav.reason;
+      err.siteId = siteId;
+      err.hasStoredSession = Boolean(existing?.webSessionId);
+      warn(`web session lost (#${sessionLostCount}, site=${siteId}, ${nav.reason}) — 上层将整段重建`);
       throw err;
     }
+    const navigate = nav.state === 'resume' ? nav.url : 'fresh';
     let result;
     try {
       result = await runTurn(message, { navigate, signal, onDelta, onThink, onImage, model, images, thinkMode });
@@ -1115,6 +1260,8 @@ export function createBrowserDriver(options = {}) {
       if (err?.code === 'WEB_SESSION_LOST') forgetConversation(key);
       throw err;
     }
+    // 身份优先来自地址、其次来自流（C-1）。两者都拿不到时才丢掉会话槽——
+    // 而这种情况在 GLM/Z.ai 上曾经是**恒态**（旧实现只认 DeepSeek 的地址形状）。
     if (result.sessionId) rememberConversation(key, result.sessionId);
     else if (navigate !== 'fresh') forgetConversation(key);
     return result;
@@ -1879,15 +2026,27 @@ export function createBrowserDriver(options = {}) {
     return { base64: b64, clip, viewport: page.viewportSize() };
   }
 
+  /**
+   * 本轮网页会话身份（C-1）——**地址与流两个来源都认**。
+   *
+   * 为什么必须两个来源（真机 2026-09-14 取证）：
+   *   • DeepSeek 只把身份放在地址里（`?chat_session_id=` / `/a/chat/s/`）；
+   *   • GLM 的地址里有 `?cid=<24 位十六进制>`，**同时** SSE 首帧带
+   *     `conversation_id`，两者逐字相同（6aa6f08454b3a5a4e4f64a77）；
+   *   • Z.ai 的地址形状尚未确认时，流里的 id 是唯一身份来源。
+   *
+   * 旧实现只看地址、且只认 DeepSeek 的两种形状 → GLM/Z.ai 恒 null →
+   * rememberConversation 永不执行 → 每轮 WEB_SESSION_LOST → 上层 fresh 重开。
+   * 用户看到的是「同一个会话，每轮都新开一个对话」。
+   *
+   * 顺序上地址优先：它是**用户此刻真实所在**的会话，比流里报的更权威。
+   */
+  function turnSessionId(url) {
+    return conversationIdFromUrl(siteId, url) || lastFinished?.decoderConversationId || null;
+  }
+
   function sessionIdFromUrl(url) {
-    try {
-      const u = new URL(url);
-      const q = u.searchParams.get('chat_session_id');
-      if (q) return q;
-      const m = u.pathname.match(/\/a\/chat\/s\/([0-9a-zA-Z-]{8,64})/);
-      if (m) return m[1];
-    } catch {}
-    return null;
+    return conversationIdFromUrl(siteId, url);
   }
   function safeUrl(url) { try { return String(new URL(url)); } catch { return null; } }
 

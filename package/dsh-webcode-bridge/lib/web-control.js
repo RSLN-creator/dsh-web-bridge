@@ -17,6 +17,7 @@
 //   • Responses never echo tokens; errors are fixed-text; bodies are bounded.
 
 import { listAllModels, SITES, getSite } from './providers.js';
+import { buildPromptVariants } from './prompt-variants.js';
 import { isLoopbackHost, originMatchesHost } from './loopback.js';
 import { httpFetch } from './upstream.js';
 import fs from 'node:fs';
@@ -86,6 +87,7 @@ export function createWebControl(deps = {}) {
     logger = console,
     presetInfo = null,  // () → { prompt, model, tools, at } — last first-turn text
     settingsStore = null, // { get: () => ({extraPrompt}), set: (value) => ({extraPrompt}) }
+    contextWindowOf = null, // (model) → number — 与 resolveModel/预算闸同一个取值函数
   } = deps;
   const log = (...a) => logger.log?.('[webcode-web]', ...a);
   const warn = (...a) => logger.warn?.('[webcode-web]', ...a);
@@ -204,10 +206,20 @@ export function createWebControl(deps = {}) {
       relay: relay ? (({ running, consent, consentPersistent, requireConsent, busy, queueLength, activeRequests, lastError, metrics }) => ({
         running, consent, consentPersistent, requireConsent, busy, queueLength, activeRequests, lastError, metrics,
       }))(relay.status()) : null,
-      driver: relay?.config?.driverStatus?.() ?? (driver ? (({ running, busy, loggedIn, needLogin, selectedModel, lastTurn, profileDir, conversations }) => ({
+      driver: relay?.config?.driverStatus?.() ?? (driver ? (({ running, busy, loggedIn, needLogin, selectedModel, lastTurn, profileDir, conversations, recoveredTurns, lastRecovered, lastEndReason, lastTimeoutScene, sessionLostCount, lastSessionLost }) => ({
         running, busy, loggedIn, needLogin, selectedModel, profileDir,
         conversationCount: conversations ? Object.keys(conversations).length : 0,
         lastTurn: lastTurn ? { sessionId: lastTurn.sessionId, at: lastTurn.at } : null,
+        // 0.14.0：这条兜底分支（无 relay 的独立启动）此前把这几个字段丢了，
+        // 而 relay 分支的 driverStatus 一直带着它们——于是「网页已回复但桥卡住」
+        // 在独立运行时完全没有任何线索。补齐后两个入口的字段集一致。
+        recoveredTurns: recoveredTurns ?? 0,
+        lastRecovered: lastRecovered ?? null,
+        lastEndReason: lastEndReason ?? null,
+        lastTimeoutScene: lastTimeoutScene ?? null,
+        // C-3：会话槽丢失不再静默（glm 每轮新开对话的根因就是它恒丢）
+        sessionLostCount: sessionLostCount ?? 0,
+        lastSessionLost: lastSessionLost ?? null,
       }))(driver.status()) : null),
     }),
     'POST consent': async (body) => {
@@ -216,6 +228,33 @@ export function createWebControl(deps = {}) {
       return { ok: true, consent: relay.status().consent };
     },
     'GET models': async () => ({ ok: true, models: listAllModels() }),
+    // 窗口声明可见性（B-3）——「桥向 DSH 声明的上下文窗口」此前只存在于代码里，
+    // 用户在 GUI 上看到的占用百分比是相对一个**看不见**的数，越界报错也说不清
+    // 比的是哪个值。这里把每个站点的声明值 + 它的**来源**（实测 / 配置覆盖 /
+    // 保守兜底）如实列出，于是「为什么这次被 CONTEXT_WINDOW_EXCEEDED 拦了」
+    // 可以在面板上直接核对。
+    'GET context-windows': async () => {
+      const rows = listAllModels().map((m) => ({
+        id: m.id, siteId: m.siteId, name: m.name,
+        contextWindow: contextWindowOf ? contextWindowOf(m) : (m.context || null),
+        source: m.context ? 'declared' : (contextWindowOf ? 'fallback-or-config' : 'unknown'),
+      }));
+      const bySite = {};
+      for (const r of rows) {
+        if (!bySite[r.siteId]) bySite[r.siteId] = { siteId: r.siteId, siteName: r.name, windows: [], sources: new Set() };
+        if (r.contextWindow != null) bySite[r.siteId].windows.push(r.contextWindow);
+        bySite[r.siteId].sources.add(r.source);
+      }
+      const sites = Object.values(bySite).map((s) => ({
+        siteId: s.siteId,
+        siteName: s.siteName,
+        // 同站点各模型声明值必须一致；不一致本身就是个信号，如实列出。
+        window: s.windows.length ? Math.min(...s.windows) : null,
+        consistent: new Set(s.windows).size <= 1,
+        sources: [...s.sources],
+      }));
+      return { ok: true, sites, models: rows };
+    },
     // 站点探活：右栏在挂载 iframe 之前先问一次「这个站点本机现在能不能直连」。
     // 动机（2026-09-13 真机）：chatgpt 403 / claude 403 / 部分网络环境下的
     // gemini 502，旧面板仍会为每个 tab 挂一个注定失败的 iframe（还常驻保活），
@@ -272,6 +311,26 @@ export function createWebControl(deps = {}) {
       const info = presetInfo?.() ?? null;
       if (!info) return { ok: true, prompt: null, note: '尚未发送过首轮请求——发送第一条消息后这里显示实际注入的完整提示词模板' };
       return { ok: true, ...info };
+    },
+    // 首轮提示词的全部适配分支（只读）。设置页默认展开显示的就是这一份：
+    // 模板由桥按当前会话的工具清单现算，因此不存在「一个固定字符串」可编辑；
+    // 能编辑的只有 extraPrompt（全局指令），它会体现在每个变体的 text 里。
+    // 变体由 lib/prompt-variants.js 用真函数现算——与真正发出去的那一份同源。
+    'GET prompt-variants': async () => {
+      const last = presetInfo?.() ?? null;
+      // 优先用「本会话最近一次真实调用过的工具清单」：这样设置页看到的就是
+      // 本会话真实会发出去的模板。没有则退到占位集，并在 toolsSource 里如实
+      // 标注（UI 据此提示「这是占位，发送第一条消息后变为真实清单」）。
+      const tools = last && Array.isArray(last.tools) && last.tools.length
+        ? last.tools.map((n) => ({ name: n, description: '', parameters: {} }))
+        : undefined;
+      const settings = settingsStore ? settingsStore.get() : {};
+      const { variants, toolsSource, active } = buildPromptVariants({
+        tools,
+        extraPrompt: settings.extraPrompt || '',
+        lastPreset: last,
+      });
+      return { ok: true, variants, toolsSource, active, extraPrompt: settings.extraPrompt || '' };
     },
     'POST login': async (body) => {
       const siteId = String(body?.siteId || '').trim();

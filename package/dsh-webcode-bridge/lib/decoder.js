@@ -444,6 +444,10 @@
       this.buf = '';
       this.text = ''; this.think = ''; this.images = [];
       this.done = false; this.failed = false;
+      // 网页会话身份（C-1）：站点在流里报的会话 id。基类默认 null，子类在 obj()
+      // 里认字段名后填上。放在基类是为了让**所有**解码器的 finish() 输出形状一致
+      // ——驱动只认 result.conversationId，不必按站点分支。
+      this.conversationId = null;
     }
     push(c) {
       this.buf += c;
@@ -456,9 +460,12 @@
     }
     finish() {
       if (this.buf.trim()) this.line(this.buf.trim());
-      if (this.failed) return { complete: false, reason: 'invalid_stream' };
-      if (!this.done) return { complete: false, reason: 'incomplete' };
-      return { complete: true, text: this.text.trim(), thinking: this.think.trim(), images: this.images };
+      if (this.failed) return { complete: false, reason: 'invalid_stream', conversationId: this.conversationId };
+      if (!this.done) return { complete: false, reason: 'incomplete', conversationId: this.conversationId };
+      return {
+        complete: true, text: this.text.trim(), thinking: this.think.trim(), images: this.images,
+        conversationId: this.conversationId,
+      };
     }
     line(l) {
       if (l === '[DONE]') { this.done = true; return; }
@@ -516,6 +523,11 @@
     }
     obj(j) {
       if (!isRecord(j)) return;
+      // 会话身份：GLM 把会话 id 放在**每一帧**的 conversation_id 字段里（真机
+      // 2026-09-14 首帧实录见 finish() 的注释）。这是本桥唯一的会话身份来源——
+      // URL 形状与 DeepSeek 完全不同，靠 URL 取 id 必然恒为 null。
+      const cid = readId(j.conversation_id);
+      if (cid) this.conversationId = cid;
       if (j.error) { this.failed = true; return; }
       if (j.status === 'finish') this.done = true;
       if (!Array.isArray(j.parts)) return;

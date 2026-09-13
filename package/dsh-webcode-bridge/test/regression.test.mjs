@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { readFileSync, mkdtempSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { apply } from '../lib/index.js';
 import { createWebControl } from '../lib/web-control.js';
 import { serializeFirstTurn, serializeDelta, parseAgentReply } from '../lib/agent-preset.js';
@@ -334,6 +337,102 @@ test('流式多调用：每个调用恰好一块、不重发、参数不丢', as
   } finally { finish({ text: '' }); dispose(); }
 });
 
+test('权威全文与增量分叉（canonical 多出调用）：流式块按自身 JSON 收口并补发缺失调用', async () => {
+  // 真机 2026-09-14 会话 c7c7a03c step70：SSE 增量缺 grep 的尾部（decoder 静默
+  // 替换 fragments 不补发增量），流式只给 read 开了块；权威全文里 grep、read 都在。
+  // 旧实现 TOOL_PROTOCOL_INVALID 整轮作废；现在流式块用它自己配平的 JSON 收口，
+  // 权威解析里多出的 grep 由收尾补发。
+  let adapter, finish;
+  const result = new Promise(resolve => { finish = resolve; });
+  const driver = {
+    status: () => ({}), close: async () => {},
+    sendPrompt: async (_, opts) => {
+      opts.onDelta('先读配置。\n<tool_call>\n{"mcp_action":"call","name":"read","arguments":{"path":"a.md"}}\n</');
+      return result;
+    },
+  };
+  // profileDir 指向临时目录：0.14 起发送间隔持久化在真实 profile 里，前面的测试
+  // 发送过会让本测试读回 lastSendAt 并等待 sendGapMs（真机设置 10s），测试必须隔离。
+  const dispose = apply({ llm: { registerAdapter: (_, value) => { adapter = value; } }, get: () => null }, { port: 0, requireConsent: false, driver, profileDir: mkdtempSync(path.join(os.tmpdir(), 'webcode-test-')) });
+  try {
+    const stream = adapter.stream({ model: 'flash', tools: [{ name: 'read', parameters: {} }, { name: 'grep', parameters: {} }], messages: [{ role: 'user', content: '查配置' }] });
+    const chunks = [];
+    const collector = (async () => { for await (const chunk of stream) chunks.push(chunk); })();
+    // 轮询等流式开块（全量套件负载下固定 sleep 不稳），最多 2s
+    for (let i = 0; i < 100 && !chunks.some(c => c.type === 'tool-call-delta'); i++) await new Promise(r => setTimeout(r, 20));
+    assert.equal(chunks.filter(c => c.type === 'tool-call-delta').length, 1, '增量通道只有 read 配平并开块');
+    finish({ text: '先读配置。\n<tool_call>\n{"mcp_action":"call","name":"grep","arguments":{"query":"x"}}\n</tool_call>\n<tool_call>\n{"mcp_action":"call","name":"read","arguments":{"path":"a.md"}}\n</tool_call>\n</' });
+    await collector;
+    const callEnds = chunks.filter(c => c.type === 'block-end' && c.block?.type === 'tool-call');
+    assert.equal(callEnds.length, 2, '分叉修复后两个调用都必须到达');
+    assert.deepEqual(callEnds.map(b => b.block.name), ['read', 'grep']);
+    const readEnd = callEnds.find(b => b.block.name === 'read');
+    assert.ok(readEnd.block.arguments.includes('a.md'), 'read 参数收口正确');
+    const grepEnd = callEnds.find(b => b.block.name === 'grep');
+    assert.ok(grepEnd.block.arguments.includes('x'), 'grep 由收尾补发');
+    const finishChunk = chunks.find(c => c.type === 'finish');
+    assert.equal(finishChunk.reason.kind, 'tool-calls', '整轮不得作废');
+  } finally { finish({ text: '' }); dispose(); }
+});
+
+test('权威全文与增量分叉（canonical 丢失调用）：流式块按自身 JSON 收口，整轮不作废', async () => {
+  // 真机 2026-09-14 会话 c7c7a03c turn2 step7：流式给 edit 开了块（增量里 JSON 已
+  // 配平），权威全文却被服务端替换成只剩散文——旧实现「解析结果：无」整轮作废。
+  let adapter, finish;
+  const result = new Promise(resolve => { finish = resolve; });
+  const driver = {
+    status: () => ({}), close: async () => {},
+    sendPrompt: async (_, opts) => {
+      opts.onDelta('实现修复。\n<tool_call>\n{"mcp_action":"call","name":"edit","arguments":{"path":"x.ts","content":"y"}}\n');
+      return result;
+    },
+  };
+  const dispose = apply({ llm: { registerAdapter: (_, value) => { adapter = value; } }, get: () => null }, { port: 0, requireConsent: false, driver, profileDir: mkdtempSync(path.join(os.tmpdir(), 'webcode-test-')) });
+  try {
+    const stream = adapter.stream({ model: 'flash', tools: [{ name: 'edit', parameters: {} }], messages: [{ role: 'user', content: '改文件' }] });
+    const chunks = [];
+    const collector = (async () => { for await (const chunk of stream) chunks.push(chunk); })();
+    await new Promise(r => setTimeout(r, 120));
+    finish({ text: '实现修复。\n' });
+    await collector;
+    const callEnds = chunks.filter(c => c.type === 'block-end' && c.block?.type === 'tool-call');
+    assert.equal(callEnds.length, 1, '流式块按自身 JSON 收口');
+    assert.equal(callEnds[0].block.name, 'edit');
+    assert.ok(callEnds[0].block.arguments.includes('x.ts'), '参数来自开块时配平的 JSON');
+    const finishChunk = chunks.find(c => c.type === 'finish');
+    assert.equal(finishChunk.reason.kind, 'tool-calls', '整轮不得作废');
+  } finally { finish({ text: '' }); dispose(); }
+});
+
+test('调用之间的纯标签残片（</</）不再当正文外发', async () => {
+  // 真机 2026-09-14 会话 c7c7a03c step69：调用 #0 没写闭标签、只吐了 '</</' 垃圾，
+  // 下一个调用的边界到达时这段垃圾被当散文开块外发，用户看到「回复夹杂错误调用」。
+  let adapter, finish;
+  const result = new Promise(resolve => { finish = resolve; });
+  const driver = {
+    status: () => ({}), close: async () => {},
+    sendPrompt: async (_, opts) => {
+      opts.onDelta('<tool_call>\n{"mcp_action":"call","name":"read","arguments":{"path":"a.md"}}\n</</\n');
+      opts.onDelta('<tool_call>\n{"mcp_action":"call","name":"read","arguments":{"path":"b.md"}}\n</tool_call>');
+      return result;
+    },
+  };
+  const dispose = apply({ llm: { registerAdapter: (_, value) => { adapter = value; } }, get: () => null }, { port: 0, requireConsent: false, driver, profileDir: mkdtempSync(path.join(os.tmpdir(), 'webcode-test-')) });
+  try {
+    const stream = adapter.stream({ model: 'flash', tools: [{ name: 'read', parameters: {} }], messages: [{ role: 'user', content: '读两个' }] });
+    const chunks = [];
+    const collector = (async () => { for await (const chunk of stream) chunks.push(chunk); })();
+    await new Promise(r => setTimeout(r, 120));
+    finish({ text: '<tool_call>\n{"mcp_action":"call","name":"read","arguments":{"path":"a.md"}}\n</</\n<tool_call>\n{"mcp_action":"call","name":"read","arguments":{"path":"b.md"}}\n</tool_call>' });
+    await collector;
+    const debris = chunks.filter(c => c.type === 'text-delta' && /[<>]/.test(c.text || ''));
+    assert.equal(debris.length, 0, '标签残片不得进入正文: ' + JSON.stringify(debris.map(d => d.text)));
+    const callEnds = chunks.filter(c => c.type === 'block-end' && c.block?.type === 'tool-call');
+    assert.equal(callEnds.length, 2, '两个调用都要到达');
+    assert.deepEqual(callEnds.map(b => b.block.arguments.includes('a.md') ? 'a' : 'b'), ['a', 'b'], '同名两调用参数不串');
+  } finally { finish({ text: '' }); dispose(); }
+});
+
 test('APPEND 新 RESPONSE 片段的起始内容不丢失', () => {
   const deltas = [];
   const decoder = new globalThis.WebCodeDeepSeekStreamDecoder({ onDelta: text => deltas.push(text) });
@@ -642,13 +741,12 @@ test('模型名是干净名字：不得含元描述或括注，auto 入口仍唯
     // 选择器里显示的必须是模型/站点名本身。像「网页当前模型（不切换）」
     // 这类元描述属于**说明文字**，不该占用模型名——说明放在 UI 的 hint 里。
     assert.ok(!m.name.includes('网页当前模型'), `${m.id} 仍带「网页当前模型」: ${m.name}`);
-    // 唯一豁免：DeepSeek 的「（深度思考）」是能力注记（它是唯一有思考开关
-    // 语义的模型），其余一律要求干净名字。
-    if (m.id === 'deepseek:deepseek') continue;
+    // 0.14.0：名字统一为「站点短键/模型 id」，不再有括注——DeepSeek 的
+    // 「（深度思考）」能力注记也随之取消（思考开关由模型元数据表达）。
     assert.ok(!m.name.includes('（') && !m.name.includes('）'), `${m.id} 名称应无括注: ${m.name}`);
   }
-  // 只有 DeepSeek 保留「（深度思考）」这一条能力注记（它是唯一有思考开关语义的模型）
-  assert.equal(all.find(m => m.id === 'deepseek:deepseek').name, 'DeepSeek（深度思考）');
+  // DeepSeek 只有一个模型，且名字就是「站点短键/模型 id」的形态（用户要求）。
+  assert.equal(all.find(m => m.id === 'deepseek:deepseek').name, 'deepseek/deepseek');
   // 未校准站点仍只有唯一 auto 入口，且解析不因改名而失效。
   // 0.13.0 起 glm/zai/kimi 有了真实版本条目，auto 变回「站点默认（不切换）」，
   // 因此这里断言的是「auto 仍存在且解析到本站点」，而不是具体版本名。
@@ -743,6 +841,100 @@ test('会话命名优先取网页端真实标题，取不到才回落本地启�
     const heuristic = textOf(await collect(titleCall('title-none', '帮我分析这个仓库的结构')));
     assert.equal(heuristic, '帮我分析这个仓库的结构'.slice(0, 16));
   } finally { await dispose(); }
+});
+
+// ── 0.14.0 两个真机问题的**接线**护栏 ──────────────────────────────────────
+// 判定逻辑本身有专门文件（send-gap.test.mjs / wip-settle.test.mjs）覆盖。这里
+// 只钉「有没有真的接上」——两个 bug 的共同特征都是「函数写好了但没人调用」或
+// 「接线被改回旧写法」，那是纯逻辑单测看不见的。
+
+const bridgeSrc = (rel) => readFileSync(new URL('../lib/' + rel, import.meta.url), 'utf8');
+
+test('发送间隔基准必须落盘（重启后第一轮也要生效），不许退回纯内存', () => {
+  const src = bridgeSrc('index.js');
+  // 基准文件：真机「设了 10 秒、重启后第一条立刻发出去」的根因就是它不存在。
+  assert.match(src, /webcode-send-state\.json/, '发送间隔基准必须落盘到 profileDir');
+  assert.match(src, /function rememberSend\(/, '必须有记录「刚刚发出」的入口');
+  // 判定必须走纯函数（而不是各处再写一遍减法），否则语义会再次漂移。
+  assert.match(src, /computeSendGap\(\{/, '节流判定必须走 metrics.computeSendGap');
+  // send-to-send：基准只在真正发出时更新，finally 里不再无条件刷新。
+  assert.doesNotMatch(src, /节流基准是「上一轮结束时刻」/, '旧的 turn-end 基准注释不应残留');
+  // 三个可核对字段必须进 metrics（右栏「发送前等待」恒可显示的前提）。
+  for (const key of ['gapTargetMs', 'sincePrevSendMs', 'sendWaitMs']) {
+    assert.match(src, new RegExp(key), `metrics 必须带 ${key}`);
+  }
+});
+
+test('网页不回话时，适配器侧必须有「无进展」看门狗（否则无限思考中）', () => {
+  const src = bridgeSrc('index.js');
+  assert.match(src, /function idleTimeoutError\(/, '缺少无进展错误构造');
+  assert.match(src, /WEB_NO_PROGRESS/, '必须用可识别的错误码');
+  assert.match(src, /const nextWithIdle = async/, '消费端必须包一层超时');
+  // 两个消费点（纯聊分支与带工具分支）都必须走它——只改一处的话另一条路仍然挂死。
+  const uses = src.match(/await nextWithIdle\(\)/g) || [];
+  assert.ok(uses.length >= 2, `nextWithIdle 必须覆盖两条消费路径，当前只有 ${uses.length} 处`);
+  assert.doesNotMatch(src, /await ch\.next\(\)/, '不应再直接 await ch.next()（会无限挂住）');
+  // 看门狗必须比稳态窗口大，否则会在稳态收束之前把可救回的轮次判死。
+  assert.match(src, /IDLE_TIMEOUT_MS = Math\.max\(WIP_IDLE_MS \+ 1000/, '看门狗必须 > WIP 稳态窗口');
+});
+
+test('驱动侧必须装上 WIP 稳态巡检器，并在发送之后启动', () => {
+  const src = bridgeSrc('browser-driver.js');
+  assert.match(src, /function startWipWatch\(/, '缺少 WIP 稳态巡检器');
+  assert.match(src, /shouldSettleWip\(\{/, '稳态判定必须走 metrics.shouldSettleWip');
+  // 启动点必须在「发送动作」之后、`await done` 之前：
+  //   • 发送前启动 → 会在上一轮收尾期间就开火；
+  //   • 收束之后启动 → 永远等不到（done 已经 settle 或永远挂着）。
+  // 用相对位置而不是逐字锚点：注释措辞会变，调用顺序不会。
+  const sendBranch = src.indexOf('if (SEL.sendButton)');
+  const watchIdx = src.indexOf('startWipWatch();');
+  const awaitDoneIdx = src.indexOf('result = await done;');
+  assert.ok(sendBranch > 0 && watchIdx > 0 && awaitDoneIdx > 0,
+    '找不到发送分支/巡检器/await done 三处结构之一（源码结构已变，请核对本测试）');
+  assert.ok(watchIdx > sendBranch, 'startWipWatch 必须在发送动作之后调用');
+  assert.ok(watchIdx < awaitDoneIdx, 'startWipWatch 必须在 await done 之前启动（否则永远等不到收束）');
+  // 巡检器必须随轮次结束一起停：否则下一轮会被上一轮的采样误判。
+  assert.match(src, /if \(a\?\.wipTimer\) clearTimeout\(a\.wipTimer\)/, 'finishActive 必须清理巡检器');
+  // 收束原因与超时现场必须进 status（否则用户仍然只能看到「卡了很久」）。
+  for (const key of ['lastEndReason', 'lastTimeoutScene']) {
+    assert.match(src, new RegExp(key), `driver.status() 必须透出 ${key}`);
+  }
+});
+
+// ── 0.14.1：F（OpenAI 前端绕过发送间隔）/ B-3（窗口声明可见性）接线护栏 ──────
+
+test('OpenAI 兼容前端（:8931）也必须遵守发送间隔（F 修复，不许退回）', () => {
+  const front = bridgeSrc('openai.js');
+  // 两条分支（流式 + 非流式）都要带 sendGapMs。真机 0.14.0 矩阵实测该路径
+  // gapTargetMs 恒为 0 —— 因为 meta 里根本没这个字段，executor 的
+  // clampSendGapMs(undefined) === 0，于是设置页的间隔被整体绕过。
+  // 只认 relay.submit 的 meta（modelsDocument 里也有一个同名的模型元数据字段，
+  // 与本修复无关，不能把它算进来）。
+  const metas = front.match(/relay\.submit\([^;]*?meta: \{[^}]*\}/gs) || [];
+  assert.ok(metas.length >= 2, `openai.js 应有两条 relay.submit meta（实际 ${metas.length}）`);
+  for (const m of metas) {
+    assert.match(m, /sendGapMs/, '每条 relay.submit 的 meta 都必须带 sendGapMs');
+  }
+  // 取值必须是**当场求值**的函数，不是建前端时的快照——否则设置页改完要重启才生效。
+  assert.match(front, /sendGapMsOf/, '应通过 sendGapMsOf 注入取值函数');
+  assert.match(front, /const gapMs = \(\) =>/, 'sendGapMs 必须是每次调用时求值');
+  const idx = bridgeSrc('index.js');
+  assert.match(idx, /sendGapMsOf: \(\) => clampSendGapMs\(configManager\.get\(\)\.sendGapMs\)/,
+    'index.js 必须把设置里的 sendGapMs 接到前端');
+});
+
+test('窗口声明可见性（B-3）：模型目录与状态里能核对自己声明的窗口', () => {
+  const prov = bridgeSrc('providers.js');
+  // 目录条目带 context（此前 listAllModels 有、但要看得到「真实来源」）
+  assert.match(prov, /context: m\.context \|\| null/, 'listAllModels 必须透出 context');
+  assert.match(prov, /const GLM_CONTEXT_WINDOW = 1_000_000;/, 'glm/zai 窗口声明应有实名常量');
+  // 控制面 /models 走的就是 listAllModels，因此面板能读到
+  const ctl = bridgeSrc('web-control.js');
+  assert.match(ctl, /'GET models': async \(\) => \(\{ ok: true, models: listAllModels\(\) \}\)/,
+    '/__webcode/models 必须返回带 context 的目录');
+  // 预算闸与声明共用同一个取值函数（否则「声明的数」与「闸门比的数」会分叉）
+  const idx = bridgeSrc('index.js');
+  assert.match(idx, /function contextWindowFor\(/, '窗口取值必须收口到一个函数');
 });
 
 

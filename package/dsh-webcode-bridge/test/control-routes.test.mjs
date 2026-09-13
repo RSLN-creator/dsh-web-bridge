@@ -137,6 +137,27 @@ test('表里每个 action 都能被真实 HTTP 请求命中（不是 404/405）'
   assert.deepEqual(failures, [], '这些 action 在挂载清单里却不可达：\n' + failures.join('\n'));
 });
 
+// B-3（0.14.1）：窗口声明必须可核对。此前「桥声明的上下文窗口」只存在于代码里，
+// 用户在 GUI 上看到的占用百分比是相对一个看不见的数，越界报错也说不清比的是哪个值。
+test('GET context-windows 列出每个站点的声明窗口与来源（B-3）', async () => {
+  const control = stubControl();
+  const r = await call(control, 'GET', '/__webcode/context-windows');
+  assert.equal(r.status, 200);
+  const body = JSON.parse(r.text);
+  assert.equal(body.ok, true);
+  assert.ok(Array.isArray(body.sites) && body.sites.length > 0, '应逐站点列出');
+  const ids = body.sites.map((s) => s.siteId);
+  assert.ok(ids.includes('glm') && ids.includes('zai'), 'glm/zai 必须在列（本轮的声明改动对象）');
+  // 同站点各模型的声明值必须一致——不一致本身就是信号，consistent 字段如实标注
+  for (const s of body.sites) {
+    assert.equal(typeof s.consistent, 'boolean', `${s.siteId} 必须给出 consistent`);
+    assert.ok(Array.isArray(s.sources) && s.sources.length > 0, `${s.siteId} 必须给出 source`);
+  }
+  // 逐模型明细也在（面板可以下钻）
+  assert.ok(Array.isArray(body.models) && body.models.length > 0, '应含逐模型明细');
+  for (const m of body.models) assert.ok('contextWindow' in m, `${m.id} 必须带 contextWindow`);
+});
+
 test('未知方法回 405 JSON（带 Allow），未知路径回 false 由调用方补 404 JSON', async () => {
   const control = stubControl();
   // 路径存在、方法不对：必须是 405 + 非空 JSON body。

@@ -108,6 +108,25 @@ window.__ModuleLoader__.load({
         h('output', { className: 'hwb-bar-value' }, text));
     }
 
+    /**
+     * 「发送前等待」这条的注解文字（0.14.0）。
+     *
+     * 用户报「等待时间好像不是按我设置的来」，其中一半是**看不出发生了什么**：
+     * 设置是 send-to-send 语义（两次*发送*之间的最小间隔），上一轮跑得久时本轮
+     * 无需再等，旧界面在这种情况下干脆不显示这一条。这里把三个数字摊开：
+     * 实际等待、目标值、距上次发送的实际间隔——「没等待」也有了明确原因。
+     */
+    function gapNote(m) {
+      const parts = [];
+      if (m.gapTargetMs > 0) parts.push('目标 ' + (m.gapTargetMs >= 1000 ? (m.gapTargetMs / 1000).toFixed(1) + ' s' : m.gapTargetMs + ' ms'));
+      if (m.sincePrevSendMs != null) {
+        const secs = (m.sincePrevSendMs / 1000).toFixed(1) + ' s';
+        parts.push(m.sendWaitMs > 0 ? '距上次发送 ' + secs : '未等待（距上次发送 ' + secs + ' 已满足）');
+      }
+      if (m.rateLimitRetries) parts.push('限流重试 ' + m.rateLimitRetries + ' 次');
+      return parts.length ? ' · ' + parts.join(' · ') : '';
+    }
+
     function Metrics({ metrics }) {
       if (!metrics) return h('span', { className: 'hwb-hint' }, '尚无调用记录（完成一次生成后此处显示实测速度）');
       const measured = metrics.timing === 'measured';
@@ -118,10 +137,14 @@ window.__ModuleLoader__.load({
         h('div', { className: 'hwb-metrics-head' },
           h('span', { className: 'hwb-badge' + (measured ? ' measured' : '') }, measured ? '实测' : '估算'),
           measured ? (metrics.phaseSource ? '来自 ' + metrics.phaseSource + '；速度 token 数按 CJK/ASCII 估算' : null) : '首次网页调用完成后显示实测数据'),
-        // 发送前等待只在真正等待过时出现：默认 0 间隔的安装里不占一条空栏。
-        (metrics.sendWaitMs > 0 || metrics.rateLimitRetries > 0) && h(Bar, {
+        // 发送前等待：**恒可核对**（0.14.0）。
+        // 旧实现只在「真的等待过」时才渲染这一条，于是用户设了 10 秒间隔、而
+        // 上一轮本身就跑了 20 秒（无需再等）时，界面上什么都没有——这正是
+        // 「好像不是按我设置的来」的观感来源之一。现在只要拿到了目标值或实测
+        // 间隔就显示，并把「没等待」的原因写清楚。
+        (metrics.gapTargetMs > 0 || metrics.sendWaitMs > 0 || metrics.rateLimitRetries > 0 || metrics.sincePrevSendMs != null) && h(Bar, {
           label: '发送前等待', value: metrics.sendWaitMs,
-          text: ms(metrics.sendWaitMs) + (metrics.rateLimitRetries ? ' · 限流重试' + metrics.rateLimitRetries + '次' : ''),
+          text: ms(metrics.sendWaitMs) + gapNote(metrics),
           max: BAR_MAX_MS, tone: 'ok',
         }),
         h(Bar, { label: '首字延迟', value: metrics.firstTokenMs, text: ms(metrics.firstTokenMs), max: BAR_MAX_MS }),
@@ -131,70 +154,131 @@ window.__ModuleLoader__.load({
         h(Bar, { label: '总耗时', value: metrics.durationMs, text: ms(metrics.durationMs), max: BAR_MAX_MS }));
     }
 
-    function PresetPreview() {
-      const [preset, setPreset] = React.useState(null);
-      const [open, setOpen] = React.useState(false);
-      const load = () => api('preset').then(p => setPreset(p)).catch(() => {});
-      React.useEffect(() => { if (open && preset === null) load(); }, [open]);
-      return h('details', { className: 'hwb-preset', onToggle: e => setOpen(e.target.open) },
-        h('summary', null, '查看固定首轮模板（发送首条消息时注入网页的完整内容）'),
-        preset === null ? h('p', { className: 'hwb-hint' }, '加载中…')
-          : preset.prompt
-            ? h('pre', null, preset.prompt)
-            : h('p', { className: 'hwb-hint' }, preset.note || '尚未发送过首轮请求。'),
-        preset?.prompt && h('p', { className: 'hwb-hint' },
-          '模型: ' + (MODEL_NAMES[preset.model] || preset.model) +
-          (preset.tools?.length ? ' · 工具: ' + preset.tools.join(', ') : ' · 无工具')));
+    /**
+     * 首轮提示词面板（0.14.0）。
+     *
+     * 用户原话：「设置界面提示词应该默认就显示，首轮提示词又不会变？有多的适配
+     * 就可选择框选择列出」。两处旧实现都错了：
+     *   • 折叠在 <details> 里，不点开什么也看不到；
+     *   • 只显示「最近一次真实发送过的」那一份——全新会话永远是空的，
+     *     且 glm 与其它站点是两套协议，页面上没有任何地方能看到这种差异。
+     *
+     * 现在：默认渲染。模板由 GET prompt-variants 现算（与真正发出去的那一份
+     * 同一个 serializeFirstTurn），下拉切换适配分支（默认标签形状 / glm 代码块
+     * 形状），并标出本会话实际走的是哪一支。模板本身**只读**——它由桥按会话的
+     * 工具清单生成，可编辑的只有下方的「全局指令」。
+     */
+    function PromptPanel({ onSaved }) {
+      const [variants, setVariants] = React.useState(null);
+      const [activeId, setActiveId] = React.useState('');
+      const [chosen, setChosen] = React.useState('');
+      const [meta, setMeta] = React.useState(null);
+      const [error, setError] = React.useState('');
+      const load = React.useCallback(() => {
+        api('prompt-variants').then(r => {
+          setVariants(r.variants || []);
+          setMeta({ toolsSource: r.toolsSource, active: r.active, extraPrompt: r.extraPrompt });
+          // 默认展示「本会话真正会用的那一支」——那才是用户想核对的东西。
+          const want = r.active?.variantId || (r.variants?.[0]?.id ?? '');
+          setActiveId(want); setChosen(c => c || want);
+          setError('');
+        }).catch(e => setError(e.message));
+      }, []);
+      React.useEffect(() => { load(); }, [load]);
+      if (error) return h('p', { role: 'alert', className: 'hwb-hint' }, '首轮提示词加载失败：' + error);
+      if (variants === null) return h('p', { className: 'hwb-hint' }, '加载首轮提示词…');
+      const hit = variants.find(v => v.id === chosen) || variants[0];
+      const activeVariant = variants.find(v => v.id === activeId);
+      return h('div', { className: 'hwb-import' },
+        h('div', { className: 'hwb-row' },
+          h('span', { className: 'hwb-row-label' }, '适配'),
+          h('div', { className: 'hwb-row-main' },
+            variants.length > 1
+              ? h('select', { className: 'hwb-model-select', value: hit.id, onChange: e => setChosen(e.target.value) },
+                variants.map(v => h('option', { key: v.id, value: v.id },
+                  v.label + (v.id === activeId ? ' · 本会话正在用' : ''))))
+              : h('span', { className: 'hwb-hint' }, hit.label))),
+        h('p', { className: 'hwb-hint' }, hit.note),
+        h('p', { className: 'hwb-hint' },
+          '模板由桥按会话的工具清单自动生成，是**只读**的；可编辑的只有下方的「全局指令」。'
+          + (meta?.toolsSource === 'placeholder'
+            ? '当前工具清单是占位示例——发送第一条消息后会自动换成该会话的真实清单。'
+            : '')
+          + (activeVariant ? '本会话最近一次实际使用的是「' + activeVariant.label + '」。' : '')),
+        h('pre', null, hit.text),
+        meta?.active?.tools?.length
+          ? h('p', { className: 'hwb-hint' }, '本会话工具：' + meta.active.tools.join(', '))
+          : null,
+        h('p', { className: 'hwb-hint' }, '增量轮再教学提示（每 5 个工具结果重贴一次，立场必须与首轮一致）：' + hit.trainNote));
     }
 
-    function GlobalPrompt() {
+    function GlobalPrompt({ onSaved }) {
       const [value, setValue] = React.useState('');
       const [saved, setSaved] = React.useState('');
-      const [open, setOpen] = React.useState(false);
       const [busy, setBusy] = React.useState(false);
       const [notice, setNotice] = React.useState('');
       const [error, setError] = React.useState('');
       React.useEffect(() => {
-        if (!open) return;
         let alive = true;
         api('settings').then(s => { if (alive) { setValue(s.extraPrompt || ''); setSaved(s.extraPrompt || ''); } }).catch(e => { if (alive) setError(e.message); });
         return () => { alive = false; };
-      }, [open]);
+      }, []);
       async function save() {
         setBusy(true); setNotice(''); setError('');
         try {
           const r = await api('settings', { extraPrompt: value });
           setSaved(r.extraPrompt || ''); setValue(r.extraPrompt || '');
           setNotice('已保存，后续每个新网页会话的首轮提示词都会包含「全局指令」。');
+          onSaved?.();
         } catch (e) { setError(e.message); }
         finally { setBusy(false); }
       }
-      return h('details', { className: 'hwb-preset', onToggle: e => setOpen(e.target.open) },
-        h('summary', null, '全局指令（唯一可编辑的提示词部分，追加到首轮模板末尾）'),
-        !open ? null
-          : h('div', { className: 'hwb-import' },
-            h('p', { className: 'hwb-hint' }, '首轮模板由桥按当前会话的工具清单自动生成，是固定的；你只能在这里追加一段「[全局指令]」注入每个新网页会话的首条消息，例如："始终用中文回答；执行任何操作前先说明依据"。'),
-            h('textarea', {
-              className: 'hwb-prompt-input', value, rows: 5, maxLength: 4000,
-              placeholder: '例如：始终保持工具调用格式；回答简洁；先读文件再下结论。',
-              onChange: e => setValue(e.target.value),
-            }),
-            h('div', { className: 'hwb-row' },
-              h('button', { disabled: busy || value === saved, onClick: save }, busy ? '保存中…' : '保存全局指令'),
-              notice && h('span', { className: 'hwb-hint' }, notice)),
-            error && h('p', { role: 'alert', className: 'hwb-hint' }, error)));
+      return h('div', { className: 'hwb-import' },
+        h('p', { className: 'hwb-hint' }, '这是**唯一可编辑**的提示词部分：追加一段「[全局指令]」注入每个新网页会话的首条消息，'
+          + '例如："始终用中文回答；执行任何操作前先说明依据"。保存后上方的模板会立刻反映它。'),
+        h('textarea', {
+          className: 'hwb-prompt-input', value, rows: 5, maxLength: 4000,
+          placeholder: '例如：始终保持工具调用格式；回答简洁；先读文件再下结论。',
+          onChange: e => setValue(e.target.value),
+        }),
+        h('div', { className: 'hwb-row' },
+          h('button', { disabled: busy || value === saved, onClick: save }, busy ? '保存中…' : '保存全局指令'),
+          notice && h('span', { className: 'hwb-hint' }, notice)),
+        error && h('p', { role: 'alert', className: 'hwb-hint' }, error));
+    }
+
+    /** 首轮提示词整块（只读模板 + 变体下拉 + 可编辑全局指令），默认渲染。 */
+    function PromptSection() {
+      const [nonce, setNonce] = React.useState(0);
+      return h('div', null,
+        h(PromptPanel, { key: 'p' + nonce }),
+        h(GlobalPrompt, { key: 'g' + nonce, onSaved: () => setNonce(n => n + 1) }));
     }
 
     // 按站点分组的模型下拉选项：从桥的 /__webcode/models 取全站点目录
     function ModelSelect({ models, value, onChange, disabled }) {
       if (!models) return h('select', { disabled: true }, h('option', null, '加载模型目录…'));
       const groups = new Map();
+      // 过滤兼容别名（0.14.0）：`deepseek-web` 与 `deepseek:deepseek` 的显示名
+      // 逐字相同（都是 `deepseek/deepseek`），照单渲染就是两行一模一样的选项。
+      // 过滤只发生在**展示**层——别名仍然能被 resolveWebModel 解析，历史会话与
+      // 旧设置的 `deepseek-web` 值照旧可用（后端 listAllModels 也照旧返回它）。
+      // 这里是浏览器侧 bundle，无法 import 主机的 providers.js，因此字面量不得
+      // 不重复一份；两处一致由 test/model-labels.test.mjs 钉住（它同时读
+      // providers.MODEL_ALIAS_IDS 与本文件，不一致即失败）。
+      const aliasIds = new Set(['deepseek-web']);
       for (const m of models) {
+        if (aliasIds.has(m.id)) continue;
         if (!groups.has(m.siteId)) groups.set(m.siteId, []);
         groups.get(m.siteId).push(m);
       }
+      // 当前值恰好是别名时（历史设置）：补一条选项，否则 select 会显示空。
+      const aliasHit = models.find(m => aliasIds.has(m.id) && m.id === value);
       return h('select', { className: 'hwb-model-select', value: value || '', disabled, onChange: e => onChange(e.target.value) },
+        aliasHit ? h('option', { key: aliasHit.id, value: aliasHit.id }, aliasHit.name + '（兼容别名）') : null,
         [...groups.entries()].map(([sid, list]) => h('optgroup', { key: sid, label: siteName(sid) },
+          // 0.14.0 起 m.name 自带站点短键（`z.ai/glm-5.3`），这里不再重复拼
+          // siteName——旧写法会渲染成「Z.ai (GLM 海外版) · z.ai/glm-5.3」。
           list.map(m => h('option', { key: m.id, value: m.id },
             m.name + (m.experimental ? '（实验）' : '') + (m.thinking ? ' · 深度思考' : '') + (m.vision ? ' · 识图' : ''))))));
     }
@@ -445,7 +529,7 @@ window.__ModuleLoader__.load({
                 }) }, '保存'),
               sendGapNotice && h('span', { className: 'hwb-hint' }, sendGapNotice)),
             ),
-          h('p', { className: 'hwb-hint indent' }, '两次向同一网站发送消息之间的最小等待（本地回复到网页发送）。网站有「消息发送过于频繁」的滑窗限流时长任务容易触发；设为 2–10 秒可主动避开。被限流时桥按 max(发送间隔, 10 秒) 自动退避重试最多 2 次，实际等待在下方统计的「发送前等待」单独展示。')),
+          h('p', { className: 'hwb-hint indent' }, '两次向同一网站**发送**之间的最小间隔（send-to-send）：距上一次发出不足这个值就等满，已满足则不等待。网站有「消息发送过于频繁」的滑窗限流，长任务工具循环节奏密时容易触发，设为 2–10 秒可主动避开。被限流时桥按 max(发送间隔, 10 秒) 自动退避重试最多 2 次。实际等待、目标值与「距上次发送」都在下方统计的「发送前等待」里逐项显示；该设置会落盘，**重启后第一轮同样生效**。')),
 
         h('div', { className: 'hwb-card' },
           h('h3', { className: 'hwb-group first' }, '连接'),
@@ -465,7 +549,41 @@ window.__ModuleLoader__.load({
 
         h('div', { className: 'hwb-card' },
           h('h3', { className: 'hwb-group first' }, '速度观测（最近一次生成）'),
-          h('div', { className: 'hwb-row' }, h('div', { className: 'hwb-row-main' }, h(Metrics, { metrics })))),
+          h('div', { className: 'hwb-row' }, h('div', { className: 'hwb-row-main' }, h(Metrics, { metrics }))),
+          // 「网页端回复了但 harness 这边卡住」（0.14.0）：驱动侧现在会在网页
+          // 不发 FINISHED 时按稳态收束，并把次数/最后一次原因记在 status 里。
+          // 这里把它显示出来——否则用户只能看到「有时候莫名久」，无从判断桥是
+          // 已经自愈过还是真的卡住。endReason 非 finished 时一并说明本轮为何收尾。
+          driver?.recoveredTurns > 0 && h('p', { className: 'hwb-hint' },
+            '网页流未收尾但内容已保住 ' + driver.recoveredTurns + ' 次'
+            + (driver.lastRecovered
+              ? '（最近：' + driver.lastRecovered.reason
+                + (driver.lastRecovered.status ? '/' + driver.lastRecovered.status : '')
+                + '，' + driver.lastRecovered.chars + ' 字）'
+              : '')
+            + (driver.lastEndReason && driver.lastEndReason !== 'finished'
+              ? '；本轮收束方式：' + driver.lastEndReason
+              : '')),
+          driver?.lastEndReason === 'timeout' && h('p', { className: 'hwb-hint' },
+            '本轮网页侧超时'
+            + (driver.lastTimeoutScene
+              ? '（捕获链' + (driver.lastTimeoutScene.captureAlive ? '在' : '缺失')
+                + '，页面回复 ' + (driver.lastTimeoutScene.replyChars || 0) + ' 字）'
+              : ''))),
+          // 会话丢失（0.14.1，C-3）：原先完全静默——用户只看到「同一个会话每轮
+          // 都新开一个对话」，面板上没有任何线索。现在把次数、站点与原因摊开，
+          // 并说明桥的处置（重放首轮整段），让「每轮重开」变成一个可解释的行为。
+          driver?.sessionLostCount > 0 && h('p', { className: 'hwb-hint' },
+            '网页会话已丢失 ' + driver.sessionLostCount + ' 次（桥已按「重放首轮整段」自愈）'
+            + (driver.lastSessionLost
+              ? '（最近：' + (driver.lastSessionLost.siteId || '?')
+                + '，' + (driver.lastSessionLost.reason === 'no-stored-session'
+                  ? '本地会话槽为空' : '站点没有可用的会话地址形状')
+                + '）'
+              : '')
+            + (driver.lastSessionLost?.reason === 'site-has-no-conversation-url-shape'
+              ? '；该站点的地址栏里没有会话 id，桥无法导航回既有对话，只能整段重开'
+              : '')),
 
         h('div', { className: 'hwb-card' },
           h('h3', { className: 'hwb-group first' }, '会话与子代理'),
@@ -503,11 +621,34 @@ window.__ModuleLoader__.load({
 
         h('div', { className: 'hwb-card' },
           h('h3', { className: 'hwb-group first' }, '首轮提示词'),
-          h(PresetPreview),
-          h(GlobalPrompt)),
+          h('p', { className: 'hwb-hint' }, '下面就是发送首条消息时注入网页的完整内容（默认显示，无需展开）。'),
+          h(PromptSection)),
         relay?.lastError ? h('p', { role: 'alert', className: 'hwb-hint' }, '最近错误: ' + relay.lastError) : null,
         error && h('p', { role: 'alert' }, error));
     }
+
+    /**
+     * 右栏面板对外的动作桥（0.14.0）。
+     *
+     * 背景：DSH 官方右侧栏的规范入口是「标签动作菜单」（slot
+     * `sidebar.right.tab.menu.item`）——「刷新」「独立窗口」这类**作用于当前
+     * 标签**的动作应当出现在那里，而不是只做成面板里自绘的按钮。
+     *
+     * 但菜单项与面板体是**两次独立注册**（menu.item 拿不到 pane 的组件状态），
+     * 而站点切换、iframe 池、窗口轮询全是面板内部 state。因此这里做一个最小
+     * 桥：面板挂载时把动作函数登记进来，菜单项调用它。面板没开着就报一句
+     * 人话，而不是静默失败。
+     *
+     * 只登记当前存活面板的动作——重复注册（热重载/多 pane）时最后挂载的赢，
+     * 与「菜单作用于当前标签」的语义一致。
+     */
+    const actions = {
+      handlers: null,
+      currentSite() { return this.handlers?.siteId() ?? null; },
+      reload() { return this.handlers ? this.handlers.reload() : { ok: false, reason: '面板尚未打开' }; },
+      toggleWindow() { return this.handlers ? this.handlers.toggleWindow() : { ok: false, reason: '面板尚未打开' }; },
+      bind(h) { this.handlers = h; return () => { if (this.handlers === h) this.handlers = null; }; },
+    };
 
     function Conversation({ browserSrc }) {
       const [siteId, setSiteId] = React.useState('deepseek');
@@ -625,14 +766,41 @@ window.__ModuleLoader__.load({
       // 右栏抛错变白屏——独立窗口按钮只是面板里的一个控件，它坏了也不该拖垮面板。
       const winOf = sid => (winOpen && typeof winOpen === 'object' ? winOpen[sid] : null);
       const winIsOpen = sid => winOf(sid)?.open === true;
+      // 把当前站点的真实动作登记给标签动作菜单（sidebar.right.tab.menu.item）。
+      // 依赖里有 siteId/reloadFrame/toggleWindow，站点一变菜单就作用到新站点。
+      React.useEffect(() => actions.bind({
+        siteId: () => siteId,
+        siteName: () => siteName(siteId),
+        reload: reloadFrame,
+        toggleWindow,
+      }), [siteId, frames]);
+      // 键盘导航：tablist 规范要求左右方向键在标签间移动（Home/End 到两端）。
+      // 只切 state，不自己 focus——焦点仍留在原来的按钮上，避免面板重排后
+      // 焦点跳到 iframe 里（那会让用户以为右栏卡死）。
+      const siteIds = Object.keys(SITE_NAMES);
+      const onTabKey = (e) => {
+        const i = siteIds.indexOf(siteId);
+        if (i < 0) return;
+        let next = null;
+        if (e.key === 'ArrowRight') next = siteIds[(i + 1) % siteIds.length];
+        else if (e.key === 'ArrowLeft') next = siteIds[(i - 1 + siteIds.length) % siteIds.length];
+        else if (e.key === 'Home') next = siteIds[0];
+        else if (e.key === 'End') next = siteIds[siteIds.length - 1];
+        if (next === null) return;
+        e.preventDefault();
+        setSiteId(next);
+      };
       return h('div', { className: 'hwb-conversation' },
-        h('div', { className: 'hwb-sitebar', role: 'tablist', 'aria-label': '内容服务站点' },
+        h('div', { className: 'hwb-sitebar', role: 'tablist', 'aria-label': '内容服务站点', onKeyDown: onTabKey },
           h('div', { className: 'hwb-sitebar-tabs' },
             Object.entries(SITE_NAMES).map(([sid, name]) => h('button', {
               key: sid, role: 'tab', 'aria-selected': sid === siteId,
+              // 漫游 tabindex：只有当前标签可 Tab 进入，进入后用方向键移动。
+              tabIndex: sid === siteId ? 0 : -1,
               // 基类必须始终在：0.12.9 只渲染 'active' 或 ''，于是没有基础样式
               //（字号/内边距/圆角全无），站点栏看起来是一排裸 <button>。
               className: 'hwb-site-tab' + (sid === siteId ? ' active' : ''),
+              title: name + ' · ' + statusLabel(siteStatuses[sid]) + (statusTitle(siteStatuses[sid]) ? ' · ' + statusTitle(siteStatuses[sid]) : ''),
               onClick: () => setSiteId(sid),
             }, h('span', null, name), h('span', { className: 'hwb-tab-state ' + statusClass(siteStatuses[sid]), title: statusTitle(siteStatuses[sid]) }, statusLabel(siteStatuses[sid]))))),
           h('button', {
@@ -750,10 +918,12 @@ window.__ModuleLoader__.load({
         ".hwb-bar-fill{display:block;height:100%;border-radius:4px;background:var(--dsw-alias-label-tertiary,#8a8f98);transition:width .2s ease}",
         ".hwb-bar-fill.ok{background:var(--dsw-alias-state-success-primary,#2e7d32)}",
         ".hwb-bar-value{flex:0 0 148px;font-size:12px;text-align:right;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary,inherit)}",
+        // 首轮提示词面板：0.14.0 起**默认渲染**（不再是 <details>），因此 pre
+        // 的样式直接挂在容器上，不依赖 summary 展开态。
         ".hwb-preset{border-top:1px solid var(--dsw-alias-border-l3,#8883);padding:8px 0}",
         ".hwb-preset summary{cursor:pointer;font-size:13px;color:var(--dsw-alias-label-secondary,inherit)}",
-        ".hwb-preset pre{max-height:320px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.55;background:var(--dsw-alias-interactive-bg-hover,#8881);border-radius:8px;padding:10px}",
-        // 全局指令编辑区（details 展开后的容器）
+        ".hwb-preset pre,.hwb-import pre{max-height:320px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.55;background:var(--dsw-alias-interactive-bg-hover,#8881);border-radius:8px;padding:10px;margin:0}",
+        // 全局指令编辑区 / 首轮提示词面板的容器
         ".hwb-import{display:flex;flex-direction:column;gap:8px;padding:8px 0}",
         ".hwb-conversation{position:relative;display:flex;flex-direction:column;width:100%;height:100%;min-height:0}",
         ".hwb-sitebar{display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:.5px solid var(--dsw-alias-border-l4,#8884)}",
@@ -778,60 +948,104 @@ window.__ModuleLoader__.load({
         ".hwb-tab-state.idle{color:var(--dsw-alias-label-tertiary,#7a8494)}",
         ".hwb-corner-btn{width:28px;height:28px;display:grid;place-items:center;color:var(--dsw-alias-label-secondary,inherit);background:transparent;border:.5px solid var(--dsw-alias-border-l4,#8884);border-radius:7px;cursor:pointer;padding:0}",
         ".hwb-corner-btn:hover{background:var(--dsw-alias-interactive-bg-hover,#8882)}",
+        // 标签动作菜单项（slot sidebar.right.tab.menu.item）。DSH 的菜单自带
+        // 容器与关闭逻辑，这里只负责一行可点文本，样式与宿主菜单项对齐。
+        ".hwb-menu-item{display:block;width:100%;padding:6px 10px;font:inherit;font-size:13px;line-height:20px;text-align:left;color:var(--dsw-alias-label-primary,inherit);background:transparent;border:0;border-radius:8px;cursor:pointer}",
+        ".hwb-menu-item:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,#8882)}",
+        ".hwb-menu-item:disabled{color:var(--dsw-alias-label-dimmed,#aaa);cursor:default}",
       ].join('');
       document.head.appendChild(style);
       const disposers = [() => style.remove()];
       const warn = (what, e) => console.warn('[webcode-bridge] ' + what + ' failed:', e && e.message ? e.message : e);
+      // ctx.effect 是 DSH 插件的规范生命周期：它把注销函数交给宿主统一回收
+      //（重载/卸载都走同一条路）。下面的 disposers 数组保留作兜底——宿主没提供
+      // effect 时（旧版本/单测桩）仍必须能干净卸载。
+      const own = (fn) => {
+        try { if (typeof ctx.effect === 'function') { ctx.effect(() => fn()); return; } } catch (e) { warn('ctx.effect', e); }
+        const off = fn();
+        if (typeof off === 'function') disposers.push(off);
+      };
 
       // ---- 设置页（真实需求重构：登录管理前置、无历史导入） ------------
-      try {
-        const off = ctx.slots.inject('settings.section', () => ctx.slots.register({
-          name: 'settings.section', id: 'webcode', order: 110,
-          label: () => '网页桥接', inject: () => ({}),
-        }, Settings));
-        if (typeof off === 'function') disposers.push(off);
-      } catch (e) { warn('settings section', e); }
+      own(() => {
+        try {
+          return ctx.slots.inject('settings.section', () => ctx.slots.register({
+            name: 'settings.section', id: 'webcode', order: 110,
+            label: () => '网页桥接', inject: () => ({}),
+          }, Settings));
+        } catch (e) { warn('settings section', e); }
+      });
 
       // ---- 官方右侧栏（@deepseek-ai/dsh-client-ui-sidebar-right）--------
       const TAB_ID = 'dsh-webcode-bridge';
       const TAB_KIND = 'webcode-bridge';
       const WebcodeBody = () => h(Conversation, { browserSrc: relayBase + '/' });
 
-      try {
-        const offType = ctx.sidebarRightTabs.register({
-          id: TAB_ID,
-          kind: TAB_KIND,
-          priority: 'extension',
-          title: () => 'Web Bridge',
-          guide: [{
-            order: 55,
+      own(() => {
+        try {
+          return ctx.sidebarRightTabs.register({
+            id: TAB_ID,
+            kind: TAB_KIND,
+            priority: 'extension',
             title: () => 'Web Bridge',
-            description: () => '打开内容服务的真实网页',
-          }],
-        });
-        if (typeof offType === 'function') disposers.push(offType);
-      } catch (e) { warn('sidebarRightTabs.register', e); }
+            guide: [{
+              order: 55,
+              title: () => 'Web Bridge',
+              description: () => '打开内容服务的真实网页',
+            }],
+          });
+        } catch (e) { warn('sidebarRightTabs.register', e); }
+      });
 
-      try {
-        const offBody = ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
-          name: 'sidebar.right.pane.tab', key: TAB_ID,
-        }, WebcodeBody));
-        if (typeof offBody === 'function') disposers.push(offBody);
-      } catch (e) { warn('pane.tab body', e); }
+      own(() => {
+        try {
+          return ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
+            name: 'sidebar.right.pane.tab', key: TAB_ID,
+          }, WebcodeBody));
+        } catch (e) { warn('pane.tab body', e); }
+      });
+
+      // ---- 标签动作菜单项：刷新 / 独立窗口（DSH 规范入口） --------------
+      // 规范要求菜单项作用于「当前标签」并在动作后关闭菜单（dismiss 必须调，
+      // 否则菜单会浮在被换掉的内容上）。动作本身由面板登记（actions 桥）。
+      const menuItem = (key, label, run) => function TabMenuItem(owner) {
+        const sid = actions.currentSite();
+        return h('button', {
+          type: 'button', className: 'hwb-menu-item',
+          onClick: () => { try { run(sid); } finally { owner?.dismiss?.(); } },
+        }, label + (sid ? '（' + sid + '）' : ''));
+      };
+      own(() => {
+        try {
+          return ctx.slots.inject('sidebar.right.tab.menu.item', () => ctx.slots.register(
+            { name: 'sidebar.right.tab.menu.item' },
+            menuItem('reload', '刷新网页', () => actions.reload()),
+          ));
+        } catch (e) { warn('tab menu item (reload)', e); }
+      });
+      own(() => {
+        try {
+          return ctx.slots.inject('sidebar.right.tab.menu.item', () => ctx.slots.register(
+            { name: 'sidebar.right.tab.menu.item' },
+            menuItem('window', '切换独立窗口', () => actions.toggleWindow()),
+          ));
+        } catch (e) { warn('tab menu item (window)', e); }
+      });
 
       // ---- 会话头角落按钮：展开/收起右侧栏 ------------------------------
-      try {
-        const CornerButton = () => h('button', {
-          className: 'hwb-corner-btn', type: 'button',
-          title: '打开 Web Bridge 网页会话（右侧栏）',
-          'aria-label': '打开 Web Bridge 网页会话',
-          onClick: () => { try { ctx.sidebarRight.toggleExpanded(); } catch (_) {} },
-        }, icon(16));
-        const offCorner = ctx.slots.inject('conversation.session.header.corner', () => ctx.slots.register({
-          name: 'conversation.session.header.corner',
-        }, CornerButton));
-        if (typeof offCorner === 'function') disposers.push(offCorner);
-      } catch (e) { warn('header corner button', e); }
+      own(() => {
+        try {
+          const CornerButton = () => h('button', {
+            className: 'hwb-corner-btn', type: 'button',
+            title: '打开 Web Bridge 网页会话（右侧栏）',
+            'aria-label': '打开 Web Bridge 网页会话',
+            onClick: () => { try { ctx.sidebarRight.toggleExpanded(); } catch (_) {} },
+          }, icon(16));
+          return ctx.slots.inject('conversation.session.header.corner', () => ctx.slots.register({
+            name: 'conversation.session.header.corner',
+          }, CornerButton));
+        } catch (e) { warn('header corner button', e); }
+      });
 
       return () => disposers.reverse().forEach(d => { try { d(); } catch (_) {} });
     }

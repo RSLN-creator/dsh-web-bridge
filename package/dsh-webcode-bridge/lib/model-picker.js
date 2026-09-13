@@ -258,8 +258,10 @@ export async function selectWebModel(page, model, contractPicker) {
     scopedToComposer: picker.scopedToComposer === true,
     segmented: picker.segmented === true,
   };
-  // 目标名：labels 优先（网页上显示的就是它），否则模型显示名。
-  const wanted = (model.labels && model.labels[0]) || model.name;
+  // 目标名：labels 优先（网页上显示的就是它），否则用网页上的原始名字
+  // （webName）——**不能用 name**：0.14.0 起 name 是 `z.ai/glm-5.3` 这种带站点
+  // 短键的显示名，而网页上永远不会出现这个前缀，拿它比对必然 option-not-in-list。
+  const wanted = (model.labels && model.labels[0]) || model.webName || model.name;
 
   const opened = await page.evaluate(OPEN_AND_READ, cfg).catch((e) => ({ ok: false, reason: 'evaluate-failed: ' + (e?.message || e) }));
   if (!opened.ok) {

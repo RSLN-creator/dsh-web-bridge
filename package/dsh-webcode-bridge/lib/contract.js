@@ -5,7 +5,7 @@
 // DeepSeek 契约：strictModelType 仍为真，核验口径按 UI 代际取值——旧三 pill UI 看
 // model_type，2026-09-10 新版统一 UI 看 thinking_enabled（见 expectedRequestMetadata）；
 // 其余站点为通用契约（标签点击选模型 + 通用解码器），实验性站点标记 experimental。
-import { DEEPSEEK, SITES, resolveWebModel, getSite } from './providers.js';
+import { DEEPSEEK, SITES, resolveWebModel, getSite, conversationIdFromUrl, conversationUrlFor } from './providers.js';
 import { expectedModelType, expectedRequestMetadata } from './metrics.js';
 
 export const DEEPSEEK_WEB_CONTRACT = Object.freeze({
@@ -58,4 +58,30 @@ export function getContract(siteId) {
   return SITE_CONTRACTS[siteId] ?? null;
 }
 
-export { DEEPSEEK, SITES, resolveWebModel, getSite, expectedModelType, expectedRequestMetadata };
+/**
+ * 会话导航契约的三态（C-2）—— 驱动**唯一**的会话地址知识入口。
+ *
+ * 旧实现把 DeepSeek 的两种地址形状写死在浏览器驱动里，GLM/Z.ai 因此永远拿不到
+ * 会话 id（真机 2026-09-14：`?cid=` 就在地址栏里，却没人读）。现在形状收口在
+ * providers.js 的两张表，这里只负责把「这一轮该怎么走」判成三态：
+ *
+ *   fresh        — 开新会话（首轮，或上层明确要求重开）
+ *   resume       — 站点声明了地址形状，导航回既有会话
+ *   unsupported  — 站点没有可用形状：**必须报错**，绝不默默开新会话发增量
+ *
+ * @param {object} o
+ * @param {string} o.siteId
+ * @param {string} o.origin          站点根（如 https://chatglm.cn）
+ * @param {boolean} o.fresh           上层是否要求新会话
+ * @param {string|null} o.sessionId   会话槽里记着的网页会话 id
+ * @returns {{state:'fresh'|'resume'|'unsupported', url:string|null, reason:string|null}}
+ */
+export function conversationNav({ siteId, origin, fresh, sessionId } = {}) {
+  if (fresh) return { state: 'fresh', url: null, reason: 'caller-requested-fresh' };
+  if (!sessionId) return { state: 'unsupported', url: null, reason: 'no-stored-session' };
+  const url = conversationUrlFor(siteId, origin, sessionId);
+  if (!url) return { state: 'unsupported', url: null, reason: 'site-has-no-conversation-url-shape' };
+  return { state: 'resume', url, reason: null };
+}
+
+export { DEEPSEEK, SITES, resolveWebModel, getSite, expectedModelType, expectedRequestMetadata, conversationIdFromUrl, conversationUrlFor };
