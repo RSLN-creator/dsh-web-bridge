@@ -217,7 +217,8 @@ test('包装形状：<invoke name="tool_call"> 里装完整调用对象（2026-0
   const raw = '<\uFF5C\uFF5CDSML\uFF5C\uFF5C calls>\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C invoke name="tool_call">\n{"mcp_action": "call", "name": "read", "purpose": "read security doc", "arguments": {"path": "doc/security-review.md"}}\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter>\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C invoke>\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C calls>';
   const calls = parseAgentReply(raw).calls;
   assert.equal(calls.length, 1, '壳 + 壳内 JSON 只应记一个调用');
-  assert.deepEqual(calls, [{ name: 'read', arguments: { path: 'doc/security-review.md' } }]);
+  // purpose 自 0.12.7 起保留在调用对象上（供派发侧补缺失的 description 类必填参数）。
+  assert.deepEqual(calls, [{ name: 'read', arguments: { path: 'doc/security-review.md' }, purpose: 'read security doc' }]);
 });
 test('畸形属性抢救：调用 JSON 塞进 <invoke name=…（2026-09-10 真机第 6 跑）', () => {
   // 真机原文：整段调用 JSON 落进了 invoke 的 name 属性区，标签本身没说清工具名。

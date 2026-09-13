@@ -24,6 +24,11 @@ button:hover { background: #1d4ed8; }
 .success { background: #dcfce7; color: #166534; }
 .error { background: #fee2e2; color: #991b1b; }
 .hint { font-size: 13px; color: #6b7280; margin-top: 4px; }
+.state { display: inline-block; font-size: 12px; padding: 2px 10px; border-radius: 10px; }
+.state.ok { background: #dcfce7; color: #166534; }
+.state.bad { background: #fee2e2; color: #991b1b; }
+.state.idle { background: #e5e7eb; color: #4b5563; }
+button.mini { width: auto; margin-top: 0; padding: 6px 12px; font-size: 13px; }
 </style>
 </head>
 <body>
@@ -72,6 +77,19 @@ button:hover { background: #1d4ed8; }
       <button type="button" id="syncMainToSub" style="width:auto; margin-top:0; padding:6px 12px; font-size:13px;">主线站点 → 子代理</button>
       <button type="button" id="syncSubToMain" style="width:auto; margin-top:0; padding:6px 12px; font-size:13px;">子代理站点 → 主线</button>
       <span class="hint" style="margin-top:0;">手动单向同步「站点选择」；登录态不迁移（同站点天然共享，跨站点无法迁移）。</span>
+    </div>
+
+    <div id="subAccountFollow" class="hint" style="display:none;">跟随主线站点：子代理与主线共用同一账户，登录状态随主线站点，无需单独登录。</div>
+    <div id="subAccountBlock" style="display:none; margin-top:10px; padding:10px 12px; border:1px solid #e5e7eb; border-radius:8px;">
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+        <b id="subSiteName" style="font-size:14px;"></b>
+        <span id="subSiteState" class="state idle">待检查</span>
+        <button type="button" id="subLogin" class="mini">登录</button>
+        <button type="button" id="subVerify" class="mini">检测</button>
+        <button type="button" id="subWindow" class="mini">独立窗口</button>
+      </div>
+      <div id="subAccountStatus" class="hint"></div>
+      <div class="hint">子代理站点的账户与登录管理：与主线站点同一套逻辑（真实 Edge 窗口一次性登录），登录态按站点各自持久化；与主线同站点时两者天然共享登录。</div>
     </div>
 
     <label for="sendGapPreset">发送间隔（限流防护）</label>
@@ -153,6 +171,94 @@ button:hover { background: #1d4ed8; }
     if (e.target.value !== 'custom') document.getElementById('sendGapMs').value = e.target.value;
   });
 
+  // ---- 子代理账户与登录管理（与原生面板同一套端点：login / verify-login / window） ----
+  const subAccountBlock = document.getElementById('subAccountBlock');
+  const subAccountFollow = document.getElementById('subAccountFollow');
+  const subSiteState = document.getElementById('subSiteState');
+  const subSiteName = document.getElementById('subSiteName');
+  const subAccountStatus = document.getElementById('subAccountStatus');
+  let subWinOpen = false;
+  let subBusy = false;
+
+  async function apiPost(name, body) {
+    const res = await fetch(API_BASE + '/' + name, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    });
+    if (!res.ok) throw new Error(name + ' 失败（HTTP ' + res.status + '）');
+    return res.json();
+  }
+
+  function setSubState(s) {
+    subSiteState.className = 'state ' + (s.loggedIn === true ? 'ok' : s.loggedIn === false ? 'bad' : 'idle');
+    subSiteState.textContent = s.loggedIn === true ? (s.loggedInCached ? '已登录(缓存)' : '已登录') : s.loggedIn === false ? '未登录' : '待检查';
+    document.getElementById('subLogin').textContent = s.loggedIn === true ? '更换账户' : '登录';
+  }
+
+  async function refreshSubAccount() {
+    const site = document.getElementById('subAgentSite').value;
+    if (!site || site === 'follow') {
+      subAccountBlock.style.display = 'none';
+      subAccountFollow.style.display = '';
+      return;
+    }
+    subAccountBlock.style.display = '';
+    subAccountFollow.style.display = 'none';
+    subSiteName.textContent = site;
+    try {
+      const st = await fetch(API_BASE + '/status').then((r) => r.json());
+      const hit = (st.sites || []).find((s) => s.siteId === site);
+      if (hit) setSubState(hit);
+    } catch (e) { /* 状态拿不到就维持当前显示 */ }
+    try {
+      const w = await fetch(API_BASE + '/window').then((r) => r.json());
+      subWinOpen = Boolean(w.windows && w.windows[site] && w.windows[site].open);
+      document.getElementById('subWindow').textContent = subWinOpen ? '收起窗口' : '独立窗口';
+    } catch (e) { /* 同上 */ }
+  }
+
+  async function subAction(kind) {
+    const site = document.getElementById('subAgentSite').value;
+    if (!site || site === 'follow' || subBusy) return;
+    subBusy = true;
+    subAccountStatus.textContent = '';
+    subAccountStatus.className = 'hint';
+    const btns = ['subLogin', 'subVerify', 'subWindow'].map((id) => document.getElementById(id));
+    btns.forEach((b) => { b.disabled = true; });
+    try {
+      if (kind === 'login') {
+        subAccountStatus.textContent = '等待登录完成…（最长 5 分钟，请在弹出的 Edge 窗口内完成登录）';
+        const r = await apiPost('login', { siteId: site, wait: true, timeoutMs: 300000 });
+        subAccountStatus.textContent = (r.alreadyLoggedIn ? '登录态仍有效，无需重复登录' : (r.message || '登录完成'))
+          + (r.ms ? '（' + Math.round(r.ms / 1000) + 's）' : '');
+        subAccountStatus.className = r.loggedIn === true ? 'success' : 'error';
+      } else if (kind === 'verify') {
+        const r = await apiPost('verify-login', { siteId: site });
+        subAccountStatus.textContent = r.loggedIn === true ? '已检测到登录态'
+          : r.loggedIn === false ? '仍未登录（请在独立窗口完成登录后再检测）' : '待检查（先打开一次站点）';
+        subAccountStatus.className = r.loggedIn === true ? 'success' : 'error';
+      } else if (kind === 'window') {
+        const r = await apiPost('window', { siteId: site, action: subWinOpen ? 'close' : 'open' });
+        subAccountStatus.textContent = (r && r.alreadyOpen) ? '窗口已存在——已聚焦弹到最前'
+          : (subWinOpen ? '独立窗口已收起，回到无头运行' : '独立窗口已打开（与桥共用登录态）');
+      }
+    } catch (e) {
+      subAccountStatus.textContent = '✗ ' + e.message;
+      subAccountStatus.className = 'error';
+    } finally {
+      btns.forEach((b) => { b.disabled = false; });
+      subBusy = false;
+      await refreshSubAccount();
+    }
+  }
+
+  document.getElementById('subLogin').addEventListener('click', () => subAction('login'));
+  document.getElementById('subVerify').addEventListener('click', () => subAction('verify'));
+  document.getElementById('subWindow').addEventListener('click', () => subAction('window'));
+  document.getElementById('subAgentSite').addEventListener('change', refreshSubAccount);
+  setInterval(refreshSubAccount, 20000);
+
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const payload = {
@@ -180,7 +286,7 @@ button:hover { background: #1d4ed8; }
     }
   });
 
-  loadSettings();
+  loadSettings().then(refreshSubAccount).catch(() => {});
 </script>
 </body>
 </html>`;;

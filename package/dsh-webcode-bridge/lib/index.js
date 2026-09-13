@@ -16,7 +16,7 @@ import { createRelay } from './relay.js';
 import { createOpenAiFront } from './openai.js';
 import { createBrowserDriver } from './browser-driver.js';
 import { createWebControl, buildSessionEvents, mainLineOf } from './web-control.js';
-import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, readCallAt, partialProtocolAt, coerceArguments, normalizeDsml } from './agent-preset.js';
+import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, readCallAt, partialProtocolAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeDsml } from './agent-preset.js';
 import { createMirror } from './mirror.js';
 import { textOfBlocks } from './flatten.js';
 import { estimateTokens } from './metrics.js';
@@ -660,8 +660,13 @@ export function apply(ctx, config = {}) {
           // 工具报错全部属于这一类）。只按 schema 显式声明的类型做无歧义纠偏。
           const target = tools.find((t) => t?.name === valid[i].name) || null;
           const { args: fixedArgs, coerced } = coerceArguments(valid[i].arguments, target?.parameters);
+          // 缺失必填补齐：DSH 会因 description 这类纯描述字段缺失整次拒绝
+          // （真机 GLM 调 pwsh 只给 command 被拒，模型陷入重试死循环）。
+          // purpose 优先、命令前缀兜底，补不出就保持缺失，让 DSH 报自己的错。
+          const { args: filledArgs, filled } = fillMissingRequired(fixedArgs, target?.parameters, valid[i].purpose);
+          if (filled.length) log(`filled missing required args for ${valid[i].name}: ${filled.join(', ')}`);
           if (coerced.length) log(`coerced args for ${valid[i].name}: ${coerced.join(', ')}`);
-          const args = JSON.stringify(fixedArgs);
+          const args = JSON.stringify(filledArgs);
           if (!reuse) yield { type: 'block-start', index, blockType: 'tool-call' };
           yield { type: 'tool-call-delta', index, id, ...(reuse ? {} : { name: valid[i].name }), argumentsDelta: args };
           yield { type: 'block-end', index, block: { type: 'tool-call', id, name: valid[i].name, arguments: args } };
@@ -1118,7 +1123,7 @@ function imageMarkdown(images) {
       };
     };
     if (!keyPath) {
-      const prompt = serializeFirstTurn({ ...options, extraPrompt });
+      const prompt = serializeFirstTurn({ ...options, extraPrompt, siteId });
       recordPreset(prompt);
       return {
         prompt,
@@ -1147,9 +1152,10 @@ function imageMarkdown(images) {
     if (st && (messages.length <= st.sent || st.fingerprint !== fingerprint(st.sent))) st = null;
     const fresh = !st;
     st ||= { sent: 0, toolResults: 0, tokens: 0 };
-    const delta = serializeDelta(messages, st.sent, st.toolResults);
+    // 增量轮的再教学提示按站点取（glm 只教代码块形状，与首轮同一立场）。
+    const delta = serializeDelta(messages, st.sent, st.toolResults, undefined, trainNoteFor(siteId));
     let prompt;
-    if (fresh) { prompt = serializeFirstTurn({ ...options, extraPrompt }); recordPreset(prompt); }
+    if (fresh) { prompt = serializeFirstTurn({ ...options, extraPrompt, siteId }); recordPreset(prompt); }
     else prompt = delta.text;
     // 上下文计数口径（问题③根因）：网页这一侧是「首轮全文 + 后续增量」，模型
     // 实际看到的上下文 = 本会话已发出去的全部文本之和。旧实现把 usage.inputTokens
@@ -1166,7 +1172,7 @@ function imageMarkdown(images) {
         // 发送间隔（设置页）：executor 在发送前按它节流，限流退避也以它为基数
         sendGapMs: clampSendGapMs(settings.sendGapMs),
         // 网页会话丢失时的整段重放文本（见 executor 的 WEB_SESSION_LOST 分支）
-        rebuild: () => serializeFirstTurn({ ...options, extraPrompt }),
+        rebuild: () => serializeFirstTurn({ ...options, extraPrompt, siteId }),
       },
       invalidate: () => sessionState.delete(keyPath),
       async attach() {

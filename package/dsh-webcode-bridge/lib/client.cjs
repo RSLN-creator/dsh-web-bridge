@@ -137,12 +137,15 @@ window.__ModuleLoader__.load({
      * 网页与模型管理的「账户」卡片：每个内容服务一行——登录状态 + 登录/换账户
      * + 独立窗口。登录等待真实结果（最长 5 分钟），成功/失败/超时都回显在本行，
      * 不再 fire-and-forget；登录窗口是真实有头 Edge，与自动化共用同一 profile。
+     * onlySiteId：只渲染该站点一行（子代理卡内联所选子代理站点的账户管理，
+     * 与「账户与登录管理」卡片同一套状态与端点，不另起第二套真相）。
      */
-    function SiteAccounts({ sites, onRefresh }) {
+    function SiteAccounts({ sites, onRefresh, onlySiteId, subHint }) {
       const [busySite, setBusySite] = React.useState(null);
       const [results, setResults] = React.useState({});
       const list = (sites && sites.length ? sites : [])
         .map(s => ({ siteId: s.siteId, loggedIn: s.loggedIn, initialized: s.initialized, busy: s.busy }))
+        .filter(s => !onlySiteId || s.siteId === onlySiteId)
         .sort((a, b) => (a.siteId === 'deepseek' ? -1 : b.siteId === 'deepseek' ? 1 : siteName(a.siteId).localeCompare(siteName(b.siteId))));
       const setResult = (sid, r) => setResults(prev => ({ ...prev, [sid]: r }));
       const [winSites, setWinSites] = React.useState({});
@@ -204,8 +207,10 @@ window.__ModuleLoader__.load({
           results[s.siteId] && h('p', { className: 'hwb-hint indent', role: 'status' },
             (results[s.siteId].ok ? '✓ ' : '✗ ') + siteName(s.siteId) + '：' + results[s.siteId].text))),
         h('p', { className: 'hwb-hint indent' },
-          '登录会打开真实 Edge 窗口，请在窗口内完成一次性登录（扫码/验证码/密码均可），检测到成功后自动切回无头运行。'
-          + '各站点登录态分开保存在各自 profile 里，互不串号；账户失效时在这里「更换账户」即可。'));
+          subHint
+            ? '子代理所选站点的账户行：登录/更换账户与其它站点同一套逻辑（真实 Edge 窗口一次性登录），登录态按站点各自持久化；与主线同站点时两者天然共享登录。'
+            : '登录会打开真实 Edge 窗口，请在窗口内完成一次性登录（扫码/验证码/密码均可），检测到成功后自动切回无头运行。'
+            + '各站点登录态分开保存在各自 profile 里，互不串号；账户失效时在这里「更换账户」即可。'));
     }
 
     function Settings() {
@@ -364,6 +369,11 @@ window.__ModuleLoader__.load({
                 onClick: () => { const site = String(defaultModel).split(':')[0]; if (site) { setSubAgentSite(site); setSubAgentNotice('已选 ' + site + '，请点「保存」生效。'); } } }, '主线→子代理'),
               h('button', { disabled: pending || subAgentSite === 'follow', title: '把主线默认模型设为子代理站点的模型',
                 onClick: () => { const hit = models && models.find(m => String(m.id) === subAgentSite + ':auto'); if (hit) { saveSetting('defaultModel', hit.id, () => { setDefaultModel(hit.id); setModelSaved(hit.id); setSubAgentNotice('主线默认模型已设为 ' + hit.id + '。'); }); } } }, '子代理→主线'))),
+          h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '子代理账户'),
+            h('div', { className: 'hwb-row-main' },
+              subAgentSite !== 'follow'
+                ? h(SiteAccounts, { sites, onRefresh: refresh, onlySiteId: subAgentSite, subHint: true })
+                : h('span', { className: 'hwb-hint' }, '跟随主线站点：子代理与主线共用同一账户，登录状态在上方「账户与登录管理」维护，无需单独登录。'))),
           h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '会话隔离'),
             h('div', { className: 'hwb-row-main' }, h('span', { className: 'hwb-hint' },
               (driver?.conversationCount ?? 0) + ' 个网页会话槽。子代理（如 explore/plan/通用 agent）按 agentId 自动分到'

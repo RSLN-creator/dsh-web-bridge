@@ -18,6 +18,16 @@ const MAX_OUTPUT_CHARS = 16_000;
 /** Every Nth tool result re-teaches the call format (webcode's train note). */
 const TRAIN_EVERY = 5;
 const TRAIN_NOTE = '[系统提示] 请保持工具调用格式：以 <tool_call> 开始、</tool_call> 结束，其内为单个 JSON 对象 {"mcp_action":"call","name":"工具名","purpose":"原因","arguments":{…}}。';
+/** glm 站点的再教学提示：该网页对正文里的调用标签有原生执行器（只认
+ *  search/open/click/find），标签形状会被它抢走执行并回灌 unknown tool call，
+ *  只有 ```json 代码块能活到桥。与 buildPreset/serializeFirstTurn 的 glm 分支
+ *  同一立场（2026-09-13 两份真机会话 cacaba8c/ab4c6dc8 实锤）。 */
+const TRAIN_NOTE_GLM = '[系统提示] 请保持工具调用格式：先写一行 ```json，其内为单个 JSON 对象 {"mcp_action":"call","name":"工具名","purpose":"原因","arguments":{…}}，再以一行 ``` 结束；不要用 <tool_call> 等标签包裹（会被本网页拦截丢失）。';
+/** 按站点取再教学提示——增量轮的 resultBlock 与首轮教学必须同一立场，否则
+ *  模型刚被纠回代码块形状，第 5 个工具结果又把它教回标签形状。 */
+export function trainNoteFor(siteId) {
+  return siteId === 'glm' ? TRAIN_NOTE_GLM : TRAIN_NOTE;
+}
 /** 单个工具描述的保留上限。DSH 的工具描述本身就是提示词主体（最长实测约
  *  400 字符，含「路径必须绝对」「不要产出超大输出」这类硬约束），旧实现的
  *  300 字符截断会把这些约束截掉一半。 */
@@ -59,15 +69,32 @@ export function buildPreset(options = {}) {
       ...lines,
       '',
       '# 工具调用格式',
-      '需要调用工具时，任选下面一种格式输出（两种都能被识别，推荐格式 A）：',
-      '格式 A（推荐，以标签包裹）：',
-      '<tool_call>',
-      '{"mcp_action": "call", "name": "工具名", "purpose": "执行此操作的简要原因", "arguments": {"参数名": "值"}}',
-      '</tool_call>',
-      '格式 B（```json 代码块）：',
-      '```json',
-      '{"mcp_action": "call", "name": "工具名", "purpose": "执行此操作的简要原因", "arguments": {"参数名": "值"}}',
-      '```',
+      // glm 站点只教代码块形状：该网页对正文调用标签有原生执行器（只认
+      // search/open/click/find），标签形状会被抢走执行并回灌 unknown tool call
+      // （2026-09-13 真机会话 cacaba8c/ab4c6dc8：模型反复重试标签形状全部阵亡，
+      // 唯一存活的调用是代码块裸 JSON）。其它站点维持既有双形状不动。
+      ...(options.siteId === 'glm' ? [
+        '需要调用工具时，只用下面这一种格式输出：',
+        '格式（```json 代码块，唯一可用）：',
+        '```json',
+        '{"mcp_action": "call", "name": "工具名", "purpose": "执行此操作的简要原因", "arguments": {"参数名": "值"}}',
+        '```',
+        '警告：不要使用 <tool_call>…</tool_call> 或任何 XML/标签包裹调用——本网页会把这类标签当成它自己的内置工具抢走执行并报 unknown tool call，调用会静默丢失；只有 ```json 代码块能到达本地工具网关。',
+      ] : [
+        '需要调用工具时，任选下面一种格式输出（两种都能被识别，推荐格式 A）：',
+        '格式 A（推荐，以标签包裹）：',
+        '<tool_call>',
+        '{"mcp_action": "call", "name": "工具名", "purpose": "执行此操作的简要原因", "arguments": {"参数名": "值"}}',
+        '</tool_call>',
+        '格式 B（```json 代码块）：',
+        '```json',
+        '{"mcp_action": "call", "name": "工具名", "purpose": "执行此操作的简要原因", "arguments": {"参数名": "值"}}',
+        '```',
+      ]),
+      // 真机 2026-09-13（cacaba8c turn3）：模型把原因写进 purpose、arguments 里
+      // 却不带 pwsh 必填的 description → DSH 拒绝 missing required property
+      // "description"。schema 全文有教（required 在列）但模型没守，这里点名说破。
+      'arguments 必须包含对应工具 schema 里 required 列出的每一个字段（例如 pwsh 必须同时给 command 和 description——description 是 5-10 词英文主动语态的命令概述）；purpose 只是执行原因备注，不能替代任何必填参数。',
       '一次回复可以包含多个工具调用代码块，会按顺序执行；有依赖的调用请分多轮等待结果。',
       '工具执行结果会作为用户消息自动回填给你，格式：{"mcp_action":"result","name":"…","status":"success","output":"…"}（失败为 "status":"error","error":"…"）。',
       '重要：如果上一次工具调用因参数无效而失败，收到了 status:"error" 的结果，请在下一轮把参数修正后重新调用，不要因为失败而放弃工具改用猜测。',
@@ -92,12 +119,17 @@ export function serializeFirstTurn(options = {}) {
     if (m.role === 'user') {
       const raw = textOfBlocks(m.content);
       const directive = normalizeHarnessDirective(raw);
-      return directive || serializeDelta([m], 0, 0, names).text;
+      return directive || serializeDelta([m], 0, 0, names, trainNoteFor(options.siteId)).text;
     }
-    return serializeDelta([m], 0, 0, names).text;
+    return serializeDelta([m], 0, 0, names, trainNoteFor(options.siteId)).text;
   }).join('\n\n');
   const preset = buildPreset(options);
-  const transport = options.tools?.length ? '\n[本地工具传输协议]\n必须使用 <tool_call>{"mcp_action":"call","name":"实际工具名","arguments":{}}</tool_call> 发起工具调用。工具名和参数必须严格匹配上面的 schema。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。' : '';
+  // 传输协议按站点分立场：glm 网页会拦截正文里的调用标签（原生执行器只认
+  // search/open/click/find），必须只教代码块形状并明说标签会被吃；其它站点
+  // 维持既有文字逐字不动。
+  const transport = !options.tools?.length ? '' : options.siteId === 'glm'
+    ? '\n[本地工具传输协议]\n必须使用 ```json 代码块发起工具调用：先写一行 ```json，下一行是单个 JSON 对象 {"mcp_action":"call","name":"实际工具名","purpose":"原因","arguments":{…}}，再以一行 ``` 结束。不要使用 <tool_call> 等标签包裹——本网页会把这些标签当成它自己的内置工具抢走执行并报 unknown tool call，调用会静默丢失。工具名和参数必须严格匹配上面的 schema（arguments 必须包含 required 里的每个字段，如 pwsh 的 description）。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。'
+    : '\n[本地工具传输协议]\n必须使用 <tool_call>{"mcp_action":"call","name":"实际工具名","arguments":{}}</tool_call> 发起工具调用。工具名和参数必须严格匹配上面的 schema。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。';
   return [preset, '[会话开始]', text || '（用户未提供文字）', transport].filter(Boolean).join('\n\n');
 }
 
@@ -114,11 +146,11 @@ export function normalizeHarnessDirective(text) {
   return '';
 }
 
-function resultBlock({ name, status, output, error }, withTrain) {
+function resultBlock({ name, status, output, error }, withTrain, note = TRAIN_NOTE) {
   const payload = { mcp_action: 'result', name, status };
   if (status === 'error') payload.error = clip(error ?? 'unknown error');
   else payload.output = clip(output ?? '');
-  if (withTrain) payload.system_note = TRAIN_NOTE;
+  if (withTrain) payload.system_note = note;
   return '```json\n' + JSON.stringify(payload, null, 2) + '\n```';
 }
 function clip(s) {
@@ -145,7 +177,7 @@ function toolNames(msgs) {
   return idToName;
 }
 
-export function serializeDelta(messages, sent, toolResultsSent = 0, knownNames) {
+export function serializeDelta(messages, sent, toolResultsSent = 0, knownNames, note) {
   const msgs = Array.isArray(messages) ? messages : [];
   const segs = [];
   const idToName = knownNames || toolNames(msgs);
@@ -154,7 +186,7 @@ export function serializeDelta(messages, sent, toolResultsSent = 0, knownNames) 
     if (!m) continue;
     if (m.role === 'tool') {
       results += 1;
-      segs.push(resultBlock({ name: m.name || idToName.get(m.tool_call_id) || 'unknown', status: m.isError ? 'error' : 'success', output: textOfBlocks(m.content), error: textOfBlocks(m.content) }, results % TRAIN_EVERY === 0));
+      segs.push(resultBlock({ name: m.name || idToName.get(m.tool_call_id) || 'unknown', status: m.isError ? 'error' : 'success', output: textOfBlocks(m.content), error: textOfBlocks(m.content) }, results % TRAIN_EVERY === 0, note));
       continue;
     }
     if (m.role === 'user') {
@@ -175,7 +207,7 @@ export function serializeDelta(messages, sent, toolResultsSent = 0, knownNames) 
               error = output || 'tool execution failed';
             }
             results += 1;
-            segs.push(resultBlock({ name, status, output, error }, results % TRAIN_EVERY === 0));
+            segs.push(resultBlock({ name, status, output, error }, results % TRAIN_EVERY === 0, note));
           }
         }
       } else if (typeof m.content === 'string' && m.content.trim()) {
@@ -260,6 +292,48 @@ export function coerceArguments(args, schema) {
     }
   }
   return { args: out, coerced };
+}
+
+/**
+ * 缺失必填参数补齐：DSH 按 schema 严格拒绝缺 required 的调用（真机 2026-09-13
+ * 会话 cacaba8c turn3 实锤：GLM 调 pwsh 只给 command，DSH 回
+ * `invalid arguments: missing required property "description"`，模型被这句错误
+ * 引入重试死循环）。与 coerceArguments 同一哲学——只在**无歧义**时动手：
+ *   · 只补 schema.required 声明、且类型为 string、名字是纯描述性的字段
+ *     （白名单 description：pwsh / subagent / subagent_fork 三处，都是「展示在
+ *     UI 上的用途概述」）；objective/file_path/pattern 等语义字段绝不猜；
+ *   · 值来源两级：envelope 的 purpose（模型自述的调用原因）→ 已给参数中第一个
+ *     非空字符串（pwsh→command、subagent→prompt 的前缀）；
+ *   · 两级都取不到就保持缺失，交给 DSH 报它自己的错。
+ *
+ * @param {object} args 网页解析出的参数（已经过 coerceArguments）
+ * @param {object} schema 该工具的 parameters（JSON Schema）
+ * @param {string} [purpose] 调用 envelope 里的 purpose 字段（若有）
+ * @returns {{args: object, filled: string[]}} filled 是被补齐的参数名
+ */
+const FILLABLE_REQUIRED = /^description$/;
+
+export function fillMissingRequired(args, schema, purpose) {
+  const out = (args && typeof args === 'object' && !Array.isArray(args)) ? { ...args } : {};
+  const filled = [];
+  if (!schema || typeof schema !== 'object' || !Array.isArray(schema.required)) return { args: out, filled };
+  const props = schema.properties && typeof schema.properties === 'object' ? schema.properties : {};
+  for (const key of schema.required) {
+    const current = out[key];
+    if (current !== undefined && current !== null && current !== '') continue;
+    const spec = props[key];
+    if (!spec || spec.type !== 'string' || !FILLABLE_REQUIRED.test(key)) continue;
+    let value = typeof purpose === 'string' ? purpose.trim() : '';
+    if (!value) {
+      for (const v of Object.values(out)) {
+        if (typeof v === 'string' && v.trim()) { value = v; break; }
+      }
+    }
+    if (!value) continue;
+    out[key] = value.replace(/\s+/g, ' ').trim().slice(0, 120);
+    filled.push(key);
+  }
+  return { args: out, filled };
 }
 
 /** 从 text[start]（应为 '{'）做花括号配对（跳过字符串内的括号），配平即试解析。 */
@@ -534,7 +608,10 @@ export function parseAgentReply(text) {
     const sig = obj.name.trim() + '\u0000' + JSON.stringify(args);
     if (seenSig.has(sig)) return;
     seenSig.add(sig);
-    calls.push({ name: obj.name.trim(), arguments: args });
+    // purpose 是模型对「为什么调」的自述：派发侧用它补缺失的 description 类
+    // 必填参数（fillMissingRequired），比从命令前缀派生更贴切。没有就不带键。
+    const purpose = typeof obj.purpose === 'string' ? obj.purpose.trim() : '';
+    calls.push({ name: obj.name.trim(), arguments: args, ...(purpose ? { purpose } : {}) });
   };
   const fenceRe = /```(?:json)?\s*\n?([\s\S]*?)```/gi;
   let m;
