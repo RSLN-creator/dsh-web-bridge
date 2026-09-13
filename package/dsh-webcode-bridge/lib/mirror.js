@@ -4,6 +4,7 @@
 
 import { httpFetch } from './upstream.js';
 import { isLoopbackHost } from './loopback.js';
+import { rewriteSetCookieForMirror, mergeCookieHeaders } from './cookies.js';
 
 export function createMirror(options = {}) {
   const {
@@ -257,11 +258,15 @@ export function createMirror(options = {}) {
     return headers;
   }
 
+  /**
+   * 上游 Set-Cookie → 右栏 iframe 那个源（`http://<site>.localhost:<port>`）。
+   *
+   * 实现搬到 cookies.js（纯函数，可离线断言）。旧实现是三段字符串替换，在两种
+   * 真实情形下会把登录态弄丢——见 cookies.js 顶部的取证说明与
+   * test/cookies.test.mjs 的回归用例。
+   */
   function rewriteCookie(value) {
-    return String(value)
-      .replace(/;\s*domain=[^;]*/gi, '')
-      .replace(/;\s*secure/gi, '')
-      .replace(/;\s*samesite=none/gi, '; SameSite=Lax');
+    return rewriteSetCookieForMirror(value);
   }
 
   function bootstrap(token) {
@@ -538,12 +543,17 @@ export function createMirror(options = {}) {
       if (HOP_BY_HOP.has(lower) || lower === 'origin') continue;
       headers[key] = value;
     }
-    if (req.headers.cookie) headers.cookie = req.headers.cookie;
-    else if (typeof getCookies === 'function') {
-      try {
-        const cookies = await getCookies(upstreamOrigin);
-        if (Array.isArray(cookies) && cookies.length) headers.cookie = cookies.map(c => c.name + '=' + c.value).join('; ');
-      } catch { /* best effort */ }
+    // Cookie 合并（0.14.4）：旧实现是「请求带 cookie 就只用请求里的」，于是右栏
+    // iframe 在 `<site>.localhost` 上存过任何一枚 cookie 之后，驱动 profile 里
+    // **真正登录的那份 cookie 就再也不会发给上游**——表现就是「打开右侧网页
+    // 之后掉登录」。现在 profile 优先、请求补缺，详见 cookies.mergeCookieHeaders。
+    {
+      let profileCookies = [];
+      if (typeof getCookies === 'function') {
+        try { profileCookies = await getCookies(upstreamOrigin) || []; } catch { /* best effort */ }
+      }
+      const merged = mergeCookieHeaders(profileCookies, req.headers.cookie);
+      if (merged) headers.cookie = merged;
     }
     if (typeof getUserAgent === 'function') {
       try { const ua = await getUserAgent(); if (ua) headers['user-agent'] = String(ua); } catch {}

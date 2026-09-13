@@ -8,6 +8,18 @@
 // 它不能替代真机验证（网页 DOM/SSE 仍在桥之外），但它能证明「同一段网页回复，
 // 桥不会再把它吃掉或变形」——这正是「工具调用失败」里属于桥的那一半。
 import { apply } from '../lib/index.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+// 测试隔离（0.14.4）：本文件此前不传 profileDir，于是 apply() 落到**用户真实**的
+// `~/.dsh/webcode-edge-profile`，读到真实的 `webcode-settings.json`。真机设置里
+// `sendGapMs: 30000` 会盖过用例传入的 `rateLimitBackoffMinMs: 1`（退避取
+// `max(sendGapMs, backoffMinMs)`），三次限流重试变成 30s+30s+60s=120s，正好撞上
+// 适配器侧 `IDLE_TIMEOUT_MS` 看门狗 —— 用例于是报 WEB_NO_PROGRESS 而不是
+// RATE_LIMITED，单测「看环境脸色」。这里改用一次性临时 profile，测试与用户设置解耦。
+const TEST_PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'hwb-tool-loop-'));
+process.on('exit', () => { try { fs.rmSync(TEST_PROFILE_DIR, { recursive: true, force: true }); } catch {} });
 
 const SHAPES = {
   '标准 <tool_call>': (name) => `<tool_call>{"mcp_action":"call","name":"${name}","arguments":{"command":"Get-Date"}}</tool_call>`,
@@ -32,7 +44,7 @@ async function runTurn({ reply, think, tools, sessionId, message = '看时间', 
     sendTurn: async (key, prompt, opts) => { if (think) opts.onThink?.(think); opts.onDelta?.(reply); return { text: reply }; },
     sendPrompt: async () => ({ text: '' }),
   };
-  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver, ...(config || {}) });
+  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver, profileDir: TEST_PROFILE_DIR, ...(config || {}) });
   try {
     const chunks = [];
     for await (const c of adapter.stream({

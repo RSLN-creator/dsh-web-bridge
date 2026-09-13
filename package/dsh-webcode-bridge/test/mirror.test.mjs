@@ -44,8 +44,15 @@ test('mirror serves a fixed upstream for the sidebar iframe', async (t) => {
   assert.equal(response.headers.get('content-security-policy'), null);
   assert.match(html, /data-webcode-mirror/);
   assert.match(html, /test-token/);
-  assert.match(response.headers.get('set-cookie') || '', /sid=abc/);
-  assert.doesNotMatch(response.headers.get('set-cookie') || '', /Domain=|Secure|SameSite=None/i);
+  // 0.14.4：Domain 必须去掉（跨域会被浏览器整枚丢弃），但 Secure **必须保留**——
+  // 旧断言把「剥掉 Secure」钉成了期望行为，而 `__Secure-` 前缀 cookie 缺 Secure
+  // 会被浏览器直接丢弃，正是「打开右侧网页后掉登录」的直接原因。
+  // 详见 lib/cookies.js 与 test/cookies.test.mjs。
+  const setCookie = response.headers.get('set-cookie') || '';
+  assert.match(setCookie, /sid=abc/);
+  assert.doesNotMatch(setCookie, /Domain=/i);
+  assert.doesNotMatch(setCookie, /SameSite=None/i);
+  assert.match(setCookie, /Secure/i);
 
   const foreign = await new Promise((resolve, reject) => {
     const request = http.get({ hostname: '127.0.0.1', port: relayPort, path: '/', headers: { host: 'evil.example' } }, resolve);

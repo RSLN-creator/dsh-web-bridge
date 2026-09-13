@@ -33,6 +33,10 @@ export function createRelay(options = {}) {
     loginTrigger: options.loginTrigger ?? null,  // () → open one-time login window
     sessionImport: options.sessionImport ?? null, // (sourceProfileDir) → adopt session
     consentStorePath: options.consentStorePath ?? (options.profileDir ? path.join(options.profileDir, 'webcode-consent.json') : null),
+    // 每次调用收束时的观测回调 (metrics, meta)。0.14.4：累计等待时长的唯一记账
+    // 入口——记账必须发生在**本轮真正收束**那一刻，而不是轮询 status 时补算，
+    // 否则同一条 metrics 会被重复累加（status 是被高频读取的）。
+    onMetrics: options.onMetrics ?? null,
   };
   const log = (...a) => cfg.logger.log?.('[webcode-relay]', ...a);
   const warn = (...a) => cfg.logger.warn?.('[webcode-relay]', ...a);
@@ -182,6 +186,9 @@ export function createRelay(options = {}) {
           // browser-driver 的 WIP 稳态收束；null 表示驱动没报（旧版本/dom 站点）。
           endReason: typeof measured.endReason === 'string' ? measured.endReason : null,
         };
+        // 观测回调：累计等待时长在这里落账（见 cfg.onMetrics 注释）。回调失败
+        // 绝不能影响本轮结果——统计是附带产物，不是主链路。
+        try { cfg.onMetrics?.(metrics, item.meta || null); } catch (err) { warn('onMetrics failed:', err?.message); }
         lastError = '';
         e.item.resolve({
           text: (text ?? e.text) || '',

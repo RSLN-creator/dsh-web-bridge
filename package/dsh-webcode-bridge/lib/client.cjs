@@ -155,6 +155,41 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 输入框底下的「等待发送」速览（0.14.4）。
+     *
+     * 用户要求：输入界面框底下增加速度，含「本次会话的总等待发送消息时间」，
+     * 与官方格式类似。官方在同一个槽位（`conversation.composer.dock`）放的是
+     * 一行状态药丸（ui-chat 的 StatsPills、ui-goal 的 GoalDock），因此这里也走
+     * 同一个规范入口，而不是自绘浮层——自绘会与宿主重排打架。
+     *
+     * 文案由**服务端**算好（/__webcode/wait-stats 的 `line` 字段）：本文件是单
+     * 文件 bundle，import 不到 lib/wait-stats.js。若在这里再写一份时长格式化，
+     * 这条与设置页的「累计」迟早会长得不一样，用户就无法信任任何一个数。
+     *
+     * 数据不足时服务端回 null，这里**整行不渲染**——新会话第一条消息之前不该
+     * 看到一行 `0 ms`。
+     *
+     * @param {{sessionId?: string}} owner 由 inject 注入的会话 id
+     */
+    function WaitLine(owner) {
+      const sessionId = owner?.sessionId || null;
+      const [line, setLine] = React.useState('');
+      React.useEffect(() => {
+        if (!sessionId) { setLine(''); return () => {}; }
+        let alive = true;
+        const pull = () => api('wait-stats', { sessionId })
+          .then(r => { if (alive) setLine(typeof r?.line === 'string' ? r.line : ''); })
+          .catch(() => { /* 中继未起时静默：这条是附加信息，不该刷错误 */ });
+        pull();
+        // 10 秒一次足够：这个数只在本轮结束后才变，且是本地回环请求。
+        const timer = setInterval(pull, 10000);
+        return () => { alive = false; clearInterval(timer); };
+      }, [sessionId]);
+      if (!line) return null;
+      return h('div', { className: 'hwb-waitline', role: 'status' }, line);
+    }
+
+    /**
      * 首轮提示词面板（0.14.0）。
      *
      * 用户原话：「设置界面提示词应该默认就显示，首轮提示词又不会变？有多的适配
@@ -417,6 +452,31 @@ window.__ModuleLoader__.load({
             + '各站点登录态分开保存在各自 profile 里，互不串号；账户失效时在这里「更换账户」即可。'));
     }
 
+    /**
+     * 设置页的「累计等待发送」区块（0.14.4）。
+     *
+     * 用户要求：设置界面新增统计**所有累计**的等待时长，并且要「简洁直观、
+     * 不要沉在底部」。因此这里做成网格化的键值对（而不是一段长句），放在
+     * 速度卡片顶部——速度与等待本来就是同一件事的两面。
+     *
+     * 数值与文案都由服务端算（/__webcode/wait-stats 的 `rows`），与输入框底下
+     * 那条同源：本文件 import 不到 lib/wait-stats.js。
+     */
+    function WaitStats() {
+      const [rows, setRows] = React.useState(null);
+      React.useEffect(() => {
+        let alive = true;
+        const pull = () => api('wait-stats').then(r => { if (alive) setRows(Array.isArray(r?.rows) ? r.rows : []); }).catch(() => {});
+        pull();
+        const timer = setInterval(pull, 8000);
+        return () => { alive = false; clearInterval(timer); };
+      }, []);
+      if (!rows || !rows.length) return null;
+      return h('dl', { className: 'hwb-waitgrid' },
+        rows.map(r => h('div', { key: r.label },
+          h('dt', null, r.label), h('dd', null, r.value))));
+    }
+
     function Settings() {
       const [status, setStatus] = React.useState(null);
       const [error, setError] = React.useState('');
@@ -548,7 +608,8 @@ window.__ModuleLoader__.load({
                 : '首次使用时请勾选授权一次；关闭后所有网页调用都会被拒绝。'))),
 
         h('div', { className: 'hwb-card' },
-          h('h3', { className: 'hwb-group first' }, '速度观测（最近一次生成）'),
+          h('h3', { className: 'hwb-group first' }, '速度与等待'),
+          h(WaitStats),
           h('div', { className: 'hwb-row' }, h('div', { className: 'hwb-row-main' }, h(Metrics, { metrics }))),
           // 「网页端回复了但 harness 这边卡住」（0.14.0）：驱动侧现在会在网页
           // 不发 FINISHED 时按稳态收束，并把次数/最后一次原因记在 status 里。
@@ -650,7 +711,7 @@ window.__ModuleLoader__.load({
       bind(h) { this.handlers = h; return () => { if (this.handlers === h) this.handlers = null; }; },
     };
 
-    function Conversation({ browserSrc }) {
+    function Conversation({ browserSrc, onSplit, onFloat }) {
       const [siteId, setSiteId] = React.useState('deepseek');
       const [siteStatuses, setSiteStatuses] = React.useState({});
       // iframe 保活：每个访问过的站点一个 frame，全部常驻 DOM，用 display 切换。
@@ -777,6 +838,32 @@ window.__ModuleLoader__.load({
       // 键盘导航：tablist 规范要求左右方向键在标签间移动（Home/End 到两端）。
       // 只切 state，不自己 focus——焦点仍留在原来的按钮上，避免面板重排后
       // 焦点跳到 iframe 里（那会让用户以为右栏卡死）。
+      // ---- 站点标签条：滚轮横向滚动（0.14.4） -------------------------------
+      // 用户报「右滑只能拖右滑栏，而且还有一点遮挡」。鼠标停在标签条上滚轮就该
+      // 能横向滚——标签溢出时这是最自然的操作。React 的 onWheel 挂在根容器上且
+      // 是**被动监听**（preventDefault 无效），因此这里挂原生非被动监听。
+      const tabsRef = React.useRef(null);
+      React.useEffect(() => {
+        const el = tabsRef.current;
+        if (!el) return () => {};
+        const onWheel = (e) => {
+          // 横向滚轮 / 触控板横滑本来就能滚，不抢；只接管纵向滚轮。
+          if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+          const before = el.scrollLeft;
+          el.scrollLeft = before + e.deltaY;
+          if (el.scrollLeft !== before) e.preventDefault();
+        };
+        el.addEventListener('wheel', onWheel, { passive: false });
+        return () => el.removeEventListener('wheel', onWheel);
+      }, [frames]);
+      /** 在新分屏里打开某个站点（多开不同网页）。宿主不支持时安静略过。 */
+      const openSiteInPane = (sid) => {
+        try {
+          if (typeof onSplit !== 'function') { setSiteId(sid); return; }
+          setSiteId(sid);
+          onSplit(sid);
+        } catch { setSiteId(sid); }
+      };
       const siteIds = Object.keys(SITE_NAMES);
       const onTabKey = (e) => {
         const i = siteIds.indexOf(siteId);
@@ -792,7 +879,7 @@ window.__ModuleLoader__.load({
       };
       return h('div', { className: 'hwb-conversation' },
         h('div', { className: 'hwb-sitebar', role: 'tablist', 'aria-label': '内容服务站点', onKeyDown: onTabKey },
-          h('div', { className: 'hwb-sitebar-tabs' },
+          h('div', { className: 'hwb-sitebar-tabs', ref: tabsRef },
             Object.entries(SITE_NAMES).map(([sid, name]) => h('button', {
               key: sid, role: 'tab', 'aria-selected': sid === siteId,
               // 漫游 tabindex：只有当前标签可 Tab 进入，进入后用方向键移动。
@@ -802,16 +889,33 @@ window.__ModuleLoader__.load({
               className: 'hwb-site-tab' + (sid === siteId ? ' active' : ''),
               title: name + ' · ' + statusLabel(siteStatuses[sid]) + (statusTitle(siteStatuses[sid]) ? ' · ' + statusTitle(siteStatuses[sid]) : ''),
               onClick: () => setSiteId(sid),
-            }, h('span', null, name), h('span', { className: 'hwb-tab-state ' + statusClass(siteStatuses[sid]), title: statusTitle(siteStatuses[sid]) }, statusLabel(siteStatuses[sid]))))),
-          h('button', {
-            className: 'hwb-icon-btn', title: '刷新右侧网页（重新加载镜像页面）',
-            'aria-label': '刷新右侧网页', onClick: reloadFrame,
-          }, '\u21bb'),
-          h('button', {
-            className: 'hwb-win-btn' + (winIsOpen(siteId) ? ' open' : ''), disabled: winBusy,
-            title: winIsOpen(siteId) ? '收起该站点的独立窗口（回到无头运行）' : '在独立窗口中打开真实网页（已开的窗口会聚焦弹到最前，不会覆盖）',
-            'aria-pressed': winIsOpen(siteId), onClick: toggleWindow,
-          }, winBusy ? '窗口切换中…' : winIsOpen(siteId) ? '✓ 已开独立窗口 · 点击收回' : '⧉ 独立窗口打开')),
+              // Ctrl/⌘ + 点击 = 在**新分屏**里打开该站点：多开不同网页的直接入口
+              //（另一块面板是独立的组件实例，站点选择互不影响）。
+              onAuxClick: (e) => { if (e.button === 1) { e.preventDefault(); openSiteInPane(sid); } },
+            }, h('span', { className: 'hwb-site-tab-name' }, name),
+              h('span', { className: 'hwb-tab-state ' + statusClass(siteStatuses[sid]), title: statusTitle(siteStatuses[sid]) }, statusLabel(siteStatuses[sid]))))),
+          // 动作组：统一成同一套图标按钮（旧实现里刷新是裸图标、独立窗口是一颗
+          // 长药丸，两套视觉语言并存——用户报「刷新栏目/独立窗口状态有点简略，
+          // 而且不统一风格」）。现在四颗按钮同高、同圆角、同状态表达。
+          h('div', { className: 'hwb-sitebar-actions' },
+            h('button', {
+              className: 'hwb-act-btn', title: '刷新当前站点网页（重新加载镜像页面）',
+              'aria-label': '刷新右侧网页', onClick: reloadFrame,
+            }, h('span', { className: 'hwb-act-ico' }, '\u21bb'), h('span', { className: 'hwb-act-txt' }, '刷新')),
+            h('button', {
+              className: 'hwb-act-btn' + (winIsOpen(siteId) ? ' on' : ''), disabled: winBusy,
+              title: winIsOpen(siteId) ? '收起该站点的独立窗口（回到无头运行）' : '在独立窗口中打开真实网页（已开的窗口会聚焦弹到最前，不会覆盖）',
+              'aria-pressed': winIsOpen(siteId), onClick: toggleWindow,
+            }, h('span', { className: 'hwb-act-ico' }, winIsOpen(siteId) ? '\u25a3' : '\u29c9'),
+              h('span', { className: 'hwb-act-txt' }, winBusy ? '切换中' : winIsOpen(siteId) ? '已开窗口' : '独立窗口')),
+            onSplit && h('button', {
+              className: 'hwb-act-btn', title: '在新分屏中再开一个网页面板（可同时看两个不同站点）',
+              'aria-label': '新分屏打开网页面板', onClick: onSplit,
+            }, h('span', { className: 'hwb-act-ico' }, '\u25eb'), h('span', { className: 'hwb-act-txt' }, '分屏')),
+            onFloat && h('button', {
+              className: 'hwb-act-btn', title: '把本面板浮动成独立窗口（可拖拽、可同时开多个）',
+              'aria-label': '浮动本面板', onClick: onFloat,
+            }, h('span', { className: 'hwb-act-ico' }, '\u2750'), h('span', { className: 'hwb-act-txt' }, '浮动')))),
         // 站点栏之下的「网页区」：iframe 与各种遮罩（加载中 / 拦截 / 不可达 /
         // 未初始化）全部放在这里。遮罩的 position:absolute;inset:0 于是只覆盖
         // 网页区——0.12.9 的遮罩是面板根的兄弟节点，加载时会把整条站点栏也糊掉，
@@ -913,6 +1017,13 @@ window.__ModuleLoader__.load({
         ".hwb-badge{display:inline-block;font-size:11px;line-height:16px;padding:0 8px;margin-right:6px;border-radius:8px;border:.5px solid var(--dsw-alias-border-l3,#8885);color:var(--dsw-alias-label-secondary,inherit)}",
         ".hwb-badge.measured{color:var(--dsw-alias-state-success-primary,#2e7d32);border-color:var(--dsw-alias-state-success-primary,#2e7d32)}",
         ".hwb-bar-row{display:flex;align-items:center;gap:12px}",
+        // 输入框底下的等待速览（0.14.4）。官方在同一槽位放一行状态药丸，
+        // 因此这里也只占一行、克制低饱和，不抢输入框的视觉重量。
+        ".hwb-waitline{font-size:12px;line-height:18px;padding:2px 10px;color:var(--dsw-alias-label-tertiary,#8a8f98);font-variant-numeric:tabular-nums}",
+        ".hwb-waitgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px 16px;width:100%}",
+        ".hwb-waitgrid div{display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px}",
+        ".hwb-waitgrid dt{color:var(--dsw-alias-label-tertiary,#8a8f98)}",
+        ".hwb-waitgrid dd{margin:0;color:var(--dsw-alias-label-primary,inherit);font-variant-numeric:tabular-nums}",
         ".hwb-bar-label{flex:0 0 76px;font-size:12px;color:var(--dsw-alias-label-secondary,inherit)}",
         ".hwb-bar-track{flex:1;height:8px;border-radius:4px;overflow:hidden;background:var(--dsw-alias-interactive-bg-hover,#8882)}",
         ".hwb-bar-fill{display:block;height:100%;border-radius:4px;background:var(--dsw-alias-label-tertiary,#8a8f98);transition:width .2s ease}",
@@ -926,16 +1037,29 @@ window.__ModuleLoader__.load({
         // 全局指令编辑区 / 首轮提示词面板的容器
         ".hwb-import{display:flex;flex-direction:column;gap:8px;padding:8px 0}",
         ".hwb-conversation{position:relative;display:flex;flex-direction:column;width:100%;height:100%;min-height:0}",
-        ".hwb-sitebar{display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:.5px solid var(--dsw-alias-border-l4,#8884)}",
-        ".hwb-sitebar-tabs{display:flex;gap:4px;overflow-x:auto;flex:1}",
-        ".hwb-site-tab{flex:none;display:inline-flex;align-items:center;gap:4px;height:28px;padding:0 12px;font:inherit;font-size:12px;color:var(--dsw-alias-label-secondary,inherit);background:transparent;border:.5px solid transparent;border-radius:14px;cursor:pointer}",
-        ".hwb-site-tab:hover{background:var(--dsw-alias-interactive-bg-hover,#8882)}",
+        // 站点栏：flex:none + z-index 保证**永不被网页区遮住**（用户报的「有一点
+        // 遮挡」就是旧实现里网页区在层叠上压过了标签条）。
+        ".hwb-sitebar{flex:none;position:relative;z-index:2;display:flex;align-items:center;gap:6px;padding:6px 8px;background:var(--dsw-alias-bg-base,transparent);border-bottom:.5px solid var(--dsw-alias-border-l4,#8884)}",
+        // 标签条：可横向滚，但**不显示滚动条**（滚动条本身就是那点「遮挡」的来源）；
+        // 两端加渐隐遮罩，提示「还有更多」。
+        ".hwb-sitebar-tabs{display:flex;gap:4px;overflow-x:auto;flex:1;min-width:0;scrollbar-width:none;-ms-overflow-style:none;scroll-behavior:smooth;mask-image:linear-gradient(to right,transparent 0,#000 8px,#000 calc(100% - 8px),transparent 100%)}",
+        ".hwb-sitebar-tabs::-webkit-scrollbar{display:none}",
+        ".hwb-site-tab{flex:none;display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 12px;font:inherit;font-size:12px;line-height:26px;color:var(--dsw-alias-label-secondary,inherit);background:transparent;border:.5px solid transparent;border-radius:14px;cursor:pointer;transition:background .12s ease,color .12s ease,border-color .12s ease}",
+        ".hwb-site-tab:hover{background:var(--dsw-alias-interactive-bg-hover,#8882);color:var(--dsw-alias-label-primary,inherit)}",
         ".hwb-site-tab.active{color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border-color:var(--dsw-alias-border-l3,#8885)}",
-        ".hwb-icon-btn{flex:none;width:28px;height:28px;display:grid;place-items:center;color:var(--dsw-alias-label-secondary,inherit);background:transparent;border:none;border-radius:14px;cursor:pointer}",
-        ".hwb-icon-btn:hover{background:var(--dsw-alias-interactive-bg-hover,#8882)}",
-        ".hwb-win-btn{flex:none;height:28px;padding:0 12px;font:inherit;font-size:12px;color:var(--dsw-alias-label-secondary,inherit);background:transparent;border:.5px solid var(--dsw-alias-border-l3,#8885);border-radius:14px;cursor:pointer}",
-        ".hwb-win-btn.open{color:var(--dsw-alias-state-success-primary,#2e7d32);border-color:var(--dsw-alias-state-success-primary,#2e7d32)}",
-        ".hwb-frame-host{position:relative;flex:1;min-height:0}",
+        ".hwb-site-tab-name{white-space:nowrap}",
+        // 动作组：四颗同形按钮。旧实现刷新是裸图标、独立窗口是长药丸，两套视觉
+        // 语言并存，状态也各说各话；现在统一高度/圆角/悬停/激活表达。
+        ".hwb-sitebar-actions{flex:none;display:inline-flex;align-items:center;gap:4px}",
+        ".hwb-act-btn{display:inline-flex;align-items:center;gap:4px;height:28px;padding:0 10px;font:inherit;font-size:12px;line-height:26px;color:var(--dsw-alias-label-secondary,inherit);background:transparent;border:.5px solid transparent;border-radius:14px;cursor:pointer;transition:background .12s ease,color .12s ease,border-color .12s ease}",
+        ".hwb-act-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,#8882);color:var(--dsw-alias-label-primary,inherit)}",
+        ".hwb-act-btn:disabled{opacity:.45;cursor:default}",
+        ".hwb-act-btn.on{color:var(--dsw-alias-state-success-primary,#2e7d32);border-color:var(--dsw-alias-state-success-primary,#2e7d32)}",
+        ".hwb-act-ico{font-size:13px;line-height:1}",
+        ".hwb-act-txt{white-space:nowrap}",
+        // 窄面板里只留图标，避免动作组把标签条挤没（面板宽度是用户可拖的）。
+        "@container (max-width: 380px){.hwb-act-txt{display:none}.hwb-act-btn{padding:0 8px}}",
+        ".hwb-frame-host{position:relative;flex:1;min-height:0;overflow:hidden;z-index:1}",
         ".hwb-browser-frame{display:block;width:100%;height:100%;min-height:0;border:0;background:#fff}",
         ".hwb-frame-status{position:absolute;inset:0;display:grid;place-items:center;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-tertiary,#7a8494);font-size:12px;pointer-events:none}",
         ".hwb-error,.hwb-guide{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:24px;text-align:center;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-secondary,#394150)}",
@@ -966,6 +1090,19 @@ window.__ModuleLoader__.load({
         if (typeof off === 'function') disposers.push(off);
       };
 
+      // ---- 输入框底下的等待速览（0.14.4，官方 conversation.composer.dock） ----
+      // 官方在同一个槽位放状态药丸（ui-chat 的 StatsPills / ui-goal 的 GoalDock），
+      // 因此走同一个规范入口，而不是自绘浮层——自绘会与宿主重排打架。
+      // inject 拿到的 sessionId 是**当前会话**，服务端据此回本会话的账本。
+      own(() => {
+        try {
+          return ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
+            name: 'conversation.composer.dock', id: 'webcode-wait', order: 20,
+            inject: (sessionId) => ({ sessionId }),
+          }, WaitLine));
+        } catch (e) { warn('composer.dock wait line', e); }
+      });
+
       // ---- 设置页（真实需求重构：登录管理前置、无历史导入） ------------
       own(() => {
         try {
@@ -979,7 +1116,33 @@ window.__ModuleLoader__.load({
       // ---- 官方右侧栏（@deepseek-ai/dsh-client-ui-sidebar-right）--------
       const TAB_ID = 'dsh-webcode-bridge';
       const TAB_KIND = 'webcode-bridge';
-      const WebcodeBody = () => h(Conversation, { browserSrc: relayBase + '/' });
+      /**
+       * 多开不同网页（0.14.4）。
+       *
+       * DSH 官方右侧栏自带「分屏 / 浮动」两种多面板形态（`ctx.sidebarRight.split`
+       * 与 `.float`），因此**不自己发明浮层**——自绘浮层正是旧实现「遮挡」的来源。
+       * 分屏后在新 pane 里打开同一个 kind：pane 之间是独立的组件实例，各自的
+       * 站点选择与 iframe 池互不影响，于是「同时看两个不同网页」自然成立。
+       *
+       * 宿主没提供该能力时（旧版本）按钮不渲染，而不是点了报错。
+       */
+      const splitPanel = (typeof ctx.sidebarRight?.split === 'function')
+        ? (sid) => {
+          try {
+            const paneId = ctx.sidebarRight.split();
+            if (paneId) ctx.sidebarRight.openTab(TAB_KIND, { paneId });
+          } catch (e) { warn('sidebarRight.split', e); }
+        }
+        : null;
+      const floatPanel = (typeof ctx.sidebarRight?.float === 'function')
+        ? () => {
+          try {
+            const rec = ctx.sidebarRight.active?.();
+            if (rec?.id) ctx.sidebarRight.float(rec.id);
+          } catch (e) { warn('sidebarRight.float', e); }
+        }
+        : null;
+      const WebcodeBody = () => h(Conversation, { browserSrc: relayBase + '/', onSplit: splitPanel, onFloat: floatPanel });
 
       own(() => {
         try {
@@ -991,7 +1154,7 @@ window.__ModuleLoader__.load({
             guide: [{
               order: 55,
               title: () => 'Web Bridge',
-              description: () => '打开内容服务的真实网页',
+              description: () => '打开内容服务的真实网页（可多开：Ctrl+点击站点，或用面板上的「分屏 / 浮动」）',
             }],
           });
         } catch (e) { warn('sidebarRightTabs.register', e); }

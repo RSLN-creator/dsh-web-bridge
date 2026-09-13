@@ -21,6 +21,7 @@ import { createMirror } from './mirror.js';
 import { httpFetch } from './upstream.js';
 import { textOfBlocks } from './flatten.js';
 import { estimateTokens, computeSendGap, checkContextBudget } from './metrics.js';
+import { accumulateWait, sanitizeWaitStats, emptyWaitStats, composerWaitLine, waitStatRows, formatDuration } from './wait-stats.js';
 import { renderSettingsPage } from './settings-page.js';
 
 export const name = 'webcode-bridge';
@@ -1182,6 +1183,74 @@ function imageMarkdown(images) {
       fs.renameSync(tmp, sendStatePath);
     } catch (err) { warn('send-state save failed:', err?.message); }
   }
+
+  // ---- 等待发送时长的累计账本（0.14.4） ----------------------------------
+  // 需求：输入框底下要显示「本次会话总等待发送时间」，设置页要显示「累计等待时长」。
+  // 两者必须同口径（都来自 relay 的 metrics.sendWaitMs），因此共用 wait-stats.js 的
+  // 纯计算层，这里只负责**落盘与按会话索引**。
+  //
+  // 为什么要落盘：DSH 重启会顶掉进程内状态，用户看到的「累计」如果每次重启归零，
+  // 这个数字就没有意义了（与 send-state 落盘同一个理由）。
+  const waitStatsPath = path.join(cfg.profileDir, 'webcode-wait-stats.json');
+  // 单会话索引的上限：只保留最近活跃的若干个会话。GUI 只会读**当前**会话那一格，
+  // 但「累计」是全量的——淘汰只影响按会话查询，不影响总数。
+  const WAIT_SESSION_CAP = 64;
+  let waitStats = (function loadWaitStats() {
+    try {
+      const raw = JSON.parse(fs.readFileSync(waitStatsPath, 'utf8'));
+      return {
+        total: sanitizeWaitStats(raw?.total),
+        sessions: new Map(Object.entries(raw?.sessions && typeof raw.sessions === 'object' ? raw.sessions : {})
+          .slice(0, WAIT_SESSION_CAP)
+          .map(([k, v]) => [k, sanitizeWaitStats(v)])),
+      };
+    } catch { return { total: emptyWaitStats(), sessions: new Map() }; }
+  })();
+  function saveWaitStats() {
+    try {
+      fs.mkdirSync(path.dirname(waitStatsPath), { recursive: true });
+      const payload = { total: waitStats.total, sessions: Object.fromEntries(waitStats.sessions) };
+      const tmp = waitStatsPath + '.tmp-' + process.pid;
+      fs.writeFileSync(tmp, JSON.stringify(payload), { mode: 0o600 });
+      fs.renameSync(tmp, waitStatsPath);
+    } catch (err) { warn('wait-stats save failed:', err?.message); }
+  }
+  /**
+   * relay 的观测回调：把本轮等待记进「累计」与「本会话」两个账本。
+   *
+   * 会话键取 meta.sessionKey 的**会话段**（`<sessionId>::<agentId>` → `<sessionId>`）：
+   * 子代理有自己的网页对话，但「本次会话等待发送」在用户眼里就是主会话那一个数，
+   * 不该被子代理的等待混进来。
+   */
+  function recordWaitMetrics(metrics, meta) {
+    if (!metrics) return;
+    waitStats.total = accumulateWait(waitStats.total, metrics);
+    const key = sessionKeyOf(meta);
+    if (key) {
+      const prev = waitStats.sessions.get(key) || null;
+      // 重新插入以刷新 Map 的插入序，配合下面的头部淘汰就是 LRU。
+      waitStats.sessions.delete(key);
+      waitStats.sessions.set(key, accumulateWait(prev, metrics));
+      while (waitStats.sessions.size > WAIT_SESSION_CAP) {
+        waitStats.sessions.delete(waitStats.sessions.keys().next().value);
+      }
+    }
+    saveWaitStats();
+  }
+  /** meta.sessionKey / meta.sessionId → 主会话 id（拿不到就返回 null，只记总数）。 */
+  function sessionKeyOf(meta) {
+    const raw = meta && (meta.sessionKey || meta.sessionId);
+    if (typeof raw !== 'string' || !raw) return null;
+    return raw.split('::')[0] || null;
+  }
+  /** 控制面读取用：`{ total, session }`。sessionId 缺省时只回累计。 */
+  function waitStatsSnapshot(sessionId) {
+    const key = typeof sessionId === 'string' && sessionId ? sessionId.split('::')[0] : null;
+    return {
+      total: waitStats.total,
+      session: key ? (waitStats.sessions.get(key) || emptyWaitStats()) : null,
+    };
+  }
   // 站点限流退避重试上限（RATE_LIMITED）。退避时长 = max(发送间隔, 10s) × 已重试次数，
   // 10s 下限是因为限流滑窗通常以十秒计，几十毫秒的短间隔重试只会再次撞墙。
   const RATE_LIMIT_RETRIES = 2;
@@ -1197,6 +1266,8 @@ function imageMarkdown(images) {
   const relay = createRelay({
     ...cfg,
     logger: console,
+    // 累计等待时长的记账入口（见 recordWaitMetrics）。
+    onMetrics: recordWaitMetrics,
     // Session mode routes into the session's own web conversation (only the
     // increment lands); stateless turns (OpenAI front, aux) stay fresh.
     executor: async (prompt, opts) => {
@@ -1435,6 +1506,8 @@ function imageMarkdown(images) {
     // B-3：把「声明窗口」的取值函数交给控制面，让 /__webcode/context-windows
     // 列出的值与 resolveModel 声明的、预算闸比的是**同一个数**。
     contextWindowOf: (m) => contextWindowFor(m),
+    // 等待发送时长的累计账本（设置页「累计」+ 输入框底下的「本次会话」同源）。
+    waitStatsOf: (sessionId) => waitStatsSnapshot(sessionId),
   });
   const mirror = createMirror({
     siteOrigin: new URL(cfg.site).origin,

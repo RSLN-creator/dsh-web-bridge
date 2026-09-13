@@ -18,6 +18,7 @@
 
 import { listAllModels, SITES, getSite } from './providers.js';
 import { buildPromptVariants } from './prompt-variants.js';
+import { composerWaitLine, waitStatRows, formatDuration } from './wait-stats.js';
 import { isLoopbackHost, originMatchesHost } from './loopback.js';
 import { httpFetch } from './upstream.js';
 import fs from 'node:fs';
@@ -88,6 +89,7 @@ export function createWebControl(deps = {}) {
     presetInfo = null,  // () → { prompt, model, tools, at } — last first-turn text
     settingsStore = null, // { get: () => ({extraPrompt}), set: (value) => ({extraPrompt}) }
     contextWindowOf = null, // (model) → number — 与 resolveModel/预算闸同一个取值函数
+    waitStatsOf = null,     // (sessionId?) → { total, session } — 等待发送时长累计账本
   } = deps;
   const log = (...a) => logger.log?.('[webcode-web]', ...a);
   const warn = (...a) => logger.warn?.('[webcode-web]', ...a);
@@ -163,6 +165,33 @@ export function createWebControl(deps = {}) {
     });
   }
 
+  /**
+   * 等待发送时长的**唯一**展示载荷（0.14.4）。
+   *
+   * 为什么在服务端算文案：client.cjs 是单文件 bundle，import 不到 lib/ 的模块。
+   * 若在浏览器侧再写一份时长格式化，输入框底下那条与设置页那条迟早会长得不一样，
+   * 用户就无法信任任何一个数。这里一次算清，两边都读同一份结果。
+   *
+   * @param {string} [sessionId] 要附带的会话账本（缺省只回累计）
+   * @param {object} [metrics] 本轮 relay.metrics，用于「距上次发送」注解
+   */
+  function waitStatsPayload(sessionId, metrics) {
+    const snap = waitStatsOf ? waitStatsOf(sessionId) : { total: null, session: null };
+    const total = snap?.total || null;
+    const session = snap?.session || null;
+    return {
+      ok: true,
+      total,
+      session,
+      // 设置页「累计」区块直接渲染这些行。
+      rows: total ? waitStatRows(total) : [],
+      // 输入框底下那一条速览（数据不足时为 null，前端据此不渲染）。
+      line: composerWaitLine({ session, metrics }) || (total && total.totalWaitMs > 0
+        ? '累计等待发送 ' + formatDuration(total.totalWaitMs)
+        : null),
+    };
+  }
+
   /** One route table keyed by "METHOD path-suffix". */
   const actions = {
     'POST connect': async (body) => {
@@ -228,6 +257,14 @@ export function createWebControl(deps = {}) {
       return { ok: true, consent: relay.status().consent };
     },
     'GET models': async () => ({ ok: true, models: listAllModels() }),
+    // 等待发送时长（0.14.4）：累计（设置页）与本会话（输入框底下速览）同源。
+    //
+    // 展示文案由**服务端**算好（composerWaitLine / waitStatRows）：client.cjs 是单
+    // 文件 bundle，import 不到 lib/ 的模块，若在浏览器侧再写一份 formatDuration，
+    // 两个数字迟早会长得不一样——用户就无法信任任何一个。这里一次算清。
+    // 走 POST 是因为要带 sessionId；GET 形态同时保留，便于 curl 核对累计值。
+    'POST wait-stats': async (body) => waitStatsPayload(body?.sessionId, body?.metrics || null),
+    'GET wait-stats': async () => waitStatsPayload(),
     // 窗口声明可见性（B-3）——「桥向 DSH 声明的上下文窗口」此前只存在于代码里，
     // 用户在 GUI 上看到的占用百分比是相对一个**看不见**的数，越界报错也说不清
     // 比的是哪个值。这里把每个站点的声明值 + 它的**来源**（实测 / 配置覆盖 /

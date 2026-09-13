@@ -12,6 +12,7 @@
 // {text, thinking, images}——修复“没有思考链条”“有图说没图”。
 
 import { chromium } from 'playwright-core';
+import { toPlaywrightCookie } from './cookies.js';
 import { getSite, getContract, resolveWebModel, conversationNav, conversationIdFromUrl } from './contract.js';
 import { selectWebModel, pickerUsable } from './model-picker.js';
 import { deriveLastRate, shouldSettleWip } from './metrics.js';
@@ -458,15 +459,31 @@ export function createBrowserDriver(options = {}) {
     if (!ctx || typeof ctx.cookies !== 'function') return [];
     try { return await ctx.cookies(origin); } catch { return []; }
   }
+  /**
+   * 把上游的 Set-Cookie 写回**驱动自己的** cookie jar。
+   *
+   * 旧实现只取 `name=value` 就 `ctx.addCookies([{name,value,url}])`，在三种真实
+   * 情形下是有害的（0.14.4，豆包「登录后右侧打开网页会掉登录」的根因之一）：
+   *   • **删除被当成设置**：`name=; Max-Age=0` 会被写成「该 cookie 的空值且不过期」
+   *     ——profile 里那枚有效登录 cookie 当场被抹掉，下一轮真实发送就是未登录。
+   *   • `__Secure-` / `__Host-` 前缀 cookie 必须带 `secure: true`，否则 playwright
+   *     直接抛错，**整批一枚都写不进去**。
+   *   • `SameSite=None` 必须与 `Secure` 同时成立，缺任一会被浏览器拒绝。
+   *
+   * 现在按 RFC 6265 解析（cookies.toPlaywrightCookie）：删除 → `expires: 0`；
+   * 其余带上 domain/path/secure/sameSite/expires 写入。
+   *
+   * @param {string[]} setCookieHeaders 上游原样的 Set-Cookie 头（可多条）
+   * @param {string} [origin] 归属源；用于补齐 host-only 的 domain
+   */
   async function writeProfileCookies(setCookieHeaders, origin = siteUrl) {
     if (!ctx || typeof ctx.addCookies !== 'function') return;
     const url = String(origin).replace(/\/$/, '') + '/';
+    const now = Date.now();
     const list = [];
     for (const raw of Array.isArray(setCookieHeaders) ? setCookieHeaders : []) {
-      const first = String(raw).split(';', 1)[0];
-      const eq = first.indexOf('=');
-      if (eq <= 0) continue;
-      list.push({ name: first.slice(0, eq).trim(), value: first.slice(eq + 1).trim(), url });
+      const cookie = toPlaywrightCookie(raw, url, now);
+      if (cookie) list.push(cookie);
     }
     if (list.length) await ctx.addCookies(list);
   }

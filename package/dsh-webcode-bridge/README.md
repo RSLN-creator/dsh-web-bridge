@@ -1,13 +1,53 @@
 # Harness Web Bridge
 
-已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.14.3。
+已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.14.4。
 
-安装：`pnpm pack` 后执行 `dsh plugin --profile web add ./dsh-webcode-bridge-0.14.3.tgz`，重启 `dsh web`。需要 Node.js 20+、系统 Edge；无需浏览器扩展。
+安装：`pnpm pack` 后执行 `dsh plugin --profile web add ./dsh-webcode-bridge-0.14.4.tgz`，重启 `dsh web`。需要 Node.js 20+、系统 Edge；无需浏览器扩展。
 
 原生「设置 > 网页桥接」管理登录与启用开关。默认沿用 `~/.dsh/webcode-edge-profile`。
 模型分组 Harness Web Bridge 暴露全部内容服务站点（`site:model` 限定 id）；显示名为
 「站点短键/模型 id」（如 `z.ai/glm-5.3`、`deepseek/deepseek`），**一眼能看出是哪个
 网站**；兼容别名 `deepseek-web` 不出现在下拉里（历史会话仍可解析）。
+
+## 0.14.4
+
+**修掉「打开右侧网页之后掉登录」，并把等待时间变成可核对的两个数。**
+
+### 掉登录（豆包真机报障）
+
+根因在 `Set-Cookie` 的两个消费方向被混成字符串替换（`lib/cookies.js` 是本次抽出的纯模块）：
+
+1. **删除指令被当成「设成空值」**。站点在 iframe 里刷新会话时回 `name=; Max-Age=0`，
+   旧实现把空值写回驱动 profile——**把有效登录 cookie 就地抹掉**，下一轮真实发送即未登录。
+   现在按 RFC 6265 判定删除，翻译成 `expires: 0`。
+2. **`__Secure-` / `__Host-` 前缀 cookie 被剥掉 `Secure`**。浏览器按前缀规则**直接丢弃**，
+   playwright 侧同样抛错导致整批写不进去。现在保留/补齐 `Secure`，`__Host-` 补 `Path=/`。
+3. **镜像转发时 profile 的 cookie 被 iframe 的旧值挤掉**。旧实现「请求带 cookie 就只用请求里的」，
+   于是驱动 profile 里真正登录的那份**永远不再发给上游**。现在按 profile 优先、请求补缺合并。
+
+### 等待时长（输入框底下 + 设置页累计）
+
+新增 `lib/wait-stats.js` 纯计算层，**输入框底下的「本次会话等待发送」与设置页的「累计等待发送」
+同口径**（都来自 relay 的 `sendWaitMs`），文案由服务端一次算清，避免两处各写一份格式化后漂移。
+展示走官方 `conversation.composer.dock` 槽位（与 ui-chat 的 StatsPills、ui-goal 的 GoalDock 同一入口）。
+账本落盘 `webcode-wait-stats.json`，重启不清零。
+
+### 右栏
+
+- 站点标签条支持**鼠标滚轮横向滚动**（原生非被动监听），去掉滚动条并加两端渐隐——
+  消除「只能拖右滑栏、还有一点遮挡」。
+- 「刷新 / 独立窗口 / 分屏 / 浮动」统一成同一套图标按钮（同高、同圆角、同状态表达），
+  窄面板下自动只留图标。
+- **多开不同网页**：`Ctrl+点击`站点在新分屏打开；或直接用面板上的「分屏 / 浮动」，
+  走 DSH 官方 `sidebarRight.split` / `.float`，不自绘浮层（自绘正是遮挡的来源）。
+- 站点栏 `z-index` 与 `flex:none` 保证永不被网页区遮住。
+
+### 测试
+
+新增 `test/cookies.test.mjs`（25 例）与 `test/wait-stats.test.mjs`（18 例）；
+修掉 `test/mirror.test.mjs` 里把「剥掉 Secure」钉成期望行为的旧断言（它锁的正是本次修的 bug）；
+`test/tool-loop.test.mjs` 补测试隔离——它此前读**用户真实**设置（`sendGapMs: 30000`），
+退避变成 30s+30s+60s 撞上 120s 看门狗，用例「看环境脸色」。全套 **249/249**。
 
 ## 0.14.3
 
