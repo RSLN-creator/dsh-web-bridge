@@ -387,7 +387,8 @@ export function createBrowserDriver(options = {}) {
       // captureId 过滤丢弃——整轮报 no_response_frames，长任务反复被打死
       // （0.12.2 真机 goal 会话 turn2 step12 实锤）。空流不立即收场：留 3s
       // 窗口等新流绑定；等不到再按原样收场，代价上限 3s。
-      if (emptyStream && !active.retryGrace) {
+      // 限流（rate_limited）不进宽限：服务端已撤回消息、不会自动重发，白等 3s。
+      if (emptyStream && result.reason !== 'rate_limited' && !active.retryGrace) {
         active.retryGrace = true;
         active.decoder = null;
         active.captureId = null;
@@ -853,6 +854,13 @@ export function createBrowserDriver(options = {}) {
         }
       }
       if (!result.complete && !result.partial) {
+        // 限流单列：hint 带着服务端原话（「消息发送过于频繁」），按专门错误码
+        // 抛出，让上层退避后重试，而不是和无从下手的不完整流混在一起。
+        if (result.reason === 'rate_limited') {
+          const err = new Error(`RATE_LIMITED: ${site.name} 网页端限流（${result.hint || '消息发送过于频繁，请稍后重试'}）— 将退避后重试`);
+          err.code = 'RATE_LIMITED';
+          throw err;
+        }
         // 带上流首段原文：整流零响应帧时，「网页 200 包错误 JSON（风控/审核）」
         // 和「流形态对不上」在报错文本里一眼可分，不用再开 SSE_DEBUG 抓包。
         const head = lastFinished?.rawHead ? ' | 流首段: ' + String(lastFinished.rawHead).slice(0, 200) : '';

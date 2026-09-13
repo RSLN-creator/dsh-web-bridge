@@ -170,6 +170,10 @@ export function createRelay(options = {}) {
           responseTps: Math.round(outputTokens * 10000 / Math.max(1, responseMs)) / 10,
           tps: Math.round(outputTokens * 10000 / Math.max(1, durationMs)) / 10,
           phaseSource: measured.firstResponseMs != null ? '网页 SSE' : '中继观测',
+          // 发送前等待（节流间隔 + 限流退避）：发生在网页生成之前，不计入
+          // durationMs，右栏统计单独一条展示；rateLimitRetries 是限流重试次数。
+          sendWaitMs: Math.max(0, Math.round(Number(measured.sendWaitMs) || 0)),
+          rateLimitRetries: Math.max(0, Math.round(Number(measured.rateLimitRetries) || 0)),
         };
         lastError = '';
         e.item.resolve({

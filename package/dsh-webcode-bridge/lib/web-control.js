@@ -179,6 +179,10 @@ export function createWebControl(deps = {}) {
         const v = String(updated.subAgentSite ?? 'follow').trim() || 'follow';
         updated.subAgentSite = v === 'follow' || getSite(v) ? v : 'follow';
       }
+      // 发送间隔规范化：非负整数毫秒、上限 10 分钟。负数/NaN 一律归 0（关闭）。
+      if ('sendGapMs' in updated) {
+        updated.sendGapMs = Math.min(600_000, Math.max(0, Math.round(Number(updated.sendGapMs) || 0)));
+      }
       const result = settingsStore.set(updated);
       return { ok: true, ...result };
     },

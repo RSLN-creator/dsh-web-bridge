@@ -171,3 +171,45 @@ test('驱动解码器注册表护栏：创建时急加载 + onPageCapture 懒加
   assert.ok(onPage.length > 0, 'onPageCapture 必须存在');
   assert.match(onPage, /if \(!Decoders\) \{ try \{ Decoders = loadDecoderRegistry\(cfg\.decoderPath\); \} catch/);
 });
+
+// ---------- DeepSeek hint 限流（2026-09-13 真机实锤） ----------
+// 真实流首段：ready(request_message_id=31, response_message_id=32) 后紧跟
+// hint{type:'error', content:'消息发送过于频繁…', clear_response:true,
+// finish_reason:'rate_limited'}，服务端撤回消息、零响应帧收流。旧实现把
+// hint 静默丢弃，整轮报 no_response_frames，真实原因只能靠流首段猜。
+
+test('deepseek hint：rate_limited → reason=rate_limited 且带服务端原话', () => {
+  const decoder = new D.deepseek({});
+  decoder.push('event: ready\ndata: {"request_message_id":31,"response_message_id":32,"model_type":"default"}\n\n');
+  decoder.push('event: hint\ndata: {"type":"error","content":"消息发送过于频繁，请稍后重试","clear_response":true,"finish_reason":"rate_limited"}\n\n');
+  decoder.push('event: close\ndata: \n\n');
+  const out = decoder.finish();
+  assert.equal(out.complete, false);
+  assert.equal(out.partial, false);
+  assert.equal(out.reason, 'rate_limited');
+  assert.equal(out.hint, '消息发送过于频繁，请稍后重试');
+  assert.equal(out.text, '');
+});
+
+test('deepseek hint：非限流错误 hint 不改变 no_response_frames 归类', () => {
+  const decoder = new D.deepseek({});
+  decoder.push('event: ready\ndata: {"request_message_id":1,"response_message_id":2}\n\n');
+  decoder.push('event: hint\ndata: {"type":"error","content":"内容审核未通过","finish_reason":"content_filter"}\n\n');
+  decoder.push('event: close\ndata: \n\n');
+  const out = decoder.finish();
+  assert.equal(out.reason, 'no_response_frames');
+  assert.equal(out.hint, null);
+});
+
+test('deepseek hint：已有响应帧时 hint 只是旁路提示，不影响部分流', () => {
+  const deltas = [];
+  const decoder = new D.deepseek({ onDelta: (t) => deltas.push(t) });
+  decoder.push('event: ready\ndata: {"request_message_id":1,"response_message_id":2}\n\n');
+  decoder.push('data: ' + JSON.stringify({ v: { response: { role: 'ASSISTANT', message_id: 2, status: 'WIP', fragments: [{ type: 'RESPONSE', content: '部分回答' }] } } }) + '\n\n');
+  decoder.push('event: hint\ndata: {"type":"error","content":"异常","finish_reason":"rate_limited"}\n\n');
+  const out = decoder.finish();
+  assert.equal(out.reason, 'stream_ended_before_finished');
+  assert.equal(out.partial, true);
+  assert.equal(out.text, '部分回答');
+  assert.equal(out.hint, null);
+});

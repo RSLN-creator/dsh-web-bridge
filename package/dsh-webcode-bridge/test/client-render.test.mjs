@@ -18,11 +18,12 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const CLIENT = path.resolve(here, '../lib/client.cjs');
 
 /** 在当前进程里加载 client.cjs 并跑若干渲染周期，返回每次渲染捕获的异常。 */
-async function renderPane({ payloads }) {
+async function renderPane({ payloads, which = 'pane' } = {}) {
   const saved = { window: global.window, document: global.document, fetch: global.fetch, setInterval: global.setInterval, clearInterval: global.clearInterval };
   const realSetTimeout = global.setTimeout;
   let captured = null;
   let PaneComponent = null;
+  let SettingsComponent = null;
   let windowHits = 0;
   let current = payloads[0];
 
@@ -60,6 +61,11 @@ async function renderPane({ payloads }) {
       const u = String(url);
       let body = { ok: true };
       if (u.includes('/__webcode/window')) { windowHits++; body = current; }
+      else if (u.includes('/__webcode/status')) {
+        body = { ok: true, relay: { running: true, consent: true, consentPersistent: true, metrics: { timing: 'measured', firstTokenMs: 500, thinkingMs: 100, responseMs: 2000, responseTps: 20, durationMs: 3000, sendWaitMs: 15000, rateLimitRetries: 1 } }, driver: { sites: [], selectedModel: 'deepseek:deepseek' }, build: { hash: 'x', version: 'test' } };
+      }
+      else if (u.includes('/__webcode/settings')) body = { ok: true, extraPrompt: '', sendGapMs: 10000, thinkMode: 'auto', subAgentMode: 'own', subAgentSite: 'follow' };
+      else if (u.includes('/__webcode/models')) body = { ok: true, models: [{ id: 'deepseek:deepseek', name: 'DeepSeek', siteId: 'deepseek', thinking: true }] };
       else if (u.includes('/__webcode/connect')) body = { ok: true, loggedIn: true };
       return { ok: true, json: async () => body };
     };
@@ -77,23 +83,29 @@ async function renderPane({ payloads }) {
     mod.apply({
       slots: {
         inject: (_n, fn) => fn(),
-        register: (def, Comp) => { if (def?.name === 'sidebar.right.pane.tab') PaneComponent = Comp; return () => {}; },
+        register: (def, Comp) => {
+          if (def?.name === 'sidebar.right.pane.tab') PaneComponent = Comp;
+          if (def?.name === 'settings.section') SettingsComponent = Comp;
+          return () => {};
+        },
       },
       sidebarRightTabs: { register: () => () => {} },
       sidebarRight: { toggleExpanded() {} },
       get: () => null,
     });
     assert.ok(PaneComponent, 'sidebar.right.pane.tab 正文从未注册');
+    assert.ok(SettingsComponent, 'settings.section 从未注册');
 
     const flush = () => new Promise((r) => realSetTimeout(r, 0));
     const instantiate = (el) => (el && typeof el.type === 'function' ? el.type(el.props) : el);
     const errors = [];
+    const Target = which === 'settings' ? SettingsComponent : PaneComponent;
     for (const p of payloads) {
       current = p;
       states = []; effectSlots = [];
       for (let pass = 0; pass < 4; pass++) {
         cursor = 0; effectSlotCursor = 0; pendingEffects = [];
-        try { instantiate(PaneComponent()); } catch (e) { errors.push(e); break; }
+        try { instantiate(Target()); } catch (e) { errors.push(e); break; }
         for (const fn of pendingEffects) { try { fn(); } catch (e) { errors.push(e); } }
         await flush(); await flush();   // ← 异步 setState 必须在这里落地
       }
@@ -120,4 +132,11 @@ test('右栏：没有独立窗口时渲染不得抛错（回归：面板全白�
 test('右栏：窗口状态切换（无窗 ↔ 有窗 ↔ 他站有窗）全程稳定', async () => {
   const { errors } = await renderPane({ payloads: [emptyWindows, oneWindow, otherSiteWindow, emptyWindows] });
   assert.deepEqual(errors, [], '状态切换时渲染抛错：' + errors.map(e => e.message).join('; '));
+});
+
+test('设置面板：发送间隔行与「发送前等待」统计条渲染不抛错', async () => {
+  // Settings 依赖 status/settings/models 三个接口；status 里带 sendWaitMs>0 +
+  // rateLimitRetries 的 metrics，证明新增的等待条与限流重试文案走的是真实渲染路径。
+  const { errors } = await renderPane({ payloads: [emptyWindows], which: 'settings' });
+  assert.deepEqual(errors, [], '设置面板渲染抛错：' + errors.map(e => e.message).join('; '));
 });

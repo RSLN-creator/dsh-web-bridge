@@ -74,6 +74,21 @@ button:hover { background: #1d4ed8; }
       <span class="hint" style="margin-top:0;">手动单向同步「站点选择」；登录态不迁移（同站点天然共享，跨站点无法迁移）。</span>
     </div>
 
+    <label for="sendGapPreset">发送间隔（限流防护）</label>
+    <div style="display:flex; gap:8px;">
+      <select id="sendGapPreset" style="flex:0 0 150px;">
+        <option value="0">0 秒（关闭）</option>
+        <option value="2000">2 秒</option>
+        <option value="5000">5 秒</option>
+        <option value="10000">10 秒</option>
+        <option value="30000">30 秒</option>
+        <option value="60000">60 秒</option>
+        <option value="custom">自定义…</option>
+      </select>
+      <input type="number" id="sendGapMs" min="0" max="600000" step="500" style="flex:1;" placeholder="毫秒（0–600000）">
+    </div>
+    <div class="hint">两次向同一网站发送消息之间的最小间隔（本地回复到网页发送的等待时间）。DeepSeek 网页有「消息发送过于频繁」的滑窗限流，长任务工具循环节奏密时容易触发；设置间隔可主动避开。触发限流后桥会按 max(发送间隔, 10 秒) 起步自动退避重试（最多 2 次）。实际等待在右侧统计的「发送前等待」单独展示。</div>
+
     <button type="submit">保存设置</button>
   </form>
   <div id="status"></div>
@@ -103,6 +118,10 @@ button:hover { background: #1d4ed8; }
       }
       const subSiteVal = data.subAgentSite && SITE_IDS.includes(data.subAgentSite) ? data.subAgentSite : 'follow';
       subSiteEl.value = subSiteVal;
+      const gapMs = Math.max(0, Math.round(Number(data.sendGapMs) || 0));
+      document.getElementById('sendGapMs').value = gapMs;
+      const presetEl = document.getElementById('sendGapPreset');
+      presetEl.value = ['0', '2000', '5000', '10000', '30000', '60000'].includes(String(gapMs)) ? String(gapMs) : 'custom';
     } catch (e) {
       statusEl.textContent = '加载设置失败: ' + e.message;
       statusEl.className = 'error';
@@ -130,6 +149,10 @@ button:hover { background: #1d4ed8; }
     }
   });
 
+  document.getElementById('sendGapPreset').addEventListener('change', (e) => {
+    if (e.target.value !== 'custom') document.getElementById('sendGapMs').value = e.target.value;
+  });
+
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const payload = {
@@ -139,6 +162,7 @@ button:hover { background: #1d4ed8; }
       thinkMode: document.getElementById('thinkMode').value,
       subAgentMode: document.getElementById('subAgentMode').value,
       subAgentSite: document.getElementById('subAgentSite').value || 'follow',
+      sendGapMs: Math.max(0, parseInt(document.getElementById('sendGapMs').value, 10) || 0),
     };
     try {
       const res = await fetch(API_BASE + '/settings', {

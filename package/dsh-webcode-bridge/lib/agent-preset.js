@@ -541,6 +541,22 @@ export function parseAgentReply(text) {
   while ((m = fenceRe.exec(s)) !== null) takeObj(m[1]);
   const tagRe = /<\s*(?:tool_call|function|stories)\s*>([\s\S]*?)<\s*\/\s*(?:tool_call|function|stories)\s*>/gi;
   while ((m = tagRe.exec(s)) !== null) takeObj(m[1], true);
+  // GLM-5.3 原生形状（2026-09-13 真机）：工具名裸放在标签后、参数 JSON 直接
+  // 跟随，没有 name 字段——<tool_call>pwsh{"command":"Get-ChildItem …"}</tool_call>。
+  // tagRe 对它取到的 body 以工具名开头（不以 { 开头）而跳过，这里单独还原：
+  // 裸名 + 配平 JSON + 紧跟闭标签三件齐才认，散文里的举例不会误报。
+  const bareNameRe = /<\s*(?:tool_call|function)\s*>\s*([\w.$-]+)\s*/gi;
+  while ((m = bareNameRe.exec(s)) !== null) {
+    const hit = readCallAt(s, m.index + m[0].length);
+    if (!hit) continue;
+    if (!/^\s*<\s*\/\s*(?:tool_call|function)\s*>/i.test(s.slice(hit.end))) continue;
+    try {
+      const args = JSON.parse(hit.raw);
+      if (args && typeof args === 'object' && !Array.isArray(args)) {
+        takeObj(JSON.stringify({ mcp_action: 'call', name: m[1], arguments: args }), true);
+      }
+    } catch { /* 配平但非对象：不算调用 */ }
+  }
   // 裸 <invoke> XML 形状（probe-17 首跑 2026-09-09 发现：无 fence、无 mcp_action，
   // 模型把 DSH 原生 XML 调用语法直接搬进网页回复）。<parameter name="k">v</parameter>
   // 逐个收集为 arguments；至少一个 parameter 才算调用，散文举例不触发。

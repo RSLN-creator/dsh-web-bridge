@@ -25,14 +25,14 @@ function check(label, ok, detail) {
 }
 
 /** 建一个只回一段固定文本的桥实例，收集这一轮的全部 chunk。 */
-async function runTurn({ reply, tools, sessionId, message = '看时间' }) {
+async function runTurn({ reply, think, tools, sessionId, message = '看时间', driver: injectDriver, config } = {}) {
   let adapter;
-  const driver = {
+  const driver = injectDriver || {
     status: () => ({ running: true }), close: async () => {}, resetConversation: async () => {},
-    sendTurn: async (key, prompt, opts) => { opts.onDelta?.(reply); return { text: reply }; },
+    sendTurn: async (key, prompt, opts) => { if (think) opts.onThink?.(think); opts.onDelta?.(reply); return { text: reply }; },
     sendPrompt: async () => ({ text: '' }),
   };
-  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver, ...(config || {}) });
   try {
     const chunks = [];
     for await (const c of adapter.stream({
@@ -73,6 +73,84 @@ for (const [label, make] of Object.entries(SHAPES)) {
   check('未知工具 · 不执行、回报可用清单、正常收束',
     !executed && /TOOL_UNKNOWN/.test(text) && /pwsh/.test(text) && chunks.at(-1).reason?.kind === 'stop',
     text.slice(0, 120));
+}
+
+// GLM-5.3 强制思考（2026-09-13 真机）：工具调用写进思考流、正文只有散文。
+// 思考里的 taught 形状调用必须被兜底解析成可执行的 tool-call 块，且正文
+// （含流式收尾时仍扣着的 8 字符尾巴）必须一字不少。
+{
+  const reply = '我来帮你检查项目。';
+  const think = '需要先看时间。<tool_call>{"mcp_action":"call","name":"pwsh","arguments":{"command":"Get-Date"}}</tool_call>';
+  const chunks = await runTurn({ reply, think, tools: [TOOL], sessionId: 's-glm-think' });
+  const calls = chunks.filter(c => c.type === 'block-end' && c.block?.type === 'tool-call');
+  const text = chunks.filter(c => c.type === 'block-end' && c.block?.type === 'text').map(c => c.block.text).join('');
+  check('GLM-5.3 思考中调用 · 兜底解析成 tool-call 且正文完整',
+    calls.length === 1 && calls[0].block.name === 'pwsh' && JSON.parse(calls[0].block.arguments).command === 'Get-Date'
+      && text === '我来帮你检查项目。' && chunks.at(-1).reason?.kind === 'tool-calls',
+    JSON.stringify({ calls: calls.map(c => c.block), text }));
+}
+
+// GLM 原生裸名形状（真机 2026-09-13）：<tool_call>pwsh{"command":…}</tool_call>，
+// 没有 name 字段、参数 JSON 直接跟随裸名 —— 必须还原成真调用而不是泄漏进正文。
+{
+  const reply = '<tool_call>pwsh{"command":"Get-Date"}</tool_call>';
+  const chunks = await runTurn({ reply, tools: [TOOL], sessionId: 's-glm-bare' });
+  const calls = chunks.filter(c => c.type === 'block-end' && c.block?.type === 'tool-call');
+  const leaked = chunks.some(c => c.type === 'text-delta' && /tool_call/.test(c.text || ''));
+  check('GLM 裸名标签 · 还原调用且协议不泄漏',
+    calls.length === 1 && calls[0].block.name === 'pwsh' && JSON.parse(calls[0].block.arguments).command === 'Get-Date' && !leaked,
+    JSON.stringify(chunks));
+}
+
+// 嵌套参数的裸名形状也要配平（非贪婪正则会截断嵌套 JSON —— 用配平扫描）。
+{
+  const reply = '<tool_call>write{"file":{"path":"a.md","content":"# hi"}}</tool_call>';
+  const chunks = await runTurn({ reply, tools: [{ name: 'write', description: 'w', parameters: { type: 'object', properties: { file: { type: 'object' } } } }], sessionId: 's-glm-nested' });
+  const call = chunks.find(c => c.type === 'block-end' && c.block?.type === 'tool-call');
+  const args = call ? JSON.parse(call.block.arguments) : {};
+  check('GLM 裸名标签 · 嵌套参数配平', call?.block.name === 'write' && args.file?.path === 'a.md', JSON.stringify(args));
+}
+
+// 站点限流（RATE_LIMITED）：第一次被限流，退避后重试成功 —— 长任务不断链。
+{
+  let attempts = 0;
+  const drv = {
+    status: () => ({ running: true }), close: async () => {}, resetConversation: async () => {},
+    sendTurn: async (key, prompt, opts) => {
+      attempts += 1;
+      if (attempts === 1) { const e = new Error('RATE_LIMITED: 网页端限流'); e.code = 'RATE_LIMITED'; throw e; }
+      opts.onDelta?.('重试成功');
+      return { text: '重试成功', metrics: { endToEndMs: 5 } };
+    },
+    sendPrompt: async () => ({ text: '' }),
+  };
+  const chunks = await runTurn({ driver: drv, reply: '', tools: [TOOL], sessionId: 's-rate-retry', config: { rateLimitBackoffMinMs: 1 } });
+  const text = chunks.find(c => c.type === 'block-end' && c.block?.type === 'text')?.block?.text || '';
+  check('限流退避重试 · 第二次成功并记入统计',
+    attempts === 2 && /重试成功/.test(text) && chunks.at(-1).reason?.kind === 'stop',
+    JSON.stringify(chunks.map(c => c.type)));
+}
+
+// 限流重试耗尽：3 次全部被限流 → 整轮失败抛出（DSH 侧可见错误）。
+{
+  let attempts = 0;
+  const drv = {
+    status: () => ({ running: true }), close: async () => {}, resetConversation: async () => {},
+    sendTurn: async () => {
+      attempts += 1;
+      const e = new Error('RATE_LIMITED: 网页端限流');
+      e.code = 'RATE_LIMITED';
+      throw e;
+    },
+    sendPrompt: async () => ({ text: '' }),
+  };
+  let failed = null;
+  try {
+    await runTurn({ driver: drv, reply: '', tools: [TOOL], sessionId: 's-rate-fail', config: { rateLimitBackoffMinMs: 1 } });
+  } catch (err) { failed = err; }
+  check('限流重试耗尽 · 3 次尝试后如实失败',
+    attempts === 3 && failed?.code === 'RATE_LIMITED',
+    String(failed));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

@@ -56,6 +56,11 @@ const DEFAULTS = {
   allowedOrigins: ['http://127.0.0.1:3080', 'http://localhost:3080'],
 };
 
+/** 发送间隔（设置页「发送间隔」）：两次向同一站点发送之间的最小毫秒数。
+ *  滑窗限流（「消息发送过于频繁」）的防护手段，也是 RATE_LIMITED 退避的基数。 */
+const SEND_GAP_MAX_MS = 600_000;
+const clampSendGapMs = (v) => Math.min(SEND_GAP_MAX_MS, Math.max(0, Math.round(Number(v) || 0)));
+
 // 模型目录 = 全部内容服务站点的模型（'site:model' 限定 id），DSH 模型选择器
 // 直接可见 GLM/ChatGPT/Kimi/Qwen/豆包/Grok/Claude/Gemini 的模型。
 const WEB_MODELS = listAllModels();
@@ -65,6 +70,17 @@ const WEB_MODELS = listAllModels();
 const PROSE_TAIL_CHARS = 8;
 const log = (...a) => console.log('[webcode-bridge]', ...a);
 const warn = (...a) => console.warn('[webcode-bridge]', ...a);
+
+/** 可中止的 sleep：等待期间 DSH 侧取消要立即退出，不能让用户干等退避。 */
+function sleepSignal(ms, signal) {
+  if (!(ms > 0)) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const onAbort = () => { clearTimeout(timer); reject(Object.assign(new Error('webcode relay: aborted'), { name: 'AbortError' })); };
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve(); }, ms);
+    if (signal?.aborted) { onAbort(); return; }
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
 
 /** Pull image attachments out of message blocks in DSH's several shapes.
  *  Returns [{ name, contentType, data(base64) }] — data URLs are decoded
@@ -236,7 +252,7 @@ export function apply(ctx, config = {}) {
   if (!(settingsService && typeof settingsService.get === 'function' && typeof settingsService.set === 'function')) {
     settingsService = null;
   }
-  const defaultConfig = { extraPrompt: '', defaultModel: 'deepseek', previewRefreshRate: 5000, thinkMode: 'on', subAgentMode: 'own', subAgentSite: 'follow' };
+  const defaultConfig = { extraPrompt: '', defaultModel: 'deepseek', previewRefreshRate: 5000, thinkMode: 'on', subAgentMode: 'own', subAgentSite: 'follow', sendGapMs: 0 };
   const configManager = {
     get() {
       // settingsService 已在初始化时校验 get/set 双全；此处仍防御式包裹
@@ -578,7 +594,15 @@ export function apply(ctx, config = {}) {
       assertNonEmpty(finalText, thinkAcc, endImages);
 
       const { calls } = parseAgentReply(finalText);
-      const valid = calls.filter((c) => tools.some((t) => t?.name === c.name));
+      let valid = calls.filter((c) => tools.some((t) => t?.name === c.name));
+      // GLM-5.3 强制思考（reference/zai-copilot-chat 的 dialect 佐证：5.3 起思考
+      // 不可关）：真机确认模型会把工具调用写进思考流而不是正文，正文解析不到时
+      // 从思考全文兜底解析一次。正文已有可用调用时不看思考——思考里的可能是
+      // 预演草稿，照单全收会双重执行。
+      if (!valid.length && thinkAcc) {
+        const thinkCalls = parseAgentReply(thinkAcc).calls.filter((c) => tools.some((t) => t?.name === c.name));
+        if (thinkCalls.length) valid = thinkCalls;
+      }
       // 网页调了本会话没有的工具（真机里模型调过未登记的 write / subagent）。
       // 旧实现静默过滤 → 剩下空回复被当收束 → 任务从此不动。这里**不抛错**而是
       // 把「可用工具清单 + 请重试」作为这一轮的回复交回会话：错误文本会作为助手
@@ -610,11 +634,17 @@ export function apply(ctx, config = {}) {
         turn.commit();
         yield* closeThink();
         if (textOpen && !pendingCalls.length) {
+          // 流式收尾还扣着 PROSE_TAIL_CHARS 尾巴没发（正文无协议边界、调用来自
+          // 思考兜底的 GLM-5.3 场景）：先补上再收口，否则正文尾巴被永远扣住。
+          const prose0 = proseSent.slice(proseBlockStart);
+          const clean = stripProtocolText(finalText);
+          const missing = (clean.startsWith(prose0) && clean.length > prose0.length) ? clean.slice(prose0.length) : '';
+          if (missing) { textSent += missing; proseSent += missing; yield { type: 'text-delta', index: textIndex, text: missing }; }
           const imageMd = imageMarkdown(endImages);
           if (imageMd) { textSent += imageMd; proseSent += imageMd; yield { type: 'text-delta', index: textIndex, text: imageMd }; }
           // 兜底：边界探测若漏掉某种未知形态，这里仍保证写进会话的助手文本是散文。
           // 正常路径下探测已把协议拦在外面，stripProtocolText 是恒等变换。
-          yield { type: 'block-end', index: textIndex, block: { type: 'text', text: stripProtocolText(proseSent.slice(proseBlockStart)) } };
+          yield { type: 'block-end', index: textIndex, block: { type: 'text', text: proseSent.slice(proseBlockStart) } };
         }
         for (let i = 0; i < valid.length; i++) {
           // id carries the session so harness-side streams / logs can be traced
@@ -810,48 +840,96 @@ function imageMarkdown(images) {
       return { ok: true, sessionId: sid, messageCount: msgs.length, branchSkipped: hist.branchCount ?? 0, title: finalTitle, attached, attachError };
     },
   };
+  // 发送间隔的站点级状态：站点 id → 上一轮结束的时刻。「发送间隔」节流与
+  // 限流退避都以它为基准（同站点串行，跨站点互不影响）。
+  const lastSendBySite = new Map();
+  // 站点限流退避重试上限（RATE_LIMITED）。退避时长 = max(发送间隔, 10s) × 已重试次数，
+  // 10s 下限是因为限流滑窗通常以十秒计，几十毫秒的短间隔重试只会再次撞墙。
+  const RATE_LIMIT_RETRIES = 2;
+
   let front = null;
   const relay = createRelay({
     ...cfg,
     logger: console,
     // Session mode routes into the session's own web conversation (only the
     // increment lands); stateless turns (OpenAI front, aux) stay fresh.
-    executor: (prompt, opts) => {
+    executor: async (prompt, opts) => {
       const m = opts?.meta || null;
       // 归一化模型限定 id：meta 可能只带裸 id（OpenAI 前端），补上站点前缀，
       // 保证 driver 的 selectModel 一定解析到正确站点，不会因跨站点重名串模型。
       const qualified = qualifyModelId(m?.model, m?.siteId);
       // thinkMode: 'auto' | 'on' | 'off' — 设置页手动覆盖网页「深度思考」开关
       const thinkMode = ['on', 'off', 'auto'].includes(m?.thinkMode) ? m.thinkMode : 'auto';
-      if (m?.sessionKey) {
-        const drive = driverFor(m.siteId);
-        const turnOpts = {
-          fresh: m.fresh === true,
-          signal: opts.signal,
-          onDelta: opts.onDelta,
-          onThink: opts.onThink,
-          onImage: opts.onImage,
-          model: qualified,
-          images: m.images,
-          thinkMode,
-        };
-        return drive.sendTurn(m.sessionKey, prompt, turnOpts).catch(async (err) => {
-          // 网页会话被删/过期：桥这一侧的唯一正确恢复是重放「首轮整段」——
-          // 网页会话里保有的就是首轮全文 + 后续增量，重放首轮即完整上下文
-          // 与工具协议，而不是把一个没有前文的增量丢进新会话（那才是真正的
-          // 「跑着跑着变傻」）。重放失败才把游标作废，交给下一轮。
-          if (err?.code === 'WEB_SESSION_LOST' && typeof m.rebuild === 'function') {
-            log('web session lost — replaying the full first-turn prompt into a fresh web chat');
-            await drive.resetConversation(m.sessionKey).catch(() => {});
-            return drive.sendTurn(m.sessionKey, m.rebuild(), { ...turnOpts, fresh: true });
-          }
-          // a vanished/deleted conversation poisons the stored slot — reset
-          // it so the NEXT turn reopens a fresh web chat
-          if (err && !err.code) await drive.resetConversation(m.sessionKey).catch(() => {});
-          throw err;
-        });
+      const siteId = m?.siteId || 'deepseek';
+      const sendGapMs = clampSendGapMs(m?.sendGapMs);
+      const attempt = (fresh) => {
+        if (m?.sessionKey) {
+          const drive = driverFor(siteId);
+          const turnOpts = {
+            fresh,
+            signal: opts.signal,
+            onDelta: opts.onDelta,
+            onThink: opts.onThink,
+            onImage: opts.onImage,
+            model: qualified,
+            images: m.images,
+            thinkMode,
+          };
+          return drive.sendTurn(m.sessionKey, prompt, turnOpts).catch(async (err) => {
+            // 网页会话被删/过期：桥这一侧的唯一正确恢复是重放「首轮整段」——
+            // 网页会话里保有的就是首轮全文 + 后续增量，重放首轮即完整上下文
+            // 与工具协议，而不是把一个没有前文的增量丢进新会话（那才是真正的
+            // 「跑着跑着变傻」）。重放失败才把游标作废，交给下一轮。
+            if (err?.code === 'WEB_SESSION_LOST' && typeof m.rebuild === 'function') {
+              log('web session lost — replaying the full first-turn prompt into a fresh web chat');
+              await drive.resetConversation(m.sessionKey).catch(() => {});
+              return drive.sendTurn(m.sessionKey, m.rebuild(), { ...turnOpts, fresh: true });
+            }
+            // a vanished/deleted conversation poisons the stored slot — reset
+            // it so the NEXT turn reopens a fresh web chat
+            if (err && !err.code) await drive.resetConversation(m.sessionKey).catch(() => {});
+            throw err;
+          });
+        }
+        return driverFor(siteId).sendPrompt(prompt, { signal: opts.signal, meta: m, onDelta: opts.onDelta, onThink: opts.onThink, onImage: opts.onImage, model: qualified, thinkMode });
+      };
+      // 发送节流（设置页「发送间隔」）：本轮发送前把与上一轮结束的间隔补满。
+      // 等待不属于网页生成耗时，单独记 sendWaitMs（右栏统计「发送前等待」）。
+      let waitedMs = 0;
+      if (sendGapMs > 0) {
+        const wait = Math.max(0, (lastSendBySite.get(siteId) || 0) + sendGapMs - Date.now());
+        if (wait > 0) {
+          log(`send gap: waiting ${Math.round(wait / 1000)}s before next send to ${siteId}`);
+          await sleepSignal(wait, opts.signal);
+        }
+        waitedMs += wait;
       }
-      return driverFor(m?.siteId).sendPrompt(prompt, { ...opts, model: qualified, thinkMode });
+      try {
+        let result = null;
+        let retries = 0;
+        for (;;) {
+          try { result = await attempt(m?.fresh === true); break; }
+          catch (err) {
+            // 站点限流（DeepSeek hint rate_limited）：消息已被服务端撤回，重发
+            // 安全；按退避序列重试同一轮，而不是把失败甩回 DSH 让长任务断链。
+            if (err?.code !== 'RATE_LIMITED' || opts.signal?.aborted || retries >= RATE_LIMIT_RETRIES) throw err;
+            retries += 1;
+            // 10s 下限：限流滑窗以十秒计，几十毫秒的短间隔重试只会再次撞墙。
+            // （rateLimitBackoffMinMs 仅供离线测试调小；真实运行缺省 10_000。）
+            const backoff = Math.max(sendGapMs, cfg.rateLimitBackoffMinMs ?? 10_000) * retries;
+            waitedMs += backoff;
+            warn(`rate limited — retry ${retries}/${RATE_LIMIT_RETRIES} after ${Math.round(backoff / 1000)}s (${siteId})`);
+            await sleepSignal(backoff, opts.signal);
+          }
+        }
+        if (result && typeof result === 'object') {
+          result.metrics = { ...(result.metrics || {}), sendWaitMs: Math.round(waitedMs), rateLimitRetries: retries };
+        }
+        return result;
+      } finally {
+        // 节流基准是「上一轮结束时刻」：成功、失败、被限流都一样重新起算。
+        lastSendBySite.set(siteId, Date.now());
+      }
     },
     driverStatus: () => {
       const base = driver.status();
@@ -1045,7 +1123,7 @@ function imageMarkdown(images) {
       return {
         prompt,
         inputTokens: estimateTokens(prompt),
-        meta: { model: siteId + ':' + model, siteId, thinkMode },
+        meta: { model: siteId + ':' + model, siteId, thinkMode, sendGapMs: clampSendGapMs(settings.sendGapMs) },
         async attach() {
           const imgs = imagesOfMessages(messages);
           return imgs.length ? resolveRemoteImages(imgs) : [];
@@ -1085,6 +1163,8 @@ function imageMarkdown(images) {
       inputTokens: cumulativeTokens,
       meta: {
         sessionKey: keyPath, fresh, model: siteId + ':' + model, siteId, thinkMode,
+        // 发送间隔（设置页）：executor 在发送前按它节流，限流退避也以它为基数
+        sendGapMs: clampSendGapMs(settings.sendGapMs),
         // 网页会话丢失时的整段重放文本（见 executor 的 WEB_SESSION_LOST 分支）
         rebuild: () => serializeFirstTurn({ ...options, extraPrompt }),
       },

@@ -52,6 +52,12 @@ window.__ModuleLoader__.load({
         h('div', { className: 'hwb-metrics-head' },
           h('span', { className: 'hwb-badge' + (measured ? ' measured' : '') }, measured ? '实测' : '估算'),
           measured ? (metrics.phaseSource ? '来自 ' + metrics.phaseSource + '；速度 token 数按 CJK/ASCII 估算' : null) : '首次网页调用完成后显示实测数据'),
+        // 发送前等待只在真正等待过时出现：默认 0 间隔的安装里不占一条空栏。
+        (metrics.sendWaitMs > 0 || metrics.rateLimitRetries > 0) && h(Bar, {
+          label: '发送前等待', value: metrics.sendWaitMs,
+          text: ms(metrics.sendWaitMs) + (metrics.rateLimitRetries ? ' · 限流重试' + metrics.rateLimitRetries + '次' : ''),
+          max: BAR_MAX_MS, tone: 'ok',
+        }),
         h(Bar, { label: '首字延迟', value: metrics.firstTokenMs, text: ms(metrics.firstTokenMs), max: BAR_MAX_MS }),
         h(Bar, { label: '可观测思考', value: metrics.thinkingMs, text: metrics.thinkingMs == null ? '网页未提供' : ms(metrics.thinkingMs), max: BAR_MAX_MS }),
         h(Bar, { label: '正文输出', value: metrics.responseMs, text: ms(metrics.responseMs), max: BAR_MAX_MS }),
@@ -218,6 +224,9 @@ window.__ModuleLoader__.load({
       const [subAgentNotice, setSubAgentNotice] = React.useState('');
       const [subAgentSite, setSubAgentSite] = React.useState('follow');
       const [subAgentSiteSaved, setSubAgentSiteSaved] = React.useState('follow');
+      const [sendGapMs, setSendGapMs] = React.useState(0);
+      const [sendGapSaved, setSendGapSaved] = React.useState(0);
+      const [sendGapNotice, setSendGapNotice] = React.useState('');
       const refresh = () => api('status').then(s => setStatus(s)).catch(() => {});
       React.useEffect(() => {
         let alive = true;
@@ -233,6 +242,8 @@ window.__ModuleLoader__.load({
           setSubAgentSaved(s.subAgentMode === 'share' ? 'share' : 'own');
           const subSite = s.subAgentSite && String(s.subAgentSite) !== 'follow' ? String(s.subAgentSite) : 'follow';
           setSubAgentSite(subSite); setSubAgentSiteSaved(subSite);
+          const gap = Math.min(600000, Math.max(0, Math.round(Number(s.sendGapMs) || 0)));
+          setSendGapMs(gap); setSendGapSaved(gap);
         }).catch(() => {});
         const timer = setInterval(poll, 4000);
         return () => { alive = false; clearInterval(timer); };
@@ -286,7 +297,30 @@ window.__ModuleLoader__.load({
                 h('option', { value: 'off' }, '始终关闭（追求速度）')),
               h('button', { disabled: pending || thinkMode === thinkSaved, onClick: () => saveSetting('thinkMode', thinkMode, r => { const v = ['on', 'off', 'auto'].includes(r.thinkMode) ? r.thinkMode : thinkMode; setThinkMode(v); setThinkSaved(v); setThinkNotice('已保存。下次生成起生效。'); }) }, '保存'),
               thinkNotice && h('span', { className: 'hwb-hint' }, thinkNotice))),
-          h('p', { className: 'hwb-hint indent' }, '当前网页模型：' + (driver?.selectedModel ? currentModelName(driver.selectedModel) : '未选择（按默认模型）'))),
+          h('p', { className: 'hwb-hint indent' }, '当前网页模型：' + (driver?.selectedModel ? currentModelName(driver.selectedModel) : '未选择（按默认模型）')),
+          h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '发送间隔'),
+            h('div', { className: 'hwb-row-main' },
+              (() => {
+                const presets = [0, 2000, 5000, 10000, 30000, 60000];
+                const gap = Math.min(600000, Math.max(0, Math.round(Number(sendGapMs) || 0)));
+                return [
+                  h('select', { key: 'gap-preset', className: 'hwb-model-select', style: { maxWidth: '150px' }, value: presets.includes(gap) ? String(gap) : 'custom', disabled: pending,
+                    onChange: e => { if (e.target.value !== 'custom') setSendGapMs(Number(e.target.value)); } },
+                    presets.map(p => h('option', { key: p, value: String(p) }, p === 0 ? '0 秒（关闭）' : (p / 1000) + ' 秒')),
+                    h('option', { value: 'custom' }, '自定义…')),
+                  h('input', { key: 'gap-input', type: 'number', className: 'hwb-model-select', style: { maxWidth: '130px' }, min: 0, max: 600000, step: 500, value: gap, disabled: pending,
+                    placeholder: '毫秒', title: '两次向同一网站发送之间的最小间隔（毫秒）',
+                    onChange: e => setSendGapMs(Math.min(600000, Math.max(0, Math.round(Number(e.target.value) || 0)))) }),
+                ];
+              })(),
+              h('button', { disabled: pending || Math.round(Number(sendGapMs) || 0) === Math.round(Number(sendGapSaved) || 0),
+                onClick: () => saveSetting('sendGapMs', Math.min(600000, Math.max(0, Math.round(Number(sendGapMs) || 0))), r => {
+                  const v = Math.min(600000, Math.max(0, Math.round(Number(r.sendGapMs) || 0)));
+                  setSendGapMs(v); setSendGapSaved(v); setSendGapNotice('已保存。下一次发送起生效。');
+                }) }, '保存'),
+              sendGapNotice && h('span', { className: 'hwb-hint' }, sendGapNotice)),
+            ),
+          h('p', { className: 'hwb-hint indent' }, '两次向同一网站发送消息之间的最小等待（本地回复到网页发送）。网站有「消息发送过于频繁」的滑窗限流时长任务容易触发；设为 2–10 秒可主动避开。被限流时桥按 max(发送间隔, 10 秒) 自动退避重试最多 2 次，实际等待在下方统计的「发送前等待」单独展示。')),
 
         h('div', { className: 'hwb-card' },
           h('h3', { className: 'hwb-group first' }, '连接'),

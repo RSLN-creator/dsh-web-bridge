@@ -104,6 +104,12 @@
       this.response = null;
       this.images = [];
       this.receivedChars = 0;
+      // DeepSeek 的错误走 event:hint（type=error），不是 event:error——2026-09-13
+      // 真机实锤：限流时 ready(request/response id 都已分配)后紧跟
+      // hint{type:'error',content:'消息发送过于频繁',clear_response:true,
+      // finish_reason:'rate_limited'}，随后服务端撤回消息、零响应帧收流。
+      // 记录之，finish() 时把它作为比 no_response_frames 更真实的失败原因。
+      this.hintError = null;
     }
     push(chunk) {
       this.receivedChars += chunk.length;
@@ -125,11 +131,18 @@
         // 正文/思考/图片任何一项非空都算「部分可用」，把 partial 标出来交给
         // 驱动层决定（它知道工具协议是否完整），而不是在解码层判死。
         const partial = Boolean(collected.text || collected.thinking || collected.images.length);
+        // 零响应帧 + 限流 hint：归为 rate_limited 而不是笼统的 no_response_frames，
+        // 驱动层据此抛 RATE_LIMITED 交给上层退避重试（hint 只在零帧时升级——
+        // 若已有响应帧，hint 只是流中途的旁路提示，不影响结果归类）。
+        const rateLimited = !this.response && this.hintError?.finish_reason === 'rate_limited';
         return {
           complete: false,
           partial,
-          reason: this.response ? 'stream_ended_before_finished' : 'no_response_frames',
+          reason: this.response ? 'stream_ended_before_finished'
+            : rateLimited ? 'rate_limited'
+            : 'no_response_frames',
           status: this.response?.status || null,
+          hint: rateLimited ? (this.hintError.content || null) : null,
           ...collected,
         };
       }
@@ -141,6 +154,12 @@
       let payload;
       try { payload = JSON.parse(ev.data); } catch { this.failed = true; return; }
       if (ev.event === 'error') { this.failed = true; return; }
+      if (ev.event === 'hint') {
+        if (isRecord(payload) && payload.type === 'error') {
+          this.hintError = { content: typeof payload.content === 'string' ? payload.content : '', finish_reason: typeof payload.finish_reason === 'string' ? payload.finish_reason : '' };
+        }
+        return;
+      }
       if (!isRecord(payload)) return;
       if (ev.event === 'ready') { this.readyResponseId = readId(payload.response_message_id); return; }
       if (ev.event !== 'message') return;
