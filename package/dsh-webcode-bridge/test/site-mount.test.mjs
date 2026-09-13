@@ -6,6 +6,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
 import { createMirror } from '../lib/mirror.js';
 import { createWebControl } from '../lib/web-control.js';
 import { isLoopbackHost, originMatchesHost } from '../lib/loopback.js';
@@ -185,13 +187,24 @@ test('web-control：session-import 按站点路由，失败原因是可读错误
     req.end(payload);
   });
 
-  // 不存在的源目录：必须回可读原因（面板直接显示），且不触发导入
-  const missing = await post({ siteId: 'glm', sourceProfileDir: 'Z:\\definitely\\not\\here' });
+  // 白名单内的不存在目录：必须回可读原因（面板直接显示），且不触发导入。
+  // 注意路径要落在允许根之内（DSH home / 桥 profile / 本包树），否则先被白名单拦下，
+  // 测不到「不存在」这条分支——这正是 0.14.4 加白名单时暴露出的口径顺序。
+  const inRootsMissing = path.join(os.homedir(), '.dsh', 'definitely-not-here-' + Date.now());
+  const missing = await post({ siteId: 'glm', sourceProfileDir: inRootsMissing });
   assert.equal(missing.body.ok, false);
   assert.match(String(missing.body.error), /不存在|不可访问/);
   assert.equal(calls.length, 0, '源目录不存在时不得调用导入');
 
-  const src = process.env.LOCALAPPDATA || process.cwd();
+  // 白名单之外：无论存在与否都必须拒绝（0.14.4 新增；旧实现只查「存在」）。
+  const outside = await post({ siteId: 'glm', sourceProfileDir: 'Z:\\definitely\\not\\here' });
+  assert.equal(outside.body.ok, false);
+  assert.match(String(outside.body.error), /允许范围/);
+  assert.equal(calls.length, 0, '白名单外目录不得调用导入');
+
+  // 允许根之内且存在的目录（DSH home 本身即白名单根之一）。用 os.homedir() 会落在
+  // ~/.dsh **之外**，被白名单拦下——这正是 0.14.4 白名单带来的行为变化。
+  const src = path.join(os.homedir(), '.dsh');
   const ok = await post({ siteId: 'glm', sourceProfileDir: src });
   assert.equal(ok.body.ok, true);
   // 站点 id 必须原样透传（这是「按站点路由」的契约：旧实现写死默认驱动，
