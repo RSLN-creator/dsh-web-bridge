@@ -23,6 +23,13 @@ export function createMirror(options = {}) {
     getCookies = null,
     setCookies = null,
     getUserAgent = null,
+    // 驱动 cookie 的缓存窗口（毫秒）。0 = 不缓存。
+    //
+    // 为什么必须有（0.14.4）：合并 cookie 之后每次代理请求都要读一次驱动 profile，
+    // 而 `getCookies` 是 CDP 往返（`ctx.cookies()`）——一次页面加载会代理上百个
+    // 请求，逐个往返会把右栏拖成幻灯片。登录态本身变化很慢，缓存 5 秒足够；
+    // 且**本镜像自己写回 cookie 时立即失效**（见 setCookies 调用点）。
+    cookieCacheMs = 5000,
   } = options;
   const upstreamOrigin = new URL(siteOrigin).origin.replace(/\/$/, '');
   const upstreamHost = new URL(upstreamOrigin).host;
@@ -57,6 +64,27 @@ export function createMirror(options = {}) {
   // 改写。内网/回环主机拒绝代理，防本机 SSRF。
   const STATIC_SEG = '/__static/';
   const PRIVATE_HOST = /^(localhost$|127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|\[::1\]$|.*\.local$)/i;
+
+  // ---- 驱动 cookie 的短缓存（0.14.4） ------------------------------------
+  // 合并 cookie（见 handle 里的 Cookie 合并块）之后，每个代理请求都要读一次驱动
+  // profile，而 `getCookies` 是 **CDP 往返**（`ctx.cookies()`）。一次页面加载会
+  // 代理上百个请求（HTML + JS + CSS + 字体 + 接口），逐个往返足以把右栏拖成
+  // 幻灯片——这是本模块自己引入的回归，必须用缓存抵消。
+  //
+  // 缓存窗口取 5 秒：登录态变化本身很慢，而**本镜像自己写回 cookie 时立即失效**
+  // （见下方 setCookies 调用点），因此站点刚下的新 cookie 不会被陈旧缓存挡住。
+  let cookieCache = { at: 0, origin: null, value: [] };
+  const invalidateCookieCache = () => { cookieCache = { at: 0, origin: null, value: [] }; };
+  async function cachedProfileCookies(origin) {
+    if (typeof getCookies !== 'function') return [];
+    const ttl = Math.max(0, Number(cookieCacheMs) || 0);
+    const now = Date.now();
+    if (ttl > 0 && cookieCache.origin === origin && now - cookieCache.at < ttl) return cookieCache.value;
+    let value = [];
+    try { value = (await getCookies(origin)) || []; } catch { /* best effort：读不到就当没有 */ }
+    if (ttl > 0) cookieCache = { at: now, origin, value };
+    return value;
+  }
 
   /** 绝对资源 URL → 同源镜像路径；本站绝对地址收敛进 mountPrefix，内网原样返回。 */
   function toProxyUrl(u) {
@@ -548,10 +576,7 @@ export function createMirror(options = {}) {
     // **真正登录的那份 cookie 就再也不会发给上游**——表现就是「打开右侧网页
     // 之后掉登录」。现在 profile 优先、请求补缺，详见 cookies.mergeCookieHeaders。
     {
-      let profileCookies = [];
-      if (typeof getCookies === 'function') {
-        try { profileCookies = await getCookies(upstreamOrigin) || []; } catch { /* best effort */ }
-      }
+      const profileCookies = await cachedProfileCookies(upstreamOrigin);
       const merged = mergeCookieHeaders(profileCookies, req.headers.cookie);
       if (merged) headers.cookie = merged;
     }
@@ -615,7 +640,9 @@ export function createMirror(options = {}) {
     const cookies = upstream.headers.getSetCookie?.() || [];
     if (cookies.length) out['set-cookie'] = cookies.map(rewriteCookie);
     if (cookies.length && typeof setCookies === 'function') {
-      try { await setCookies(cookies, upstreamOrigin); } catch { /* best effort */ }
+      // 写回成功后**立即失效** cookie 缓存：下一轮请求要看到站点刚下的新 cookie，
+      // 而不是被 5 秒的陈旧快照挡住（这正是「登录后立刻再发一轮」的路径）。
+      try { await setCookies(cookies, upstreamOrigin); invalidateCookieCache(); } catch { /* best effort */ }
     }
     out['x-webcode-mirror'] = '1';
 
