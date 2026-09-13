@@ -27,6 +27,36 @@ import path from 'node:path';
 
 const MAX_BODY_BYTES = 256 * 1024;
 
+/**
+ * 「导入登录态」允许的源 profile 根目录（0.14.4）。
+ *
+ * 与 `openai.js` 的 `/bridge/import-session` 同一口径：只允许 DSH home、桥自己的
+ * 驱动 profile、以及本包树内。旧实现（本文件的 `POST session-import`）只校验
+ * 「目录存在」，于是任意 `sourceProfileDir` 都能让调用方在磁盘任意位置创建
+ * Chromium profile 文件——两条入口敏感度相同（都会把真实登录态复制进桥 profile），
+ * 防护强度却一个有一个没有。现在两处共用同一套判定。
+ *
+ * @param {object} config 插件配置（含 profileDir）
+ * @returns {string[]} 解析后的绝对路径清单
+ */
+export function permittedImportRoots(config = {}) {
+  const pkgRoot = path.resolve(import.meta.dirname, '..');
+  return [config.profileDir, process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), pkgRoot]
+    .filter(Boolean)
+    .map((p) => { try { return path.resolve(p); } catch { return null; } })
+    .filter(Boolean);
+}
+
+/** 目标目录是否落在任一允许根之内（含根本身）。 */
+export function isWithinRoots(target, roots = []) {
+  let resolved = null;
+  try { resolved = path.resolve(String(target)); } catch { return false; }
+  return roots.some((b) => {
+    const rel = path.relative(b, resolved);
+    return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+  });
+}
+
 /** "GET status" → ['GET', 'status']. */
 function splitActionKey(key) {
   const i = String(key).indexOf(' ');
@@ -419,6 +449,12 @@ export function createWebControl(deps = {}) {
       const siteId = String(body?.siteId || 'deepseek').trim();
       const dir = String(body?.sourceProfileDir || '').trim() || defaultEdgeUserDataDir();
       if (!dir) return { ok: false, error: '未找到本机 Edge profile 目录，请在请求里显式给出 sourceProfileDir' };
+      // 目录白名单（0.14.4）：旧实现只查「存在」，于是任意路径都能让调用方在磁盘
+      // 任意位置创建 Chromium profile 文件。与 openai.js 的 /bridge/import-session
+      // 共用同一套判定（permittedImportRoots），两条入口防护强度从此一致。
+      if (!isWithinRoots(dir, permittedImportRoots(config))) {
+        return { ok: false, error: '源 profile 目录不在允许范围内（仅 DSH home / 桥 profile / 本包树）' };
+      }
       try {
         if (!fs.existsSync(dir)) return { ok: false, error: '源 profile 目录不存在：' + dir };
       } catch (err) {

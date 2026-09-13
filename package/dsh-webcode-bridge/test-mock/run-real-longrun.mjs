@@ -28,7 +28,9 @@ const log = (...a) => console.log('[longrun]', ...a);
 // ---- 真实驱动（与 DSH 内一致的配置） -------------------------------------
 const driver = createBrowserDriver({
   site: 'https://chat.deepseek.com/',
-  profileDir: path.join(os.homedir(), '.dsh', 'webcode-edge-profile'),
+  // 允许用 WEBCODE_PROFILE_DIR 覆盖（跑验证时把 profile 复制到隔离目录，避免
+  // 与正在运行的 DSH 抢同一个 Edge profile 锁）；未设置时保持原行为。
+  profileDir: process.env.WEBCODE_PROFILE_DIR || path.join(os.homedir(), '.dsh', 'webcode-edge-profile'),
   headless: process.env.WEBCODE_HEADED ? false : true,
   requestTimeoutMs: 240_000,
   loginTimeoutMs: 300_000,

@@ -253,7 +253,10 @@ export function createBrowserDriver(options = {}) {
     cachedLogin = entry;
     try {
       fs.mkdirSync(cfg.profileDir, { recursive: true });
-      fs.writeFileSync(loginStatePath(), JSON.stringify(entry));
+      // mode 0o600 与 consent/settings/send-state 三个文件一致。注意：Windows 上
+      // Node 的 mode 不生效（权限由 ACL 决定），这里写它是为了跨平台正确性与
+      // 意图表达——不要据此认为凭据文件已被额外加固（见 doc/security-review.md 6.3）。
+      fs.writeFileSync(loginStatePath(), JSON.stringify(entry), { mode: 0o600 });
     } catch (e) { warn('login state save failed:', e?.message); }
   }
   /** 轮次/连接路径的高频持久化入口：值没变且 60s 内写过就不重复落盘。
@@ -392,7 +395,7 @@ export function createBrowserDriver(options = {}) {
   function saveStore() {
     try {
       fs.mkdirSync(cfg.profileDir, { recursive: true });
-      fs.writeFileSync(storePath(), JSON.stringify(Object.fromEntries(conversations), null, 2));
+      fs.writeFileSync(storePath(), JSON.stringify(Object.fromEntries(conversations), null, 2), { mode: 0o600 });
     } catch (e) { warn('session store save failed:', e?.message); }
   }
   function conversationFor(key) { loadStore(); return conversations.get(String(key || 'main')) || null; }
