@@ -937,5 +937,64 @@ test('窗口声明可见性（B-3）：模型目录与状态里能核对自己�
   assert.match(idx, /function contextWindowFor\(/, '窗口取值必须收口到一个函数');
 });
 
+// ── 0.14.3：GLM 深链风控页与「已在目标会话上」的接线护栏 ──────────────────────
+// 来自 probe-26/27 的真机取证：C 修复让 GLM 的会话身份正确之后，第二轮**仍然**失败，
+// 但失败形态换成了 fill 超时——因为导航到 ?cid= 时站点返回了阿里云滑块验证页，
+// 而页面上那 3 个 textarea 全是**隐藏**的 WAF 脚本模板（内容是 CF_APP_WAF）。
+
+test('登录回退判定必须要求 composer **可见**（只数个数会被风控页骗过）', () => {
+  const src = bridgeSrc('browser-driver.js');
+  assert.match(src, /async function visibleComposerCount\(/, '应有「可见 composer」判定');
+  const at = src.indexOf('async function judgeLoggedIn(');
+  assert.ok(at > 0, '应有 judgeLoggedIn');
+  const body = src.slice(at, at + 2600);
+  assert.ok(/return await visibleComposerCount\(p\) > 0;/.test(body),
+    '回退判定必须走 visibleComposerCount');
+  assert.ok(!/locator\(SEL\.input\)\.count\(\) > 0/.test(body),
+    '不得回到「只数 SEL.input 个数」——GLM 风控页的隐藏 textarea 会命中它');
+});
+
+test('可见 composer 判定必须遍历**全部**候选选择器（GLM 的 composer 是裸 textarea）', () => {
+  const src = bridgeSrc('browser-driver.js');
+  const at = src.indexOf('async function visibleComposerCount(');
+  const body = src.slice(at, at + 1400);
+  // 真机 probe-27：GLM 真实 composer 是 <textarea>（id=null、placeholder=null），
+  // 只认 SEL.input 的第一个候选（textarea#chat-input）会漏掉它 → 正常页被判未登录。
+  assert.ok(/split\(','\)/.test(body), '必须切分候选选择器列表');
+  assert.ok(!/split\(','\)\[0\]/.test(body), '不得只取第一个候选（会漏掉 GLM 的裸 textarea）');
+  assert.match(body, /querySelectorAll\(c\)/, '逐个候选查元素');
+  assert.match(body, /seen\.has\(e\)/, '跨候选去重，避免同一元素被计两次');
+});
+
+test('风控/验证页必须在判定登录态之前识别，并如实报成 challenge-page', () => {
+  const src = bridgeSrc('browser-driver.js');
+  assert.match(src, /async function detectChallenge\(/, '应有风控页识别');
+  const at = src.indexOf('async function detectChallenge(');
+  const body = src.slice(at, at + 1100);
+  assert.ok(/滑动验证|访问验证/.test(body), '必须认站点验证页的文案');
+  assert.ok(/CF_APP_WAF|aliyun_waf/.test(body), '必须认 WAF 脚本指纹');
+
+  // 调用点：resume 分支里 detectChallenge 必须早于 judgeLoggedIn
+  const rb = src.indexOf('let challenge = null;');
+  assert.ok(rb > 0, 'resume 分支应记录 challenge');
+  const seg = src.slice(rb, rb + 2800);
+  const dc = seg.indexOf('detectChallenge(page)');
+  const jl = seg.indexOf('judgeLoggedIn(page)');
+  assert.ok(dc > 0 && jl > dc, 'detectChallenge 必须在 judgeLoggedIn 之前（否则隐藏 textarea 会骗过登录判定）');
+  // 原因必须与「会话过期」分开，否则用户按会话过期去查永远查不到风控
+  assert.match(seg, /challenge-page/, '必须用独立的 navReason 标注风控');
+  assert.match(seg, /被风控验证页拦截/, '报错文本要说清风控');
+});
+
+test('「已在目标会话上」按会话 id 判定，不靠 URL 字符串前缀', () => {
+  const src = bridgeSrc('browser-driver.js');
+  const at = src.indexOf('const wantId = conversationIdFromUrl(');
+  assert.ok(at > 0, '必须用会话 id 比较，而不是裸 startsWith');
+  const seg = src.slice(at, at + 700);
+  assert.ok(/conversationIdFromUrl\(siteId, target\)/.test(seg), '目标地址解析 id');
+  assert.ok(/conversationIdFromUrl\(siteId, page\.url\(\)\)/.test(seg), '当前地址解析 id');
+  assert.ok(/alreadyThere/.test(seg), '应先判断「已经在上面」再决定是否 goto');
+});
+
 
 

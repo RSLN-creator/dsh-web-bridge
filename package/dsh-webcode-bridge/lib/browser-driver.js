@@ -275,11 +275,71 @@ export function createBrowserDriver(options = {}) {
     });
   }
   /**
+   * 风控/验证页识别（纯判定，真机取证 2026-09-14）。
+   *
+   * 背景：GLM 在**直接深链** `…/main/alltoolsdetail?cid=<id>` 时会返回阿里云
+   * 滑块验证页（title「滑动验证页面」，正文「访问验证…请按住滑块，拖动到最右边」），
+   * 页面上有 3 个**隐藏** textarea（内容是 CF_APP_WAF / renderData / _waf_ 内联脚本）。
+   * 旧判定只数 textarea 个数、不看可见性 → 被判成「已登录 + 输入框在」→ 继续
+   * fill → 30s 超时。这是「第二轮必挂」的直接机制。
+   *
+   * 与登录态是两件事：验证页**不代表未登录**（cookie 可能完全有效），它代表
+   * 「这个 URL 形状被风控拦了」。因此单独成一态，让调用方换一条路（见 sendTurn）。
+   */
+  async function detectChallenge(p) {
+    try {
+      return await p.evaluate(() => {
+        const t = String(document.title || '');
+        const body = String(document.body?.innerText || '');
+        // 三种指纹任一命中即算：title、可见文案、WAF 脚本标识
+        if (/滑动验证|访问验证|安全验证|验证页面/.test(t)) return 'waf-title';
+        if (/访问验证|请按住滑块|拖动到最右边/.test(body)) return 'waf-body';
+        if (/CF_APP_WAF|aliyun_waf|_waf_[0-9a-f]+/.test(document.documentElement?.innerHTML || '')) return 'waf-script';
+        return null;
+      });
+    } catch { return null; }
+  }
+
+  /**
+   * 页面上是否存在**可见且可编辑**的 composer（真机 2026-09-14 修正）。
+   *
+   * 旧实现是 `locator(SEL.input).count() > 0` —— 只数个数。风控页/未渲染完的页面上
+   * 藏着若干个不可见 textarea（脚本模板），于是判定为「输入框在」，紧接着的 fill
+   * 必然超时。这里改为逐元素检查可见性，语义与后面真正要做的动作一致。
+   *
+   * ⚠ 必须逐个 selector 试**全部**候选，不能只取 `SEL.input.split(',')[0]`：
+   * GLM 的真实 composer 是裸 `<textarea>`（真机 probe-27：id=null、placeholder=null），
+   * 只认第一个候选（`textarea#chat-input`）会漏掉它，把正常页面判成未登录。
+   */
+  async function visibleComposerCount(p) {
+    try {
+      return await p.evaluate((sel) => {
+        const cands = sel.split(',').map((s) => s.trim()).filter(Boolean);
+        const seen = new Set();
+        let n = 0;
+        for (const c of cands) {
+          let nodes = [];
+          try { nodes = [...document.querySelectorAll(c)]; } catch { continue; }
+          for (const e of nodes) {
+            if (seen.has(e)) continue;
+            seen.add(e);
+            if (e.offsetWidth || e.offsetHeight || e.getClientRects().length) n += 1;
+          }
+        }
+        return n;
+      }, SEL.input);
+    } catch { return 0; }
+  }
+
+  /**
    * 统一的「这个页面算不算已登录」判定。旧实现只看 SEL.input 是否存在，而
    * z.ai 游客页自带完整输入框（真机实测 textarea + 发送按钮都在），未登录
    * 也被记成已登录。站点可在 providers.js 声明 loginProbe：
    *   bad — 命中即判未登录（如游客页可见的「登录」按钮）；
    *   ok  — 命中即判已登录（登录后才有的元素）；都没有时回退输入框判定。
+   *
+   * 0.14.3 修正：回退判定必须是**可见**的 composer。只数个数会把风控页里的隐藏
+   * textarea 当成输入框（GLM 深链的真实症状）。
    */
   async function judgeLoggedIn(p) {
     if (!p || p.isClosed?.()) { lastLoginBasis = 'unavailable'; return false; }
@@ -298,7 +358,7 @@ export function createBrowserDriver(options = {}) {
     // probe-fallback，不要谎称「命中了登录特征」——那会让面板把一次猜测
     // 当成特征核验的结果。
     lastLoginBasis = declared ? 'probe-fallback' : 'input-fallback';
-    return await p.locator(SEL.input).count() > 0;
+    return await visibleComposerCount(p) > 0;
   }
   /** 当前页面捕获链自检：binding + 捕获脚本必须真实存在于文档（见 installPage）。 */
   async function captureChainAlive(p) {
@@ -980,13 +1040,27 @@ export function createBrowserDriver(options = {}) {
         }
       } else {
         let ready = false;
+        let challenge = null;
         try {
           const target = String(navigate);
-          if (!page.url().startsWith(target)) {
+          // 「已在目标会话上」判定要用 **cid/会话 id**，不能用 URL 字符串前缀。
+          // 真机 2026-09-14：站点自己会把地址补成 `?lang=zh&cid=X`（首轮落点就是
+          // 这个），而桥拼的目标是 `?cid=X`——startsWith 判为「不同」，于是**白白
+          // 整页重载一次**，而重载正好会撞上风控验证页。idsMatch 用站点声明的解析
+          // 器比会话 id，语义正确且不会因参数顺序/多余参数误判。
+          const wantId = conversationIdFromUrl(siteId, target);
+          const haveId = conversationIdFromUrl(siteId, page.url());
+          const alreadyThere = Boolean(wantId && haveId && wantId === haveId)
+            || page.url().startsWith(target);
+          if (!alreadyThere) {
             await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 45_000 });
           }
           await page.waitForSelector(SEL.input, { timeout: 20_000 }).catch(() => {});
-          ready = await judgeLoggedIn(page);
+          // 风控/验证页要在判定登录态**之前**识别：那种页面上的 textarea 全是隐藏的
+          // 脚本模板，judgeLoggedIn 会把它们当成「输入框在 = 已登录」，随后 fill
+          // 必然超时（这正是 GLM 深链第二轮的失败形态）。
+          challenge = await detectChallenge(page);
+          ready = !challenge && await judgeLoggedIn(page);
         } catch { ready = false; }
         throwIfAborted();
         if (!ready) {
@@ -994,6 +1068,10 @@ export function createBrowserDriver(options = {}) {
           // 增量照发——新会话既没有首轮预设也没有任何历史，模型带着半截上下文
           // 裸奔（长时间运行的会话删/过期后最常见的一类「越跑越傻」）。
           // 现在抛码给上层：游标作废、下一轮整段重建。
+          //
+          // 风控页是**另一回事**：它不是「会话没了」，而是「这条深链被拦了」。
+          // 两者都导致无法续聊，恢复动作也一样（丢掉会话槽 + 整段重建），
+          // 但原因必须如实分开——否则用户按「会话过期」去查，永远查不到风控。
           const inputReady = await gotoFreshChat();
           if (!inputReady) {
             loggedIn = false;
@@ -1001,8 +1079,13 @@ export function createBrowserDriver(options = {}) {
             err.code = 'NEED_LOGIN';
             throw err;
           }
-          const err = new Error('WEB_SESSION_LOST: 网页会话已不可达（已删除或过期） — 需要整段重建');
+          const reason = challenge
+            ? `导航回既有会话时被风控验证页拦截（${challenge}）`
+            : '网页会话已不可达（已删除或过期）';
+          const err = new Error(`WEB_SESSION_LOST: ${reason} — 需要整段重建`);
           err.code = 'WEB_SESSION_LOST';
+          err.navReason = challenge ? 'challenge-page' : 'conversation-gone';
+          err.challenge = challenge;
           throw err;
         }
       }
