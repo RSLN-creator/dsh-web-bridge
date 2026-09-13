@@ -43,6 +43,18 @@ function platformNote() {
   return `运行环境：${os}（Node ${process.version}）。请按该平台的原生命令与路径书写习惯调用工具（如 Windows 用 PowerShell 语法与反斜杠路径），不要照搬其它平台的命令。`;
 }
 
+/** 传输协议末尾的 present 提醒（只在本会话注册了 present 时追加）。
+ *
+ *  为什么要在**协议**里再说一遍：preset 的「# 交付物呈现」是解释性的，而这里
+ *  紧挨着「调用后立即停止等待结果」那条行为约束——模型在收尾那一刻最容易忘掉
+ *  最后一步是 present。2026-09-13 真机症状：一轮里写了 8 个文件、正文把路径
+ *  列成一串，却一次 present 都没调，用户界面上全是点不动的纯文本。 */
+function presentTransportNote(tools) {
+  if (!Array.isArray(tools) || !tools.some((t) => t && t.name === 'present')) return '';
+  return '本会话可调 present：写/改完用户要拿到手的文件后，在给出最终答复之前必须调它声明这些文件'
+    + '（present 让文件以可点开的面板出现在界面上，只在正文写路径则是点不动的纯文本）。';
+}
+
 /** The agent preset: who the model is, which local tools exist, and the exact
  *  call/result protocol. Mirrors webcode's prompt_zh.md structure. */
 export function buildPreset(options = {}) {
@@ -52,6 +64,9 @@ export function buildPreset(options = {}) {
   const extraPrompt = typeof options.extraPrompt === 'string' && options.extraPrompt.trim() ? options.extraPrompt.trim() : '';
   if (extraPrompt) parts.push('[全局指令]\n' + extraPrompt);
   const tools = Array.isArray(options.tools) ? options.tools : [];
+  // present 是「交付物」的唯一声明入口：只有本会话真的注册了它，才值得教模型去调
+  // ——不能让模型去调用一个不存在的工具（那会白费一轮并撞 TOOL_UNKNOWN）。
+  const hasPresent = tools.some((t) => t && t.name === 'present');
   if (tools.length) {
     const lines = [];
     for (const t of tools) {
@@ -99,6 +114,18 @@ export function buildPreset(options = {}) {
       '工具执行结果会作为用户消息自动回填给你，格式：{"mcp_action":"result","name":"…","status":"success","output":"…"}（失败为 "status":"error","error":"…"）。',
       '重要：如果上一次工具调用因参数无效而失败，收到了 status:"error" 的结果，请在下一轮把参数修正后重新调用，不要因为失败而放弃工具改用猜测。',
       '回填结果中的每一轮调用（含失败）都会编号出现；继续任务时请基于真实结果，不要虚构文件内容。',
+      ...(hasPresent ? [
+        '',
+        '# 交付物呈现（present）',
+        '你写文件、改文件之后，若该文件是用户要拿到手的结果，**必须**调用 present 声明它，' +
+          '并且要在最终答复之前调用完——只在回复正文里写出文件路径**不算**交付：',
+        '· present 让文件以**可点开的面板/窗口**形式出现在用户界面上；只在正文里写路径，用户看到的只是纯文本，点不动。',
+        '· 典型该声明的：新建或修改的源码、脚本、配置、文档、报告，以及用 Bash/代码生成出来的产物。',
+        '· 不需要声明的：只是读来当参考的文件、临时中间文件、用户没要的输出。',
+        '· 路径要写真实存在的文件（相对工作目录或绝对路径都可以）；文件不存在就不要声明。',
+        '· 总结类答复里提到"主要产物"时，只有 present 声明过的才会变成可点开的窗口——' +
+          '若你已在正文列了一串路径却没调 present，那串路径对用户而言就是死文字，请补调 present。',
+      ] : []),
       '# 使用准则',
       '本会话的最终目标由用户的最新消息决定。除非用户只是闲聊/要观点，否则默认应优先通过真实工具获取数据，而不是凭记忆或设想作答。',
       '判断是否需要调用工具，应看"这个回答是否依赖本机真实文件、目录或命令执行结果"——依赖就用，不依赖就不用；能用一次调用覆盖就不用多次。',
@@ -128,8 +155,8 @@ export function serializeFirstTurn(options = {}) {
   // search/open/click/find），必须只教代码块形状并明说标签会被吃；其它站点
   // 维持既有文字逐字不动。
   const transport = !options.tools?.length ? '' : options.siteId === 'glm'
-    ? '\n[本地工具传输协议]\n必须使用 ```json 代码块发起工具调用：先写一行 ```json，下一行是单个 JSON 对象 {"mcp_action":"call","name":"实际工具名","purpose":"原因","arguments":{…}}，再以一行 ``` 结束。不要使用 <tool_call> 等标签包裹——本网页会把这些标签当成它自己的内置工具抢走执行并报 unknown tool call，调用会静默丢失。工具名和参数必须严格匹配上面的 schema（arguments 必须包含 required 里的每个字段，如 pwsh 的 description）。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。'
-    : '\n[本地工具传输协议]\n必须使用 <tool_call>{"mcp_action":"call","name":"实际工具名","arguments":{}}</tool_call> 发起工具调用。工具名和参数必须严格匹配上面的 schema。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。';
+    ? '\n[本地工具传输协议]\n必须使用 ```json 代码块发起工具调用：先写一行 ```json，下一行是单个 JSON 对象 {"mcp_action":"call","name":"实际工具名","purpose":"原因","arguments":{…}}，再以一行 ``` 结束。不要使用 <tool_call> 等标签包裹——本网页会把这些标签当成它自己的内置工具抢走执行并报 unknown tool call，调用会静默丢失。工具名和参数必须严格匹配上面的 schema（arguments 必须包含 required 里的每个字段，如 pwsh 的 description）。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。' + presentTransportNote(options.tools)
+    : '\n[本地工具传输协议]\n必须使用 <tool_call>{"mcp_action":"call","name":"实际工具名","arguments":{}}</tool_call> 发起工具调用。工具名和参数必须严格匹配上面的 schema。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。' + presentTransportNote(options.tools);
   return [preset, '[会话开始]', text || '（用户未提供文字）', transport].filter(Boolean).join('\n\n');
 }
 

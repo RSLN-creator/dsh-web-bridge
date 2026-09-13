@@ -1,13 +1,28 @@
 # Harness Web Bridge
 
-已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.13.0。
+已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.13.1。
 
-安装：`pnpm pack` 后执行 `dsh plugin --profile web add ./dsh-webcode-bridge-0.13.0.tgz`，重启 `dsh web`。需要 Node.js 20+、系统 Edge；无需浏览器扩展。
+安装：`pnpm pack` 后执行 `dsh plugin --profile web add ./dsh-webcode-bridge-0.13.1.tgz`，重启 `dsh web`。需要 Node.js 20+、系统 Edge；无需浏览器扩展。
 
 原生「设置 > 网页桥接」管理登录与启用开关。默认沿用 `~/.dsh/webcode-edge-profile`。
 模型分组 Harness Web Bridge 暴露全部内容服务站点（`site:model` 限定 id）；DeepSeek
 站点只提供唯一模型 `DeepSeek`（深度思考），旧 id（`flash`/`vision`/`deepseek-web`/
 `deepseek-reasoner`）保留为别名。
+
+## 0.13.1
+
+**交付物必须以 `present` 呈现，写进预设提示词。** 此前预设从未教过这件事，于是
+模型写完文件只在**正文**里列一串路径——用户看到的是一堆点不动的纯文本，而不是
+可点开的文件面板。现在预设新增「# 交付物呈现（present）」章节，讲清三件事：
+只在正文写路径**不算**交付；`present` 让文件变成可点开的面板；要在最终答复
+**之前**调用。首轮的 `[本地工具传输协议]` 尾部也带一句提醒（收尾那一刻最容易忘），
+glm 的代码块分支与其它站点的标签分支都覆盖。
+**仅在本会话真的注册了 `present` 时才教**——否则模型会去调一个不存在的工具，
+白费一轮并撞 TOOL_UNKNOWN。
+
+> 为什么必须升版本号：0.13.0 已发布过一份**不含**该提示词的包，同名同版本却换了
+> 内容会让 pnpm 按版本号去重而静默不更新（实测安装副本仍是旧文件），也让构建指纹
+> 失去意义。任何内容变更都必须伴随版本号变更。
 
 ## 0.13.0
 
