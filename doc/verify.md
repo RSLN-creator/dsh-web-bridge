@@ -4,6 +4,99 @@
 
 ---
 
+# 0.14.3 真机复验与两个新 bug 修复
+
+日期：2026-09-14。环境：Windows、Node v24.18.0、pnpm 11.25.0、DSH 已重启。
+
+**范围**：0.14.2 全部内容 + 真机复验暴露的两个 bug（登录判定只看个数不看可见性、
+「已在目标会话上」用 URL 前缀判断），外加风控页单独成一态。
+
+## 复验怎么暴露的问题（0.14.2 → 0.14.3 的关键一课）
+
+0.14.2 装了、重启了、**单测 23 文件全绿**，`build.version=0.14.2`、
+`hash=2c3d4df106c3`（旧 `ab0fdf766a5d`）——但 GLM 第二轮**仍然失败**，
+只是失败方式换成了 `locator.fill: Timeout 30000ms exceeded`。
+
+| 复验项 | 0.14.2 当时 | 结论 |
+| --- | --- | --- |
+| 版本核对 | `version=0.14.2`，hash 变化 | PASS |
+| B-3 窗口可见性 | `glm/zai: window=1000000 consistent=true sources=declared` | PASS |
+| C 会话身份 | `result.sessionId` 非 null、store 非 `{}` | PASS（身份部分） |
+| C 续聊 | ✖ `fill` 超时 30s | **FAIL → 0.14.3 修** |
+| F（`:8931` 间隔） | `gapTargetMs=10000`（修前 0） | PASS |
+| A-4b（重启后首轮） | `sincePrevSendMs=183820`，基准时刻早于重启时刻 | PASS |
+
+## 两个新 bug（probe-26/27 定位）
+
+1. **`judgeLoggedIn` 回退判定只数个数、不看可见性**。导航到 `?cid=` 时 GLM 返回阿里云
+   滑块验证页（title「滑动验证页面」），页面上 3 个 textarea 全是**隐藏**的 WAF 脚本
+   模板（`CF_APP_WAF` / `renderData` / `aliyun_waf_*`）→ `count() > 0` 判成
+   「已登录 + 输入框在」→ 继续 `fill` → 30s 超时。
+2. **「是否已在目标会话上」用 URL 字符串前缀**。站点把地址补成 `?lang=zh&cid=X`
+   （首轮真实落点），桥拼的目标是 `?cid=X` → `startsWith` 判为不同 → **白白整页重载**，
+   而重载正好撞风控页。
+
+修法：`visibleComposerCount()`（逐元素查可见性，且**遍历全部候选选择器**——GLM 的真实
+composer 是裸 `<textarea>`，只认第一个候选会漏掉它、把正常页判成未登录）；
+`detectChallenge()`（认验证页文案 + WAF 指纹，在登录判定**之前**）；
+resume 分支改用**会话 id** 比较；新增 `navReason='challenge-page'` 把风控与
+「会话过期」分开报。
+
+## 0.14.3 真机复验结果
+
+```
+GLM 连续性（probe-26，修复后）：
+  第一轮  sessionId = 6aa6ff186112d633ae83e731   会话槽已写入
+  第二轮  ✔ 未抛 WEB_SESSION_LOST，正文「好的」
+          cid 首轮 = 次轮（逐字相同）→ 同一会话 ✔
+          sessionLostCount = 0
+
+A-4b（重启后第一轮发送间隔）：
+  重启后首轮 sincePrevSendMs=183820 → 基准时刻 03:43:19 < 重启时刻 03:43:55
+  → 证明基准确实从 webcode-send-state.json 读回（不是进程内存）
+
+F（OpenAI 兼容路径）：
+  POST :8931/v1/chat/completions（glm:glm-5.3）→ HTTP 200，gapTargetMs=10000
+```
+
+## 产物
+
+| 项 | 值 |
+| --- | --- |
+| tarball | `package/dsh-webcode-bridge/dsh-webcode-bridge-0.14.3.tgz`（211106 B） |
+| SHA256 | `FA013F1176DB7D11CB3FAF301435BAB5BFFE994DA40CE59DF264B6B6F38520BC` |
+| 包内文件数 | 23 |
+| 逐文件 SHA256 | **22/23 与工作区逐字相同** |
+| 唯一差异 | `package.json` —— pnpm 打包时移除 `packageManager` 字段（内容等价） |
+| `web` profile | 0.14.3，**23/23 与 tarball 逐字相同**，备份 `package.json.bak-0143` |
+| `headless` profile | 0.14.3，**23/23 与 tarball 逐字相同**，备份 `package.json.bak-0143` |
+
+## 测试
+
+| 项 | 结果 |
+| --- | --- |
+| `test/*.test.mjs`（23 个文件） | **全绿，0 失败** |
+| `test/regression.test.mjs` | **51/51**（+4：可见 composer、候选遍历、风控页顺序、会话 id 比较） |
+| `test/parse.test.mjs` | 22 passed, 0 failed |
+| `test/run-m1.js` | **M1 RESULT: PASS** |
+
+## 本轮事故（已恢复）
+
+probe-26/27 反复深链同一个 `?cid=` 之后，GLM 对该 profile 的**根路径**也开始返回风控页，
+probe-26 第二次重跑在 fresh 分支就 `NEED_LOGIN`。probe-28 诊断：
+
+- **登录态完好**：`chatglm_token` / `chatglm_refresh_token` / `chatglm_user_id` 均在（cookie 共 9 枚）；
+- **风控是暂时的**：20s 间隔重试三次，三次都回到正常的「智谱清言」页（可见 textarea 1 个）。
+
+教训：**反复深链同一会话地址会触发站点风控**，探针要节制；且风控页 ≠ 未登录。
+
+## 待做
+
+重启后按 0.14.3 再核对一次 `build.version === '0.14.3'`，并按
+`PLAN-0.14.0-HANDOFF.md` §0.0 的短清单收尾（GLM 连发两轮、`:8931` 间隔、A-4b）。
+
+---
+
 # 0.14.2 打包与安装记录（B/C/F 三组）
 
 日期：2026-09-14。环境：Windows、Node v24.18.0、pnpm 11.25.0。
