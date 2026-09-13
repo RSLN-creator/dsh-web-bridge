@@ -11,24 +11,25 @@
 import { flattenOpenAiMessages, imagesOfOpenAiMessages } from './flatten.js';
 import { SITES, resolveWebModel, DEFAULT_MODEL_ID, qualifyModelId } from './providers.js';
 import { estimateTokens } from './metrics.js';
+import { isLoopbackHost, originMatchesHost } from './loopback.js';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const pkgRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const JSON_CT = 'application/json; charset=utf-8';
-const LOOPBACK_HOST = /^(127\.0\.0\.1|\[::1\]|localhost)(:\d+)?$/i;
 
 /** 拒绝浏览器里恶意网页可控的上下文（防 CSRF/防 DNS 重绑定）。 */
 function csrfSafe(req, allowedOrigins = []) {
-  if (!LOOPBACK_HOST.test(String(req.headers.host || ''))) return false;
+  // 回环名称族判定统一在 lib/loopback.js（含 <site>.localhost 子域）：
+  // 三处各写一份正则的代价，0.12.9 已经真机付过一次（子域控制面被 403）。
+  if (!isLoopbackHost(String(req.headers.host || ''))) return false;
   const site = String(req.headers['sec-fetch-site'] || '').toLowerCase();
   if (site === 'cross-site') return false;
   const origin = String(req.headers.origin || '');
   if (origin) {
     if (allowedOrigins.includes(origin.toLowerCase())) return true;
-    try { return new URL(origin).host === String(req.headers.host || ''); }
-    catch { return false; }
+    return originMatchesHost(origin, req.headers.host);
   }
   return true;
 }

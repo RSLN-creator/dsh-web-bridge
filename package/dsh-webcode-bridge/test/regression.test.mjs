@@ -635,22 +635,35 @@ test('GET login-sites 列出全部站点（含 z.ai）且不启动浏览器', as
 // ---------------------------------------------------------------- 0.13.0
 // 四个回归的护栏。每条都锁「旧实现的错误行为」，不是锁实现细节。
 
-test('模型名不再含「网页当前模型」字样，但 auto 入口仍唯一且可解析', async () => {
+test('模型名是干净名字：不得含元描述或括注，auto 入口仍唯一且可解析', async () => {
   const { listAllModels, resolveWebModel } = await import('../lib/providers.js');
   const all = listAllModels();
   for (const m of all) {
+    // 选择器里显示的必须是模型/站点名本身。像「网页当前模型（不切换）」
+    // 这类元描述属于**说明文字**，不该占用模型名——说明放在 UI 的 hint 里。
     assert.ok(!m.name.includes('网页当前模型'), `${m.id} 仍带「网页当前模型」: ${m.name}`);
+    // 唯一豁免：DeepSeek 的「（深度思考）」是能力注记（它是唯一有思考开关
+    // 语义的模型），其余一律要求干净名字。
+    if (m.id === 'deepseek:deepseek') continue;
+    assert.ok(!m.name.includes('（') && !m.name.includes('）'), `${m.id} 名称应无括注: ${m.name}`);
   }
-  // 只有 DeepSeek 保留「（深度思考）」这一条能力注记，其余是干净站点名
+  // 只有 DeepSeek 保留「（深度思考）」这一条能力注记（它是唯一有思考开关语义的模型）
   assert.equal(all.find(m => m.id === 'deepseek:deepseek').name, 'DeepSeek（深度思考）');
-  for (const id of ['chatgpt:auto', 'qwen:auto', 'doubao:auto', 'grok:auto', 'claude:auto', 'gemini:auto']) {
-    const name = all.find(m => m.id === id).name;
-    assert.ok(!name.includes('（') && !name.includes('）'), `${id} 名称应无括注: ${name}`);
+  // 未校准站点仍只有唯一 auto 入口，且解析不因改名而失效。
+  // 0.13.0 起 glm/zai/kimi 有了真实版本条目，auto 变回「站点默认（不切换）」，
+  // 因此这里断言的是「auto 仍存在且解析到本站点」，而不是具体版本名。
+  for (const [id, siteId] of [['glm:auto', 'glm'], ['zai:auto', 'zai'], ['kimi:auto', 'kimi'],
+    ['qwen:auto', 'qwen'], ['doubao:auto', 'doubao'], ['grok:auto', 'grok']]) {
+    const m = resolveWebModel(id);
+    assert.equal(m.siteId, siteId, id + ' 必须解析到 ' + siteId);
+    assert.equal(m.id, 'auto');
+    assert.ok(m.name.trim().length > 0, id + ' 必须有显示名');
   }
-  // 未校准站点仍只有唯一 auto 入口，且解析不因改名而失效
-  const glm = resolveWebModel('glm:auto');
-  assert.equal(glm.siteId, 'glm');
-  assert.equal(glm.name, 'GLM-5.3');
+  // 每个站点的 auto 入口唯一
+  for (const siteId of new Set(all.map((m) => m.siteId))) {
+    const autos = all.filter((m) => m.siteId === siteId && m.id === siteId + ':auto');
+    assert.ok(autos.length <= 1, siteId + ' 的 auto 入口不得重复');
+  }
 });
 
 test('右栏窗口状态是聚合对象：没有独立窗口时不得让面板渲染抛错', () => {

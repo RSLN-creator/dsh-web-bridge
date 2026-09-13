@@ -186,14 +186,43 @@ button.mini { width: auto; margin-top: 0; padding: 6px 12px; font-size: 13px; }
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body || {}),
     });
-    if (!res.ok) throw new Error(name + ' 失败（HTTP ' + res.status + '）');
-    return res.json();
+    // 先读文本再解析：后端 405/404 回的是空 body 时，直接 .json() 会抛
+    // “unexpected end of JSON data”，把真实状态码吞掉（0.12.9 真机 bug）。
+    const text = await res.text().catch(() => '');
+    const ctype = res.headers.get('content-type') || '';
+    let data = null;
+    if (text && ctype.includes('json')) { try { data = JSON.parse(text); } catch { /* 下面按空处理 */ } }
+    if (!res.ok || (data && data.ok === false)) {
+      throw new Error('HTTP ' + res.status + '：'
+        + ((data && (data.error || data.message)) || text.slice(0, 160) || '无响应内容'));
+    }
+    return data || {};
+  }
+
+  /** 不抛异常的 POST：行内显示失败原因用。 */
+  async function apiSoftPost(name, body) {
+    try { return { ok: true, data: await apiPost(name, body) }; }
+    catch (e) { return { ok: false, error: String(e && e.message ? e.message : e) }; }
   }
 
   function setSubState(s) {
     subSiteState.className = 'state ' + (s.loggedIn === true ? 'ok' : s.loggedIn === false ? 'bad' : 'idle');
     subSiteState.textContent = s.loggedIn === true ? (s.loggedInCached ? '已登录(缓存)' : '已登录') : s.loggedIn === false ? '未登录' : '待检查';
+    subSiteState.title = basisText(s);
     document.getElementById('subLogin').textContent = s.loggedIn === true ? '更换账户' : '登录';
+  }
+
+  // 判定依据（loginBasis）是后端已经给出的真相，0.12.9 之前 UI 完全没露出——
+  // 于是「未登录」看起来像凭空断言。这里把它翻译成一句人话做 hover 说明。
+  function basisText(s) {
+    const when = s.loginCheckedAt ? new Date(s.loginCheckedAt).toLocaleTimeString() : '';
+    const basis = s.loginBasis === 'probe-bad' ? '命中站点未登录特征'
+      : s.loginBasis === 'probe-ok' ? '命中站点登录特征'
+        : s.loginBasis === 'probe-fallback' ? '站点特征未命中，回退输入框判定'
+          : s.loginBasis === 'input-fallback' ? '按输入框存在与否推断（该站点未声明登录特征）'
+            : s.loginBasis === 'stale' ? '旧版本结论，已被忽略'
+              : '尚未核验';
+    return '判定依据：' + basis + (when ? ' · ' + when + ' 核验' : '');
   }
 
   async function refreshSubAccount() {
@@ -229,19 +258,39 @@ button.mini { width: auto; margin-top: 0; padding: 6px 12px; font-size: 13px; }
     try {
       if (kind === 'login') {
         subAccountStatus.textContent = '等待登录完成…（最长 5 分钟，请在弹出的 Edge 窗口内完成登录）';
-        const r = await apiPost('login', { siteId: site, wait: true, timeoutMs: 300000 });
-        subAccountStatus.textContent = (r.alreadyLoggedIn ? '登录态仍有效，无需重复登录' : (r.message || '登录完成'))
-          + (r.ms ? '（' + Math.round(r.ms / 1000) + 's）' : '');
-        subAccountStatus.className = r.loggedIn === true ? 'success' : 'error';
+        const r = await apiSoftPost('login', { siteId: site, wait: true, timeoutMs: 300000 });
+        if (!r.ok) {
+          subAccountStatus.textContent = '✗ ' + r.error;
+          subAccountStatus.className = 'error';
+        } else {
+          const d = r.data;
+          subAccountStatus.textContent = (d.alreadyLoggedIn ? '登录态仍有效，无需重复登录' : (d.message || '登录完成'))
+            + (d.ms ? '（' + Math.round(d.ms / 1000) + 's）' : '');
+          subAccountStatus.className = d.loggedIn === true ? 'success' : 'error';
+        }
       } else if (kind === 'verify') {
-        const r = await apiPost('verify-login', { siteId: site });
-        subAccountStatus.textContent = r.loggedIn === true ? '已检测到登录态'
-          : r.loggedIn === false ? '仍未登录（请在独立窗口完成登录后再检测）' : '待检查（先打开一次站点）';
-        subAccountStatus.className = r.loggedIn === true ? 'success' : 'error';
+        const r = await apiSoftPost('verify-login', { siteId: site });
+        if (!r.ok) {
+          subAccountStatus.textContent = '✗ 检测失败：' + r.error;
+          subAccountStatus.className = 'error';
+        } else {
+          const d = r.data;
+          // 三态：true / false / null（null = 该站点尚未打开过，不是错误）。
+          subAccountStatus.textContent = d.loggedIn === true ? '✓ 已检测到登录态'
+            : d.loggedIn === false ? '✓ 检测完成：仍未登录（请在独立窗口完成登录后再检测）'
+              : '✓ 检测完成：待检查（该站点尚未打开过，点「独立窗口」打开一次后再检测）';
+          subAccountStatus.className = d.loggedIn === false ? 'error' : 'success';
+        }
       } else if (kind === 'window') {
-        const r = await apiPost('window', { siteId: site, action: subWinOpen ? 'close' : 'open' });
-        subAccountStatus.textContent = (r && r.alreadyOpen) ? '窗口已存在——已聚焦弹到最前'
-          : (subWinOpen ? '独立窗口已收起，回到无头运行' : '独立窗口已打开（与桥共用登录态）');
+        const r = await apiSoftPost('window', { siteId: site, action: subWinOpen ? 'close' : 'open' });
+        if (!r.ok) {
+          subAccountStatus.textContent = '✗ ' + r.error;
+          subAccountStatus.className = 'error';
+        } else {
+          const d = r.data;
+          subAccountStatus.textContent = (d && d.alreadyOpen) ? '窗口已存在——已聚焦弹到最前'
+            : (subWinOpen ? '独立窗口已收起，回到无头运行' : '独立窗口已打开（与桥共用登录态）');
+        }
       }
     } catch (e) {
       subAccountStatus.textContent = '✗ ' + e.message;

@@ -37,7 +37,9 @@
 
 ## 多站点与跨域资源
 
-9 个内容服务共用同一套镜像与驱动（见 `lib/providers.js` 的 `SITES`）。站点 HTML 常把脚本/样式放在**另一个域**上并用 `crossorigin` 引用，而该域返回的 `Access-Control-Allow-Origin` 可能是非法通配（DeepSeek 的 `https://*.deepseek.com`），浏览器会硬性拒绝执行，整页退化成「页面资源加载异常」。
+**每个站点一个独立源**（0.12.9）：右栏 iframe 走 `http://<siteId>.localhost:8931/`，站点看到的 pathname 与它自己的真实站点逐字一致，SPA router 基线与根相对资源天然正确（旧形态 `/__webcode/site/<id>/` 会被 router 认不出，且站点用 history API 写回根相对路径时会跳回中继根 = DeepSeek 镜像）。例外是 **DeepSeek 恒挂在中继根**：它校验宿主名，套子域会得到 `Unknown hostname` 空白页。`*.localhost` 由系统解析到回环，暴露面不变。
+
+站点 HTML 常把脚本/样式放在**另一个域**上并用 `crossorigin` 引用，而该域返回的 `Access-Control-Allow-Origin` 可能是非法通配（DeepSeek 的 `https://*.deepseek.com`），浏览器会硬性拒绝执行，整页退化成「页面资源加载异常」。
 
 因此站点声明 `staticOrigins` 后，`lib/mirror.js` 会：
 
@@ -68,6 +70,8 @@
 ## 验证和边界
 
 - `pnpm test`：回归、解析和 Harness 适配契约（含镜像同源改写护栏）。
+- `node test-mock/real-mirror-matrix.mjs --port 8931`：**右栏真机验收矩阵**——CDP 附着到桥已开的 Edge（沙箱下 spawn 浏览器必 EPERM），逐站点加载真实站点镜像，采集渲染/探活/跳站/乱码证据并截图；输出 `test-mock/out/real-mirror-matrix-<ts>.json` + `.tmp/shots/matrix-*.png`。0.12.9 实测 10/10。
+- 设置页「账户与登录管理」每站点有 **导入本机登录态**（把本机真实 Edge 的 cookies 采纳进该站点的桥 profile）。**实测边界**：Edge 128+ 用 app-bound 加密（cookie 的 `encrypted_value` 前缀为 `v20`，密钥绑定到 Edge 应用身份而非仅用户），复制 profile 后一枚都解不开（本机 372 枚全部 v20，`storageState` 返回 0）。因此该按钮在当前 Edge 上会**如实报错**并指向「登录」按钮，而不是假装成功。实现只复制读取所需的最小文件集到临时 profile，且绝不打开你正在用的 Edge User Data。cookie 仍为 v10（DPAPI）的旧 Edge 或其它 Chromium 上该通路可用。
 - `node test/glm-session-replay.test.mjs`：用真机会话形状回放 glm 站点工具调用链路——网页存活形状解析、缺失必填补齐、站点差异化教学立场。
 - `node test-mock/run-real-longrun.mjs`：长期真实调用验证——真实 Edge + 真实网页会话跑多轮工具闭环（未登录自动开有头窗口等人工登录），断言同一网页会话连续、回复完整、无协议泄漏；说明见 [路线](PLAN.md) 0.9.8 一节。
 - `node test-mock/run-m2b-driver.js`：真实 Edge 加模拟站点 JSON/SSE。

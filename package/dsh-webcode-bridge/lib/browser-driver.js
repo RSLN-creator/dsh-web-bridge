@@ -13,6 +13,7 @@
 
 import { chromium } from 'playwright-core';
 import { getSite, getContract, resolveWebModel } from './contract.js';
+import { selectWebModel, pickerUsable } from './model-picker.js';
 import { deriveLastRate } from './metrics.js';
 import child_process from 'node:child_process';
 import fs from 'node:fs';
@@ -139,6 +140,27 @@ const DOM_CAPTURE = `
 })()
 `;
 
+/**
+ * composer 形态判定（纯函数，便于护栏测试）：给定元素的标签与可编辑性，
+ * 决定用「表单控件」还是「富文本编辑器」策略。
+ *
+ * 真机形状（2026-09-13）：
+ *   field    — textarea（deepseek / glm / qwen / zai / grok / claude）
+ *   editable — contenteditable（doubao 的 div.tiptap.ProseMirror、
+ *              kimi 的 div.chat-input-editor、gemini 的 div.ql-editor）
+ * 判错的代价：fill() 写不进去或 inputValue() 抛错 → 这两个站点要么发不出
+ * 消息、要么被判成「提示词被截断」。因此这里只按元素事实分派，不看站点名。
+ */
+export function composerStrategy(info) {
+  if (!info) return 'unknown';
+  const tag = String(info.tag || '').toLowerCase();
+  if (info.editable === true) return 'editable';
+  if (tag === 'textarea' || tag === 'input') return 'field';
+  // 其它标签（div 等）即便没声明 contenteditable 也按富文本处理：写进去才是
+  // 目的，用 fill() 对 div 会直接抛错。
+  return 'editable';
+}
+
 export function createBrowserDriver(options = {}) {
   const siteId = options.siteId ?? 'deepseek';
   const site = getSite(siteId);
@@ -164,6 +186,15 @@ export function createBrowserDriver(options = {}) {
   const log = (...a) => cfg.logger.log?.('[webcode-driver:' + siteId + ']', ...a);
   const warn = (...a) => cfg.logger.warn?.('[webcode-driver:' + siteId + ']', ...a);
 
+  // 宿主的图片限额（每消息张数 / 单图字节 / 允许的媒体类型）。由 index.js 在
+  // 解析到 attachment 服务后注入；拿不到就退回保守默认。上传前用它拦下必然被
+  // 网页拒绝的输入，而不是发出去再猜为什么「模型说没图」。
+  let getImageLimits = typeof options.getImageLimits === 'function' ? options.getImageLimits : null;
+  function attachmentsRef() {
+    try { return getImageLimits ? getImageLimits() : null; } catch { return null; }
+  }
+  function setImageLimitsProvider(fn) { getImageLimits = typeof fn === 'function' ? fn : null; }
+
   let ctx = null;
   let page = null;
   let busy = false;
@@ -185,6 +216,11 @@ export function createBrowserDriver(options = {}) {
   let Decoders = null;
   try { Decoders = loadDecoderRegistry(cfg.decoderPath); } catch (e) { warn('decoder registry preload failed:', e?.message); }
   let loggedIn = null;
+  // 上一次登录判定**依据什么得出**（'probe-bad' | 'probe-ok' | 'input-fallback'
+  // | 'unavailable'）。落盘时带上它，面板才能区分「按站点特征核验过」与
+  // 「旧版本按输入框猜的」——0.12.9 之前所有站点的结论都是后者（qwen/gemini/
+  // glm/zai/grok 全被记成已登录），若把它当权威，修好判定后面板仍会显示旧结论。
+  let lastLoginBasis = null;
   // 重启前最后一次核验的登录态（持久化在各站点 profile）：进程内存里的 loggedIn
   // 重启即归零，没有这份缓存，面板每次重启都把所有站点打回「待检查」，
   // 用户只能逐站点手动核验（cookies 明明还在 profile 里）。
@@ -199,11 +235,24 @@ export function createBrowserDriver(options = {}) {
       fs.writeFileSync(loginStatePath(), JSON.stringify(entry));
     } catch (e) { warn('login state save failed:', e?.message); }
   }
-  /** 轮次/连接路径的高频持久化入口：值没变且 60s 内写过就不重复落盘。 */
+  /** 轮次/连接路径的高频持久化入口：值没变且 60s 内写过就不重复落盘。
+   *  但**判定依据**变了必须重写：否则「输入框猜的 true」会挡住「特征核验的
+   *  false」，面板永远显示修好之前的旧结论。 */
   function rememberLogin(v) {
     const val = v === true;
-    if (cachedLogin && cachedLogin.loggedIn === val && Date.now() - (cachedLogin.at || 0) < 60_000) return;
-    persistLoginState({ loggedIn: val, at: Date.now(), message: val ? '页面核验：输入框在' : '页面核验：未见登录态' });
+    const basis = lastLoginBasis;
+    if (cachedLogin && cachedLogin.loggedIn === val && cachedLogin.basis === basis
+      && Date.now() - (cachedLogin.at || 0) < 60_000) return;
+    persistLoginState({
+      loggedIn: val,
+      at: Date.now(),
+      basis: basis || 'unavailable',
+      message: basis === 'probe-bad' ? '页面核验：命中未登录特征'
+        : basis === 'probe-ok' ? '页面核验：命中登录特征'
+          : basis === 'probe-fallback' ? '页面核验：站点特征未命中，回退输入框判定'
+            : basis === 'input-fallback' ? '页面核验：回退输入框判定'
+              : '页面核验：页面不可用',
+    });
   }
   /**
    * 统一的「这个页面算不算已登录」判定。旧实现只看 SEL.input 是否存在，而
@@ -213,17 +262,22 @@ export function createBrowserDriver(options = {}) {
    *   ok  — 命中即判已登录（登录后才有的元素）；都没有时回退输入框判定。
    */
   async function judgeLoggedIn(p) {
-    if (!p || p.isClosed?.()) return false;
+    if (!p || p.isClosed?.()) { lastLoginBasis = 'unavailable'; return false; }
     const probe = site.loginProbe;
+    const declared = Boolean(probe?.bad || probe?.ok);
     if (probe?.bad) {
       try {
         const bad = p.locator(probe.bad).first();
-        if (await bad.count() && await bad.isVisible().catch(() => false)) return false;
+        if (await bad.count() && await bad.isVisible().catch(() => false)) { lastLoginBasis = 'probe-bad'; return false; }
       } catch { /* bad 特征坏了不阻塞判定 */ }
     }
     if (probe?.ok) {
-      try { if (await p.locator(probe.ok).first().count()) return true; } catch { /* 同上 */ }
+      try { if (await p.locator(probe.ok).first().count()) { lastLoginBasis = 'probe-ok'; return true; } } catch { /* 同上 */ }
     }
+    // 声明了特征但都没命中（如站点改版、或页面根本没加载出来）：如实标成
+    // probe-fallback，不要谎称「命中了登录特征」——那会让面板把一次猜测
+    // 当成特征核验的结果。
+    lastLoginBasis = declared ? 'probe-fallback' : 'input-fallback';
     return await p.locator(SEL.input).count() > 0;
   }
   /** 当前页面捕获链自检：binding + 捕获脚本必须真实存在于文档（见 installPage）。 */
@@ -275,15 +329,28 @@ export function createBrowserDriver(options = {}) {
 
   function status() {
     loadStore();
+    // 重启前那份落盘结论只有在**由本版本判定逻辑写出**时才可信。0.12.9 之前
+    // 所有站点都是「有输入框=已登录」猜出来的，qwen/gemini/glm/zai/grok 全被记成
+    // true（真机证据：state 文件里 message 逐字为「输入框在」），且文件里**没有
+    // basis 字段**。因此「有 basis」= 新逻辑写的、「没 basis」= 旧版本的猜测。
+    //
+    // 注意不能只认 probe-*：deepseek 的设计就是输入框回退（游客落地页是 /sign_in、
+    // 没有 textarea；已登录会话页有），它的 basis 恒为 input-fallback，若把它一并
+    // 降级成「待检查」，反而让唯一可用的基线每次重启都要手动核验。
+    const cachedTrusted = Boolean(cachedLogin && typeof cachedLogin.basis === 'string');
+    const effectiveLoggedIn = loggedIn != null ? loggedIn : (cachedTrusted ? cachedLogin.loggedIn : null);
     return {
       running: Boolean(ctx),
       busy,
-      loggedIn,
+      loggedIn: effectiveLoggedIn,
       // loggedIn 为 null（本进程从未核验）时回退到重启前的持久值，面板据此
       // 显示「已登录(缓存)」而不是「待检查」；loggedInCached 标记数据来源。
-      loggedInCached: loggedIn == null && cachedLogin?.loggedIn === true,
+      loggedInCached: loggedIn == null && cachedTrusted && cachedLogin.loggedIn === true,
+      // 判定依据：'probe-bad'/'probe-ok' 是按站点特征核验；'input-fallback' 是
+      // 回退判定；'stale' 表示落盘值来自旧版本、已不再作为结论。
+      loginBasis: lastLoginBasis || (cachedTrusted ? cachedLogin.basis : (cachedLogin ? 'stale' : null)),
       loginCheckedAt: lastLogin?.at ?? cachedLogin?.at ?? null,
-      needLogin: loggedIn === false,
+      needLogin: effectiveLoggedIn === false,
       selectedModel,
       siteId,
       profileDir: cfg.profileDir,
@@ -606,8 +673,13 @@ export function createBrowserDriver(options = {}) {
 
   async function connect() {
     await ensure();
+    // 统一走 judgeLoggedIn：旧实现这里只看「有没有输入框」，而多数站点的游客页
+    // 自带完整输入框（qwen 的 message-input-textarea、gemini 的 ql-editor、
+    // doubao 的 tiptap、z.ai 的 #chat-input），于是「未登录」被记成「已登录」，
+    // 设置页与右栏徽标据此显示错误结论（真机证据 2026-09-13）。
+    // 站点可在 providers.js 声明 loginProbe.bad（未登录特征）来纠正。
     if (!busy && new URL(page.url()).origin !== new URL(cfg.site).origin) loggedIn = await gotoFreshChat();
-    else loggedIn = await page.locator(SEL.input).count() > 0;
+    else loggedIn = await judgeLoggedIn(page);
     rememberLogin(loggedIn);
     return { ok: true, loggedIn };
   }
@@ -646,20 +718,107 @@ export function createBrowserDriver(options = {}) {
     return ok;
   }
 
-  async function uploadImages(files) {
+  /** 输入框是富文本编辑器（contenteditable）还是表单控件？
+   *  doubao=div.tiptap.ProseMirror、kimi=div.chat-input-editor、gemini=div.ql-editor
+   *  都是前者；deepseek/glm/qwen/zai/grok/claude 的 textarea 是后者。
+   *  分派规则见 composerStrategy（纯函数，有护栏测试）。 */
+  async function composerKind(locator) {
+    const info = await locator.evaluate((el) => ({
+      tag: (el.tagName || '').toLowerCase(),
+      editable: el.isContentEditable === true || el.getAttribute('contenteditable') === 'true',
+    })).catch(() => null);
+    return composerStrategy(info);
+  }
+
+  /** 把文本写进 composer——按真实元素形态分派（见 composerKind 的说明）。 */
+  async function fillComposer(locator, message) {
+    const kind = await composerKind(locator);
+    if (kind === 'field') { await locator.fill(message); return kind; }
+    // contenteditable：fill() 在部分富文本编辑器上不触发框架的 input 事件
+    // （tiptap/ProseMirror 靠 beforeinput/input 维护内部文档），因此先聚焦、
+    // 清空既有内容，再用键盘级插入——这是与真人输入最接近的路径。
+    await locator.click({ timeout: 10_000 }).catch(() => {});
+    await locator.focus().catch(() => {});
+    try { await page.keyboard.press('Control+A'); await page.keyboard.press('Delete'); } catch { /* 空框 */ }
+    await page.keyboard.insertText(String(message));
+    return kind;
+  }
+
+  /** 回读 composer 里的文本，用于「网页端有没有截断」校验。
+   *  表单控件读 value；contenteditable 读 innerText（textarea 的 inputValue()
+   *  对富文本编辑器必抛错，旧实现因此把 doubao/kimi 判成截断）。 */
+  async function readComposer(locator) {
+    const kind = await composerKind(locator);
+    if (kind === 'field') return await locator.inputValue().catch(() => null);
+    return await locator.evaluate((el) => el.innerText || el.textContent || '').catch(() => null);
+  }
+
+  /** 上传后的**可见证据**选择器：附件真进了网页才会出现这些节点。
+   *
+   * 站点没声明时退回一组通用探针（blob 缩略图 / attachment|file-card|upload
+   * 类名 / 输入框附近的 <img>）。探针命中即算确认——它不需要精确，只需要
+   * 「网页里确实多了一个附件类节点」这个事实。 */
+  const ATTACH_PREVIEW_FALLBACK = [
+    "img[src^='blob:']",
+    "[class*='attachment']",
+    "[class*='Attachment']",
+    "[class*='file-card']",
+    "[class*='fileCard']",
+    "[class*='upload-item']",
+    "[class*='uploadItem']",
+    "[data-testid*='attachment']",
+    "[data-testid*='file']",
+  ];
+
+  /** 轮询等待附件在页面上出现。返回命中的选择器，或 null（超时）。 */
+  async function waitForAttachment(timeoutMs = 15_000) {
+    const declared = contract.attachPreviewSelector;
+    const candidates = declared ? [declared, ...ATTACH_PREVIEW_FALLBACK] : ATTACH_PREVIEW_FALLBACK;
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      for (const sel of candidates) {
+        try {
+          const loc = page.locator(sel).first();
+          if (await loc.count() && await loc.isVisible().catch(() => false)) return sel;
+        } catch { /* 选择器语法或页面转场：试下一个 */ }
+      }
+      if (Date.now() >= deadline) return null;
+      await page.waitForTimeout(250);
+    }
+  }
+
+  async function uploadImages(files, { timeoutMs = 15_000 } = {}) {
     const fi = page.locator(contract.attachSelector || "input[type='file']").first();
     if (!await fi.count()) {
       const err = new Error('ATTACH_UNAVAILABLE: 页面没有可用的文件上传入口');
       err.code = 'ATTACH_UNAVAILABLE';
       throw err;
     }
-    const payloads = files.slice(0, 6).map((f) => ({
+    // 附件数上限：宿主的 attachment 服务知道真实限额（imageLimits
+    // .maxImagesPerMessage），拿不到才退回 6。
+    const maxImages = Number(attachmentsRef()?.imageLimits?.maxImagesPerMessage) || 6;
+    const payloads = files.slice(0, maxImages).map((f) => ({
       name: String(f.name || 'image.png').replace(/[\\/:*?"<>|]/g, '_').slice(0, 120) || 'image.png',
       mimeType: String(f.contentType || 'image/png'),
       buffer: Buffer.from(String(f.data || ''), 'base64'),
     }));
     await fi.setInputFiles(payloads);
-    await page.waitForTimeout(500);
+    // 关键修复：不再「固定等 500ms 就当传好了」。setInputFiles 只是把文件塞进
+    // 隐藏 input，网页的上传/预览是异步的——旧写法在慢站点上会在附件尚未落地
+    // 时按 Enter 发送，网页端收到的就是一条**没有附件**的消息，模型于是说
+    //「我没有看到图片」。现在必须看到可见的附件证据才放行；看不到就明确报错，
+    // 绝不发一条注定「没有图」的消息。
+    const hit = await waitForAttachment(timeoutMs);
+    if (!hit) {
+      const diag = await composerSnippet();
+      const err = new Error('ATTACH_NOT_CONFIRMED: 已选择 ' + payloads.length
+        + ' 个文件，但 ' + Math.round(timeoutMs / 1000) + 's 内页面上没有出现附件'
+        + (diag ? ' — 输入框附近可点项：' + diag : '')
+        + '（网页可能拒绝了该格式/大小，或上传入口与预览节点都已改版）');
+      err.code = 'ATTACH_NOT_CONFIRMED';
+      throw err;
+    }
+    return { attached: payloads.length, evidence: hit };
   }
 
   async function runTurn(message, { navigate, signal, onDelta, onThink, onImage, model, images, thinkMode } = {}) {
@@ -667,6 +826,7 @@ export function createBrowserDriver(options = {}) {
     busy = true;
     let timer = null;
     let stopClick = null;
+    let attachEvidence = null;   // 本轮图片上传的确认结果 { attached, evidence }
     if (signal?.aborted) { busy = false; throw abortError(); }
     const throwIfAborted = () => { if (signal?.aborted) throw abortError(); };
     const onAbort = () => {
@@ -744,13 +904,30 @@ export function createBrowserDriver(options = {}) {
       // DeepSeek 的「深度思考」pill 是独立开关,auto 时按模型 thinking 属性双向同步。
       const thinkOverride = thinkMode === 'on' ? true : thinkMode === 'off' ? false : null;
       const selection = model ? await selectModel(model, { hasImages: Array.isArray(images) && images.length > 0, thinkOverride }) : null;
+      // 模型切换未能确认时如实告知，而不是让用户以为选中的模型生效了。
+      // 0.12.9 的 selectModelGeneric 在切换失败时静默返回 default-model，
+      // 调用方当成功继续 —— 于是「模型选择」在多数站点上是空操作，
+      // 用户在网页端看到的是另一个模型，却没有任何提示。
+      if (selection && selection.strict === false && selection.note) {
+        warn('model selection not confirmed:', selection.fallback, '—', selection.note);
+        onThink?.('⚠ ' + selection.note);
+      }
+      if (selection && selection.fallback === 'unverified') {
+        // 站点没有选择契约（未真机校准）：必须让用户知道本轮用的是网页当前模型
+        onThink?.('⚠ 本轮未切换网页模型（该站点尚未真机校准），将按页面当前模型对话');
+      }
+      // 上传确认结果也要可见：附件没落地时报错已经很响，但成功时给一条
+      // 可核对的痕迹（张数 + 命中的证据选择器）便于真机排查。
+      if (attachEvidence) onThink?.(`已附加 ${attachEvidence.attached} 张图片（页面证据：${attachEvidence.evidence}）`);
       if (contract.searchTogglePattern) {
         const search = page.locator('[aria-pressed]').filter({ hasText: contract.searchTogglePattern });
         if (await search.count() && await search.first().getAttribute('aria-pressed') === 'true') await search.first().click();
       }
       throwIfAborted();
       if (Array.isArray(images) && images.length) {
-        await uploadImages(images);
+        // 上传后**确认**附件真的进了网页才继续（见 uploadImages 的注释）：
+        // 拿不到可见证据就抛 ATTACH_NOT_CONFIRMED，绝不发一条注定「没有图」的消息。
+        attachEvidence = await uploadImages(images);
         throwIfAborted();
       }
       const done = new Promise((resolve, reject) => {
@@ -789,11 +966,16 @@ export function createBrowserDriver(options = {}) {
         warn(`large prompt:${String(message).length} chars — the web composer may become slow; consider trimming context`);
       }
       const input = page.locator(SEL.input).first();
-      await input.fill(message);
+      // 2026-09-13：doubao（tiptap/ProseMirror）与 kimi（div.chat-input-editor）
+      // 的输入框是 contenteditable，**不是**表单控件。Playwright 的 fill() 只认
+      // input/textarea/[contenteditable]（后者要走 locator.fill 的 contenteditable
+      // 分支）；而 inputValue() 对富文本编辑器永远抛错 → 旧实现里这两个站点要么
+      // 写不进去、要么回读校验直接失败。按真实元素形态分派输入与回读。
+      await fillComposer(input, message);
       // 网页输入框有长度上限，超限会被静默截断——模型只看到半截提示词却照常
       // 作答，长跑里表现为「越到后面越答非所问」。回读一次，长度对不上就拒绝
       // 发送，让上层压缩后重试（此时还没按 Enter，网页端没有被污染）。
-      const echoed = await input.inputValue().catch(() => null);
+      const echoed = await readComposer(input);
       if (typeof echoed === 'string' && echoed.length < String(message).length - 8) {
         const err = new Error(`PROMPT_TRUNCATED: 网页输入框只接收了 ${echoed.length}/${String(message).length} 字符（网页端长度上限）— 请缩短上下文或先压缩历史再重试`);
         err.code = 'PROMPT_TRUNCATED';
@@ -966,27 +1148,57 @@ export function createBrowserDriver(options = {}) {
     return selectModelGeneric(model, { label });
   }
 
+  /**
+   * 非 DeepSeek 站点的模型选择。
+   *
+   * 0.13.0 重写（真机根因）：旧实现在没有选择器契约时，用
+   * `getByText(labels[0], {exact:true})` 之类的启发式**猜着点**，猜不到就
+   * `return { strict:false, fallback:'default-model' }` —— 而调用方把这个
+   * 返回值当成功继续往下走，于是「模型选择」在多数站点上是静默的空操作。
+   *
+   * 现在：站点在 providers 里声明 modelPicker 契约（触发 + 选项 + 回读），
+   * 由 lib/model-picker.js 执行**精确名匹配 + 点击后回读确认**；没有契约就
+   * 如实报告 unverified，绝不假装切换成功。
+   */
   async function selectModelGeneric(model, { label }) {
-    let mode = page.getByText(model.labels[0], { exact: true }).filter({ visible: true });
-    if (await mode.count()) {
-      await mode.last().click();
-      await page.keyboard.press('Escape');
-      selectedModel = model.id;
-      return { strict: true };
-    }
-    const trigger = page.getByRole('button', { name: /^(模型|Model|模式|Mode)/i }).first();
-    if (await trigger.count()) {
-      await trigger.click().catch(() => {});
-      const option = page.getByRole('option', { name: label }).or(page.getByRole('menuitem', { name: label }));
-      if (await option.count()) {
-        await option.first().click();
-        selectedModel = model.id;
-        return { strict: true };
+    const picker = site.modelPicker;
+    if (!pickerUsable(picker)) {
+      // 旧行为保留一层：站点若有原生 <select> 或多形态标签，仍可尝试，
+      // 但**必须**以「是否真的读到目标名」判定成败。
+      const native = page.locator('select[aria-label="模型"], select[aria-label="Model"]');
+      if (await native.count()) {
+        const option = native.first().locator(`option[value="${model.id}"]`);
+        if (await option.count()) {
+          await native.first().selectOption(model.id);
+          const now = await native.first().inputValue();
+          if (now === model.id) { selectedModel = model.id; return { strict: true, ui: 'native-select' }; }
+        }
       }
-      await page.keyboard.press('Escape');
+      selectedModel = null;
+      warn(`站点 ${siteId} 没有模型选择契约（providers.modelPicker），本轮不切换网页模型`);
+      return { strict: false, fallback: 'unverified', note: `站点 ${siteId} 的模型切换尚未真机校准，本轮沿用网页当前模型` };
     }
-    selectedModel = null;
-    return { strict: false, fallback: 'default-model' };
+
+    const result = await selectWebModel(page, model, picker);
+    if (!result.ok) {
+      selectedModel = null;
+      const detail = result.options?.length ? ' — 弹层可选：' + result.options.join('、') : '';
+      const err = new Error(`MODEL_UNAVAILABLE: 未能切换到 ${result.requested}（${result.reason}）${detail}`);
+      err.code = 'MODEL_UNAVAILABLE';
+      throw err;
+    }
+    selectedModel = model.id;
+    if (!result.confirmed && result.applied) {
+      // 点了、也回读到了，但读出来的不是目标名 —— 这是一次**可能没生效**的
+      // 切换，必须让上层知道（旧实现会把这种情况记成成功）。
+      warn(`模型回读不一致：目标 ${result.requested}，回读 ${result.applied}`);
+      return { strict: false, fallback: 'readback-mismatch', applied: result.applied, note: `已点击 ${result.clicked}，但回读为「${result.applied}」` };
+    }
+    if (!result.applied) {
+      // 站点没声明回读选择器：点了但无法确认
+      return { strict: false, fallback: 'unverified-click', note: `已点击 ${result.clicked}，该站点无法回读当前模型名` };
+    }
+    return { strict: true, ui: 'picker', applied: result.applied };
   }
 
   /** 网页新版的「深度思考」pill 是独立开关(aria-pressed),与模型 pill 并存:
@@ -1447,22 +1659,68 @@ export function createBrowserDriver(options = {}) {
     };
   }
 
+  /**
+   * 「导入本机登录态」：把用户真实 Edge profile 的 cookies 采纳进本驱动。
+   *
+   * 关键实现约束（2026-09-13 重写）：**绝不在原 profile 上 launchPersistentContext**。
+   * 旧实现直接 launchPersistentContext(sourceProfileDir) —— 那个目录正是用户日常
+   * 正在使用的 Edge User Data，会撞单实例锁、更糟的是可能把用户的浏览器带进
+   * 自动化会话。现在先复制成临时 profile 再读 storageState，读完即删。
+   *
+   * @param {string} sourceProfileDir User Data 目录（内部会拼 Default/Network/Cookies）
+   */
   async function importStorageFromProfile(sourceProfileDir) {
     if (busy || transitioning) throw new Error('driver busy with a web turn — session import refused');
     transitioning = true;
     try {
-      const cookiesFile = path.join(sourceProfileDir, 'Default', 'Network', 'Cookies');
-      if (!fs.existsSync(cookiesFile)) throw new Error('source profile has no cookies: ' + sourceProfileDir);
+      const src = String(sourceProfileDir || '').trim();
+      if (!src) throw new Error('source profile dir is empty');
+      const cookiesFile = path.join(src, 'Default', 'Network', 'Cookies');
+      if (!fs.existsSync(cookiesFile)) throw new Error('source profile has no cookies: ' + src);
+      // 临时目录必须与本 profile 同盘才能保证 rename/copy 语义一致；用 profileDir
+      // 的父目录下的 .tmp-import-<pid>（与既有 .tmp 约定一致，不污染用户目录）。
+      const tmpProfile = path.join(path.dirname(cfg.profileDir), '.tmp-import-' + process.pid + '-' + Date.now());
       let tmp = null;
       try {
-        tmp = await chromium.launchPersistentContext(sourceProfileDir, {
+        fs.mkdirSync(tmpProfile, { recursive: true });
+        // 只复制读取 storageState 所需的最小集合：Local State（加密密钥）与
+        // Default/Network/Cookies（凭据本体）。整目录复制在真实 User Data 上可能
+        // 是数 GB，且会把缓存/历史一起搬走。
+        for (const rel of ['Local State', path.join('Default', 'Network', 'Cookies'),
+          path.join('Default', 'Network', 'Cookies-journal'),
+          path.join('Default', 'Preferences')]) {
+          const from = path.join(src, rel);
+          const to = path.join(tmpProfile, rel);
+          try {
+            if (!fs.existsSync(from)) continue;
+            fs.mkdirSync(path.dirname(to), { recursive: true });
+            fs.copyFileSync(from, to);
+          } catch (err) { warn('import: copy skipped', rel, err?.message); }
+        }
+        tmp = await chromium.launchPersistentContext(tmpProfile, {
           executablePath: cfg.executablePath,
           headless: true,
           args: ['--no-first-run', '--disable-blink-features=AutomationControlled'],
         });
         cfg.storageState = await tmp.storageState();
+        // 真机实测（2026-09-13）：Edge 128+ 用 **app-bound 加密**（cookie 的
+        // encrypted_value 前缀为 `v20`，本机 372 枚全部如此），密钥绑定 Edge 应用
+        // 身份而非仅用户 —— 换 profile 目录后一个都解不开。storageState 会静默
+        // 返回 0 枚 cookie，看起来像「导入成功但没登录」。这里显式识别并如实报错，
+        // 不让按钮骗人（cookies 为 v10/DPAPI 的旧 Edge 或其它 Chromium 仍可用）。
+        const cookieCount = Array.isArray(cfg.storageState?.cookies) ? cfg.storageState.cookies.length : 0;
+        if (cookieCount === 0) {
+          // 不留半截状态：空 storageState 对后续 launch 没有意义，清掉更诚实。
+          cfg.storageState = null;
+          // 消息保持短（控制面透传时截断到 200 字符，可操作的那句必须在前面）。
+          const err = new Error('cookie 无法解密：Edge 128+ 用 app-bound 加密（v20）把密钥绑定到 Edge 应用身份，复制 profile 读不出任何 cookie。请改用该站点的「登录」按钮——弹出的真实 Edge 窗口里登录一次即可，登录态会持久保存在桥自己的 profile 里。');
+          err.code = 'COOKIE_IMPORT_UNDECRYPTABLE';
+          throw err;
+        }
+        cfg.storageState.cookieCount = cookieCount;
       } finally {
         try { await tmp?.close(); } catch {}
+        try { fs.rmSync(tmpProfile, { recursive: true, force: true }); } catch { /* 下次覆盖 */ }
       }
       const stale = finishActive();
       stale?.reject?.(abortError('session import interrupted the web turn'));
@@ -1633,7 +1891,7 @@ export function createBrowserDriver(options = {}) {
   }
   function safeUrl(url) { try { return String(new URL(url)); } catch { return null; } }
 
-  return { sendPrompt, sendTurn, resetConversation, conversationFor, connect, interact, openLogin, openWindow, closeWindow, importStorageFromProfile, status, close, diagnostics, getToken, profileCookies, writeProfileCookies, userAgent, get page() { return page; }, webApi, listSessions, fetchHistory, screenshotBase64 };
+  return { sendPrompt, sendTurn, resetConversation, conversationFor, connect, interact, openLogin, openWindow, closeWindow, importStorageFromProfile, status, close, diagnostics, getToken, profileCookies, writeProfileCookies, userAgent, get page() { return page; }, webApi, listSessions, fetchHistory, screenshotBase64, setImageLimitsProvider };
 }
 
 function abortError() {

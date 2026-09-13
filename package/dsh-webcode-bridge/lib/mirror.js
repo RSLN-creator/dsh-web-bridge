@@ -2,6 +2,9 @@
 // The upstream is fixed at siteOrigin; this is a same-origin relay, not an
 // open proxy. The page token is injected only into the relay origin's storage.
 
+import { httpFetch } from './upstream.js';
+import { isLoopbackHost } from './loopback.js';
+
 export function createMirror(options = {}) {
   const {
     siteOrigin = 'https://chat.deepseek.com',
@@ -153,12 +156,12 @@ export function createMirror(options = {}) {
 
     let upstream;
     try {
-      upstream = await fetch(origin + assetPath + search, {
+      upstream = await httpFetch(origin + assetPath + search, {
         method: req.method,
         headers,
         body: body?.length ? body : undefined,
         redirect: 'follow',
-        signal: AbortSignal.timeout(60_000),
+        timeoutMs: 60_000,
       });
     } catch (error) {
       warn('asset upstream failed:', assetPath, error?.message);
@@ -200,9 +203,19 @@ export function createMirror(options = {}) {
   }
 
 
+  // 回环主机白名单：127.0.0.1 / [::1] / localhost，以及 **<site>.localhost 子域**。
+  // 子域方案是本插件多站点挂载的正式形态：每个站点挂在
+  // http://<siteId>.localhost:<port>/ 上，站点看到的 pathname 与它自己的真实
+  // 站点完全一致（doubao 的 /chat/、z.ai 的 /auth …），SPA router 基线不再
+  // 错位；同时 Host 头唯一确定镜像实例，不会互相串站。
+  // 浏览器与 Windows 都把 *.localhost 解析到回环，因此这仍然是 loopback-only，
+  // 没有扩大暴露面（公网无法把一个名字解析到本机 127.0.0.1）。
+  //
+  // 判定实现统一在 lib/loopback.js：本文件、web-control.js、openai.js 三处
+  // 曾各写一份同义正则，0.12.9 加子域时漏改控制面 → 真机实锤
+  // `zai.localhost:8931/__webcode/status` 被 403。规则从此只定义一次。
   function loopbackOnly(req, res) {
-    const host = String(req.headers.host || '');
-    if (/^(127\.0\.0\.1|\[::1\]|localhost)(:\d+)?$/i.test(host)) return true;
+    if (isLoopbackHost(req.headers.host)) return true;
     res.writeHead(403, { 'content-type': 'application/json', 'cache-control': 'no-store' });
     res.end(JSON.stringify({ error: { message: 'mirror: loopback only' } }));
     return false;
@@ -551,12 +564,12 @@ export function createMirror(options = {}) {
 
     let upstream;
     try {
-      upstream = await fetch(upstreamOrigin + pathname + search, {
+      upstream = await httpFetch(upstreamOrigin + pathname + search, {
         method: req.method,
         headers,
         body: body?.length ? body : undefined,
         redirect: 'manual',
-        signal: AbortSignal.timeout(60_000),
+        timeoutMs: 60_000,
       });
     } catch (error) {
       warn('upstream failed:', pathname, error?.message);

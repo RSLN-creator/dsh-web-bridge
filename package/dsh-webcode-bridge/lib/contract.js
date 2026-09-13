@@ -16,6 +16,7 @@ export const DEEPSEEK_WEB_CONTRACT = Object.freeze({
   sendButtonSelector: DEEPSEEK.sendButton,
   stopButtonSelector: DEEPSEEK.stopButton,
   attachSelector: DEEPSEEK.attachSelector,
+  attachPreviewSelector: DEEPSEEK.attachPreview,
   decoder: DEEPSEEK.decoder,
   searchTogglePattern: /^(智能搜索|联网搜索|Search)$/,
   requestMetadataKeys: ['model_type', 'thinking_enabled', 'search_enabled'],
@@ -35,6 +36,11 @@ function genericContract(st) {
     sendButtonSelector: st.sendButton ?? null,
     stopButtonSelector: st.stopButton ?? null,
     attachSelector: st.attachSelector ?? "input[type='file']",
+    // 附件「已进网页」的可见证据。上传后必须看到其中一个才算成功——否则
+    // setInputFiles 只改了一个隐藏 input 的 files，网页未必真的收下了
+    //（0.12.9 之前固定 waitForTimeout(500) 就当成功，这正是「有图说没图」
+    // 的链路：桥以为传完了，网页端其实一个附件都没有）。
+    attachPreviewSelector: st.attachPreview ?? null,
     decoder: st.decoder,
     searchTogglePattern: null,
     requestMetadataKeys: [],

@@ -1,13 +1,52 @@
 # Harness Web Bridge
 
-已登录的 DeepSeek 网页作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.9.7。
+已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.13.0。
 
-安装：`pnpm pack` 后执行 `dsh plugin --profile web add ./dsh-webcode-bridge-0.9.7.tgz`，重启 `dsh web`。需要 Node.js 20+、系统 Edge；无需浏览器扩展。
+安装：`pnpm pack` 后执行 `dsh plugin --profile web add ./dsh-webcode-bridge-0.13.0.tgz`，重启 `dsh web`。需要 Node.js 20+、系统 Edge；无需浏览器扩展。
 
 原生「设置 > 网页桥接」管理登录与启用开关。默认沿用 `~/.dsh/webcode-edge-profile`。
 模型分组 Harness Web Bridge 暴露全部内容服务站点（`site:model` 限定 id）；DeepSeek
 站点只提供唯一模型 `DeepSeek`（深度思考），旧 id（`flash`/`vision`/`deepseek-web`/
-`deepseek-reasoner`）保留为别名。0.9.5 新增 `zai`（Z.ai）。
+`deepseek-reasoner`）保留为别名。
+
+## 0.13.0
+
+**模型选择从「空承诺」变成真实切换。** 0.12.9 的驱动遇到 `auto` 直接返回、
+**页面上一个动作都不做**，而每站目录里又只有这一条 auto——UI 有下拉，网页什么都不会变。
+现在按站点声明**模型选择契约**（触发 / 选项 / 名字节点 / 回读），由 `lib/model-picker.js`
+执行**精确名匹配 + 点击后回读确认**；契约缺失就如实报「未切换网页模型」，绝不假装成功。
+真机实测目录（`test-mock/probe-model-dropdown.mjs` 全量 dump）：
+
+- **z.ai**：`GLM-5.3-Flash` / `GLM-5.3` / `GLM-5.2`
+- **GLM**：`GLM-5.3` / `GLM-5.3-Flash`
+- **Kimi**：`快速` / `K3` / `K3 集群`
+- **豆包**：`对话` / `工作`（分段控件形态，**本地默认 = 对话**）
+- chatgpt / claude / gemini / qwen：未校准（诚实显示，不假装可选）
+
+注意 `GLM-5.3` 是 `GLM-5.3-Flash` 的**前缀**，因此匹配必须是精确的
+（`test/model-picker.test.mjs` 把这个陷阱钉死）。真机验证
+`node test-mock/verify-model-switch.mjs` **11/11 PASS**。
+
+**harness 截图能真的传到网页端了。** 旧实现只认 wire 形状的图片块，而 DSH 原生
+（截图走的）是 `{type:'image', attachment}`——两者零交集，于是每次截图传图都被
+**静默丢弃**。现在原生块经 `ctx.attachments.readImageRequest` 取像素（预算与
+dsh-llm-deepseek 同档），并声明 `inputModalities` 防止宿主把图片提前换成文字；
+上传后**必须看到页面上出现附件证据**才发送（拿不到就报错，绝不发一条没有图的消息）。
+真机端到端 `node test-mock/real-vision-upload.mjs` PASS：上传已知色带图，
+模型答「3条，红色、绿色、蓝色」。
+
+**「检测」按钮不再报 JSON 解析错误。** 根因是 `verify-login` / `site-probe` /
+`session-import` 三个 action 进了 action 表却**没进挂载清单**（手写数组漏了），
+请求落到宿主兜底回 **405 + 空 body**，客户端在判断状态码之前就 `.json()`，
+于是把真实原因吞成一句 `unexpected end of JSON data`。现在挂载清单从 action 表
+**派生**（结构上不可能再漏），未知方法回 405 JSON、未知路径回 404 JSON，
+客户端先读文本再按 content-type 解析。
+
+**设置界面改为 harness 风格**：三段内联硬编码色合并为一张 token 化样式表
+（`--dsw-alias-*` + fallback，16px 圆角卡片 / .5px 边框 / pill 按钮，与 DSH 自家
+设置区同款）；站点行改为「状态点 + 名字 + 行内动作」，并**露出登录判定依据**
+（`loginBasis` 一直有，此前 UI 把它丢了，于是「未登录」看起来像凭空断言）；
+「检测」结果分三态，`待检查` 不再画成红色错误。
 
 ## 0.9.7
 

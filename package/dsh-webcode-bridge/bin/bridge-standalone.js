@@ -63,7 +63,7 @@ function driverStatus() {
     const d = st.id === 'deepseek' ? driver : drivers.get(st.id);
     if (!d) return { siteId: st.id, siteName: st.name, origin: st.origin, initialized: false, running: false, busy: false, loggedIn: null, needLogin: false, selectedModel: null, window: null, loginState: 'idle', lastLogin: null };
     const s = d.status();
-    return { siteId: st.id, siteName: st.name, origin: st.origin, initialized: true, running: s.running, busy: s.busy, loggedIn: s.loggedIn, needLogin: s.needLogin, selectedModel: s.selectedModel, window: s.window ?? null, loginState: s.loginState ?? 'idle', lastLogin: s.lastLogin ?? null };
+    return { siteId: st.id, siteName: st.name, origin: st.origin, initialized: true, running: s.running, busy: s.busy, loggedIn: s.loggedIn, loggedInCached: s.loggedInCached === true, loginBasis: s.loginBasis ?? null, needLogin: s.needLogin, selectedModel: s.selectedModel, window: s.window ?? null, loginState: s.loginState ?? 'idle', lastLogin: s.lastLogin ?? null };
   });
   return { ...base, sites };
 }
@@ -90,6 +90,8 @@ const relay = createRelay({
     }
   },
   siteConnect: (siteId) => driverFor(siteId),
+  // 与 DSH 侧同一签名 (siteId, dir)：把本机真实 Edge 的登录态导入所选站点。
+  sessionImport: (siteId, dir) => driverFor(getSite(siteId) ? siteId : 'deepseek').importStorageFromProfile(dir),
   windowOpener: (siteId, action, opts = {}) => {
     const d = driverFor(siteId);
     return action === 'close' ? d.closeWindow() : d.openWindow(opts);
@@ -97,7 +99,19 @@ const relay = createRelay({
   onHttp: (req, res) => {
     const u = new URL(req.url, 'http://localhost');
     const pathname = u.pathname;
-    // 多站点侧栏视图：/__webcode/site/<siteId>/… → 对应站点 mirror
+    // 多站点侧栏视图（主形态）：<siteId>.localhost:<port>/…
+    // 与 DSH 侧（lib/index.js）同一规则：站点住在自己的源上，pathname 与真实
+    // 站点逐字一致，SPA router 基线与根相对资源天然正确。独立运行时也需要它，
+    // 否则 standalone 下 doubao/z.ai/qwen 仍然是「打不开 / 登录跳回根」。
+    const hostSite = /^([a-z0-9-]+)\.localhost(:\d+)?$/i.exec(String(req.headers.host || ''));
+    const LOCAL_PREFIXES = ['/v1/', '/bridge/', '/webcode/', '/__webcode/'];
+    const isControlPath = LOCAL_PREFIXES.some((p) => pathname === p.slice(0, -1) || pathname.startsWith(p));
+    if (hostSite && getSite(hostSite[1].toLowerCase()) && !isControlPath) {
+      const sid = hostSite[1].toLowerCase();
+      mirrorFor(sid).handle(req, res, pathname, u.search).catch(() => { try { res.end(); } catch {} });
+      return;
+    }
+    // 兼容旧路径形态：/__webcode/site/<siteId>/… → 对应站点 mirror
     const siteRoute = /^\/__webcode\/site\/([a-z0-9-]+)(\/.*)?$/.exec(pathname);
     if (siteRoute) {
       const [, sid, rest = '/'] = siteRoute;
@@ -106,7 +120,7 @@ const relay = createRelay({
         res.end(JSON.stringify({ error: { message: 'unknown site: ' + sid } }));
         return;
       }
-      mirrorFor(sid).handle(req, res, rest, u.search).catch(() => { try { res.end(); } catch {} });
+      mirrorFor(sid, { prefixed: true }).handle(req, res, rest, u.search).catch(() => { try { res.end(); } catch {} });
       return;
     }
     // web-side control plane fallbacks (no DSH host services here, so
@@ -138,21 +152,26 @@ const relay = createRelay({
 });
 const webControl = createWebControl({ driver, relay, config: cfg, host: {}, logger: console });
 const mirror = createMirror({ siteOrigin: new URL(cfg.site).origin, getToken: () => driver.getToken(), logger: console });
-// 多站点镜像：懒创建，路径前缀 /__webcode/site/<siteId>/…
+// 多站点镜像：懒创建，两种挂载形态各一份实例——子域根挂载（主形态，
+// mountPrefix ''）与路径前缀挂载（兼容形态 /__webcode/site/<siteId>/…）。
+// 同 lib/index.js 的 mirrorFor：两者都是同一站点同一 driver 的只读转发。
 const mirrors = new Map();
-function mirrorFor(siteId) {
+function mirrorFor(siteId, { prefixed = false } = {}) {
   const sid = getSite(siteId) ? siteId : 'deepseek';
-  if (!mirrors.has(sid)) {
+  const key = sid + (prefixed ? '#path' : '');
+  if (!mirrors.has(key)) {
     const st = getSite(sid);
-    mirrors.set(sid, createMirror({
+    mirrors.set(key, createMirror({
       siteOrigin: st.origin,
       getToken: () => driverFor(sid).getToken(),
       logger: console,
       assetOrigins: st.staticOrigins || [],
-      mountPrefix: '/__webcode/site/' + sid,
+      mountPrefix: prefixed ? '/__webcode/site/' + sid : '',
+      // 子域形态 pathname 与真实站点逐字一致，无需（也不应）改写路由基线。
+      rootPathForSpa: prefixed && st.rootPathForSpa === true,
     }));
   }
-  return mirrors.get(sid);
+  return mirrors.get(key);
 }
 
 /** Routes the OpenAI front owns on the relay; everything else mirrors upstream. */

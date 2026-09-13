@@ -9,24 +9,90 @@ window.__ModuleLoader__.load({
     const inject = ['slots', 'settingsScope', 'sidebarRightTabs', 'sidebarRight'];
     const RELAY_PORT = 8931;
     const relayBase = 'http://127.0.0.1:' + RELAY_PORT;
+    // 每个站点一个独立源：<siteId>.localhost:<port>。
+    // 站点在根路径上被镜像，pathname 与真实站点逐字一致——SPA router 基线、
+    // 根相对资源、history 路由全部自然正确（详见 lib/index.js 的路由注释）。
+    // 旧路径形态 /__webcode/site/<sid>/ 仍在服务端保留兼容，但 UI 一律用子域。
+    // 少数站点**必须**挂在中继根上：DeepSeek 前端校验宿主名，
+    // `deepseek.localhost` 会触发 `Unknown hostname` → #root 永远空白
+    //（真机 2026-09-13）。它本来就是中继的默认站点，根挂载天然正确。
+    // 站点侧声明见 providers.js 的 mountAtRelayRoot。
+    const ROOT_MOUNTED = { deepseek: true };
+    const siteBase = sid => (ROOT_MOUNTED[sid] ? relayBase + '/' : 'http://' + sid + '.localhost:' + RELAY_PORT + '/');
     const icon = size => h(IconCodeOutline16, { size });
 
-    async function api(action, body, timeoutMs = 30000) {
+    // ---- 控制面调用 ----------------------------------------------------------
+    // 0.12.9 的 bug（真机 2026-09-13 取证）：这里在判断 res.ok **之前**就
+    // `await response.json()`。后端因为漏挂载路由回了一个 405 + 空 body，
+    // JSON.parse 于是抛 “unexpected end of JSON data at line 1 column 1”，
+    // 把真实原因（405 / 路由不存在）整个吞掉，面板上每个「检测」都只显示这
+    // 一句无意义的解析错误。
+    //
+    // 现在：先读文本，只有 content-type 是 JSON 才尝试解析；解析失败也不抛，
+    // 而是把 HTTP 状态与 body 片段作为错误信息带出去。
+    async function request(action, body, timeoutMs) {
       const response = await fetch('/__webcode/' + action, {
         method: body === undefined ? 'GET' : 'POST',
         headers: body === undefined ? {} : { 'content-type': 'application/json' },
         body: body === undefined ? undefined : JSON.stringify(body),
         cache: 'no-store', signal: AbortSignal.timeout(timeoutMs),
       });
-      const data = await response.json();
-      if (!response.ok || data.ok === false) throw new Error(data.error || '请求失败');
-      return data;
+      const text = await response.text().catch(() => '');
+      const ctype = response.headers.get('content-type') || '';
+      let data = null;
+      let parseError = '';
+      if (text && ctype.includes('json')) {
+        try { data = JSON.parse(text); } catch (e) { parseError = e.message; }
+      }
+      const reason = (data && (data.error || data.message)) || parseError
+        || (text ? text.slice(0, 200) : '')
+        || (response.ok ? '响应为空' : 'HTTP ' + response.status);
+      const failure = response.ok && data && data.ok !== false
+        ? null
+        : 'HTTP ' + response.status + (response.statusText ? ' ' + response.statusText : '') + '：' + reason;
+      return { response, data, text, failure, ctype };
+    }
+
+    /** 抛异常的调用：只关心「成功拿到结构化结果」或「为什么失败」。 */
+    async function api(action, body, timeoutMs = 30000) {
+      const r = await request(action, body, timeoutMs);
+      if (r.failure) throw new Error(r.failure);
+      if (r.data === null) throw new Error('HTTP ' + r.response.status + '：响应不是 JSON（' + r.ctype + '）');
+      return r.data;
+    }
+
+    /** 不抛异常的调用：需要把失败原因显示在行内、而不是让整块 UI 报错时用。 */
+    async function apiSoft(action, body, timeoutMs = 30000) {
+      try {
+        const r = await request(action, body, timeoutMs);
+        if (r.failure) return { ok: false, error: r.failure, data: r.data };
+        return { ok: true, data: r.data || {} };
+      } catch (e) {
+        return { ok: false, error: String(e?.message || e) };
+      }
     }
 
     const MODEL_NAMES = { deepseek: 'DeepSeek' };
     // 站点显示名 + 多站点模型目录（打开时从 /__webcode/models 拉取）
     const SITE_NAMES = { deepseek: 'DeepSeek', glm: '智谱清言', chatgpt: 'ChatGPT', kimi: 'Kimi', qwen: '通义千问', doubao: '豆包', grok: 'Grok', claude: 'Claude', gemini: 'Gemini', zai: 'Z.ai (GLM 海外版)' };
     const siteName = sid => SITE_NAMES[sid] || sid;
+
+    // ---- 登录判定依据的人话翻译 ----------------------------------------------
+    // 后端一直在 status 里给 loginBasis / loginCheckedAt，但 0.12.9 的 UI 把它
+    // 丢了，于是「未登录」看起来像凭空断言。这里把它变成可判断的依据说明。
+    const LOGIN_BASIS_TEXT = {
+      'probe-bad': '命中站点未登录特征',
+      'probe-ok': '命中站点登录特征',
+      'probe-fallback': '站点登录特征未命中，回退输入框判定',
+      'input-fallback': '按输入框存在与否推断（该站点未声明登录特征）',
+      stale: '旧版本结论，已被忽略',
+    };
+    function basisText(s) {
+      const basis = LOGIN_BASIS_TEXT[s?.loginBasis] || '尚未核验';
+      const when = s?.loginCheckedAt ? new Date(s.loginCheckedAt).toLocaleString() : '';
+      const cached = s?.loggedInCached ? '（来自重启前的核验缓存，登录态实际存在 profile 里）' : '';
+      return '判定依据：' + basis + cached + (when ? ' · ' + when + ' 核验' : '');
+    }
 
     // ---- 速度观测（HTML/CSS 条形图，克制低饱和） ------------------------
     // 数值表格不直观；条形长度按时间/速度归一化，一眼可比。
@@ -144,68 +210,122 @@ window.__ModuleLoader__.load({
       const [busySite, setBusySite] = React.useState(null);
       const [results, setResults] = React.useState({});
       const list = (sites && sites.length ? sites : [])
-        .map(s => ({ siteId: s.siteId, loggedIn: s.loggedIn, initialized: s.initialized, busy: s.busy }))
+        // 保留判定依据字段：旧实现只挑 4 个字段进列表，把后端已经算好的
+        // loginBasis/loginCheckedAt 丢掉了——「未登录」于是看起来像凭空断言。
+        .map(s => ({
+          siteId: s.siteId, loggedIn: s.loggedIn, initialized: s.initialized, busy: s.busy,
+          loggedInCached: s.loggedInCached === true, loginBasis: s.loginBasis || null,
+          loginCheckedAt: s.loginCheckedAt || null, window: s.window || null,
+        }))
         .filter(s => !onlySiteId || s.siteId === onlySiteId)
         .sort((a, b) => (a.siteId === 'deepseek' ? -1 : b.siteId === 'deepseek' ? 1 : siteName(a.siteId).localeCompare(siteName(b.siteId))));
       const setResult = (sid, r) => setResults(prev => ({ ...prev, [sid]: r }));
       const [winSites, setWinSites] = React.useState({});
       const refreshWins = () => api('window').then(w => setWinSites(w?.windows || {})).catch(() => {});
       React.useEffect(() => { refreshWins(); }, []);
+      // 四个动作全部走 apiSoft：失败原因落进本行状态，绝不让整块面板崩掉。
+      // （0.12.9 的 verify-login 因路由漏挂载回 405 空 body，api() 抛的是
+      // JSON 解析错误而不是「HTTP 405」——原因见 lib/web-control.js 注释。）
       async function doLogin(sid) {
         setBusySite(sid); setResult(sid, null);
-        try {
-          // 后端要打开有头 Edge 等人工登录，超时必须放宽（等待上限 300s）。
-          const r = await api('login', { siteId: sid, wait: true, timeoutMs: 300000 }, 330000);
+        // 后端要打开有头 Edge 等人工登录，超时必须放宽（等待上限 300s）。
+        const r = await apiSoft('login', { siteId: sid, wait: true, timeoutMs: 300000 }, 330000);
+        if (!r.ok) setResult(sid, { ok: false, text: r.error });
+        else {
+          const d = r.data;
           setResult(sid, {
-            ok: r.loggedIn === true,
-            text: (r.alreadyLoggedIn ? '登录态仍有效，无需重复登录' : (r.message || '登录完成'))
-              + (r.ms ? '（' + Math.round(r.ms / 1000) + 's）' : ''),
+            ok: d.loggedIn === true,
+            text: (d.alreadyLoggedIn ? '登录态仍有效，无需重复登录' : (d.message || '登录完成'))
+              + (d.ms ? '（' + Math.round(d.ms / 1000) + 's）' : ''),
           });
-          await onRefresh?.();
-        } catch (e) { setResult(sid, { ok: false, text: e.message }); }
-        finally { setBusySite(null); }
+        }
+        setBusySite(null);
+        await onRefresh?.();
       }
       async function checkLogin(sid) {
         // 在独立窗口里登录完后点这里立即确认结果（connect 幂等且轻量）。
         setBusySite(sid); setResult(sid, null);
-        try {
-          const r = await api('verify-login', { siteId: sid }, 90000);
-          setResult(sid, { ok: r.loggedIn === true, text: r.loggedIn === true ? '已检测到登录态' : r.loggedIn === false ? '仍未登录（请在独立窗口完成登录后再检测）' : '待检查（先打开一次站点）' });
-          await onRefresh?.();
-        } catch (e) { setResult(sid, { ok: false, text: e.message }); }
-        finally { setBusySite(null); }
+        const r = await apiSoft('verify-login', { siteId: sid }, 90000);
+        if (!r.ok) setResult(sid, { ok: false, text: '检测失败：' + r.error });
+        else {
+          const d = r.data;
+          // 三态：true / false / null。null 表示「该站点尚未打开过」——那是一个
+          // 状态，不是失败，不该画成红色错误。
+          setResult(sid, {
+            ok: d.loggedIn !== false,
+            tone: d.loggedIn === null ? 'idle' : null,
+            text: d.loggedIn === true ? '检测完成：已检测到登录态'
+              : d.loggedIn === false ? '检测完成：仍未登录（请在独立窗口完成登录后再检测）'
+                : '检测完成：待检查（该站点尚未打开过——点「独立窗口」打开一次后再检测）',
+          });
+        }
+        setBusySite(null);
+        await onRefresh?.();
+      }
+      async function importCookies(sid) {
+        // 把本机真实 Edge 的登录态导入该站点：无需在桥里再手工登录一次。
+        // 桥 profile 与用户的 Edge profile 是两个独立世界，这是两者之间唯一的
+        // 桥（真机 2026-09-13：桥 profile 里除 deepseek 外没有任何站点 cookie）。
+        setBusySite(sid); setResult(sid, null);
+        const r = await apiSoft('session-import', { siteId: sid }, 180000);
+        if (!r.ok) setResult(sid, { ok: false, text: '导入失败：' + r.error });
+        else {
+          const d = r.data;
+          setResult(sid, {
+            ok: d.loggedIn === true,
+            text: (d.loggedIn === true ? '已导入本机登录态'
+              : '已导入，但该站点仍未登录（本机 Edge 里可能也没登录；'
+                + 'Edge 128+ 的 app-bound 加密 cookie 无法跨 profile 使用，这不是桥的 bug）')
+              + '；来源 ' + (d.sourceProfileDir || ''),
+          });
+        }
+        setBusySite(null);
+        await onRefresh?.();
       }
       async function toggleWindow(sid) {
         setBusySite(sid); setResult(sid, null);
-        try {
-          const isOpen = !!winSites[sid]?.open;
-          const r = await api('window', { siteId: sid, action: isOpen ? 'close' : 'open' }, 120000);
-          if (r?.alreadyOpen) setResult(sid, { ok: true, text: '窗口已存在——已聚焦弹到最前' });
-          else setResult(sid, { ok: true, text: isOpen ? '独立窗口已收起，回到无头运行' : '独立窗口已打开（与桥共用登录态）' });
-          await refreshWins();
-          await onRefresh?.();
-        } catch (e) { setResult(sid, { ok: false, text: e.message }); }
-        finally { setBusySite(null); }
+        const isOpen = !!winSites[sid]?.open;
+        const r = await apiSoft('window', { siteId: sid, action: isOpen ? 'close' : 'open' }, 120000);
+        if (!r.ok) setResult(sid, { ok: false, text: r.error });
+        else if (r.data?.alreadyOpen) setResult(sid, { ok: true, text: '窗口已存在——已聚焦弹到最前' });
+        else setResult(sid, { ok: true, text: isOpen ? '独立窗口已收起，回到无头运行' : '独立窗口已打开（与桥共用登录态）' });
+        setBusySite(null);
+        await refreshWins();
+        await onRefresh?.();
       }
       if (!list.length) return h('p', { className: 'hwb-hint' }, '站点状态加载中…（中继未启动时不可用）');
       return h('div', { className: 'hwb-sites' },
         list.map(s => h('div', { key: s.siteId, className: 'hwb-site-block' },
           h('div', { className: 'hwb-site-row' + (busySite === s.siteId || s.busy ? ' busy' : '') },
-            h('span', { className: 'hwb-site-name' }, siteName(s.siteId)),
+            h('span', { className: 'hwb-site-identity' },
+              h('span', {
+                className: 'hwb-dot ' + (s.loggedIn === true ? 'ok' : s.loggedIn === false ? 'bad' : 'idle'),
+                'aria-hidden': 'true',
+              }),
+              h('span', { className: 'hwb-site-name' }, siteName(s.siteId))),
             h('span', {
               className: 'hwb-site-state ' + (s.loggedIn === true ? 'ok' : s.loggedIn === false ? 'bad' : 'idle'),
-              title: s.loggedInCached ? '来自重启前的核验缓存（登录态存在 profile 里）；点「登录」或「检测」即时核验' : undefined,
+              title: basisText(s),
             },
               s.loggedIn === true ? (s.loggedInCached ? '已登录(缓存)' : '已登录') : s.loggedIn === false ? '未登录' : '待检查'),
-            h('button', { disabled: busySite !== null, onClick: () => doLogin(s.siteId) },
-              busySite === s.siteId ? '等待登录完成…' : s.loggedIn === true ? '更换账户' : '登录'),
-            h('button', {
-              disabled: busySite !== null,
-              title: '在独立窗口中打开该站点真实网页（可登录、可聊天，与桥共用登录态）',
-              onClick: () => toggleWindow(s.siteId),
-            }, '独立窗口')),
-          results[s.siteId] && h('p', { className: 'hwb-hint indent', role: 'status' },
-            (results[s.siteId].ok ? '✓ ' : '✗ ') + siteName(s.siteId) + '：' + results[s.siteId].text))),
+            h('span', { className: 'hwb-row-actions' },
+              h('button', { disabled: busySite !== null, onClick: () => doLogin(s.siteId) },
+                busySite === s.siteId ? '等待登录完成…' : s.loggedIn === true ? '更换账户' : '登录'),
+              h('button', { disabled: busySite !== null, onClick: () => checkLogin(s.siteId) }, '检测'),
+              h('button', {
+                disabled: busySite !== null,
+                title: '把本机真实 Edge 里该站点的登录态导入桥 profile（读取你的 Edge cookies；无需在桥里再登录一次）',
+                onClick: () => importCookies(s.siteId),
+              }, '导入本机登录态'),
+              h('button', {
+                disabled: busySite !== null,
+                title: '在独立窗口中打开该站点真实网页（可登录、可聊天，与桥共用登录态）',
+                onClick: () => toggleWindow(s.siteId),
+              }, '独立窗口'))),
+          results[s.siteId] && h('p', {
+            className: 'hwb-hint indent ' + (results[s.siteId].ok ? 'ok' : results[s.siteId].tone === 'idle' ? '' : 'bad'),
+            role: 'status',
+          }, (results[s.siteId].ok ? '✓ ' : '✗ ') + siteName(s.siteId) + '：' + results[s.siteId].text))),
         h('p', { className: 'hwb-hint indent' },
           subHint
             ? '子代理所选站点的账户行：登录/更换账户与其它站点同一套逻辑（真实 Edge 窗口一次性登录），登录态按站点各自持久化；与主线同站点时两者天然共享登录。'
@@ -429,11 +549,37 @@ window.__ModuleLoader__.load({
         return '未登录';
       };
       const statusClass = row => row?.loggedIn === true ? 'ok' : row?.loggedIn === false ? 'bad' : 'idle';
+      // 判定依据存疑时给一句解释（0.12.9 起 status 带 loginBasis）：
+      //   'input-fallback' → 站点没声明 loginProbe，只能按「有没有输入框」判，
+      //                      游客页自带输入框的站点会有误报；
+      //   'stale'          → 落盘值来自旧版本判定，已不再作为结论。
+      const statusTitle = row => {
+        if (!row) return '';
+        if (row.loginBasis === 'input-fallback') return '该站点未声明未登录特征，按输入框存在与否判定——游客页自带输入框时可能误报，请以「检测」为准';
+        if (row.loginBasis === 'stale') return '此结论来自旧版本判定，已被忽略；点「检测」按站点特征重新核验';
+        return '';
+      };
       const shouldGuide = row => row && row.initialized === false && row.loggedIn !== true;
+      // 站点探活（不可达站点不挂 iframe）：会话内缓存，点「重试」强制重探。
+      // probesRef 必须先于 probeSite 声明：probeSite 的闭包捕获它，虽然实际调用
+      // 发生在 render 之后的 effect 里（那时已初始化），但把声明放在后面等于埋一个
+      // TDZ 陷阱——后人把 probeSite 提前调用就会炸。
+      const [probes, setProbes] = React.useState({});     // siteId → { reachable, status, reason, ms, at }
+      const probesRef = React.useRef({});
+      const probeSite = React.useCallback((sid, force) => {
+        if (!force && probesRef.current[sid]) return Promise.resolve(probesRef.current[sid]);
+        return api('site-probe', { siteId: sid }, 30000)
+          .then(r => { probesRef.current = { ...probesRef.current, [sid]: r }; setProbes(probesRef.current); return r; })
+          .catch(() => null);
+      }, []);
+      const unreachable = sid => { const p = probes[sid]; return p && p.reachable === false ? p : null; };
       const ensureFrame = React.useCallback((sid, force) => {
         setFrames(prev => {
           if (prev[sid] && !force) return prev;   // 已有存活 frame：直接复用，不重载
-          return { ...prev, [sid]: { src: browserSrc + '__webcode/site/' + sid + '/?ts=' + Date.now(), ready: false, status: null } };
+          // 子域形态：站点在根路径（pathname 与真实站点一致）。强制重载用一个
+          // 站点不认识的查询参数绕开缓存——不动 pathname，SPA 路由不受影响。
+          const src = siteBase(sid) + (force ? '?__wc_reload=' + Date.now() : '');
+          return { ...prev, [sid]: { src, ready: false, status: null } };
         });
       }, [browserSrc]);
       React.useEffect(() => {
@@ -442,12 +588,21 @@ window.__ModuleLoader__.load({
         // Wait for the first status snapshot before deciding whether to mount a
         // site frame; otherwise an uninitialized site can race the status poll
         // and briefly boot a browser before its guide state arrives.
-        if (siteStatuses[siteId] && !frames[siteId] && !shouldGuide(siteStatuses[siteId])) {
-          api('connect', { siteId }, 90000).then(() => { if (alive) ensureFrame(siteId); })
-            .catch(e => { if (alive) setConnectError(e.message); });
-        }
+        if (!siteStatuses[siteId] || frames[siteId] || shouldGuide(siteStatuses[siteId])) return () => { alive = false; };
+        (async () => {
+          // 先探活再连：站点本机不可达时（chatgpt/claude 403、网络不通的 gemini）
+          // 不启动浏览器、不挂 iframe，直接给可解释的引导页——旧实现会为每个
+          // tab 挂一个注定失败的 iframe 并常驻保活，用户只看到裸错误页。
+          const probe = await probeSite(siteId);
+          if (!alive) return;
+          if (probe && probe.reachable === false) return;
+          try {
+            await api('connect', { siteId }, 90000);
+            if (alive) ensureFrame(siteId);
+          } catch (e) { if (alive) setConnectError(e.message); }
+        })();
         return () => { alive = false; };
-      }, [siteId, frames, ensureFrame, siteStatuses[siteId]?.initialized, siteStatuses[siteId]?.loggedIn]);
+      }, [siteId, frames, ensureFrame, siteStatuses[siteId]?.initialized, siteStatuses[siteId]?.loggedIn, probes[siteId]]);
       async function toggleWindow() {
         setWinBusy(true); setConnectError('');
         try {
@@ -460,7 +615,9 @@ window.__ModuleLoader__.load({
       // 官方右侧栏没有刷新入口；强制重载 = 换时间戳 src 重新挂该站点的 iframe。
       function reloadFrame() {
         setConnectError('');
-        ensureFrame(siteId, true);
+        // 重载同时重探：站点可能刚从「网络不通」恢复（或反之），只换 src 会一直
+        // 拿上一次的结论。
+        probeSite(siteId, true).then(p => { if (!p || p.reachable !== false) ensureFrame(siteId, true); });
       }
       const active = frames[siteId];
       const frameBlocked = Number(active?.status) >= 400;
@@ -472,9 +629,12 @@ window.__ModuleLoader__.load({
         h('div', { className: 'hwb-sitebar', role: 'tablist', 'aria-label': '内容服务站点' },
           h('div', { className: 'hwb-sitebar-tabs' },
             Object.entries(SITE_NAMES).map(([sid, name]) => h('button', {
-              key: sid, role: 'tab', 'aria-selected': sid === siteId, className: sid === siteId ? 'active' : '',
+              key: sid, role: 'tab', 'aria-selected': sid === siteId,
+              // 基类必须始终在：0.12.9 只渲染 'active' 或 ''，于是没有基础样式
+              //（字号/内边距/圆角全无），站点栏看起来是一排裸 <button>。
+              className: 'hwb-site-tab' + (sid === siteId ? ' active' : ''),
               onClick: () => setSiteId(sid),
-            }, h('span', null, name), h('span', { className: 'hwb-tab-state ' + statusClass(siteStatuses[sid]) }, statusLabel(siteStatuses[sid]))))),
+            }, h('span', null, name), h('span', { className: 'hwb-tab-state ' + statusClass(siteStatuses[sid]), title: statusTitle(siteStatuses[sid]) }, statusLabel(siteStatuses[sid]))))),
           h('button', {
             className: 'hwb-icon-btn', title: '刷新右侧网页（重新加载镜像页面）',
             'aria-label': '刷新右侧网页', onClick: reloadFrame,
@@ -484,52 +644,143 @@ window.__ModuleLoader__.load({
             title: winIsOpen(siteId) ? '收起该站点的独立窗口（回到无头运行）' : '在独立窗口中打开真实网页（已开的窗口会聚焦弹到最前，不会覆盖）',
             'aria-pressed': winIsOpen(siteId), onClick: toggleWindow,
           }, winBusy ? '窗口切换中…' : winIsOpen(siteId) ? '✓ 已开独立窗口 · 点击收回' : '⧉ 独立窗口打开')),
-        // 两条错误只显示一条：镜像被站点拦截时，连接类错误没有信息量，不重复刷屏。
-        connectError && !frameBlocked && h('div', { className: 'hwb-error', role: 'status' },
-          '浏览器视图未能连接：' + connectError + ' ',
-          h('button', { className: 'hwb-retry', onClick: reloadFrame }, '重试')),
-        shouldGuide(siteStatus) && h('div', { className: 'hwb-guide', role: 'status' },
-          h('strong', null, siteName(siteId) + ' 尚未初始化'),
-          h('p', null, '请先在设置页点击“登录”或“检测”，完成一次真实网页核验后再打开右栏。网络不可达或地区受限时，请使用独立窗口确认。'),
-          h('button', { className: 'hwb-retry', onClick: () => api('window', { siteId, action: 'open' }).then(winState).catch(e => setConnectError(e.message)) }, '打开独立窗口')),
-        frameBlocked && h('div', { className: 'hwb-error', role: 'status' },
-          siteName(siteId) + ' 拦截了内嵌镜像（HTTP ' + active.status + '），与登录态无关——请用「独立窗口」打开；若仍未登录，请先在上方完成登录。',
-          h('button', { className: 'hwb-retry', onClick: toggleWindow }, '改用独立窗口打开'),
-          h('button', { className: 'hwb-retry', onClick: reloadFrame }, '重试')),
-        // 所有已访问站点的 frame 常驻 DOM（隐藏保活），只显示当前站点的。
-        Object.entries(frames).map(([sid, f]) => h('iframe', {
-          key: sid,
-          className: 'hwb-browser-frame',
-          style: sid === siteId ? null : { display: 'none' },
-          src: f.src,
-          title: siteName(sid) + ' 网页对话',
-          referrerPolicy: 'no-referrer',
-          sandbox: 'allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads',
-          onLoad: (e) => {
-            let status = null;
-            try { status = Number(e?.target?.contentWindow?.location?.status) || null; } catch { status = null; }
-            setFrames(prev => {
-              const cur = prev[sid];
-              if (!cur) return prev;
-              return { ...prev, [sid]: { ...cur, ready: true, status } };
-            });
-          },
-          onError: () => setConnectError('网页代理加载失败，请确认中继服务已启动'),
-        })),
-        active && !active.ready && !connectError && h('div', { className: 'hwb-frame-status' }, '正在加载 ' + siteName(siteId) + ' 网页…（加载后可直接在右侧操作，生成任务由网页原生执行）'));
+        // 站点栏之下的「网页区」：iframe 与各种遮罩（加载中 / 拦截 / 不可达 /
+        // 未初始化）全部放在这里。遮罩的 position:absolute;inset:0 于是只覆盖
+        // 网页区——0.12.9 的遮罩是面板根的兄弟节点，加载时会把整条站点栏也糊掉，
+        // 用户连切站点都点不到。
+        h('div', { className: 'hwb-frame-host' },
+          // 两条错误只显示一条：镜像被站点拦截时，连接类错误没有信息量，不重复刷屏。
+          connectError && !frameBlocked && h('div', { className: 'hwb-error', role: 'status' },
+            '浏览器视图未能连接：' + connectError + ' ',
+            h('button', { className: 'hwb-retry', onClick: reloadFrame }, '重试')),
+          shouldGuide(siteStatus) && h('div', { className: 'hwb-guide', role: 'status' },
+            h('strong', null, siteName(siteId) + ' 尚未初始化'),
+            h('p', null, '请先在设置页点击“登录”或“检测”，完成一次真实网页核验后再打开右栏。网络不可达或地区受限时，请使用独立窗口确认。'),
+            h('button', { className: 'hwb-retry', onClick: () => api('window', { siteId, action: 'open' }).then(winState).catch(e => setConnectError(e.message)) }, '打开独立窗口')),
+          // 本机直连不通：**不挂 iframe**（挂上去只会是一张 502/403 裸错误页，还常驻
+          // 保活占资源）。给出站点名、失败原因与两条真正可行的出路。
+          !shouldGuide(siteStatus) && unreachable(siteId) && h('div', { className: 'hwb-guide', role: 'status' },
+            h('strong', null, siteName(siteId) + ' 本机网络不可达'),
+            h('p', null, '桥在中继里直连 ' + (unreachable(siteId).origin || '') + ' 失败（'
+              + (unreachable(siteId).reason || ('HTTP ' + unreachable(siteId).status)) + '）。'
+              + '这是本机网络/代理或站点地区策略的问题，镜像与独立窗口都会受影响。'),
+            h('button', { className: 'hwb-retry', onClick: () => probeSite(siteId, true) }, '重新探活'),
+            h('button', { className: 'hwb-retry', onClick: () => api('window', { siteId, action: 'open' }).then(winState).catch(e => setConnectError(e.message)) }, '仍要尝试独立窗口')),
+          frameBlocked && h('div', { className: 'hwb-error', role: 'status' },
+            siteName(siteId) + ' 拦截了内嵌镜像（HTTP ' + active.status + '），与登录态无关——请用「独立窗口」打开；若仍未登录，请先在上方完成登录。',
+            h('button', { className: 'hwb-retry', onClick: toggleWindow }, '改用独立窗口打开'),
+            h('button', { className: 'hwb-retry', onClick: reloadFrame }, '重试')),
+          // 所有已访问站点的 frame 常驻 DOM（隐藏保活），只显示当前站点的。
+          Object.entries(frames).map(([sid, f]) => h('iframe', {
+            key: sid,
+            className: 'hwb-browser-frame',
+            style: sid === siteId ? null : { display: 'none' },
+            src: f.src,
+            title: siteName(sid) + ' 网页对话',
+            referrerPolicy: 'no-referrer',
+            sandbox: 'allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads',
+            onLoad: (e) => {
+              // 子域形态下 iframe 与面板**不同源**，读 contentWindow.location 必抛
+              // 安全错误——旧实现在这里 sniff `location.status`，跨源后永远拿不到，
+              // 于是 frameBlocked 恒为 false、拦截提示永不出现。改为只用 onLoad
+              // 事实（页面已加载），拦截/不可达由 /__webcode/site-probe 判定。
+              setFrames(prev => {
+                const cur = prev[sid];
+                if (!cur) return prev;
+                return { ...prev, [sid]: { ...cur, ready: true, status: cur.status } };
+              });
+            },
+            onError: () => setConnectError('网页代理加载失败，请确认中继服务已启动'),
+          })),
+          active && !active.ready && !connectError && h('div', { className: 'hwb-frame-status' }, '正在加载 ' + siteName(siteId) + ' 网页…（加载后可直接在右侧操作，生成任务由网页原生执行）')));
     }
 
     function apply(ctx) {
       const style = document.createElement('style');
-      style.textContent = '.hwb-settings{max-width:760px;padding:20px;color:inherit;display:flex;flex-direction:column;gap:14px}.hwb-settings h2{font-size:20px;letter-spacing:0;margin:0 0 2px}.hwb-lead{font-size:12px;opacity:.72;margin:0;line-height:1.6}.hwb-card{border:1px solid #8884;border-radius:10px;padding:2px 16px 8px;background:transparent}.hwb-group{font-size:12px;font-weight:600;opacity:.72;margin:12px 0 0}.hwb-group.first{margin-top:12px}.hwb-row{display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap;padding:11px 0;border-bottom:1px solid #8883}.hwb-row:last-child{border-bottom:0}.hwb-row-label{flex:0 0 128px;min-width:96px;font-size:13px;padding-top:2px}.hwb-row-main{flex:1;min-width:240px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}.hwb-row button{padding:5px 12px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;cursor:pointer}.hwb-consent{display:flex;align-items:center;gap:8px}.hwb-hint{font-size:12px;opacity:.72;margin:4px 0 0;line-height:1.5}.hwb-hint.indent{margin:6px 0 8px 0}.hwb-model-select{min-width:220px;max-width:340px;padding:6px 8px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit}.hwb-sites{display:flex;flex-direction:column}.hwb-site-block{padding:6px 0;border-bottom:1px solid #8883}.hwb-site-block:last-of-type{border-bottom:0}.hwb-site-row{display:flex;align-items:center;gap:12px;padding:4px 0}.hwb-site-row.busy{opacity:.55}.hwb-site-name{flex:1;font-size:13px}.hwb-site-state{font-size:12px;padding:1px 8px;border-radius:10px;border:1px solid #8885}.hwb-site-state.ok{color:#2e7d32;border-color:#2e7d3280}.hwb-site-state.bad{color:#93443e;border-color:#93443e80}.hwb-site-row button{padding:4px 12px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;cursor:pointer}.hwb-metrics{display:flex;flex-direction:column;gap:6px;width:100%}.hwb-metrics-head{font-size:12px;margin-bottom:2px}.hwb-bar-row{display:flex;align-items:center;gap:12px}.hwb-bar-label{flex:0 0 76px;font-size:12px;opacity:.85}.hwb-bar-track{flex:1;min-width:120px;height:8px;border-radius:4px;background:#8883;overflow:hidden}.hwb-bar-fill{display:block;height:100%;border-radius:4px;background:#8a94a6;transition:width .4s ease}.hwb-bar-fill.ok{background:#2e7d32}.hwb-bar-value{flex:0 0 92px;font-size:12px;text-align:right;font-variant-numeric:tabular-nums}.hwb-badge{display:inline-block;padding:0 6px;border-radius:4px;font-size:11px;border:1px solid #8885;margin-right:8px}.hwb-badge.measured{color:#2e7d32;border-color:#2e7d3280}.hwb-preset{padding:12px 0;border-bottom:1px solid #8883}.hwb-preset:last-child{border-bottom:0}.hwb-preset summary{cursor:pointer;font-size:13px}.hwb-import{display:flex;flex-direction:column;gap:8px}.hwb-import select{padding:6px 8px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit}.hwb-import-row{display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid #8883}.hwb-import-title{flex:1;font-size:13px}.hwb-prompt-input{width:100%;min-height:80px;padding:8px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;font:inherit;line-height:1.5;resize:vertical}.hwb-preset pre{max-height:280px;overflow:auto;font-size:12px;line-height:1.5;padding:10px;border:1px solid #8883;border-radius:6px;white-space:pre-wrap;word-break:break-word}.hwb-conversation{height:100%;width:100%;min-height:0;overflow:hidden;background:#fff;position:relative;display:flex;flex-direction:column}.hwb-retry{padding:4px 10px;border:1px solid #8885;border-radius:6px;background:transparent;color:inherit;cursor:pointer}.hwb-error{padding:8px;font-size:12px;color:#93443e;background:#fff}.hwb-sitebar{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid #8883;background:var(--ds-bg,#fff)}.hwb-sitebar-tabs{display:flex;gap:6px;flex:1;min-width:0;overflow-x:auto;scrollbar-width:thin;padding-bottom:1px}.hwb-sitebar button{padding:3px 10px;border:1px solid #8885;border-radius:999px;background:transparent;color:inherit;cursor:pointer;font-size:12px;white-space:nowrap;transition:background .15s,color .15s,border-color .15s}.hwb-sitebar button:hover{border-color:#8888;background:#8881}.hwb-sitebar button.active{background:#2563eb;color:#fff;border-color:#2563eb}.hwb-icon-btn{flex:0 0 auto;align-self:center;width:26px;height:26px;display:grid;place-items:center;padding:0;border:1px solid #8885;border-radius:7px;background:transparent;color:inherit;cursor:pointer;font-size:14px;line-height:1}.hwb-icon-btn:hover{background:#8882}.hwb-win-btn{flex:0 0 auto;align-self:center;padding:4px 10px;border:1px solid #2563eb80;border-radius:8px;background:#2563eb0d;color:#2563eb;cursor:pointer;font-size:12px;white-space:nowrap;transition:background .15s}.hwb-win-btn:hover{background:#2563eb1a}.hwb-win-btn.open{background:#2563eb;color:#fff}.hwb-win-btn:disabled{opacity:.5;cursor:default}.hwb-sitebar-tabs::-webkit-scrollbar{height:4px}.hwb-sitebar-tabs::-webkit-scrollbar-thumb{background:#8884;border-radius:2px}';
+      // 样式：DSH 设计 token（--dsw-alias-*）+ fallback。
+      // 0.13.0 前这里是硬编码字面量（#8884 / #2e7d32 …），深色主题下与宿主
+      // 格格不入；DSH 自家设置区用 token + 16px 圆角卡片。
+      // 合并成一张 sheet —— 原本三段（设置/右栏/角落）本就是同一套界面。
+      // 注：client 插件是单文件 bundle（__ModuleLoader__ 的 require 只认平台
+      // 种子与已注册包，不支持相对路径），CSS 只能内联。
+      style.textContent = [
+        ".hwb-settings{max-width:760px;padding:20px;color:inherit;display:flex;flex-direction:column;gap:14px}",
+        ".hwb-settings h2{font-size:20px;font-weight:500;line-height:28px;letter-spacing:0;margin:0 0 2px}",
+        ".hwb-lead{font-size:13px;line-height:22px;color:var(--dsw-alias-label-tertiary,#8a8f98);margin:0}",
+        ".hwb-build{font-size:11px;line-height:16px;color:var(--dsw-alias-label-caption,#9aa0a6);margin:-6px 0 0;font-variant-numeric:tabular-nums}",
+        ".hwb-card{border:.5px solid var(--dsw-alias-border-l4,#8884);border-radius:16px;background:var(--dsw-alias-bg-layer-1,transparent);padding:4px 16px 10px}",
+        ".hwb-group{font-size:14px;font-weight:500;line-height:22px;color:var(--dsw-alias-label-primary,inherit);margin:14px 0 4px}",
+        ".hwb-group.first{margin-top:14px}",
+        ".hwb-row{display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap;padding:12px 0;border-bottom:1px solid var(--dsw-alias-border-l3,#8883)}",
+        ".hwb-row:last-child{border-bottom:0}",
+        ".hwb-row-label{flex:0 0 128px;min-width:96px;font-size:13px;line-height:20px;padding-top:6px;color:var(--dsw-alias-label-secondary,inherit)}",
+        ".hwb-row-main{flex:1;min-width:240px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}",
+        ".hwb-row button,.hwb-settings button{height:32px;padding:0 14px;font:inherit;font-size:13px;line-height:30px;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border:.5px solid var(--dsw-alias-border-l3,#8885);border-radius:16px;cursor:pointer;transition:background .12s ease}",
+        ".hwb-row button:hover:not(:disabled),.hwb-settings button:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,#8882)}",
+        ".hwb-row button:disabled,.hwb-settings button:disabled{opacity:.45;cursor:default}",
+        ".hwb-model-select,.hwb-prompt-input{min-width:220px;max-width:340px;padding:6px 10px;font:inherit;font-size:13px;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border:.5px solid var(--dsw-alias-border-l3,#8885);border-radius:8px}",
+        ".hwb-prompt-input{width:100%;max-width:none;min-height:96px;line-height:1.5;font-family:inherit;resize:vertical}",
+        ".hwb-hint{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary,#8a8f98);margin:4px 0 0}",
+        ".hwb-hint.indent{margin:6px 0 8px}",
+        ".hwb-hint.ok{color:var(--dsw-alias-state-success-primary,#2e7d32)}",
+        ".hwb-hint.bad{color:var(--dsw-alias-state-error-primary,#93443e)}",
+        ".hwb-consent{display:flex;align-items:center;gap:8px;font-size:13px}",
+        ".hwb-sites{display:flex;flex-direction:column}",
+        ".hwb-site-block{padding:8px 0;border-bottom:1px solid var(--dsw-alias-border-l3,#8883)}",
+        ".hwb-site-block:last-of-type{border-bottom:0}",
+        ".hwb-site-row{display:flex;align-items:center;gap:12px;padding:4px 0;flex-wrap:wrap}",
+        ".hwb-site-row.busy{opacity:.55}",
+        ".hwb-site-identity{flex:1;display:inline-flex;align-items:center;gap:8px;min-width:140px;font-size:13px}",
+        ".hwb-site-name{font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary,inherit)}",
+        ".hwb-row-actions{display:inline-flex;align-items:center;gap:6px;margin-left:auto;flex-wrap:wrap}",
+        ".hwb-row-actions button{height:28px;line-height:26px;padding:0 12px;font-size:12px;border-radius:14px}",
+        ".hwb-dot{width:8px;height:8px;border-radius:50%;flex:none;display:inline-block;background:var(--dsw-alias-label-tertiary,#9aa0a6)}",
+        ".hwb-dot.ok{background:var(--dsw-alias-state-success-primary,#2e7d32)}",
+        ".hwb-dot.bad{background:var(--dsw-alias-state-error-primary,#93443e)}",
+        ".hwb-site-state{font-size:12px;line-height:18px;padding:1px 8px;border-radius:10px;border:.5px solid var(--dsw-alias-border-l3,#8885);color:var(--dsw-alias-label-secondary,inherit)}",
+        ".hwb-site-state.ok{color:var(--dsw-alias-state-success-primary,#2e7d32);border-color:var(--dsw-alias-state-success-primary,#2e7d32)}",
+        ".hwb-site-state.bad{color:var(--dsw-alias-state-error-primary,#93443e);border-color:var(--dsw-alias-state-error-primary,#93443e)}",
+        ".hwb-metrics{display:flex;flex-direction:column;gap:6px;width:100%}",
+        ".hwb-metrics-head{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary,#8a8f98);margin-bottom:2px}",
+        ".hwb-badge{display:inline-block;font-size:11px;line-height:16px;padding:0 8px;margin-right:6px;border-radius:8px;border:.5px solid var(--dsw-alias-border-l3,#8885);color:var(--dsw-alias-label-secondary,inherit)}",
+        ".hwb-badge.measured{color:var(--dsw-alias-state-success-primary,#2e7d32);border-color:var(--dsw-alias-state-success-primary,#2e7d32)}",
+        ".hwb-bar-row{display:flex;align-items:center;gap:12px}",
+        ".hwb-bar-label{flex:0 0 76px;font-size:12px;color:var(--dsw-alias-label-secondary,inherit)}",
+        ".hwb-bar-track{flex:1;height:8px;border-radius:4px;overflow:hidden;background:var(--dsw-alias-interactive-bg-hover,#8882)}",
+        ".hwb-bar-fill{display:block;height:100%;border-radius:4px;background:var(--dsw-alias-label-tertiary,#8a8f98);transition:width .2s ease}",
+        ".hwb-bar-fill.ok{background:var(--dsw-alias-state-success-primary,#2e7d32)}",
+        ".hwb-bar-value{flex:0 0 148px;font-size:12px;text-align:right;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary,inherit)}",
+        ".hwb-preset{border-top:1px solid var(--dsw-alias-border-l3,#8883);padding:8px 0}",
+        ".hwb-preset summary{cursor:pointer;font-size:13px;color:var(--dsw-alias-label-secondary,inherit)}",
+        ".hwb-preset pre{max-height:320px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.55;background:var(--dsw-alias-interactive-bg-hover,#8881);border-radius:8px;padding:10px}",
+        // 全局指令编辑区（details 展开后的容器）
+        ".hwb-import{display:flex;flex-direction:column;gap:8px;padding:8px 0}",
+        ".hwb-conversation{position:relative;display:flex;flex-direction:column;width:100%;height:100%;min-height:0}",
+        ".hwb-sitebar{display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:.5px solid var(--dsw-alias-border-l4,#8884)}",
+        ".hwb-sitebar-tabs{display:flex;gap:4px;overflow-x:auto;flex:1}",
+        ".hwb-site-tab{flex:none;display:inline-flex;align-items:center;gap:4px;height:28px;padding:0 12px;font:inherit;font-size:12px;color:var(--dsw-alias-label-secondary,inherit);background:transparent;border:.5px solid transparent;border-radius:14px;cursor:pointer}",
+        ".hwb-site-tab:hover{background:var(--dsw-alias-interactive-bg-hover,#8882)}",
+        ".hwb-site-tab.active{color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border-color:var(--dsw-alias-border-l3,#8885)}",
+        ".hwb-icon-btn{flex:none;width:28px;height:28px;display:grid;place-items:center;color:var(--dsw-alias-label-secondary,inherit);background:transparent;border:none;border-radius:14px;cursor:pointer}",
+        ".hwb-icon-btn:hover{background:var(--dsw-alias-interactive-bg-hover,#8882)}",
+        ".hwb-win-btn{flex:none;height:28px;padding:0 12px;font:inherit;font-size:12px;color:var(--dsw-alias-label-secondary,inherit);background:transparent;border:.5px solid var(--dsw-alias-border-l3,#8885);border-radius:14px;cursor:pointer}",
+        ".hwb-win-btn.open{color:var(--dsw-alias-state-success-primary,#2e7d32);border-color:var(--dsw-alias-state-success-primary,#2e7d32)}",
+        ".hwb-frame-host{position:relative;flex:1;min-height:0}",
+        ".hwb-browser-frame{display:block;width:100%;height:100%;min-height:0;border:0;background:#fff}",
+        ".hwb-frame-status{position:absolute;inset:0;display:grid;place-items:center;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-tertiary,#7a8494);font-size:12px;pointer-events:none}",
+        ".hwb-error,.hwb-guide{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:24px;text-align:center;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-secondary,#394150)}",
+        ".hwb-error p,.hwb-guide p{font-size:12px;line-height:1.7;margin:0;color:var(--dsw-alias-label-tertiary,#8a8f98)}",
+        ".hwb-retry{height:30px;padding:0 14px;font:inherit;font-size:12px;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border:.5px solid var(--dsw-alias-border-l3,#8885);border-radius:15px;cursor:pointer}",
+        ".hwb-retry:hover{background:var(--dsw-alias-interactive-bg-hover,#8882)}",
+        ".hwb-tab-state{font-size:10px;margin-left:4px;opacity:.85}",
+        ".hwb-tab-state.ok{color:var(--dsw-alias-state-success-primary,#2e7d32)}",
+        ".hwb-tab-state.bad{color:var(--dsw-alias-state-error-primary,#93443e)}",
+        ".hwb-tab-state.idle{color:var(--dsw-alias-label-tertiary,#7a8494)}",
+        ".hwb-corner-btn{width:28px;height:28px;display:grid;place-items:center;color:var(--dsw-alias-label-secondary,inherit);background:transparent;border:.5px solid var(--dsw-alias-border-l4,#8884);border-radius:7px;cursor:pointer;padding:0}",
+        ".hwb-corner-btn:hover{background:var(--dsw-alias-interactive-bg-hover,#8882)}",
+      ].join('');
       document.head.appendChild(style);
-      const browserStyle = document.createElement('style');
-      browserStyle.textContent = '.hwb-browser-frame{display:block;width:100%;height:100%;min-height:0;border:0;background:#fff}.hwb-frame-status{position:absolute;inset:0;display:grid;place-items:center;background:#fff;color:#7a8494;font-size:12px;pointer-events:none}';
-      document.head.appendChild(browserStyle);
-      const cornerStyle = document.createElement('style');
-      cornerStyle.textContent = '.hwb-corner-btn{width:28px;height:28px;display:grid;place-items:center;border:1px solid #8884;border-radius:7px;background:transparent;color:inherit;cursor:pointer;padding:0}.hwb-corner-btn:hover{background:#8882}.hwb-tab-state{font-size:10px;margin-left:4px;opacity:.8}.hwb-tab-state.ok{color:#2e7d32}.hwb-tab-state.bad{color:#93443e}.hwb-tab-state.idle{color:#7a8494}.hwb-guide{padding:24px;text-align:center;background:#fff;color:#394150}.hwb-guide p{font-size:12px;line-height:1.7;opacity:.75}.hwb-build{font-size:11px;opacity:.6;margin:-8px 0 0}';
-      document.head.appendChild(cornerStyle);
-      const disposers = [() => style.remove(), () => browserStyle.remove(), () => cornerStyle.remove()];
+      const disposers = [() => style.remove()];
       const warn = (what, e) => console.warn('[webcode-bridge] ' + what + ' failed:', e && e.message ? e.message : e);
 
       // ---- 设置页（真实需求重构：登录管理前置、无历史导入） ------------

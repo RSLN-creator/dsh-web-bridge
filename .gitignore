@@ -19,6 +19,8 @@ package/dsh-webcode-bridge/test-mock/.test-build/
 
 # 打包/探针输出（tgz、真机探针日志），不入库
 package/output/
+# 真机矩阵的每次运行证据（JSON + 截图，可再生；截图在 .tmp/shots 已被 .tmp/ 覆盖）
+package/dsh-webcode-bridge/test-mock/out/
 
 # 本地暂存（排查脚本、npm 缓存、tgz 解包验证），历史上从未入库
 .tmp/

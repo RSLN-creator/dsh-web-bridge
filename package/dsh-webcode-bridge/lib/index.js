@@ -18,6 +18,7 @@ import { createBrowserDriver } from './browser-driver.js';
 import { createWebControl, buildSessionEvents, mainLineOf } from './web-control.js';
 import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, readCallAt, partialProtocolAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeDsml } from './agent-preset.js';
 import { createMirror } from './mirror.js';
+import { httpFetch } from './upstream.js';
 import { textOfBlocks } from './flatten.js';
 import { estimateTokens } from './metrics.js';
 import { renderSettingsPage } from './settings-page.js';
@@ -53,6 +54,11 @@ const DEFAULTS = {
   profileDir: path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 'webcode-edge-profile'),
   headless: true,
   contextMode: 'session', // 'session': one web conversation per DSH session, incremental turns
+  // 允许携带 Origin 的显式白名单（除「同源」之外的额外放行）。同源判定本身由
+  // lib/loopback.js 的 originMatchesHost 完成，因此这里**只需列 DSH 前端自己的
+  // 两个源**——右栏站点 iframe 是 <siteId>.localhost:<relay 端口>，它们与 relay
+  // 同源（控制面相对路径 /__webcode/* 就落在那些源上），不靠白名单。
+  // 旧注释里「白名单必须含 *.localhost:3080」是误判：DSH 前端不会被挂在子域上。
   allowedOrigins: ['http://127.0.0.1:3080', 'http://localhost:3080'],
 };
 
@@ -82,35 +88,55 @@ function sleepSignal(ms, signal) {
   });
 }
 
-/** Pull image attachments out of message blocks in DSH's several shapes.
- *  Returns [{ name, contentType, data(base64) }] — data URLs are decoded
- *  inline; http(s) URLs are fetched (≤8MB) so vision turns carry real pixels. */
+/** Pull image attachments out of message blocks in **every** shape DSH uses.
+ *
+ * 三类来源，标成 tagged entry 交给 resolveImages 统一落成 base64：
+ *   • `durable` — DSH 原生块 `{type:'image', attachment:ImageAttachmentRef}`。
+ *     像素不在块里，必须经 attachments 服务读取。**这是 harness 截图/粘贴的
+ *     唯一形态**，0.12.9 之前完全没被识别（见 resolveAttachments 注释）。
+ *   • `inline`  — wire 形状的 data URL / source.data / base64（OpenAI 前端、
+ *     旧会话回放）。data URL 就地解码，不落盘。
+ *   • `remote`  — http(s) URL，由 resolveRemoteImages 抓取（≤8MB）。
+ *
+ * 返回 [{ name, contentType, kind, ref?|data?|url? }]。
+ */
 const IMAGE_DATA_URL = /^data:(image\/[\w.+-]+);base64,(.+)$/s;
-function imagesOfMessages(messages) {
+export function imagesOfMessages(messages) {
   const out = [];
   let idx = 0;
-  const push = (name, contentType, data, url) => {
-    if (data && data.length > 8) out.push({ name: name || `image-${++idx}.png`, contentType: contentType || 'image/png', data });
-    else if (url) out.push({ name: name || `image-${++idx}.png`, contentType: contentType || 'image/png', url });
-  };
+  const nextName = (name) => String(name || '').trim() || `image-${++idx}.png`;
+  const push = (entry) => { out.push({ ...entry, name: nextName(entry.name) }); };
   for (const m of Array.isArray(messages) ? messages : []) {
     if (!m || !Array.isArray(m.content)) continue;
     for (const b of m.content) {
       if (!b) continue;
+      // ① DSH 原生 durable 图片块（首要路径）。
+      if (b.type === 'image' && b.attachment && typeof b.attachment === 'object') {
+        push({ kind: 'durable', ref: b.attachment, name: b.name || b.attachment.name, contentType: b.attachment.mediaType });
+        continue;
+      }
+      // ② 内联 / 远程 wire 形状（兼容路径，保持旧行为）。
       const url = b.url ?? b.imageUrl?.url ?? b.image_url?.url;
       if (typeof url === 'string') {
         const dm = IMAGE_DATA_URL.exec(url);
-        if (dm) { push(b.name, dm[1], dm[2]); continue; }
-        if (/^https:\/\//.test(url)) { push(b.name, b.mediaType, undefined, url); continue; }
+        if (dm) { push({ kind: 'inline', name: b.name, contentType: dm[1], data: dm[2] }); continue; }
+        if (/^https:\/\//.test(url)) { push({ kind: 'remote', name: b.name, contentType: b.mediaType, url }); continue; }
       }
       const source = b.source;
-      if (source?.data && typeof source.data === 'string' && source.data.length > 8) push(b.name, source.mediaType, source.data);
-      else if (typeof b.data === 'string' && b.data.length > 8) push(b.name, b.mediaType, b.data);
-      else if (typeof b.base64 === 'string' && b.base64.length > 8) push(b.name, b.mediaType, b.base64);
+      if (source?.data && typeof source.data === 'string' && source.data.length > 8) push({ kind: 'inline', name: b.name, contentType: source.mediaType, data: source.data });
+      else if (typeof b.data === 'string' && b.data.length > 8) push({ kind: 'inline', name: b.name, contentType: b.mediaType, data: b.data });
+      else if (typeof b.base64 === 'string' && b.base64.length > 8) push({ kind: 'inline', name: b.name, contentType: b.mediaType, data: b.base64 });
     }
   }
   return out;
 }
+
+// 请求侧图片预算：与 dsh-llm-deepseek 的 DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET /
+// DEFAULT_REQUEST_IMAGE_MAX_BYTES 对齐，让桥取到的版本和原生 DeepSeek 路由同档。
+const REQUEST_IMAGE_POLICY = Object.freeze({ maxPixels: 640_000, maxBytes: 1_048_576 });
+// attachments 服务不可用时的兜底上限（直接读原始字节，不做 request 投影）。
+const RAW_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+
 async function resolveRemoteImages(images) {
   const settled = await Promise.all(images.map(async (img) => {
     if (!img.url) return img;
@@ -120,16 +146,89 @@ async function resolveRemoteImages(images) {
       const type = resp.headers.get('content-type') || img.contentType;
       if (!type.startsWith('image/')) return null;
       const buf = Buffer.from(await resp.arrayBuffer());
-      if (buf.length > 8 * 1024 * 1024) return null;
+      if (buf.length > RAW_IMAGE_MAX_BYTES) return null;
       return { ...img, contentType: type, data: buf.toString('base64') };
     } catch { return null; }
   }));
   return settled.filter(Boolean);
 }
 
+/**
+ * 把 imagesOfMessages 的 tagged entry 落成驱动可直接上传的
+ * `[{ name, contentType, data(base64) }]`。
+ *
+ * durable 路径按优先级降级，**每一档失败都记名不静默**：
+ *   1. `readImageRequest(ref, policy)` — 宿主归一化 + 按预算投影后的请求版本
+ *      （与原生 DeepSeek 路由同档；这是「传上去清晰且不超限」的正路）。
+ *   2. `readImage(ref)` — 原始归一化字节（服务不支持 request 投影时）。
+ *   3. 都失败 → 记进 skipped，返回给调用方明确报错，而不是让模型说「没看到图」。
+ */
+export async function resolveImages(images, attachments, signal) {
+  const tagged = Array.isArray(images) ? images : [];
+  if (!tagged.length) return { images: [], skipped: [] };
+  const inline = tagged.filter((i) => i.kind === 'inline');
+  const remote = tagged.filter((i) => i.kind === 'remote');
+  const durable = tagged.filter((i) => i.kind === 'durable');
+  const out = [...inline];
+  const skipped = [];
+
+  if (remote.length) out.push(...await resolveRemoteImages(remote));
+
+  for (const entry of durable) {
+    const ref = entry.ref;
+    if (!attachments) {
+      skipped.push({ name: entry.name, reason: '附件服务不可用（ctx.attachments 未挂载），无法读取原生图片块' });
+      continue;
+    }
+    try {
+      const version = await attachments.readImageRequest(ref, REQUEST_IMAGE_POLICY, signal);
+      const buf = Buffer.from(version.data);
+      if (!buf.length) throw new Error('request 版本为空');
+      out.push({
+        name: entry.name, contentType: version.mediaType || entry.contentType || 'image/png',
+        data: buf.toString('base64'), width: version.width, height: version.height, source: 'attachment-request',
+      });
+      continue;
+    } catch (err) {
+      warn('readImageRequest failed, falling back to raw bytes:', err?.message);
+    }
+    try {
+      const stored = await attachments.readImage(ref, signal);
+      const buf = Buffer.from(stored.data);
+      if (!buf.length) throw new Error('原始字节为空');
+      if (buf.length > RAW_IMAGE_MAX_BYTES) throw new Error(`原始图片 ${buf.length} 字节超过 ${RAW_IMAGE_MAX_BYTES} 上限`);
+      out.push({ name: entry.name, contentType: ref.mediaType || entry.contentType || 'image/png', data: buf.toString('base64'), source: 'attachment-raw' });
+    } catch (err) {
+      skipped.push({ name: entry.name, reason: String(err?.message || err) });
+    }
+  }
+  return { images: out, skipped };
+}
+
 // Optional: resolve the LlmRuntime service class so ctx.get(Service) works too.
 let llmServiceRef = null;
 try { llmServiceRef = (await import('@deepseek-ai/dsh-llm')).LlmRuntime; } catch { /* optional peer */ }
+
+/** Feature-detect the durable attachment store across cordis context shapes.
+ *
+ * DSH 的原生图片块长这样：`{ type:'image', attachment: ImageAttachmentRef }`
+ *（证据：dsh-llm/lib/types/types.d.ts 的 ImageBlock、dsh-tool-fs 里构造 image
+ * 块的那处）。`ImageAttachmentRef` 只带 attachmentId / mediaType / bytes /
+ * width / height / name —— **没有任何内联字节**。真正的像素要经
+ * `ctx.attachments.readImageRequest(ref, policy, signal)` 取。
+ *
+ * 0.12.9 之前这里根本没有解析 attachment store，imagesOfMessages 只认
+ * wire 形状（url / image_url / source.data / base64），与原生块**零交集**，
+ * 于是 harness 截图/粘贴的图每次都被静默丢弃——网页端自然说看不到图。 */
+function resolveAttachments(ctx) {
+  const usable = (s) => s && typeof s.readImageRequest === 'function' && typeof s.readImage === 'function';
+  try { if (usable(ctx.attachments)) return ctx.attachments; } catch { /* next */ }
+  try {
+    const got = typeof ctx.get === 'function' ? ctx.get('attachments') : null;
+    if (usable(got)) return got;
+  } catch { /* next */ }
+  return null;
+}
 
 /** Feature-detect the llm service across cordis context shapes. */
 function resolveLlm(ctx) {
@@ -286,6 +385,11 @@ export function apply(ctx, config = {}) {
   if (!llm) {
     throw new Error('[webcode-bridge] llm service not available on ctx — is this a dsh profile bundle loaded after dsh-base?');
   }
+  // 原生图片块的唯一读取入口。拿不到时 harness 的截图会在 attach() 里被明确
+  // 记为 skipped 并报错，而不是静默丢弃（见 resolveImages）。
+  const attachments = resolveAttachments(ctx);
+  if (attachments) log('attachment store resolved — durable image blocks are readable');
+  else warn('attachment store NOT available on ctx; native (harness) image blocks cannot be resolved');
 
   // ---- LLM provider adapter --------------------------------------------
   // Pure adapter registration (the shape opencode2dsh's adapter mode uses): the
@@ -312,7 +416,15 @@ export function apply(ctx, config = {}) {
       const contextWindow = m.context
         ?? cfg.contextWindowBySite?.[m.siteId]
         ?? (m.siteId === 'deepseek' ? 1_000_000 : 64_000);
-      return { provider, id: model || m.id, name: m.name, context: { contextWindow } };
+      // inputModalities 是**护栏**，不是可选元数据：宿主只在它明确不含 'image'
+      // 时调 projectImagesForTextModel() 把图片换成文字占位
+      //（dsh-llm/lib/index.js 的那处判定）。声明错了方向，harness 截图会在到达
+      // 桥之前就被剥离，症状正是「网页端说没图」——而桥这边看不到任何异常。
+      // 因此按模型的真实带图能力声明（acceptsImages，不是 vision：vision 是
+      // DeepSeek 那种必须带图的独立识图模式）；未真机校准的一律 text——宁可
+      // 明确不支持，也不让图片在半路被悄悄换掉。
+      const inputModalities = m.acceptsImages === true ? ['text', 'image'] : ['text'];
+      return { provider, id: model || m.id, name: m.name, context: { contextWindow }, inputModalities };
     },
     async prepareCall(provider, model, signal) {
       const info = await this.resolveModel(provider, model, signal);
@@ -754,12 +866,16 @@ function imageMarkdown(images) {
   // 多站点：每个内容服务一个独立驱动实例（独立 profile，避免登录态串号）。
   // deepseek 用默认 driver（兼容测试注入与既有 profile）；其余站点按需懒创建。
   const drivers = new Map();
+  // 把宿主的图片限额交给每个驱动：上传前据此拦下必然被拒绝的输入（张数/字节），
+  // 而不是发出去再猜为什么「模型说没图」。拿不到限额时驱动退回保守默认。
+  const imageLimitsProvider = () => (attachments ? attachments.imageLimits : null) || null;
+  for (const d of [driver]) { try { d.setImageLimitsProvider?.(imageLimitsProvider); } catch { /* 测试注入的桩驱动 */ } }
   function driverFor(siteId) {
     if (!siteId || siteId === 'deepseek') return driver;
     if (!drivers.has(siteId)) {
       const st = getSite(siteId);
       if (!st) throw new Error('[webcode-bridge] 未知站点: ' + siteId);
-      drivers.set(siteId, createBrowserDriver({
+      const d = createBrowserDriver({
         siteId,
         site: st.origin + '/',
         profileDir: path.join(cfg.profileDir, 'sites', siteId),
@@ -767,7 +883,9 @@ function imageMarkdown(images) {
         requestTimeoutMs: cfg.requestTimeoutMs,
         loginTimeoutMs: cfg.loginTimeoutMs,
         logger: console,
-      }));
+      });
+      try { d.setImageLimitsProvider?.(imageLimitsProvider); } catch { /* 同上 */ }
+      drivers.set(siteId, d);
     }
     return drivers.get(siteId);
   }
@@ -954,11 +1072,16 @@ function imageMarkdown(images) {
           for (const p of statePaths) {
             try { cached = JSON.parse(fs.readFileSync(p, 'utf8')); break; } catch { /* 未初始化过 */ }
           }
-          const has = cached && typeof cached.loggedIn === 'boolean';
-          return { siteId: st.id, siteName: st.name, origin: st.origin, initialized: false, running: false, busy: false, loggedIn: has ? cached.loggedIn : null, loggedInCached: has && cached.loggedIn === true, loginCheckedAt: has ? cached.at : null, needLogin: has && cached.loggedIn === false, selectedModel: null, window: null, loginState: 'idle', lastLogin: null };
+          // 旧版本（≤0.12.8）的结论是「有输入框=已登录」猜的，qwen/gemini 等游客页
+          // 自带输入框的站点全被记成 true，且那时**不写 basis 字段**。因此只有带
+          // basis 的落盘值才算数（driver.status() 同一规则）；否则给 null →
+          // 面板显示「待检查」。规则必须与 lib/browser-driver.js 逐字一致。
+          const trusted = Boolean(cached && typeof cached.basis === 'string');
+          const has = trusted && typeof cached.loggedIn === 'boolean';
+          return { siteId: st.id, siteName: st.name, origin: st.origin, initialized: false, running: false, busy: false, loggedIn: has ? cached.loggedIn : null, loggedInCached: has && cached.loggedIn === true, loginBasis: trusted ? cached.basis : (cached ? 'stale' : null), loginCheckedAt: cached ? cached.at : null, needLogin: has && cached.loggedIn === false, selectedModel: null, window: null, loginState: 'idle', lastLogin: null };
         }
         const s = d.status();
-        return { siteId: st.id, siteName: st.name, origin: st.origin, initialized: true, running: s.running, busy: s.busy, loggedIn: s.loggedIn, loggedInCached: s.loggedInCached === true, loginCheckedAt: s.loginCheckedAt ?? null, needLogin: s.needLogin, selectedModel: s.selectedModel, window: s.window ?? null, loginState: s.loginState ?? 'idle', lastLogin: s.lastLogin ?? null };
+        return { siteId: st.id, siteName: st.name, origin: st.origin, initialized: true, running: s.running, busy: s.busy, loggedIn: s.loggedIn, loggedInCached: s.loggedInCached === true, loginBasis: s.loginBasis ?? null, loginCheckedAt: s.loginCheckedAt ?? null, needLogin: s.needLogin, selectedModel: s.selectedModel, window: s.window ?? null, loginState: s.loginState ?? 'idle', lastLogin: s.lastLogin ?? null };
       });
       return { ...base, sites };
     },
@@ -994,11 +1117,39 @@ function imageMarkdown(images) {
       } catch { /* 非关键路径 */ }
       return d.openWindow({ ...opts, offset: openCount });
     },
-    sessionImport: (dir) => driver.importStorageFromProfile(dir),
+    // 「导入本机登录态」：把用户真实 Edge profile 的 cookies 采纳进**所选站点**的
+    // 桥 profile。旧实现写死默认驱动——对 glm/kimi/qwen 调用会去改 DeepSeek 的
+    // 登录态（站点间串号），因此按 siteId 路由到对应驱动（与 login/window 同规则）。
+    sessionImport: (siteId, dir) => driverFor(getSite(siteId) ? siteId : 'deepseek').importStorageFromProfile(dir),
     onHttp: (req, res) => {
       const u = new URL(req.url, 'http://localhost');
       const pathname = u.pathname;
-      // 多站点侧栏视图：/__webcode/site/<siteId>/… → 对应站点 mirror
+      // 多站点侧栏视图（主形态）：<siteId>.localhost:<port>/…
+      //
+      // 为什么用独立子域而不是路径前缀：站点的 SPA router / 资源解析都以
+      // **pathname 基线**为准。挂在 /__webcode/site/<sid>/ 下时，站点看到的
+      // pathname 是 /__webcode/site/doubao/chat/，router 认不出自己的 /chat/
+      // （真机实测：doubao 的 #root 恒为空、页面只剩「会话列表」四个字）；
+      // z.ai / qwen / kimi / glm 则用 history API 把地址栏写回 '/' 或
+      // '/main/...'，于是后续请求落到中继根 —— 而中继根是 DeepSeek 镜像，
+      // 表现就是「一点登录就跳回 DeepSeek」。
+      //
+      // 让每个站点拥有独立源（http://<sid>.localhost:<port>）后：pathname 与
+      // 真实站点逐字一致，SPA router 基线与根相对资源全部自然正确，cookie 也
+      // 按子域天然隔离。*.localhost 由浏览器与系统解析到回环，安全边界不变。
+      const hostHeader = String(req.headers.host || '');
+      const hostSite = /^([a-z0-9-]+)\.localhost(:\d+)?$/i.exec(hostHeader);
+      // 桥自己的控制面路径在子域上照旧可用：镜像 handle 对它们返回 false，
+      // 这里据此放行到下面的 webControl 分支（否则子域里的 /__webcode/xxx
+      // 会既不被镜像处理、也不被控制面处理，直接挂住）。
+      const LOCAL_PREFIXES = ['/v1/', '/bridge/', '/webcode/', '/__webcode/'];
+      const isControlPath = LOCAL_PREFIXES.some((p) => pathname === p.slice(0, -1) || pathname.startsWith(p));
+      if (hostSite && getSite(hostSite[1].toLowerCase()) && !isControlPath) {
+        const sid = hostSite[1].toLowerCase();
+        mirrorFor(sid).handle(req, res, pathname, u.search).catch(() => { try { res.end(); } catch {} });
+        return;
+      }
+      // 兼容旧路径形态：/__webcode/site/<siteId>/… → 对应站点 mirror
       const siteRoute = /^\/__webcode\/site\/([a-z0-9-]+)(\/.*)?$/.exec(pathname);
       if (siteRoute) {
         const [, sid, rest = '/'] = siteRoute;
@@ -1007,7 +1158,7 @@ function imageMarkdown(images) {
           res.end(JSON.stringify({ error: { message: 'unknown site: ' + sid } }));
           return;
         }
-        mirrorFor(sid).handle(req, res, rest, u.search).catch(() => { try { res.end(); } catch {} });
+        mirrorFor(sid, { prefixed: true }).handle(req, res, rest, u.search).catch(() => { try { res.end(); } catch {} });
         return;
       }
       // web-side control fallbacks (standalone relay without DSH webServer)
@@ -1054,28 +1205,33 @@ function imageMarkdown(images) {
     setCookies: (headers, origin) => driver.writeProfileCookies(headers, origin),
     getUserAgent: () => driver.userAgent(),
   });
-  // 多站点侧栏视图：每个内容服务一个 mirror 实例（各自 origin + 对应 driver 的
-  // 登录态 token），懒创建；路径前缀 /__webcode/site/<siteId>/…。
+  // 多站点侧栏视图：每个内容服务两个 mirror 实例（同一站点、不同挂载形态）——
+  //   • 主形态：子域根挂载 http://<siteId>.localhost:<port>/（mountPrefix ''）
+  //   • 兼容形态：路径前缀挂载 /__webcode/site/<siteId>/…（mountPrefix 该前缀）
+  // 两者都是同一站点同一 driver 的只读转发，不额外持有浏览器状态，因此可以并存。
   const mirrors = new Map();
-  function mirrorFor(siteId) {
+  function mirrorFor(siteId, { prefixed = false } = {}) {
     const sid = getSite(siteId) ? siteId : 'deepseek';
-    if (!mirrors.has(sid)) {
+    const key = sid + (prefixed ? '#path' : '');
+    if (!mirrors.has(key)) {
       const st = getSite(sid);
-      mirrors.set(sid, createMirror({
+      mirrors.set(key, createMirror({
         siteOrigin: st.origin,
         getToken: () => driverFor(sid).getToken(),
         logger: console,
         assetOrigins: st.staticOrigins || [],
-        mountPrefix: '/__webcode/site/' + sid,
-        // 站点级：前端 router 只认根路径的（z.ai）需要在页面脚本前把 pathname
-        // 改写成 '/'，否则镜像页渲染错误边界（见 providers.js 里的说明）。
-        rootPathForSpa: st.rootPathForSpa === true,
+        // 子域形态下站点就住在根上，不需要任何前缀；路径形态才带前缀。
+        mountPrefix: prefixed ? '/__webcode/site/' + sid : '',
+        // 子域形态 pathname 与真实站点逐字一致，SPA router 基线天然正确——
+        // 原先为 z.ai 打的 rootPathForSpa 补丁在子域形态下不再需要（且有害：
+        // 它会把 /auth 强行改回 '/'）。仅路径兼容形态保留该开关。
+        rootPathForSpa: prefixed && st.rootPathForSpa === true,
         getCookies: (origin) => driverFor(sid).profileCookies(origin),
         setCookies: (headers, origin) => driverFor(sid).writeProfileCookies(headers, origin),
         getUserAgent: () => driverFor(sid).userAgent(),
       }));
     }
-    return mirrors.get(sid);
+    return mirrors.get(key);
   }
 
   // Session-mode turn builder (needs cfg; installed once). Images ride in the
@@ -1134,7 +1290,10 @@ function imageMarkdown(images) {
         meta: { model: siteId + ':' + model, siteId, thinkMode, sendGapMs: clampSendGapMs(settings.sendGapMs) },
         async attach() {
           const imgs = imagesOfMessages(messages);
-          return imgs.length ? resolveRemoteImages(imgs) : [];
+          if (!imgs.length) return [];
+          const { images, skipped } = await resolveImages(imgs, attachments, options.signal);
+          if (skipped.length) warn('image blocks skipped (unreadable):', JSON.stringify(skipped));
+          return images;
         },
         commit() {},
       };
@@ -1183,7 +1342,10 @@ function imageMarkdown(images) {
         // an incremental turn attaches only newly-arrived images
         const scope = (keyPath && !fresh) ? messages.slice(st.sent) : messages;
         const imgs = imagesOfMessages(scope);
-        return imgs.length ? resolveRemoteImages(imgs) : [];
+        if (!imgs.length) return [];
+        const { images, skipped } = await resolveImages(imgs, attachments, options.signal);
+        if (skipped.length) warn('image blocks skipped (unreadable):', JSON.stringify(skipped));
+        return images;
       },
       commit() {
         // 先删后插把键移到 Map 尾部；配合尾部淘汰就是「最近最少使用」，
@@ -1211,24 +1373,30 @@ function imageMarkdown(images) {
   })();
   const routeDisposers = [];
   if (webServer && typeof webServer.register === 'function') {
-    const routes = [
-      ['status', 'status'], ['consent', 'consent'], ['login', 'login'],
-      ['diagnostics', 'diagnostics'], ['preset', 'preset'],
-      ['connect', 'connect'], ['interact', 'interact'], ['window', 'window'],
-      ['sessions', 'sessions'], ['history', 'history'],
-      ['workspaces', 'workspaces'], ['import', 'import'],
-      ['settings', 'settings'], ['models', 'models'],
-      ['login-sites', 'login-sites'],
-    ];
-    for (const [, suffix] of routes) {
+    // 挂载清单从控制面 action 表**派生**（webControl.routes），不再手写第二份。
+    // 真机 2026-09-13 的教训：手写数组漏掉了 verify-login / site-probe /
+    // session-import 三个 action，设置面板的「检测」按钮全部落到宿主未知 POST
+    // 兜底（405 + 空 body），客户端 JSON.parse 抛 “unexpected end of JSON data”。
+    // 派生之后这类漏挂载在结构上不可能发生。
+    for (const suffix of webControl.routes) {
       try {
         routeDisposers.push(webServer.register({
           kind: 'exact',
           path: '/__webcode/' + suffix,
+          // 方法分派交给 webControl.handle：未知方法它回 405 JSON（带 Allow），
+          // 未知路径它回 false 由这里补 404 JSON。两条路都不再有空 body。
           handler: (req, res) =>
             webControl.handle(req, res, '/__webcode/' + suffix)
-              .then((handled) => { if (!handled) res.writeHead(404).end(); })
-              .catch(() => { try { res.writeHead(500).end(); } catch {} }),
+              .then((handled) => {
+                if (handled) return;
+                const text = JSON.stringify({ ok: false, error: 'no route: /__webcode/' + suffix });
+                res.writeHead(404, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(text) });
+                res.end(text);
+              })
+              .catch((err) => {
+                const text = JSON.stringify({ ok: false, error: String(err?.message || err).slice(0, 200) });
+                try { res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' }); res.end(text); } catch {}
+              }),
         }));
       } catch (e) {
         warn('webServer route /__webcode/' + suffix, 'failed:', e?.message);

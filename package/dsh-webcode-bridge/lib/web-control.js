@@ -17,9 +17,62 @@
 //   • Responses never echo tokens; errors are fixed-text; bodies are bounded.
 
 import { listAllModels, SITES, getSite } from './providers.js';
+import { isLoopbackHost, originMatchesHost } from './loopback.js';
+import { httpFetch } from './upstream.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const MAX_BODY_BYTES = 256 * 1024;
-const LOOPBACK_HOST = /^(127\.0\.0\.1|\[::1\]|localhost)(:\d+)?$/i;
+
+/** "GET status" → ['GET', 'status']. */
+function splitActionKey(key) {
+  const i = String(key).indexOf(' ');
+  if (i <= 0) return [String(key), ''];
+  return [key.slice(0, i), key.slice(i + 1)];
+}
+
+/** Index one action table as suffix → Set(methods).
+ *
+ * 这是控制面的**唯一真相**：进程内分派器（handle）与宿主路由挂载
+ *（lib/index.js 的 webServer.register）都从它派生。
+ *
+ * 动机（真机 2026-09-13 取证）：index.js 曾手写一份 routes 数组，
+ * verify-login / site-probe / session-import 三个 action 加进了本文件的表、
+ * 却忘了加进那份数组 —— 设置面板的「检测 / 独立窗口 / 导入登录态」按钮
+ * 全部落到 DSH webServer 的未知 POST 兜底（405 + 空 body），客户端
+ * response.json() 于是抛 “unexpected end of JSON data”。
+ * 让挂载清单从 action 表派生，这类「加了 action 忘了挂载」不可能再发生。 */
+export function routeIndex(actions) {
+  const index = new Map();
+  for (const key of Object.keys(actions)) {
+    const [method, suffix] = splitActionKey(key);
+    if (!suffix) continue;
+    if (!index.has(suffix)) index.set(suffix, new Set());
+    index.get(suffix).add(method);
+  }
+  return index;
+}
+
+/** 挂载清单（index.js 用）：全部 action 的 suffix，去重后按首次出现顺序。 */
+export function controlRoutes(actions) {
+  return [...routeIndex(actions).keys()];
+}
+
+/** 本机 Edge 的默认 User Data 目录（导入登录态时的默认源）。 */
+function defaultEdgeUserDataDir() {
+  const home = os.homedir();
+  const candidates = process.platform === 'win32'
+    ? [
+      path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'Microsoft', 'Edge', 'User Data'),
+      path.join(home, 'AppData', 'Local', 'Microsoft', 'Edge', 'User Data'),
+    ]
+    : process.platform === 'darwin'
+      ? [path.join(home, 'Library', 'Application Support', 'Microsoft Edge')]
+      : [path.join(home, '.config', 'microsoft-edge')];
+  for (const c of candidates) { try { if (fs.existsSync(c)) return c; } catch { /* next */ } }
+  return candidates[0] || '';
+}
 
 /** Fixed CORS headers for the relay fallback mount (OpenAI-front parity). */
 
@@ -60,7 +113,10 @@ export function createWebControl(deps = {}) {
   /** True when this request cannot come from a hostile web page. */
   function csrfSafe(req) {
     const hostHeader = String(req.headers.host || '');
-    if (!LOOPBACK_HOST.test(hostHeader)) return false;              // DNS-rebinding
+    // DNS 重绑定防护：Host 必须是回环名称族。**包含 <site>.localhost 子域**——
+    // 右栏的站点 iframe 就住在那些源上，控制面必须在那上面照常可用（真机
+    // 2026-09-13：旧正则只认裸 localhost，子域上的 /__webcode/* 全被 403）。
+    if (!isLoopbackHost(hostHeader)) return false;
     const site = String(req.headers['sec-fetch-site'] || '').toLowerCase();
     if (site === 'cross-site') return false;                        // public-website browser
     const origin = String(req.headers.origin || '');
@@ -69,11 +125,7 @@ export function createWebControl(deps = {}) {
       // explicit allowlist may carry an Origin. Any other loopback port is a
       // different (potentially hostile) application, not "us".
       if (allowedOrigins.has(origin.toLowerCase())) return true;
-      try {
-        const o = new URL(origin);
-        const host = String(hostHeader);
-        return o.host === host && (o.protocol === 'http:' || o.protocol === 'https:');
-      } catch { return false; }
+      return originMatchesHost(origin, hostHeader);
     }
     return true; // curl / same-origin GET img — no Origin header
   }
@@ -164,6 +216,36 @@ export function createWebControl(deps = {}) {
       return { ok: true, consent: relay.status().consent };
     },
     'GET models': async () => ({ ok: true, models: listAllModels() }),
+    // 站点探活：右栏在挂载 iframe 之前先问一次「这个站点本机现在能不能直连」。
+    // 动机（2026-09-13 真机）：chatgpt 403 / claude 403 / 部分网络环境下的
+    // gemini 502，旧面板仍会为每个 tab 挂一个注定失败的 iframe（还常驻保活），
+    // 用户看到的是裸错误页而不是「为什么打不开」。探活结果由前端按站点缓存。
+    // 只发一个 GET，不落盘、不带凭据出进程；判定口径与镜像上游一致（httpFetch）。
+    'POST site-probe': async (body) => {
+      const siteId = String(body?.siteId || 'deepseek').trim();
+      const st = getSite(siteId);
+      if (!st) return { ok: false, error: 'unknown site: ' + siteId };
+      const t0 = Date.now();
+      try {
+        const r = await httpFetch(st.origin + '/', {
+          method: 'GET',
+          headers: { accept: 'text/html,application/xhtml+xml', 'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8' },
+          timeoutMs: 12_000,
+          redirect: 'follow',
+        });
+        // 上游 4xx/5xx 也算「可达」——那是站点自己的风控/地区策略，右栏会显示
+        // 镜像的说明页；这里只区分「网络层根本连不上」。
+        return {
+          ok: true, siteId, origin: st.origin, ms: Date.now() - t0,
+          reachable: true, status: r.status,
+        };
+      } catch (err) {
+        return {
+          ok: true, siteId, origin: st.origin, ms: Date.now() - t0,
+          reachable: false, status: null, reason: String(err?.message || err).slice(0, 160),
+        };
+      }
+    },
     'GET settings': async () => {
       if (!settingsStore) return { ok: true, extraPrompt: '' };
       const config = settingsStore.get();
@@ -227,6 +309,28 @@ export function createWebControl(deps = {}) {
       const r = await target.connect();
       return { ok: true, siteId, loggedIn: r?.loggedIn ?? null };
     },
+    // 「导入本机登录态」：把用户真实 Edge profile 的 cookies 采纳进所选站点的桥
+    // profile。动机（真机 2026-09-13）：桥 profile 里除 deepseek 外**没有任何站点
+    // 的 cookie**（全量 7 枚，5 枚属于 deepseek），因此 kimi/qwen/doubao/zai 在桥
+    // 里永远是游客态，右栏看到的登录视角无从谈起。用户已在本机浏览器里登录过，
+    // 没必要为每个站点再手工登录一次。
+    //
+    // 安全：与 login/window 同级敏感度（会把真实登录态复制进桥 profile），
+    // 因此走同一个 csrfSafe 门禁（回环 Host + 同源/白名单 Origin）。
+    'POST session-import': async (body) => {
+      const importer = relay?.config?.sessionImport;
+      if (typeof importer !== 'function') return { ok: false, error: 'no driver' };
+      const siteId = String(body?.siteId || 'deepseek').trim();
+      const dir = String(body?.sourceProfileDir || '').trim() || defaultEdgeUserDataDir();
+      if (!dir) return { ok: false, error: '未找到本机 Edge profile 目录，请在请求里显式给出 sourceProfileDir' };
+      try {
+        if (!fs.existsSync(dir)) return { ok: false, error: '源 profile 目录不存在：' + dir };
+      } catch (err) {
+        return { ok: false, error: '源 profile 目录不可访问：' + String(err?.message || err).slice(0, 120) };
+      }
+      const r = await importer(siteId, dir);
+      return { ok: true, siteId, sourceProfileDir: dir, ...(r || {}) };
+    },
     // 设置页「登录网站」下拉的数据源：站点清单 + 各自登录态，不启动浏览器。
     'GET login-sites': async () => {
       const state = relay?.config?.driverStatus?.() ?? null;
@@ -276,6 +380,12 @@ export function createWebControl(deps = {}) {
    * with one of the action names (e.g. /__webcode/status, /bridge/web/status)
    * is accepted, so the same table serves both mounts.
    */
+  // suffix → Set(methods)：用于把「路径存在但方法不对」和「路径根本不存在」
+  // 区分开。两者都必须回 **JSON** 且带 `ok:false`——空 body 会让客户端的
+  // response.json() 抛解析错误，把真实原因（405/404）吞掉变成一句
+  // “unexpected end of JSON data”。
+  const index = routeIndex(actions);
+
   async function handle(req, res, pathname) {
     const suffix = pathname.replace(/^.*\//, '');
     const key = req.method + ' ' + suffix;
@@ -286,7 +396,17 @@ export function createWebControl(deps = {}) {
       res.end();
       return true;
     }
-    if (!actions[key]) return false;
+    if (!actions[key]) {
+      // 已注册的 suffix、但不是这个 method → 405（带 Allow），绝不空 body。
+      const methods = index.get(suffix);
+      if (methods) {
+        const allow = [...methods].sort().join(', ');
+        sendJson(req, res, { ok: false, error: `method not allowed: ${req.method} ${suffix} (allowed: ${allow})` }, 405);
+        return true;
+      }
+      // 真未知路径：交回调用方写 404（它知道自己的挂载前缀）。
+      return false;
+    }
     if (!csrfSafe(req)) {
       warn('rejected cross-site control request', key, 'from', req.headers.origin || '(no origin)');
       sendJson(req, res, { ok: false, error: 'cross-site control requests are not allowed' }, 403);
@@ -350,7 +470,8 @@ export function createWebControl(deps = {}) {
     return true;
   }
 
-  return { handle, handlePreview, actions };
+  // routes / methods 一并暴露：宿主挂载从这份索引派生，不再手写第二份清单。
+  return { handle, handlePreview, actions, routes: [...index.keys()], routeMethods: index };
 }
 
 /**
