@@ -7,7 +7,8 @@
 1. 在 `package/dsh-webcode-bridge` 执行 `pnpm install --frozen-lockfile`、`pnpm pack`。
 2. 执行 `dsh plugin --profile web add ./dsh-webcode-bridge-<版本>.tgz`，重启 Harness。
 3. 原生「设置 > 网页桥接」管理登录和自动化开关。默认复用 `~/.dsh/webcode-edge-profile`。
-4. 模型选择器的 Harness Web Bridge 分组只提供 **一个** `DeepSeek` 模型（深度思考）。
+4. 模型选择器的 Harness Web Bridge 分组按站点提供模型（DeepSeek / GLM / Kimi /
+   通义千问 / 豆包…）；新建会话的默认模型在设置页选择。
 5. 右侧网页面板使用 **DSH 官方右侧栏**（`@deepseek-ai/dsh-client-ui-sidebar-right`）的标签页；
    与会话头右上角的 Web Bridge 按钮互为一对（点击展开/收起）。**不依赖任何第三方侧栏插件。**
 
@@ -27,6 +28,12 @@
 右侧主视图通过本地固定上游代理加载真实网页 iframe，可直接输入、滚动和操作，登录放在原生设置；不再使用截图降级。设置页首次授权后永久保留，账户失效时才需更换登录；设置页还可追加「全局指令」，会注入每个新网页会话的首轮提示词。面板顶栏提供 **刷新** 按钮（官方右侧栏本身没有该入口）。
 
 普通输出及已识别工具名称会流式传递，工具参数完整解析后才交给 Harness。token 估算统一为 CJK≈0.7、ASCII≈0.25；速度指标为网页 SSE 实测（首字/思考/正文），与估算口径区分。
+
+多站点限流防护：设置页可设「发送间隔」（`sendGapMs`，站点级发送前节流）；触发站点限流时桥识别专用错误并按 max(发送间隔, 10 秒) 自动退避重试，实际等待在右栏统计的「发送前等待」单独展示（含限流重试次数）。
+
+站点差异化调用协议：GLM（chatglm.cn）会用自己的原生工具层拦截正文里的调用标签（只认其内置 search/open/click/find，报 unknown tool call），因此该站点只教 ```json 代码块形状，并支持从思考流兜底解析调用；派发前还会按工具 schema 自动补齐缺失的纯描述性必填参数（如 `pwsh` 的 `description`）。其它站点维持既有 `<tool_call>` 教学不变。
+
+子代理：支持独立网页会话（按 agentId 隔离）与独立站点分流（`subAgentSite`）；所选子代理站点的账户与登录管理内联在子代理设置区（原生面板与独立设置页两处），登录/检测/独立窗口与主站点同一套逻辑，登录态按站点各自持久化。
 
 ## 多站点与跨域资源
 
@@ -57,6 +64,7 @@
 ## 验证和边界
 
 - `pnpm test`：回归、解析和 Harness 适配契约（含镜像同源改写护栏）。
+- `node test/glm-session-replay.test.mjs`：用真机会话形状回放 glm 站点工具调用链路——网页存活形状解析、缺失必填补齐、站点差异化教学立场。
 - `node test-mock/run-real-longrun.mjs`：长期真实调用验证——真实 Edge + 真实网页会话跑多轮工具闭环（未登录自动开有头窗口等人工登录），断言同一网页会话连续、回复完整、无协议泄漏；说明见 [路线](PLAN.md) 0.9.8 一节。
 - `node test-mock/run-m2b-driver.js`：真实 Edge 加模拟站点 JSON/SSE。
 - `node test-mock/run-m2c-webapi.js`：控制面、预览和跨站拒绝。
