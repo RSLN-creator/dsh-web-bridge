@@ -1,13 +1,41 @@
 # Harness Web Bridge
 
-已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.14.2。
+已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.14.3。
 
-安装：`pnpm pack` 后执行 `dsh plugin --profile web add ./dsh-webcode-bridge-0.14.2.tgz`，重启 `dsh web`。需要 Node.js 20+、系统 Edge；无需浏览器扩展。
+安装：`pnpm pack` 后执行 `dsh plugin --profile web add ./dsh-webcode-bridge-0.14.3.tgz`，重启 `dsh web`。需要 Node.js 20+、系统 Edge；无需浏览器扩展。
 
 原生「设置 > 网页桥接」管理登录与启用开关。默认沿用 `~/.dsh/webcode-edge-profile`。
 模型分组 Harness Web Bridge 暴露全部内容服务站点（`site:model` 限定 id）；显示名为
 「站点短键/模型 id」（如 `z.ai/glm-5.3`、`deepseek/deepseek`），**一眼能看出是哪个
 网站**；兼容别名 `deepseek-web` 不出现在下拉里（历史会话仍可解析）。
+
+## 0.14.3
+
+**修掉两个只有真机复验才看得见的 bug**（0.14.2 的单测全绿，但 GLM 第二轮仍然失败）。
+
+复验第一步就发现：0.14.2 的会话**身份**修复完全正确（`result.sessionId` 不再是 null、
+`webcode-sessions-glm.json` 不再是 `{}`），但第二轮**换了一个失败方式**：
+
+```
+✖ locator.fill: Timeout 30000ms exceeded
+  - locator resolved to <textarea>appkey: "CF_APP_WAF", …</textarea>
+  - element is not visible
+```
+
+1. **登录回退判定只数个数、不看可见性**。导航到 `?cid=` 时 GLM 返回阿里云滑块验证页
+   （「滑动验证页面」），页面上 3 个 textarea 全是**隐藏**的 WAF 脚本模板；
+   `locator(SEL.input).count() > 0` 于是判成「输入框在 = 已登录」，接着 `fill` 必然超时。
+   现在改为 `visibleComposerCount()`：逐元素查可见性，且**遍历全部候选选择器**
+   （GLM 的真实 composer 是裸 `<textarea>`，只认 `textarea#chat-input` 会漏掉它）。
+2. **「是否已在目标会话上」用 URL 字符串前缀判断**。站点会把地址补成 `?lang=zh&cid=X`，
+   而桥拼的目标是 `?cid=X` → `startsWith` 判为不同 → **白白整页重载**，正好撞上风控页。
+   现在按**会话 id** 比较（`conversationIdFromUrl`）。
+3. **风控页单独成一态**：`detectChallenge()` 认验证页文案与 WAF 脚本指纹，在登录判定
+   **之前**调用；报错用 `navReason='challenge-page'` 与「会话过期」分开——否则用户按
+   会话过期去查，永远查不到风控。
+
+真机复验结果：GLM 连发两轮，`cid` 逐字相同、`sessionLostCount=0`、第二轮正文正确；
+A-4b（重启后第一轮发送间隔）与 F（`:8931` 路径 `gapTargetMs=10000`）均通过。
 
 ## 0.14.2
 
