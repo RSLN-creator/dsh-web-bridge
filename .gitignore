@@ -22,3 +22,9 @@ package/output/
 
 # 本地暂存（排查脚本、npm 缓存、tgz 解包验证），历史上从未入库
 .tmp/
+
+# 本地私有留痕与计划文件，不入库不同步（2026-09-13 要求远端清除）
+.claude/
+.Codex/
+.codex/
+PLAN*.md
