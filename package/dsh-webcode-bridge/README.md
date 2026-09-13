@@ -1,13 +1,94 @@
 # Harness Web Bridge
 
-已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.13.1。
+已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.14.2。
 
-安装：`pnpm pack` 后执行 `dsh plugin --profile web add ./dsh-webcode-bridge-0.13.1.tgz`，重启 `dsh web`。需要 Node.js 20+、系统 Edge；无需浏览器扩展。
+安装：`pnpm pack` 后执行 `dsh plugin --profile web add ./dsh-webcode-bridge-0.14.2.tgz`，重启 `dsh web`。需要 Node.js 20+、系统 Edge；无需浏览器扩展。
 
 原生「设置 > 网页桥接」管理登录与启用开关。默认沿用 `~/.dsh/webcode-edge-profile`。
-模型分组 Harness Web Bridge 暴露全部内容服务站点（`site:model` 限定 id）；DeepSeek
-站点只提供唯一模型 `DeepSeek`（深度思考），旧 id（`flash`/`vision`/`deepseek-web`/
-`deepseek-reasoner`）保留为别名。
+模型分组 Harness Web Bridge 暴露全部内容服务站点（`site:model` 限定 id）；显示名为
+「站点短键/模型 id」（如 `z.ai/glm-5.3`、`deepseek/deepseek`），**一眼能看出是哪个
+网站**；兼容别名 `deepseek-web` 不出现在下拉里（历史会话仍可解析）。
+
+## 0.14.2
+
+**GLM/Z.ai 的会话身份与上下文预算（B/C/F 三组）。** 用户报「GLM 作为子代理时同一会话却
+每轮新开对话」——真机探针查出根因：桥把「会话 id ↔ 地址」的知识硬编码成了 DeepSeek 的两种
+形状（`?chat_session_id=` / `/a/chat/s/`），而 GLM 的地址栏是
+`https://chatglm.cn/main/alltoolsdetail?lang=zh&cid=6aa6f08454b3a5a4e4f64a77`，
+其 `cid` 与 SSE 首帧的 `conversation_id` **逐字相同**。旧实现读不到 → `sessionId` 恒 null →
+`rememberConversation` 从不执行 → 每轮 `WEB_SESSION_LOST` → 上层 fresh 重开。
+
+1. **会话地址形状按站点声明**（`providers.js` 的两张表 + `contract.conversationNav`），
+   导航判定收成三态 `fresh / resume / unsupported`。**没有第四态**：`unsupported` 必须报错，
+   不再像旧实现那样默默开一个新会话把增量发进去（那正是「跑着跑着变傻」）。
+2. **解码器透出 `conversation_id`**（`GlmDecoder`，基类 `finish()` 统一带出）——身份取
+   「地址优先、流兜底」两个来源。
+3. **`WEB_SESSION_LOST` 不再静默**：`sessionLostCount` / `lastSessionLost` 进 `/status`，
+   右栏显示「网页会话已丢失 N 次（桥已按重放首轮整段自愈）」。
+4. **`zai` 故意不声明地址形状**：探针在 chat.z.ai 上只拿到裸根地址、且整轮 120s 超时
+   （`replyChars:0`），**没有证据就不编形状**——编出来会导航到不存在的地址，比「不支持」更糟。
+5. **上下文窗口声明有实测依据**：探针把 GLM composer 灌到 **120 万字符**、Z.ai 到 100 万字符，
+   **全部逐字回读、没有一档被截断**，所以 1M 是有实测支撑的下界（不再是随手写的占位）。
+   它是「本桥愿意让 transcript 长到多大」，**不是模型注意力窗口的规格**。
+6. **发送前预算闸** `CONTEXT_WINDOW_EXCEEDED`：越界在**写入 composer 之前**就拒，报错文本带
+   「多少字符 ≈ 多少 token > 声明窗口多少」与可行建议。旧实现只有填写**之后**的
+   `PROMPT_TRUNCATED` 回读校验，报错只有长度差，看不出超了多少。
+7. **窗口声明可见**：`GET /__webcode/context-windows` 列出每站点的声明值与**来源**。
+8. **修 OpenAI 前端（`:8931`）绕过发送间隔**（真机 0.14.0 矩阵发现）：`lib/openai.js` 两条
+   分支构造 `meta` 时都没带 `sendGapMs`，`clampSendGapMs(undefined) === 0`，于是设置页的间隔
+   在这条路径上被整体绕过（实测 `gapTargetMs=0`）。改为注入**当场求值**的取值函数。
+
+新增护栏：`test/context-budget.test.mjs`（11 项）、`test/glm-conversation.test.mjs`（17 项）、
+`regression` 47/47（+2 接线断言）、`control-routes` 5/5（+`context-windows`）。
+
+## 0.14.1
+
+**工具协议分叉不再整轮作废，纯标签残片不再当正文外发。**
+
+真机会话暴露出两个症状：一轮里工具调用「有时候没执行」，以及回复里夹杂 `</</` 这样的
+错误调用碎片。取证后的根因是**解码器与增量通道的分叉**：decoder 对 `fragments` 做静默
+全量替换时不补发增量，于是增量累计的 `acc` 与权威全文 `end.text` 在结构上分叉（两个方向
+都实锤过：canonical 多出一个 `grep`、canonical 丢失一个 `edit`）。旧实现遇到分叉一律
+`TOOL_PROTOCOL_INVALID` 把整轮扔掉，用户看到的就是「调用了但没执行」。
+
+现在开块时保存已经配平的 JSON，发现分叉时改为**修复**而不是作废：同名第 k 个流式块与
+第 k 个同名权威调用配对，流式块用它自己配平的 JSON 收口，没被覆盖的权威调用补发新块。
+只有块连配平 JSON 都没有时才保留旧的抛错路径。另外，调用之间那些只剩 `</</` 的纯标签
+碎片按空白同型跳过，不再混进正文。
+
+回归护栏：`test/regression.test.mjs` 45/45（新增 3 条——分叉的两个方向、标签残片）。
+新测试用临时 `profileDir`，避免 0.14.0 引入的发送间隔落盘成为跨测试的干扰通道。
+
+## 0.14.0
+
+**两个真机问题 + 四项既定改动。** 两个问题都是「先取证、后改」：
+
+**① 发送间隔「好像没按设置来」。** 设置一直存得住，真正的原因是三条：基准取的是
+「上一轮**结束**」而不是「上一轮**发出**」（一轮跑 20.9s 时，10 秒间隔只剩 7.6 秒
+可见）；基准只在进程内存，**重启后第一轮零等待**；`sendWaitMs === 0` 时那条统计
+整条不渲染——设了间隔反而「界面上什么都没有」。现在：判定改为 send-to-send 并
+**落盘**（`webcode-send-state.json`，原子写、24h 过期），右栏「发送前等待」**恒可
+核对**（未等待时也写明「距上次发送 20.9 s 已满足」），目标值与实际间隔都透出到
+`/status`。
+
+**② 网页端回复了但 Harness 这边卡住。** 网页流可能以 `status:'WIP'` 结束且**永不发
+FINISHED**，驱动只能等 240s 总超时，界面上就是**无限「思考中」**。现在有三条防线：
+驱动侧按「流停 **且** 页面 DOM 不再增长」双条件在秒级收束（只看流停会腰斩长回复，
+所以是双条件）；适配器侧有「无进展」看门狗，把无限挂住变成一条带页面现场的明确
+报错；`lastEndReason` / 超时现场进 `status`，右栏显示「网页流未收尾但内容已保住 N 次」。
+
+**③ 模型显示名自带站点出处**（`z.ai/glm-5.3`），并修掉下拉里的重复行。
+
+**④ 首轮提示词默认显示**：设置界面不再折叠，直接显示发送首条消息时注入网页的完整
+内容，可用下拉切换适配分支（默认标签形状 / GLM 代码块形状），并标出「本会话正在用」。
+模板由 `agent-preset.serializeFirstTurn` 现算——**设置里看到的 = 真正发出去的**。
+
+**⑤ 右栏规范化**：注册走 `ctx.effect` 生命周期，标签动作菜单、tablist 方向键导航，
+样式改用 DSH 的 `--dsw-alias-*` token。
+
+**⑥ 修掉两处「空转护栏」**：`client-render` 测试的 fetch mock 不是忠实 Response、
+渲染器又没递归进 children——两处叠加导致**所有**数据路径静默失败、嵌套组件从未
+渲染，旧断言等于空转。修好后 0.14.0 的新面板才真的被测到。
 
 ## 0.13.1
 
