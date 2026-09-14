@@ -174,6 +174,26 @@ function treeText(el) {
   return (el.children || []).map(treeText).join(' ');
 }
 
+/**
+ * 收集渲染树里所有节点的指定属性值。
+ *
+ * 0.14.5 起右栏把「登录态」从可见文案改成 8px 色点（见 client.cjs 的 statusDot），
+ * 状态词只存在于 title/aria-label。护栏因此需要能读到属性——只读可见文本的话，
+ * 「美化把状态信息弄丢」这类回归会完全测不出来（点还在、话没了）。
+ */
+function treeAttrs(el, names, out = []) {
+  if (el === null || el === undefined || typeof el !== 'object') return out;
+  if (Array.isArray(el)) { for (const c of el) treeAttrs(c, names, out); return out; }
+  if (typeof el.type === 'function') return treeAttrs(el.type(el.props), names, out);
+  const props = el.props || {};
+  for (const n of names) {
+    const v = props[n];
+    if (typeof v === 'string' && v) out.push(v);
+  }
+  for (const c of (el.children || [])) treeAttrs(c, names, out);
+  return out;
+}
+
 const emptyWindows = { ok: true, siteId: 'deepseek', window: { open: false, headed: false }, windows: {} };
 const oneWindow = { ok: true, siteId: 'deepseek', window: { open: true }, windows: { deepseek: { open: true } } };
 const otherSiteWindow = { ok: true, siteId: 'deepseek', window: { open: true }, windows: { glm: { open: true } } };
@@ -237,10 +257,18 @@ test('右栏：站点栏在空站点表与十站点表下都渲染不抛错（ta
   for (const n of ['DeepSeek', '智谱清言', 'Kimi', '豆包', 'Z.ai']) {
     assert.ok(text.includes(n), '站点栏缺少 ' + n);
   }
-  // 四态徽标都要能渲染出来（真实站点表里这四种状态是并存的）。
-  for (const s of ['已登录', '已登录(缓存)', '未登录', '待检查']) {
-    assert.ok(text.includes(s), '站点栏缺少登录态「' + s + '」');
+  // 0.14.5：登录态从「标签内文案」改为「8px 色点 + tooltip」。四态仍必须都
+  // 能表达出来，但表达的位置变了——断言跟着契约走，而不是跟着实现细节走。
+  //
+  // 这一条同时钉住「美化不得把信息弄丢」：点本身没有文字，状态词必须在
+  // title/aria-label 里可读到，否则屏幕阅读器与悬停提示都拿不到状态。
+  const titles = treeAttrs(full.tree, ['title', 'aria-label']).join(' | ');
+  for (const s of ['已登录(缓存)', '未登录', '待检查']) {
+    assert.ok(titles.includes(s), '登录态「' + s + '」未出现在任何 title/aria-label 中：' + titles.slice(0, 300));
   }
+  // 反过来锁住这次改动的意图：长状态文案不得再出现在**可见文本**里
+  //（它正是把标签条挤爆、被用户报「状态有点简略」的那段文字）。
+  assert.ok(!text.includes('已登录(缓存)'), '长状态文案仍渲染在可见文本中，标签条会被撑爆');
 });
 
 test('右栏：注册全部走 ctx.effect，并把「刷新 / 独立窗口」挂进标签动作菜单', async () => {

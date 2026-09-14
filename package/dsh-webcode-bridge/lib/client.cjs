@@ -877,7 +877,48 @@ window.__ModuleLoader__.load({
         e.preventDefault();
         setSiteId(next);
       };
+      // 站点状态的「色点 + tooltip」表达（0.14.5）。
+      //
+      // 旧实现把「已登录(缓存)」「未登录」「待检查」这些文案直接写进标签条，
+      // 十个站点各带一段文字 → 标签条被撑爆，用户报「状态有点简略，而且不统一
+      // 风格」。正解不是把文案写得更好，而是**换一种表达**：状态用一颗 8px 色点，
+      // 完整解释（含判定依据）留在 title/aria-label。这是 AI-IDE 浏览器里
+      // 语言服务/连接状态的通行做法。
+      const statusDot = (row) => h('span', {
+        className: 'hwb-dot ' + statusClass(row),
+        title: statusLabel(row) + (statusTitle(row) ? ' · ' + statusTitle(row) : ''),
+        'aria-hidden': 'true',
+      });
       return h('div', { className: 'hwb-conversation' },
+        // ---- 顶层工具条：当前站点身份 + 图标动作（AI-IDE 浏览器常见形态）----
+        // 旧实现把「站点标签」和「动作按钮」挤在同一行：标签会横向溢出，
+        // 动作组又长短不一。现在分两层——工具条回答「我在哪个站点、它什么状态、
+        // 我能对它做什么」，标签条只负责「切站点」。
+        h('div', { className: 'hwb-toolbar' },
+          h('div', { className: 'hwb-toolbar-id' },
+            statusDot(siteStatus),
+            h('span', { className: 'hwb-toolbar-name', title: siteName(siteId) }, siteName(siteId)),
+            h('span', { className: 'hwb-toolbar-state' }, winBusy ? '切换中' : statusLabel(siteStatus))),
+          h('div', { className: 'hwb-toolbar-actions' },
+            h('button', {
+              className: 'hwb-act-btn', title: '刷新当前站点网页（重新加载镜像页面）',
+              'aria-label': '刷新右侧网页', onClick: reloadFrame,
+            }, h('span', { className: 'hwb-act-ico', 'aria-hidden': 'true' }, '\u21bb')),
+            h('button', {
+              className: 'hwb-act-btn' + (winIsOpen(siteId) ? ' on' : ''), disabled: winBusy,
+              title: winIsOpen(siteId) ? '收起独立窗口（回到无头运行）' : '在独立窗口中打开真实网页（已开的窗口会聚焦弹到最前，不会覆盖）',
+              'aria-label': winIsOpen(siteId) ? '收起独立窗口' : '打开独立窗口',
+              'aria-pressed': winIsOpen(siteId), onClick: toggleWindow,
+            }, h('span', { className: 'hwb-act-ico', 'aria-hidden': 'true' }, winIsOpen(siteId) ? '\u25a3' : '\u29c9')),
+            onSplit && h('button', {
+              className: 'hwb-act-btn', title: '在新面板中打开（可同时看两个不同站点）',
+              'aria-label': '在新面板中打开', onClick: onSplit,
+            }, h('span', { className: 'hwb-act-ico', 'aria-hidden': 'true' }, '\u25eb')),
+            onFloat && h('button', {
+              className: 'hwb-act-btn', title: '打开为浮动面板（可拖拽、可同时开多个）',
+              'aria-label': '打开为浮动面板', onClick: onFloat,
+            }, h('span', { className: 'hwb-act-ico', 'aria-hidden': 'true' }, '\u2750')))),
+        // ---- 站点标签条：次级导航（滚轮横向滚，不显示滚动条）----
         h('div', { className: 'hwb-sitebar', role: 'tablist', 'aria-label': '内容服务站点', onKeyDown: onTabKey },
           h('div', { className: 'hwb-sitebar-tabs', ref: tabsRef },
             Object.entries(SITE_NAMES).map(([sid, name]) => h('button', {
@@ -892,30 +933,8 @@ window.__ModuleLoader__.load({
               // Ctrl/⌘ + 点击 = 在**新分屏**里打开该站点：多开不同网页的直接入口
               //（另一块面板是独立的组件实例，站点选择互不影响）。
               onAuxClick: (e) => { if (e.button === 1) { e.preventDefault(); openSiteInPane(sid); } },
-            }, h('span', { className: 'hwb-site-tab-name' }, name),
-              h('span', { className: 'hwb-tab-state ' + statusClass(siteStatuses[sid]), title: statusTitle(siteStatuses[sid]) }, statusLabel(siteStatuses[sid]))))),
-          // 动作组：统一成同一套图标按钮（旧实现里刷新是裸图标、独立窗口是一颗
-          // 长药丸，两套视觉语言并存——用户报「刷新栏目/独立窗口状态有点简略，
-          // 而且不统一风格」）。现在四颗按钮同高、同圆角、同状态表达。
-          h('div', { className: 'hwb-sitebar-actions' },
-            h('button', {
-              className: 'hwb-act-btn', title: '刷新当前站点网页（重新加载镜像页面）',
-              'aria-label': '刷新右侧网页', onClick: reloadFrame,
-            }, h('span', { className: 'hwb-act-ico' }, '\u21bb'), h('span', { className: 'hwb-act-txt' }, '刷新')),
-            h('button', {
-              className: 'hwb-act-btn' + (winIsOpen(siteId) ? ' on' : ''), disabled: winBusy,
-              title: winIsOpen(siteId) ? '收起该站点的独立窗口（回到无头运行）' : '在独立窗口中打开真实网页（已开的窗口会聚焦弹到最前，不会覆盖）',
-              'aria-pressed': winIsOpen(siteId), onClick: toggleWindow,
-            }, h('span', { className: 'hwb-act-ico' }, winIsOpen(siteId) ? '\u25a3' : '\u29c9'),
-              h('span', { className: 'hwb-act-txt' }, winBusy ? '切换中' : winIsOpen(siteId) ? '已开窗口' : '独立窗口')),
-            onSplit && h('button', {
-              className: 'hwb-act-btn', title: '在新分屏中再开一个网页面板（可同时看两个不同站点）',
-              'aria-label': '新分屏打开网页面板', onClick: onSplit,
-            }, h('span', { className: 'hwb-act-ico' }, '\u25eb'), h('span', { className: 'hwb-act-txt' }, '分屏')),
-            onFloat && h('button', {
-              className: 'hwb-act-btn', title: '把本面板浮动成独立窗口（可拖拽、可同时开多个）',
-              'aria-label': '浮动本面板', onClick: onFloat,
-            }, h('span', { className: 'hwb-act-ico' }, '\u2750'), h('span', { className: 'hwb-act-txt' }, '浮动')))),
+            }, statusDot(siteStatuses[sid]),
+              h('span', { className: 'hwb-site-tab-name' }, name))))),
         // 站点栏之下的「网页区」：iframe 与各种遮罩（加载中 / 拦截 / 不可达 /
         // 未初始化）全部放在这里。遮罩的 position:absolute;inset:0 于是只覆盖
         // 网页区——0.12.9 的遮罩是面板根的兄弟节点，加载时会把整条站点栏也糊掉，
@@ -1039,26 +1058,39 @@ window.__ModuleLoader__.load({
         ".hwb-conversation{position:relative;display:flex;flex-direction:column;width:100%;height:100%;min-height:0}",
         // 站点栏：flex:none + z-index 保证**永不被网页区遮住**（用户报的「有一点
         // 遮挡」就是旧实现里网页区在层叠上压过了标签条）。
-        ".hwb-sitebar{flex:none;position:relative;z-index:2;display:flex;align-items:center;gap:6px;padding:6px 8px;background:var(--dsw-alias-bg-base,transparent);border-bottom:.5px solid var(--dsw-alias-border-l4,#8884)}",
-        // 标签条：可横向滚，但**不显示滚动条**（滚动条本身就是那点「遮挡」的来源）；
-        // 两端加渐隐遮罩，提示「还有更多」。
-        ".hwb-sitebar-tabs{display:flex;gap:4px;overflow-x:auto;flex:1;min-width:0;scrollbar-width:none;-ms-overflow-style:none;scroll-behavior:smooth;mask-image:linear-gradient(to right,transparent 0,#000 8px,#000 calc(100% - 8px),transparent 100%)}",
+        // ---- 顶层工具条（0.14.5 重排）--------------------------------------
+        // 尺寸依据来自官方包实测（@deepseek-ai/dsh-client-ui-sidebar-right）：
+        //   expand 按钮 width/height:28px + border-radius:28px + padding:6px；
+        //   guide 卡片 min-height:56px + border-radius:24px + .5px 边框；
+        //   排版 15px（标题）/ 13px（描述，--dsw-alias-label-caption）。
+        // 旧实现把标签和动作挤在一行，两者互相抢宽度；现在工具条回答「我在哪个
+        // 站点、什么状态、能做什么」，标签条只负责切站点。
+        ".hwb-toolbar{flex:none;position:relative;z-index:3;display:flex;align-items:center;gap:8px;height:36px;padding:0 8px;background:var(--dsw-alias-bg-base,transparent)}",
+        ".hwb-toolbar-id{display:flex;align-items:center;gap:6px;min-width:0;flex:1}",
+        ".hwb-toolbar-name{font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary,inherit);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
+        ".hwb-toolbar-state{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary,#8a8f98);white-space:nowrap;flex:none}",
+        ".hwb-toolbar-actions{flex:none;display:inline-flex;align-items:center;gap:2px}",
+        // 标签条：可横向滚，但**不显示滚动条**；不再加两端 mask 渐隐——官方右栏
+        // 不用这种表达（实测其 client.js 里 mask-image/scrollbar 命中 0），且渐变
+        // 本身就是用户报的「有一点遮挡」的观感来源。
+        ".hwb-sitebar{flex:none;position:relative;z-index:2;display:flex;align-items:center;gap:6px;padding:0 8px 6px;background:var(--dsw-alias-bg-base,transparent);border-bottom:.5px solid var(--dsw-alias-border-l4,#8884)}",
+        ".hwb-sitebar-tabs{display:flex;gap:4px;overflow-x:auto;flex:1;min-width:0;scrollbar-width:none;-ms-overflow-style:none;scroll-behavior:smooth}",
         ".hwb-sitebar-tabs::-webkit-scrollbar{display:none}",
-        ".hwb-site-tab{flex:none;display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 12px;font:inherit;font-size:12px;line-height:26px;color:var(--dsw-alias-label-secondary,inherit);background:transparent;border:.5px solid transparent;border-radius:14px;cursor:pointer;transition:background .12s ease,color .12s ease,border-color .12s ease}",
+        // 标签是**紧凑胶囊**：状态改用 8px 色点（见 statusDot），不再把
+        // 「已登录(缓存)」这类长文案塞进标签里。
+        ".hwb-site-tab{flex:none;display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;font:inherit;font-size:12px;line-height:24px;color:var(--dsw-alias-label-secondary,inherit);background:transparent;border:.5px solid transparent;border-radius:13px;cursor:pointer;transition:background .12s ease,color .12s ease,border-color .12s ease}",
         ".hwb-site-tab:hover{background:var(--dsw-alias-interactive-bg-hover,#8882);color:var(--dsw-alias-label-primary,inherit)}",
         ".hwb-site-tab.active{color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border-color:var(--dsw-alias-border-l3,#8885)}",
         ".hwb-site-tab-name{white-space:nowrap}",
-        // 动作组：四颗同形按钮。旧实现刷新是裸图标、独立窗口是长药丸，两套视觉
-        // 语言并存，状态也各说各话；现在统一高度/圆角/悬停/激活表达。
-        ".hwb-sitebar-actions{flex:none;display:inline-flex;align-items:center;gap:4px}",
-        ".hwb-act-btn{display:inline-flex;align-items:center;gap:4px;height:28px;padding:0 10px;font:inherit;font-size:12px;line-height:26px;color:var(--dsw-alias-label-secondary,inherit);background:transparent;border:.5px solid transparent;border-radius:14px;cursor:pointer;transition:background .12s ease,color .12s ease,border-color .12s ease}",
+        // 动作组：四颗**同形图标按钮**（官方 expand 按钮的 28px/圆角/透明底）。
+        // 旧实现里刷新是裸图标、独立窗口是一颗长药丸，两套视觉语言并存——用户报
+        // 「刷新栏目/独立窗口状态有点简略，而且不统一风格」。文字全部进
+        // title/aria-label，按钮本身只留图标。
+        ".hwb-act-btn{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;font:inherit;color:var(--dsw-alias-label-secondary,inherit);background:0 0;border:.5px solid transparent;border-radius:14px;cursor:pointer;transition:background .12s ease,color .12s ease,border-color .12s ease}",
         ".hwb-act-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,#8882);color:var(--dsw-alias-label-primary,inherit)}",
         ".hwb-act-btn:disabled{opacity:.45;cursor:default}",
         ".hwb-act-btn.on{color:var(--dsw-alias-state-success-primary,#2e7d32);border-color:var(--dsw-alias-state-success-primary,#2e7d32)}",
-        ".hwb-act-ico{font-size:13px;line-height:1}",
-        ".hwb-act-txt{white-space:nowrap}",
-        // 窄面板里只留图标，避免动作组把标签条挤没（面板宽度是用户可拖的）。
-        "@container (max-width: 380px){.hwb-act-txt{display:none}.hwb-act-btn{padding:0 8px}}",
+        ".hwb-act-ico{font-size:14px;line-height:1}",
         ".hwb-frame-host{position:relative;flex:1;min-height:0;overflow:hidden;z-index:1}",
         ".hwb-browser-frame{display:block;width:100%;height:100%;min-height:0;border:0;background:#fff}",
         ".hwb-frame-status{position:absolute;inset:0;display:grid;place-items:center;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-tertiary,#7a8494);font-size:12px;pointer-events:none}",
@@ -1066,10 +1098,6 @@ window.__ModuleLoader__.load({
         ".hwb-error p,.hwb-guide p{font-size:12px;line-height:1.7;margin:0;color:var(--dsw-alias-label-tertiary,#8a8f98)}",
         ".hwb-retry{height:30px;padding:0 14px;font:inherit;font-size:12px;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border:.5px solid var(--dsw-alias-border-l3,#8885);border-radius:15px;cursor:pointer}",
         ".hwb-retry:hover{background:var(--dsw-alias-interactive-bg-hover,#8882)}",
-        ".hwb-tab-state{font-size:10px;margin-left:4px;opacity:.85}",
-        ".hwb-tab-state.ok{color:var(--dsw-alias-state-success-primary,#2e7d32)}",
-        ".hwb-tab-state.bad{color:var(--dsw-alias-state-error-primary,#93443e)}",
-        ".hwb-tab-state.idle{color:var(--dsw-alias-label-tertiary,#7a8494)}",
         ".hwb-corner-btn{width:28px;height:28px;display:grid;place-items:center;color:var(--dsw-alias-label-secondary,inherit);background:transparent;border:.5px solid var(--dsw-alias-border-l4,#8884);border-radius:7px;cursor:pointer;padding:0}",
         ".hwb-corner-btn:hover{background:var(--dsw-alias-interactive-bg-hover,#8882)}",
         // 标签动作菜单项（slot sidebar.right.tab.menu.item）。DSH 的菜单自带
