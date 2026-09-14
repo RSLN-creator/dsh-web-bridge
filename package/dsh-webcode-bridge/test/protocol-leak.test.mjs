@@ -175,6 +175,69 @@ test('tool_result is an anchor but never a transport call', () => {
   assert.equal(parseAgentReply(LT + 'tool_result' + GT + '\n{}').calls.length, 0, 'results must not parse as calls');
 });
 
+// ---- 4c) <call> / <call_call> fragments (0.14.6, real transcript) ---------
+//
+// Evidence: session-698700ea (2026-09-14), assistant/message TEXT blocks carried 13
+// fragments the anchors did not know about:
+//
+//   seq=91  step=11  </call_call>
+//   seq=119 step=15  </call>   (three times in one step)
+//   seq=179 step=23  </call> <call_call> {"mcp_action…
+//   seq=289 step=37  </call>
+//   seq=326 step=42  </call_call>
+//   seq=569 step=80  </call_call>
+//   seq=779 step=113 </call_call>
+//
+// and session-c710ef6e seq=548 had one. The old candidate set had only the PLURAL
+// `calls`, so `<call>` (followed by `>`) never matched, and `call_call` was absent
+// entirely -> findProtocolStart returned -1 -> the fragments were emitted as prose and
+// persisted. The user saw them as `<>call` in the UI.
+//
+// Same standing rule as tool_result: these join the boundary anchors but NEVER the
+// transport test — a fragment is not a call and must never be executed.
+//
+// Built from character codes (see the IMPORTANT note at the top of this file).
+
+const CALL = LT + 'call' + GT;
+const CALL_CLOSE = LT + SL + 'call' + GT;
+const CALL_CALL = LT + 'call_call' + GT;
+const CALL_CALL_CLOSE = LT + SL + 'call_call' + GT;
+
+test('call / call_call fragments are boundary anchors (real fragment shapes)', () => {
+  for (const frag of [CALL, CALL_CLOSE, CALL_CALL, CALL_CALL_CLOSE]) {
+    assert.ok(
+      findProtocolStart(frag).index >= 0,
+      'fragment must be detected, else it is emitted as prose: ' + frag,
+    );
+  }
+  // The real seq=179 shape: a closing fragment followed by another fragment, then JSON.
+  const seq179 = CALL_CLOSE + ' ' + CALL_CALL + ' {"mcp_action":"call","name":"pwsh","arguments":{}}';
+  assert.equal(findProtocolStart(seq179).index, 0, 'seq=179 shape must be cut at index 0');
+  assert.equal(stripProtocolText(seq179), '', 'seq=179 shape must leave no prose behind');
+});
+
+test('call fragments are anchors but never transport calls', () => {
+  for (const frag of [CALL, CALL_CLOSE, CALL_CALL, CALL_CALL_CLOSE]) {
+    const found = findProtocolStart(frag);
+    assert.equal(found.transport, false, 'a fragment is not a tool call: ' + frag);
+    assert.equal(found.name, '', 'a fragment carries no tool name: ' + frag);
+  }
+  assert.equal(parseAgentReply(CALL + '\n{}').calls.length, 0, 'fragments must not parse as calls');
+});
+
+test('a call fragment does not swallow the prose before it', () => {
+  const text = PROSE + '\n' + CALL_CLOSE;
+  assert.equal(stripProtocolText(text), PROSE, 'prose before the fragment must survive');
+});
+
+test('<calling> is NOT a protocol anchor (word boundary must hold)', () => {
+  // `call` followed by `i` are both word characters, so the \b in the anchor fails.
+  // If this ever flips, ordinary prose containing <calling> would be truncated.
+  const benign = 'Use ' + LT + 'calling' + GT + ' style here.';
+  assert.equal(findProtocolStart(benign).index, -1, 'benign <calling> must not be a boundary');
+  assert.equal(stripProtocolText(benign), benign, 'benign <calling> must not be stripped');
+});
+
 // ---- 5) normalization consistency ----------------------------------------
 
 test('normalizeDsml is idempotent', () => {

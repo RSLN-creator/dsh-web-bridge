@@ -441,7 +441,17 @@ const PROTOCOL_ANCHORS = [
   // `<tool_result>\n`（13 字符）与 `</tool_result>\n`（14 字符）被当作正文发出。
   // 注意它只加进「边界锚点」，**不**加进下面的 transport 判定：工具结果不是
   // 工具调用，不该被当成需要执行的调用。
-  /<\s*\/?\s*(?:tool_call|tool_calls|tool_result|tool_results|calls|function|stories|invoke)\b/i, // 半角标签
+  //
+  // `call_call` / `call` 也必须在列（0.14.6）：真机日志 session-698700ea 的
+  // assistant/message **text** 块里出现了 13 处残片——`</call>`（seq=119 一步内 3 次、
+  // seq=179 `</call> <call_call> {"mcp_action…`、seq=289）、`</call_call>`
+  // （seq=91/326/569/779）；session-c710ef6e 的 seq=548 也有一处。
+  // 旧候选集只有复数 `calls`：`<call>` 后面跟 `>`，`calls` 匹配不上；
+  // `<call_call>` / `</call_call>` 更是完全不在集合里。于是 findProtocolStart
+  // 返回 -1，残片被当正文 text-delta 外发并持久化（用户看到「界面出现 <>call」）。
+  // 同样只进锚点、不进 transport——残片不是待执行的调用。
+  // 安全性：`\b` 让 `<calling>` 不命中（`call` 后跟 `i` 都是词字符，词边界不成立）。
+  /<\s*\/?\s*(?:tool_call|tool_calls|tool_result|tool_results|call_call|calls|call|function|stories|invoke)\b/i, // 半角标签
   /<[\uFF5C|]*\s*DSML\s*[\uFF5C|]*/i,                              // <（真机主形态）
   /[\uFF5C|]+\s*DSML\s*[\uFF5C|]+/i,                               // 丢开头 < 的 ｜DSML｜
   /```/,                                                           // ```json 围栏
@@ -554,7 +564,7 @@ export function partialProtocolAt(text, scope = 24) {
   const raw = String(text ?? '');
   const s = normalizeDsml(raw);
   const n0 = Math.min(s.length, Math.max(2, scope));
-  const prefixes = ['<tool_call', '<tool_calls', '<invoke', '<parameter', '<function', '<stories', '**Calling:'];
+  const prefixes = ['<tool_call', '<tool_calls', '<call_call', '<call', '<invoke', '<parameter', '<function', '<stories', '**Calling:'];
   // 半成品标记的起点下标（归一化串上算出来的，再映射回原串）。
   const locate = (n) => {
     const tail = s.slice(s.length - n);

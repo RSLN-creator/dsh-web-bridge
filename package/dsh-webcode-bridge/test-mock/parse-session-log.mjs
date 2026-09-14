@@ -268,6 +268,14 @@ export function summarize(session, { textChars = 400 } = {}) {
  *
  * 只认「真调用形状」——`<tool_call>` 标签、DSML 全角标记、`{"mcp_action":"call"`
  * 这种本桥自己的调用外壳。散落的 `<` `>` 或普通 JSON 不算，避免误报。
+ *
+ * ⚠ 检测器**必须与被保护的正则同步扩集**（0.14.6 的教训）：旧版本只认
+ * `<tool_call>` / `<tool_result>` / DSML / mcp_action，于是
+ * `</call>` 与 `<call_call>` 残片既漏过边界锚点、**也漏过本检测器**——
+ * 「日志没有泄漏告警」是**假阴性**，13 处残片是靠直接扫 text 块才抓到的。
+ * 现在 `call` / `call_call` 同时进了 `lib/agent-preset.js` 的 PROTOCOL_ANCHORS
+ * 与本检测器；两者必须保持同一套形态知识。
+ * 安全性：`(?![\w-])` 让 `<calling>` 不命中。
  */
 export function detectProtocolLeak(text) {
   const patterns = [
@@ -276,6 +284,8 @@ export function detectProtocolLeak(text) {
     /<\s*[｜|]{1,2}DSML[｜|]{1,2}/i,
     /<\/tool_result>/i,
     /<tool_result>/i,
+    /<\/?\s*call_call(?![\w-])/i,
+    /<\/?\s*call(?![\w-])/i,
   ];
   for (const p of patterns) {
     const m = p.exec(text);
