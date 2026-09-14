@@ -20,7 +20,7 @@
 | `chatgpt-gateway` | 浏览器扩展 + Camoufox 网关，免手动标签页访问 ChatGPT Pro | 未直接采用 | 否 |
 | `chatgpt-vscode` | VS Code 里的 ChatGPT 扩展（走非官方 API） | 未直接采用 | 否 |
 | `chatgpt2api-NoReverse` | ChatGPT 网页转 API 的小玩具项目（作者自称 vibe-coded toy） | 未直接采用 | 否 |
-| `claude-code-reverse` | Claude Code 源码 map 逆向分析报告 | 未直接采用 | 否 |
+| `claude-code-reverse` | Claude Code 源码 map 逆向分析报告 | **参考实现（2026-09-14 补录）**：子代理与 Team 的面板形态、`Task`/`tasks` 的分离（子代理 worker vs 对等 teammate）——本轮 UI 要把两者分开的形态依据；`src/src/Task.ts`、`src/src/tasks.ts` | 否 |
 | `cursor-2api` | 把 Cursor 网页版转成 OpenAI 标准 API | 未直接采用 | 否 |
 | `deepseek-free-api` | DeepSeek 网页反向代理（Python/FastAPI，含 PoW 求解） | DSML 标记剥离的写法参考（`strip_dsml_markup`） | 否 |
 | `deepseek-reverse-api` | DeepSeek 网页版 OpenAI 兼容 API（Python/Flask） | 未直接采用 | 否 |
@@ -45,7 +45,7 @@
 | `webcode` | 另一个「驱动真实网页做编码」的项目 | **实际采用**：用**独立窗口**而非 iframe 承载站点的做法 | 否 |
 | `zai-copilot-chat` | 在 GitHub Copilot Chat 里用 Z.AI GLM 模型的扩展 | **实际采用**：GLM-5.3 起「思考不可关」的方言佐证 | 否 |
 
-统计：31 项中 **7 项**有源码级出处标注（`glm-free-api`、`Kimi-Free-API`、`LLMs2API`、`qwen-free-api`、`deepseek-free-api`、`opencode2dsh`、`zai-copilot-chat`），另加 `agentdock`/`deepseek-web-import`/`webcode` 各 1 条明确引用，共 **10 项**可确证被参考过。其余 21 项为背景素材。
+统计：31 项中 **7 项**有源码级出处标注（`glm-free-api`、`Kimi-Free-API`、`LLMs2API`、`qwen-free-api`、`deepseek-free-api`、`opencode2dsh`、`zai-copilot-chat`），另加 `agentdock`/`deepseek-web-import`/`webcode`/`claude-code-reverse` 各 1 条明确引用，共 **11 项**可确证被参考过。其余 20 项为背景素材。
 
 ## 逐条：确实被采用的项目
 
@@ -116,6 +116,12 @@
 
 采用点：承载站点页面的方式选择。这条直接影响右栏与登录链路的设计（`windowOpener` / 有头 Edge 窗口）。
 
+### `claude-code-reverse` → 子代理与 Team 的面板形态（2026-09-14 补录）
+
+- 采用点：**不是代码**，是**信息架构**——官方把「子代理（worker，结果回报给调用方）」与「Team（对等成员，互相发消息 + 共享任务板）」在界面上分成两种形态：前者从属于发起它的会话，后者平级成行。
+- 依据：本仓库 `reference/claude-code-reverse/src/src/Task.ts`、`src/src/tasks.ts` 的存在（子任务与任务分离），配合 [Claude Code Agent Teams 官方文档](https://code.claude.com/docs/en/agent-teams) 的对比表。
+- 落点：0.14.9 右栏 team 标签页内部**两个区**——子代理区缩进在本会话之下，Team 区平级。详见 [agent-ui-design-references.md](agent-ui-design-references.md) §4.5。
+
 > 备注：`reference/webcode` 的目录名与本插件的命名（`webcode-bridge`、`/__webcode/*`、`window.__webcodeCaptureInstalled`）**同名不同物**。全仓库 grep `webcode` 有数百处命中，其中绝大多数是插件自身命名，**只有上面这一处**是对该参考项目的引用。本文件不把同名命中当作采用证据。
 
 ### 背景素材（未直接采用，但有间接影响）
@@ -124,7 +130,8 @@
 - `deepseek-web-api`、`deepseek-reverse-api`、`WebChat2Api`、`chatgpt2api-NoReverse`、`cursor-2api`：DeepSeek 及其他站点「网页转 API」的同题项目。协议事实以 `reference/local-refs/` 的交叉验证笔记为准（见下节），未从这些代码取用。
 - `wabac.js`、`node-http-proxy`：镜像/反代相关。本仓库的镜像（`lib/mirror.js`）与上游抓取（`lib/upstream.js`）都是自研，**未引入**这两个依赖。
 - `eventsource-parser`、`openai-stream-parser`：SSE 解析库。**源码中零引用**——本项目 `lib/decoder.js` 自己解析 SSE。曾作为「通用 SSE 解析应该长什么样」的对照，但没有任何引用点，因此不能算采用。
-- `agent-browser`、`claude-code-reverse`、`kimi-code`、`Qwen-Copilot`、`chatgpt-vscode`、`dsh-deepseek-chat`：浏览/了解，未见任何采用痕迹。
+- `agent-browser`、`kimi-code`、`Qwen-Copilot`、`chatgpt-vscode`、`dsh-deepseek-chat`：浏览/了解，未见任何采用痕迹。
+  （`claude-code-reverse` 已从本行移出——2026-09-14 它有了明确采用点，见上方逐条。）
 - `steel-browser-npm`：**目录为空**（无 README、无 package.json），无法判断内容。
 
 ## `reference/local-refs/` —— 真正的事实来源

@@ -45,6 +45,8 @@
 
 - `deepseek-web-behavior.md`、`deepseek-newui-2026-09-10.md` — 站点前端行为与改版记录
 - `reference-projects.md` — 参考实现清单与来源
+- `prompt-engineering-evidence-2026-09-14.md` — **提示词工程实测证据与差评**（NeurIPS/ACL/arXiv 五篇；含「不能宣称最优」「必须披露 harness」两条立场）
+- `agent-ui-design-references.md` — **UI 设计语言**（Apple HIG 可执行约束、Fluent 4px 间距全表、Harness 官方 token 实测清单、teammate 面板信息架构）
 - `real-probe-*.json`、`sse-samples/` — 真机探针输出与 SSE 样本
 - `autonomous-marathon-vs-official-api-*.md`、`thinking-trace-*.md` — 专题调研
 - `awesome-deepseek-harness-README.zh-CN.md` — 外部资料留档
@@ -57,4 +59,6 @@
 | `lib/metrics.js`、`lib/wait-stats.js` | `test/metrics.test.mjs`、`test/wait-stats.test.mjs` |
 | `lib/browser-driver.js` | [verify.md](verify.md)、[long-term-issues.md](long-term-issues.md) 第 3/7 条 |
 | `lib/mirror.js` | [long-term-issues.md](long-term-issues.md)、`test/mirror.test.mjs` |
-| `lib/client.cjs` | `test/client-render.test.mjs`（渲染契约） |
+| `lib/client.cjs` | `test/client-render.test.mjs`（渲染契约）、[agent-ui-design-references.md](research/agent-ui-design-references.md)（样式取值来源） |
+| `lib/prompt-variants.js`、`lib/agent-preset.js` | [prompt-engineering-evidence-2026-09-14.md](research/prompt-engineering-evidence-2026-09-14.md)（变体的文献依据）、`test/prompt-variants.test.mjs` |
+| `test-mock/prompt-bench.mjs` | 同上（实验规范在 [comment-style.md](comment-style.md) §10） |
