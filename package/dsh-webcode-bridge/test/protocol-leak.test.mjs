@@ -148,6 +148,33 @@ test('malformed input never throws', () => {
   assert.equal(stripProtocolText(''), '');
 });
 
+// ---- 4b) tool_result wrapper (0.14.5, real transcript seq=587) -------------
+//
+// Evidence: session-c710ef6e (2026-09-14), assistant/message seq=587 carried the web
+// model's own echo of the tool results, wrapper and all. Before the fix the anchors only
+// knew `tool_call`, so the boundary landed on the JSON *after* the wrapper and the
+// literal `<tool_result>\n` (13 chars) / `</tool_result>\n` (14 chars) were emitted as
+// assistant prose. The tool_result tag is now an anchor but deliberately NOT a
+// transport shape: a result is not a call and must never be executed.
+
+test('tool_result wrapper is a boundary anchor (real seq=587 shape)', () => {
+  const open = LT + 'tool_result' + GT + '\n{"mcp_action":"result","name":"edit","status":"success"}';
+  const close = LT + SL + 'tool_result' + GT + '\n{"mcp_action":"result","name":"write"}';
+  assert.equal(findProtocolStart(open).index, 0, 'leading <tool_result> must be the boundary');
+  assert.equal(findProtocolStart(close).index, 0, 'leading </tool_result> must be the boundary');
+  assert.equal(stripProtocolText(open), '', 'wrapper must not survive as prose');
+  assert.equal(stripProtocolText(close), '', 'closing wrapper must not survive as prose');
+});
+
+test('tool_result is an anchor but never a transport call', () => {
+  // If this ever flips to transport:true, the bridge would try to *execute* a result.
+  for (const text of [LT + 'tool_result' + GT, LT + SL + 'tool_result' + GT]) {
+    const found = findProtocolStart(text);
+    assert.equal(found.transport, false, 'a tool result is not a tool call: ' + text);
+  }
+  assert.equal(parseAgentReply(LT + 'tool_result' + GT + '\n{}').calls.length, 0, 'results must not parse as calls');
+});
+
 // ---- 5) normalization consistency ----------------------------------------
 
 test('normalizeDsml is idempotent', () => {

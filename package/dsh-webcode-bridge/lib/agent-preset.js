@@ -435,7 +435,13 @@ export function normalizeDsml(text) {
 
 /** 协议文本起点的锚点。命中最早的一个即为边界。 */
 const PROTOCOL_ANCHORS = [
-  /<\s*\/?\s*(?:tool_call|tool_calls|calls|function|stories|invoke)\b/i, // 半角标签
+  // 半角标签。`tool_result` 必须在列（0.14.5）：真机日志 session-c710ef6e 的
+  // assistant/message seq=587 里，网页模型把工具结果连同 `<tool_result>` 外壳
+  // 一起吐了回来，而锚点只认 tool_call —— 于是边界落在外壳**之后**的 JSON 上，
+  // `<tool_result>\n`（13 字符）与 `</tool_result>\n`（14 字符）被当作正文发出。
+  // 注意它只加进「边界锚点」，**不**加进下面的 transport 判定：工具结果不是
+  // 工具调用，不该被当成需要执行的调用。
+  /<\s*\/?\s*(?:tool_call|tool_calls|tool_result|tool_results|calls|function|stories|invoke)\b/i, // 半角标签
   /<[\uFF5C|]*\s*DSML\s*[\uFF5C|]*/i,                              // <（真机主形态）
   /[\uFF5C|]+\s*DSML\s*[\uFF5C|]+/i,                               // 丢开头 < 的 ｜DSML｜
   /```/,                                                           // ```json 围栏
