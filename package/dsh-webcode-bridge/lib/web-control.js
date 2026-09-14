@@ -17,6 +17,7 @@
 //   • Responses never echo tokens; errors are fixed-text; bodies are bounded.
 
 import { listAllModels, SITES, getSite } from './providers.js';
+import { DEFAULT_SLOT, normalizeSlot, formatAccountKey, parseAccountKey, normalizeAccounts } from './accounts.js';
 import { buildPromptVariants } from './prompt-variants.js';
 import { composerWaitLine, waitStatRows, formatDuration } from './wait-stats.js';
 import { isLoopbackHost, originMatchesHost } from './loopback.js';
@@ -126,6 +127,27 @@ export function createWebControl(deps = {}) {
   const allowedOrigins = new Set((config.allowedOrigins || []).map((s) => String(s).toLowerCase()));
 
   /**
+   * 从请求体里取出 **accountKey**（0.14.7 账户槽）。
+   *
+   * 请求体有两条历史形态，必须同时支持：
+   *   • `{ siteId: 'glm' }`            —— 0.14.6 及以前的全部调用方
+   *   • `{ siteId: 'glm', slot: '2' }` —— 0.14.7 新增
+   *
+   * 返回 `glm` / `glm#2`。`fallback` 用于 login 这种「空值要留给调用方兜底默认站点」
+   * 的场景（它自己会 `|| 'deepseek'`），其余调用方传默认 `'deepseek'`。
+   *
+   * 非法 slot 一律**当作默认槽**而不是抛错：这是控制面入口，一个拼错的槽不该让
+   * 整个面板报 500；用户看到的是「没切过去」，而不是一片红色错误。
+   */
+  function accountKeyOf(body, { fallback = 'deepseek' } = {}) {
+    const siteId = String(body?.siteId || '').trim() || fallback;
+    if (!siteId) return '';
+    const slot = normalizeSlot(body?.slot);
+    if (!slot || slot === DEFAULT_SLOT) return siteId;
+    return formatAccountKey(siteId, slot);
+  }
+
+  /**
    * CORS headers for one request: reflect ONLY allowlisted origins. A wildcard
    * here would turn any simple POST from a hostile local page into a
    * cross-origin READ of conversation data — never send `*`.
@@ -225,9 +247,9 @@ export function createWebControl(deps = {}) {
   /** One route table keyed by "METHOD path-suffix". */
   const actions = {
     'POST connect': async (body) => {
-      // 侧栏视图按站点连接：未指定时保持 DeepSeek 兼容行为
-      const siteId = String(body?.siteId || 'deepseek').trim();
-      const target = relay?.config?.siteConnect?.(siteId);
+      // 侧栏视图按站点连接：未指定时保持 DeepSeek 兼容行为。
+      // 0.14.7：body 可带 slot（账户槽）；缺省 = 默认槽，旧调用方零改动。
+      const target = relay?.config?.siteConnect?.(accountKeyOf(body));
       if (target) return target.connect();
       return driver.connect();
     },
@@ -237,12 +259,14 @@ export function createWebControl(deps = {}) {
     'POST window': async (body) => {
       const opener = relay?.config?.windowOpener;
       if (!opener) return { ok: false, error: 'no driver' };
-      const siteId = String(body?.siteId || 'deepseek').trim() || 'deepseek';
+      // accountKey 而不是裸 siteId（0.14.7）：`glm#2` 的独立窗口开的是账户2
+      // 那份 profile，窗口里看到的登录态与自动化轮次用的是同一个。
+      const accountKey = accountKeyOf(body);
       const action = body?.action === 'close' ? 'close' : 'open';
       const width = Number(body?.width) || undefined;
       const height = Number(body?.height) || undefined;
-      if (action === 'close') return opener(siteId, 'close');
-      return opener(siteId, 'open', { width, height });
+      if (action === 'close') return opener(accountKey, 'close');
+      return opener(accountKey, 'open', { width, height });
     },
     'GET window': async () => {
       const state = relay?.config?.driverStatus?.();
@@ -251,7 +275,9 @@ export function createWebControl(deps = {}) {
       const siteWindow = state?.window ?? state?.sites?.find((s) => s.siteId === sid)?.window ?? null;
       // 聚合各站点窗口：面板按站点行各自显示「已开独立窗口」，不再只认 deepseek。
       const windows = {};
-      for (const s of state?.sites || []) if (s?.window?.open) windows[s.siteId] = s.window;
+      // 键用 accountKey（0.14.7）：两个账户各自可能开着独立窗口，用 siteId
+      // 做键会让「账户2 开了窗口」显示在账户1 那一行。
+      for (const s of state?.sites || []) if (s?.window?.open) windows[s.accountKey || s.siteId] = s.window;
       return { ok: true, siteId: sid, window: siteWindow, windows };
     },
     'POST interact': async body => {
@@ -371,6 +397,26 @@ export function createWebControl(deps = {}) {
       if ('sendGapMs' in updated) {
         updated.sendGapMs = Math.min(600_000, Math.max(0, Math.round(Number(updated.sendGapMs) || 0)));
       }
+      // 账户槽（0.14.7）：`accounts` 与槽级间隔都来自界面，但设置文件可手改，
+      // 因此写入前一律用 accounts.js 的纯函数归一化——非法条目丢弃而不是抛错，
+      // 一个拼错的槽不该让整个设置保存 500。
+      if ('accounts' in updated) {
+        const raw = Array.isArray(updated.accounts) ? updated.accounts : [];
+        const clean = normalizeAccounts(raw);
+        if (clean.length !== raw.length) warn(`accounts: 丢弃了 ${raw.length - clean.length} 条非法账户槽配置`);
+        updated.accounts = clean.map(({ siteId, slot, enabled }) => ({ siteId, slot, enabled }));
+      }
+      // 槽级发送间隔：键必须是合法 accountKey，值按全局同一口径 clamp。
+      // 未知站点的键直接丢弃——它永远不会被查表命中，留着只会让设置文件越来越脏。
+      if ('sendGapMsBySlot' in updated) {
+        const src = updated.sendGapMsBySlot && typeof updated.sendGapMsBySlot === 'object' ? updated.sendGapMsBySlot : {};
+        const out = {};
+        for (const [key, val] of Object.entries(src)) {
+          try { if (!getSite(parseAccountKey(key).siteId)) continue; } catch { continue; }
+          out[key] = Math.min(600_000, Math.max(0, Math.round(Number(val) || 0)));
+        }
+        updated.sendGapMsBySlot = out;
+      }
       const result = settingsStore.set(updated);
       return { ok: true, ...result };
     },
@@ -400,18 +446,19 @@ export function createWebControl(deps = {}) {
       return { ok: true, variants, toolsSource, active, extraPrompt: settings.extraPrompt || '' };
     },
     'POST login': async (body) => {
-      const siteId = String(body?.siteId || '').trim();
+      const accountKey = accountKeyOf(body, { fallback: '' });
       const wait = body?.wait !== false;     // 默认等待；显式 {wait:false} 才是旧的即开即回
       // 优先走「等结果」的入口：设置页需要知道这次登录到底成没成，
       // 否则失败只会写进宿主控制台，界面永远停在「未登录」。
       const loginAndReport = relay?.config?.loginAndReport;
       if (loginAndReport && wait) {
-      const r = await loginAndReport(siteId || 'deepseek', { timeoutMs: body?.timeoutMs });
+      const r = await loginAndReport(accountKey || 'deepseek', { timeoutMs: body?.timeoutMs });
       const message = r?.ok ? (r?.note || '登录完成') : (r?.error || '登录失败');
       return {
         ok: r?.ok === true,
         siteId: r?.siteId,
         siteName: r?.siteName,
+        slot: r?.slot ?? null,
         loggedIn: r?.loggedIn ?? null,
         alreadyLoggedIn: r?.alreadyLoggedIn === true,
         ms: r?.ms ?? null,
@@ -423,17 +470,17 @@ export function createWebControl(deps = {}) {
       }
       const loginTrigger = relay?.config?.loginTrigger;
       if (!loginTrigger) return { ok: false, error: 'no driver' };
-      loginTrigger(siteId || undefined).catch((err) => warn('login flow error:', err?.message));
+      loginTrigger(accountKey || undefined).catch((err) => warn('login flow error:', err?.message));
       return { ok: true, message: '登录窗口打开中，请在该窗口完成一次性登录' };
     },
     'POST verify-login': async (body) => {
       // 显式检测某站点登录态：connect 幂等且轻量（已启动时只查页面输入框），
       // 给设置面板「检测」按钮用——用户在独立窗口里登录完后能立即确认结果。
-      const siteId = String(body?.siteId || 'deepseek').trim();
-      const target = relay?.config?.siteConnect?.(siteId);
+      const accountKey = accountKeyOf(body);
+      const target = relay?.config?.siteConnect?.(accountKey);
       if (!target) return { ok: false, error: 'no driver' };
       const r = await target.connect();
-      return { ok: true, siteId, loggedIn: r?.loggedIn ?? null };
+      return { ok: true, siteId: accountKey, accountKey, loggedIn: r?.loggedIn ?? null };
     },
     // 「导入本机登录态」：把用户真实 Edge profile 的 cookies 采纳进所选站点的桥
     // profile。动机（真机 2026-09-13）：桥 profile 里除 deepseek 外**没有任何站点
@@ -446,7 +493,7 @@ export function createWebControl(deps = {}) {
     'POST session-import': async (body) => {
       const importer = relay?.config?.sessionImport;
       if (typeof importer !== 'function') return { ok: false, error: 'no driver' };
-      const siteId = String(body?.siteId || 'deepseek').trim();
+      const accountKey = accountKeyOf(body);
       const dir = String(body?.sourceProfileDir || '').trim() || defaultEdgeUserDataDir();
       if (!dir) return { ok: false, error: '未找到本机 Edge profile 目录，请在请求里显式给出 sourceProfileDir' };
       // 目录白名单（0.14.4）：旧实现只查「存在」，于是任意路径都能让调用方在磁盘
@@ -460,29 +507,57 @@ export function createWebControl(deps = {}) {
       } catch (err) {
         return { ok: false, error: '源 profile 目录不可访问：' + String(err?.message || err).slice(0, 120) };
       }
-      const r = await importer(siteId, dir);
-      return { ok: true, siteId, sourceProfileDir: dir, ...(r || {}) };
+      const r = await importer(accountKey, dir);
+      return { ok: true, siteId: accountKey, accountKey, sourceProfileDir: dir, ...(r || {}) };
     },
     // 设置页「登录网站」下拉的数据源：站点清单 + 各自登录态，不启动浏览器。
     'GET login-sites': async () => {
       const state = relay?.config?.driverStatus?.() ?? null;
-      const byId = new Map((state?.sites || []).map((s) => [s.siteId, s]));
-      return {
-        ok: true,
-        mainSiteId: state?.siteId || 'deepseek',
-        sites: SITES.map((st) => {
-          const s = byId.get(st.id);
-          return {
-            siteId: st.id,
-            siteName: st.name,
-            origin: st.origin,
-            initialized: s?.initialized === true,
-            loggedIn: s?.loggedIn ?? null,
-            loginState: s?.loginState || 'idle',
-            lastLogin: s?.lastLogin || null,
-          };
-        }),
-      };
+      // 0.14.7：一行是**一个账户槽**。但「列出全部站点」这条契约不能丢——
+      // 面板要能对**任何**站点发起登录，包括本轮从未懒创建过的那些。
+      //
+      // 因此这里是**合并**而不是替换：
+      //   ① 先为 SITES 里每个站点铺一行默认槽（与 0.14.6 的清单逐字一致）；
+      //   ② 再把 driverStatus 里同 accountKey 的实时状态盖上去；
+      //   ③ 最后追加非默认槽行（`glm#2`）——它们只可能来自设置，不在 SITES 里。
+      const live = new Map();
+      for (const s of state?.sites || []) if (s?.accountKey || s?.siteId) live.set(s.accountKey || s.siteId, s);
+      const rows = [];
+      for (const st of SITES) {
+        const s = live.get(st.id);
+        live.delete(st.id);
+        rows.push({
+          siteId: st.id,
+          siteName: st.name,
+          origin: st.origin,
+          slot: DEFAULT_SLOT,
+          accountKey: st.id,
+          displayName: st.name,
+          initialized: s?.initialized === true,
+          loggedIn: s?.loggedIn ?? null,
+          loginState: s?.loginState || 'idle',
+          lastLogin: s?.lastLogin || null,
+          profileDir: s?.profileDir ?? null,
+        });
+      }
+      // 剩下的都是非默认槽（或未知站点，直接忽略）。
+      for (const s of live.values()) {
+        if (!getSite(s.siteId)) continue;
+        rows.push({
+          siteId: s.siteId,
+          siteName: s.siteName || getSite(s.siteId).name,
+          origin: s.origin || getSite(s.siteId).origin,
+          slot: s.slot || DEFAULT_SLOT,
+          accountKey: s.accountKey || s.siteId,
+          displayName: s.displayName || s.siteName || getSite(s.siteId).name,
+          initialized: s.initialized === true,
+          loggedIn: s.loggedIn ?? null,
+          loginState: s.loginState || 'idle',
+          lastLogin: s.lastLogin || null,
+          profileDir: s.profileDir ?? null,
+        });
+      }
+      return { ok: true, mainSiteId: state?.siteId || 'deepseek', sites: rows };
     },
     'POST sessions': async (body) => {
       const r = await driver.listSessions(Math.min(200, Math.max(1, Number(body?.count) || 100)));

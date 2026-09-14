@@ -14,6 +14,7 @@
 import { chromium } from 'playwright-core';
 import { toPlaywrightCookie } from './cookies.js';
 import { getSite, getContract, resolveWebModel, conversationNav, conversationIdFromUrl } from './contract.js';
+import { DEFAULT_SLOT, normalizeSlot } from './accounts.js';
 import { selectWebModel, pickerUsable } from './model-picker.js';
 import { deriveLastRate, shouldSettleWip } from './metrics.js';
 import child_process from 'node:child_process';
@@ -207,9 +208,18 @@ export function createBrowserDriver(options = {}) {
   const site = getSite(siteId);
   const contract = getContract(siteId);
   if (!site || !contract) throw new Error('webcode driver: unknown siteId ' + siteId);
+  // 账户槽（0.14.7）：同一站点的第 2 个账户是**另一个驱动实例**，用另一个 profileDir。
+  // 槽在驱动里只做两件事：① 透出给 /status 与面板（用户要知道这行是哪个账户）；
+  // ② 进日志前缀（两个槽的日志混在一起时能分开）。
+  //
+  // 文件名**刻意不按槽改名**：profileDir 本身已经是槽目录（见 accounts.slotProfileDir），
+  // 在槽目录里再写一份带槽名的文件名是冗余的——而冗余的名字意味着多一条迁移路径，
+  // 迁移就是风险。默认槽因此逐字保持 0.14.6 的落盘形状。
+  const slot = normalizeSlot(options.slot) || DEFAULT_SLOT;
   const siteUrl = options.site ?? site.origin + '/';
   const cfg = {
     siteId,
+    slot,
     site: siteUrl,
     profileDir: options.profileDir,
     executablePath: options.executablePath ?? defaultEdgePath(),
@@ -228,8 +238,11 @@ export function createBrowserDriver(options = {}) {
     sendButton: contract.sendButtonSelector,
     stopButton: contract.stopButtonSelector,
   };
-  const log = (...a) => cfg.logger.log?.('[webcode-driver:' + siteId + ']', ...a);
-  const warn = (...a) => cfg.logger.warn?.('[webcode-driver:' + siteId + ']', ...a);
+  // 日志前缀带槽：两个槽同时跑时，`[webcode-driver:glm#2]` 与 `[webcode-driver:glm]`
+  // 能一眼分开，否则排障时要靠时间戳猜哪条属于哪个账户。
+  const tag = slot === DEFAULT_SLOT ? siteId : siteId + '#' + slot;
+  const log = (...a) => cfg.logger.log?.('[webcode-driver:' + tag + ']', ...a);
+  const warn = (...a) => cfg.logger.warn?.('[webcode-driver:' + tag + ']', ...a);
 
   // 宿主的图片限额（每消息张数 / 单图字节 / 允许的媒体类型）。由 index.js 在
   // 解析到 attachment 服务后注入；拿不到就退回保守默认。上传前用它拦下必然被
@@ -481,6 +494,9 @@ export function createBrowserDriver(options = {}) {
       needLogin: effectiveLoggedIn === false,
       selectedModel,
       siteId,
+      // 账户槽（0.14.7）：面板据此把「glm」与「glm#2」分成两行，并知道该读哪个目录。
+      slot,
+      accountKey: slot === DEFAULT_SLOT ? siteId : siteId + '#' + slot,
       profileDir: cfg.profileDir,
       loginState,
       lastLogin,

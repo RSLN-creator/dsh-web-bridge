@@ -10,6 +10,10 @@
 import os from 'node:os';
 import fs from 'node:fs';
 import { DEEPSEEK, resolveWebModel, listAllModels, getSite, SITES, qualifyModelId, MODEL_ALIAS_IDS } from './providers.js';
+import {
+  DEFAULT_SLOT, parseAccountKey, formatAccountKey, formatModelId, normalizeAccounts, slotsForSite,
+  slotProfileDir, accountLabel, sendGapForSlot,
+} from './accounts.js';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { createRelay } from './relay.js';
@@ -376,7 +380,12 @@ export function apply(ctx, config = {}) {
   if (!(settingsService && typeof settingsService.get === 'function' && typeof settingsService.set === 'function')) {
     settingsService = null;
   }
-  const defaultConfig = { extraPrompt: '', defaultModel: 'deepseek', previewRefreshRate: 5000, thinkMode: 'on', subAgentMode: 'own', subAgentSite: 'follow', sendGapMs: 0 };
+  // accounts（0.14.7）：同站多账户的槽清单。**默认空数组 = 行为与 0.14.6 完全一致**
+  // ——「不配置就不改变」是多账户这种高风险特性的第一条纪律：任何一个没配槽的
+  // 用户都不该因为升级而看到不同行为。
+  // sendGapMsBySlot：槽级发送间隔覆盖（`{ 'glm#2': 60000 }`）。回落链见
+  // accounts.sendGapForSlot：槽显式值 → 站点级键 → 全局 sendGapMs。
+  const defaultConfig = { extraPrompt: '', defaultModel: 'deepseek', previewRefreshRate: 5000, thinkMode: 'on', subAgentMode: 'own', subAgentSite: 'follow', sendGapMs: 0, accounts: [], sendGapMsBySlot: {} };
   const configManager = {
     get() {
       // settingsService 已在初始化时校验 get/set 双全；此处仍防御式包裹
@@ -1062,15 +1071,36 @@ function imageMarkdown(images) {
   // 而不是发出去再猜为什么「模型说没图」。拿不到限额时驱动退回保守默认。
   const imageLimitsProvider = () => (attachments ? attachments.imageLimits : null) || null;
   for (const d of [driver]) { try { d.setImageLimitsProvider?.(imageLimitsProvider); } catch { /* 测试注入的桩驱动 */ } }
-  function driverFor(siteId) {
-    if (!siteId || siteId === 'deepseek') return driver;
-    if (!drivers.has(siteId)) {
+  /**
+   * 取某个「站点 × 账户槽」的驱动实例。
+   *
+   * 入参是 **accountKey**（`glm` 或 `glm#2`）而不是裸 siteId —— 0.14.7 起
+   * 「同一站点两个账户」= 两个独立驱动实例 + 两个独立 profileDir。
+   *
+   * 兼容性硬约束（两条，都有测试钉住）：
+   *   ① `driverFor('deepseek')` 必须仍返回**注入的** `driver`。测试通过
+   *      `config.driver` 注入桩驱动；若默认槽改走 createBrowserDriver，
+   *      全部既有测试会在无头环境里真的去拉 Edge。
+   *   ② `driverFor('glm')` 的 profileDir 必须仍逐字等于
+   *      `<profileDir>/sites/glm`（slotProfileDir 的默认槽分支给出的就是它）。
+   *
+   * 键用 accountKey 而不是 siteId：`glm` 与 `glm#2` 是两份登录态，
+   * 用 siteId 做键会让第二个账户把第一个的驱动实例顶掉。
+   */
+  function driverFor(accountKey) {
+    const parsed = parseAccountKey(accountKey || 'deepseek');
+    const { siteId, slot } = parsed;
+    const key = formatAccountKey(siteId, slot);
+    // 默认槽 + deepseek：沿用注入的 driver（测试桩与既有 profile 都在它身上）。
+    if (siteId === 'deepseek' && slot === DEFAULT_SLOT) return driver;
+    if (!drivers.has(key)) {
       const st = getSite(siteId);
       if (!st) throw new Error('[webcode-bridge] 未知站点: ' + siteId);
       const d = createBrowserDriver({
         siteId,
+        slot,
         site: st.origin + '/',
-        profileDir: path.join(cfg.profileDir, 'sites', siteId),
+        profileDir: slotProfileDir(cfg.profileDir, siteId, slot, { primary: st.mountAtRelayRoot === true }),
         headless: cfg.headless !== false,
         requestTimeoutMs: cfg.requestTimeoutMs,
         loginTimeoutMs: cfg.loginTimeoutMs,
@@ -1078,9 +1108,9 @@ function imageMarkdown(images) {
         logger: console,
       });
       try { d.setImageLimitsProvider?.(imageLimitsProvider); } catch { /* 同上 */ }
-      drivers.set(siteId, d);
+      drivers.set(key, d);
     }
-    return drivers.get(siteId);
+    return drivers.get(key);
   }
 
   /**
@@ -1099,7 +1129,8 @@ function imageMarkdown(images) {
     let siteId = 'deepseek';
     try { siteId = resolveWebModel(options?.model || configManager.get().defaultModel || cfg.modelId).siteId; } catch { /* 用默认站点 */ }
     // 命名调用没有 agentId：对应的是本会话的主网页对话槽（key = sessionId）。
-    const d = siteId === 'deepseek' ? driver : drivers.get(siteId);
+    // 只读**已经存在**的驱动实例，绝不懒创建（见上）。默认槽的键就是 siteId。
+    const d = siteId === 'deepseek' ? driver : drivers.get(formatAccountKey(siteId, DEFAULT_SLOT));
     if (!d || typeof d.listSessions !== 'function' || typeof d.conversationFor !== 'function') return null;
     const conv = d.conversationFor(String(sessionId));
     const webSessionId = conv?.webSessionId;
@@ -1164,28 +1195,39 @@ function imageMarkdown(images) {
   // 落盘文件与设置同目录（profileDir），权限 0o600，内容极小。
   const sendStatePath = path.join(cfg.profileDir, 'webcode-send-state.json');
   const SEND_STATE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-  const lastSendBySite = new Map();
+  // 键是 **accountKey**（`glm` / `glm#2`）而不是 siteId（0.14.7）。
+  // 为什么必须按槽分开：不同账户是不同登录态，风控窗口互相独立——
+  // 若两个槽共用一条「上次发出」时间线，账户2 会被账户1 的发送压住（或反之），
+  // 用户设的槽级间隔就形同虚设。
+  //
+  // 历史文件的键是 siteId，而默认槽的 accountKey **就是** siteId，
+  // 因此旧文件不需要迁移：读进来的键天然正确（见下方 knownAccountKey）。
+  const lastSendByAccount = new Map();
+  /** 该键是否指向一个已知站点（`glm` 与 `glm#2` 都算）。文件可手改，不抛错。 */
+  function knownAccountKey(key) {
+    try { return Boolean(getSite(parseAccountKey(key).siteId)); } catch { return false; }
+  }
   (function loadSendState() {
     try {
       const raw = JSON.parse(fs.readFileSync(sendStatePath, 'utf8'));
       const now = Date.now();
-      for (const [sid, at] of Object.entries(raw || {})) {
+      for (const [key, at] of Object.entries(raw || {})) {
         // 只认已知站点 + 合理时间窗：文件可能来自别的机器/很久以前，
         // 陈旧基准没有意义（24h 前的「上一轮」不该再压住本轮）。
-        if (!getSite(sid)) continue;
+        if (!knownAccountKey(key)) continue;
         const t = Number(at);
         if (!Number.isFinite(t) || t <= 0 || t > now || now - t > SEND_STATE_MAX_AGE_MS) continue;
-        lastSendBySite.set(sid, t);
+        lastSendByAccount.set(key, t);
       }
     } catch { /* 首次运行或文件损坏：按「没有基准」处理即可 */ }
   })();
   /** 记录「刚刚真正发出」。只在发送成功那一刻调用；写失败仅 warn，绝不阻断发送。 */
-  function rememberSend(siteId, at = Date.now()) {
-    lastSendBySite.set(siteId, at);
+  function rememberSend(accountKey, at = Date.now()) {
+    lastSendByAccount.set(accountKey, at);
     try {
       fs.mkdirSync(path.dirname(sendStatePath), { recursive: true });
       const tmp = sendStatePath + '.tmp-' + process.pid;
-      fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(lastSendBySite)), { mode: 0o600 });
+      fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(lastSendByAccount)), { mode: 0o600 });
       fs.renameSync(tmp, sendStatePath);
     } catch (err) { warn('send-state save failed:', err?.message); }
   }
@@ -1284,10 +1326,18 @@ function imageMarkdown(images) {
       // thinkMode: 'auto' | 'on' | 'off' — 设置页手动覆盖网页「深度思考」开关
       const thinkMode = ['on', 'off', 'auto'].includes(m?.thinkMode) ? m.thinkMode : 'auto';
       const siteId = m?.siteId || 'deepseek';
+      // 账户槽（0.14.7）：meta 显式带 accountKey；只有裸 id 的调用方
+      // （OpenAI 前端、aux 轮）则从限定模型 id 里解出来（`glm@2:glm-5.3`）。
+      // 两者都拿不到 → 默认槽，即 0.14.6 的行为。
+      let accountKey = m?.accountKey || null;
+      if (!accountKey) {
+        try { accountKey = resolveWebModel(qualified).accountKey; } catch { accountKey = null; }
+      }
+      if (!accountKey) accountKey = siteId;
       const sendGapMs = clampSendGapMs(m?.sendGapMs);
       const attempt = (fresh) => {
         if (m?.sessionKey) {
-          const drive = driverFor(siteId);
+          const drive = driverFor(accountKey);
           const turnOpts = {
             fresh,
             signal: opts.signal,
@@ -1314,24 +1364,24 @@ function imageMarkdown(images) {
             throw err;
           });
         }
-        return driverFor(siteId).sendPrompt(prompt, { signal: opts.signal, meta: m, onDelta: opts.onDelta, onThink: opts.onThink, onImage: opts.onImage, model: qualified, thinkMode });
+        return driverFor(accountKey).sendPrompt(prompt, { signal: opts.signal, meta: m, onDelta: opts.onDelta, onThink: opts.onThink, onImage: opts.onImage, model: qualified, thinkMode });
       };
       // 发送节流（设置页「发送间隔」）：**send-to-send** 语义——本轮发送距上一次
       // *发出* 不足设置值就补满。判定与「距上次发送」都由纯函数给出，等待本身
       // 不属于网页生成耗时，单独记 sendWaitMs（右栏统计「发送前等待」）。
       let waitedMs = 0;
-      const gapPlan = computeSendGap({ lastSendAt: lastSendBySite.get(siteId) ?? null, now: Date.now(), gapMs: sendGapMs });
+      const gapPlan = computeSendGap({ lastSendAt: lastSendByAccount.get(accountKey) ?? null, now: Date.now(), gapMs: sendGapMs });
       if (gapPlan.skewed) {
-        warn(`send-state for ${siteId} is in the future (clock skew?) — treating it as "just sent"`);
+        warn(`send-state for ${accountKey} is in the future (clock skew?) — treating it as "just sent"`);
       }
       if (gapPlan.waitMs > 0) {
-        log(`send gap: waiting ${Math.round(gapPlan.waitMs / 1000)}s before next send to ${siteId}`);
+        log(`send gap: waiting ${Math.round(gapPlan.waitMs / 1000)}s before next send to ${accountKey}`);
         await sleepSignal(gapPlan.waitMs, opts.signal);
         waitedMs += gapPlan.waitMs;
       }
       // 基准在「本轮真正交给网页」的那一刻更新，且只在成功发出时——限流退避
       // 与失败都不该污染它，否则下一轮的间隔会被一次失败凭空吃掉。
-      const markSent = () => rememberSend(siteId);
+      const markSent = () => rememberSend(accountKey);
       try {
         let result = null;
         let retries = 0;
@@ -1347,7 +1397,7 @@ function imageMarkdown(images) {
             // （rateLimitBackoffMinMs 仅供离线测试调小；真实运行缺省 10_000。）
             const backoff = Math.max(sendGapMs, cfg.rateLimitBackoffMinMs ?? 10_000) * retries;
             waitedMs += backoff;
-            warn(`rate limited — retry ${retries}/${RATE_LIMIT_RETRIES} after ${Math.round(backoff / 1000)}s (${siteId})`);
+            warn(`rate limited — retry ${retries}/${RATE_LIMIT_RETRIES} after ${Math.round(backoff / 1000)}s (${accountKey})`);
             await sleepSignal(backoff, opts.signal);
           }
         }
@@ -1371,9 +1421,24 @@ function imageMarkdown(images) {
     },
     driverStatus: () => {
       const base = driver.status();
-      // 聚合全部内容服务的登录/运行状态：未初始化的站点给占位（不启动浏览器）。
-      const sites = SITES.map((st) => {
-        const d = st.id === 'deepseek' ? driver : drivers.get(st.id);
+      // 聚合全部「站点 × 账户槽」的登录/运行状态：未初始化的槽给占位（不启动浏览器）。
+      //
+      // 0.14.7 从「按站点」升维成「按槽」：`sites` 数组现在每行是一个**槽**，
+      // 每行带 `slot` / `accountKey` / `profileDir`，前端据此把 glm 与 glm#2
+      // 分成两行显示。默认槽的 accountKey 就是 siteId（历史形态不变），
+      // 因此只关心 siteId 的旧调用方（如 web-control 的 login-sites）仍然可用。
+      const sites = [];
+      for (const st of SITES) {
+        for (const acc of slotsForSite(configManager.get().accounts, st.id)) {
+          sites.push(siteStatusRow(st, acc));
+        }
+      }
+      return { ...base, sites };
+
+      /** 单个槽的状态行。拆成函数是因为默认槽与非默认槽的「未初始化」分支要逐字一致。 */
+      function siteStatusRow(st, acc) {
+        const isDefault = acc.slot === DEFAULT_SLOT;
+        const d = (st.id === 'deepseek' && isDefault) ? driver : drivers.get(acc.key);
         if (!d) {
           // 重启后未懒创建的站点：登录缓存直接读站点 profile 的落盘状态，
           // 否则面板永远「待检查」，用户只能逐站点手动核验（问题③的另一半）。
@@ -1382,8 +1447,11 @@ function imageMarkdown(images) {
           // 只查后者的旧实现让 DeepSeek 每次重启都显示「待检查」，用户被迫手点。
           // 根 profile 文件只对默认站点回退——别的站点读了会把 DeepSeek 的
           // 登录态安到自己头上。
-          const statePaths = [path.join(cfg.profileDir, 'sites', st.id, 'webcode-login-state.json')];
-          if (st.id === 'deepseek') statePaths.push(path.join(cfg.profileDir, 'webcode-login-state.json'));
+          // 槽目录由 slotProfileDir 决定；默认槽的路径与 0.14.6 逐字相同。
+          // deepseek 额外回退根 profile（它的默认槽直接挂在 profileDir 上）。
+          const slotDir = slotProfileDir(cfg.profileDir, st.id, acc.slot, { primary: st.mountAtRelayRoot === true });
+          const statePaths = [path.join(slotDir, 'webcode-login-state.json')];
+          if (st.id === 'deepseek' && isDefault) statePaths.push(path.join(cfg.profileDir, 'webcode-login-state.json'));
           for (const p of statePaths) {
             try { cached = JSON.parse(fs.readFileSync(p, 'utf8')); break; } catch { /* 未初始化过 */ }
           }
@@ -1393,19 +1461,28 @@ function imageMarkdown(images) {
           // 面板显示「待检查」。规则必须与 lib/browser-driver.js 逐字一致。
           const trusted = Boolean(cached && typeof cached.basis === 'string');
           const has = trusted && typeof cached.loggedIn === 'boolean';
-          return { siteId: st.id, siteName: st.name, origin: st.origin, initialized: false, running: false, busy: false, loggedIn: has ? cached.loggedIn : null, loggedInCached: has && cached.loggedIn === true, loginBasis: trusted ? cached.basis : (cached ? 'stale' : null), loginCheckedAt: cached ? cached.at : null, needLogin: has && cached.loggedIn === false, selectedModel: null, window: null, loginState: 'idle', lastLogin: null };
+          // 槽身份三个字段（slot / accountKey / profileDir）在**两条分支里都要有**：
+          // 前端把 sites 当同一个列表渲染，缺字段的行会让「未初始化」的槽无法显示成
+          // 「glm (账户2)」而退化成裸 siteId，两行看起来一模一样。
+          return { siteId: st.id, siteName: st.name, origin: st.origin, slot: acc.slot, accountKey: acc.key, displayName: accountLabel(st.name, acc.slot), profileDir: slotDir, initialized: false, running: false, busy: false, loggedIn: has ? cached.loggedIn : null, loggedInCached: has && cached.loggedIn === true, loginBasis: trusted ? cached.basis : (cached ? 'stale' : null), loginCheckedAt: cached ? cached.at : null, needLogin: has && cached.loggedIn === false, selectedModel: null, window: null, loginState: 'idle', lastLogin: null };
         }
         const s = d.status();
-        return { siteId: st.id, siteName: st.name, origin: st.origin, initialized: true, running: s.running, busy: s.busy, loggedIn: s.loggedIn, loggedInCached: s.loggedInCached === true, loginBasis: s.loginBasis ?? null, loginCheckedAt: s.loginCheckedAt ?? null, needLogin: s.needLogin, selectedModel: s.selectedModel, window: s.window ?? null, loginState: s.loginState ?? 'idle', lastLogin: s.lastLogin ?? null };
-      });
-      return { ...base, sites };
+        return { siteId: st.id, siteName: st.name, origin: st.origin, slot: acc.slot, accountKey: acc.key, displayName: accountLabel(st.name, acc.slot), profileDir: s.profileDir ?? null, initialized: true, running: s.running, busy: s.busy, loggedIn: s.loggedIn, loggedInCached: s.loggedInCached === true, loginBasis: s.loginBasis ?? null, loginCheckedAt: s.loginCheckedAt ?? null, needLogin: s.needLogin, selectedModel: s.selectedModel, window: s.window ?? null, loginState: s.loginState ?? 'idle', lastLogin: s.lastLogin ?? null };
+      }
     },
-    loginTrigger: (siteId) => driverFor(siteId || 'deepseek').openLogin(),
+    loginTrigger: (accountKey) => driverFor(accountKey || 'deepseek').openLogin(),
     // 设置页「登录网站」用：等这次登录真正结束（成功/失败/超时）再把结果带回
     // 控制面。旧动作是 fire-and-forget，失败只能进控制台，界面永远显示未登录。
     loginAndReport: async (siteId, { timeoutMs } = {}) => {
-      const sid = getSite(siteId) ? siteId : 'deepseek';
-      const d = driverFor(sid);
+      // accountKey（0.14.7）：`glm#2` 登录的是账户2 那份 profile。
+      // 未知站点回落到默认站点的**默认槽**（与 0.14.6 行为一致）。
+      let accountKey = String(siteId || 'deepseek');
+      try {
+        const p = parseAccountKey(accountKey);
+        accountKey = getSite(p.siteId) ? formatAccountKey(p.siteId, p.slot) : 'deepseek';
+      } catch { accountKey = 'deepseek'; }
+      const sid = accountKey;
+      const d = driverFor(accountKey);
       const ms = Math.max(10_000, Number(timeoutMs) || cfg.loginTimeoutMs);
       const t0 = Date.now();
       let timer = null;
@@ -1414,16 +1491,16 @@ function imageMarkdown(images) {
           d.openLogin(),
           new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`login timed out after ${ms}ms`)), ms); }),
         ]);
-        return { ok: true, siteId: sid, siteName: getSite(sid)?.name, ms: Date.now() - t0, ...(result || {}) };
+        return { ok: true, siteId: sid, accountKey, slot: parseAccountKey(sid).slot, siteName: getSite(parseAccountKey(sid).siteId)?.name, ms: Date.now() - t0, ...(result || {}) };
       } catch (err) {
-        return { ok: false, siteId: sid, siteName: getSite(sid)?.name, ms: Date.now() - t0, error: String(err?.message || err) };
+        return { ok: false, siteId: sid, accountKey, ms: Date.now() - t0, error: String(err?.message || err) };
       } finally { if (timer) clearTimeout(timer); }
     },
-    siteConnect: (siteId) => driverFor(getSite(siteId) ? siteId : 'deepseek'),
+    siteConnect: (accountKey) => driverFor(accountKey || 'deepseek'),
     // 展示窗口动作（有头 Edge）：侧栏「独立窗口」按钮走这里，与登录共用
     // 同一持久 profile——窗口里直接可聊，自动化轮次驱动同一页面。
-    windowOpener: (siteId, action, opts = {}) => {
-      const d = driverFor(getSite(siteId) ? siteId : 'deepseek');
+    windowOpener: (accountKey, action, opts = {}) => {
+      const d = driverFor(accountKey || 'deepseek');
       if (action === 'close') return d.closeWindow();
       // 多窗口错位：统计已开的窗口数作为停靠偏移，新窗不盖旧窗。
       let openCount = 0;
@@ -1435,7 +1512,7 @@ function imageMarkdown(images) {
     // 「导入本机登录态」：把用户真实 Edge profile 的 cookies 采纳进**所选站点**的
     // 桥 profile。旧实现写死默认驱动——对 glm/kimi/qwen 调用会去改 DeepSeek 的
     // 登录态（站点间串号），因此按 siteId 路由到对应驱动（与 login/window 同规则）。
-    sessionImport: (siteId, dir) => driverFor(getSite(siteId) ? siteId : 'deepseek').importStorageFromProfile(dir),
+    sessionImport: (accountKey, dir) => driverFor(accountKey || 'deepseek').importStorageFromProfile(dir),
     onHttp: (req, res) => {
       const u = new URL(req.url, 'http://localhost');
       const pathname = u.pathname;
@@ -1571,6 +1648,11 @@ function imageMarkdown(images) {
     const resolvedModel = resolveWebModel(options.model || defaultModel || cfg.modelId);
     let model = resolvedModel.id;
     let siteId = resolvedModel.siteId;
+    // 账户槽（0.14.7）：随模型解析一起确定。`glm@2:glm-5.3` → slot '2'；
+    // 裸 id 与历史别名 → 默认槽。**默认槽的 accountKey 就是 siteId**，
+    // 因此没配槽的用户在 meta 里看到的与 0.14.6 逐字相同。
+    let slot = resolvedModel.slot || DEFAULT_SLOT;
+    let accountKey = resolvedModel.accountKey || siteId;
     const agentId = options.agentId ?? options.agentName ?? options.agent ?? null;
     // 子代理会话模式（设置页「会话与子代理」）：own = 每个 agentId 独立网页会话
     // （同账号新对话，互不污染主对话）；share = 子代理与主会话共用同一网页对话。
@@ -1584,6 +1666,10 @@ function imageMarkdown(images) {
     if (agentId && subAgentMode === 'own' && subAgentSite && subAgentSite !== siteId) {
       siteId = subAgentSite;
       model = 'auto';
+      // 子代理站点分流是**站点级**设置，它只指默认槽：把一个槽号带过站点边界，
+      // 会去读那个站点上根本不存在的账户（`glm#2` → `zai#2`）。
+      slot = DEFAULT_SLOT;
+      accountKey = siteId;
     }
     const keyAgentId = subAgentMode === 'own' ? agentId : null;
     const keyPath = options.sessionId && cfg.contextMode === 'session' && !options.purpose
@@ -1599,6 +1685,10 @@ function imageMarkdown(images) {
         // siteId 必须一起记：设置页要据此标出「本会话实际走的是哪一支适配」
         // （默认标签形状 / glm 代码块形状），只记 prompt 就只能靠猜。
         siteId,
+        // 账户槽（0.14.7）同样要记：同一站点两个槽的提示词可能一样，
+        // 但「这一轮走的是哪个账户」是排障时的第一个问题。
+        slot,
+        accountKey,
         agentId,
         tools: Array.isArray(options.tools) ? options.tools.map((t) => t?.name).filter(Boolean) : [],
         at: new Date().toISOString(),
@@ -1610,7 +1700,11 @@ function imageMarkdown(images) {
       return {
         prompt,
         inputTokens: estimateTokens(prompt),
-        meta: { model: siteId + ':' + model, siteId, thinkMode, sendGapMs: clampSendGapMs(settings.sendGapMs) },
+        meta: {
+          model: formatModelId(siteId, slot, model), siteId, slot, accountKey, thinkMode,
+          // 发送间隔按**槽**取（不同登录态风控独立）；回落链见 accounts.sendGapForSlot。
+          sendGapMs: clampSendGapMs(sendGapForSlot(settings, accountKey, siteId)),
+        },
         async attach() {
           const imgs = imagesOfMessages(messages);
           if (!imgs.length) return [];
@@ -1653,9 +1747,10 @@ function imageMarkdown(images) {
       prompt,
       inputTokens: cumulativeTokens,
       meta: {
-        sessionKey: keyPath, fresh, model: siteId + ':' + model, siteId, thinkMode,
-        // 发送间隔（设置页）：executor 在发送前按它节流，限流退避也以它为基数
-        sendGapMs: clampSendGapMs(settings.sendGapMs),
+        sessionKey: keyPath, fresh, model: formatModelId(siteId, slot, model), siteId, slot, accountKey, thinkMode,
+        // 发送间隔（设置页）：executor 在发送前按它节流，限流退避也以它为基数。
+        // 0.14.7 起按槽取——同一站点两个账户是两份独立的风控窗口。
+        sendGapMs: clampSendGapMs(sendGapForSlot(settings, accountKey, siteId)),
         // 网页会话丢失时的整段重放文本（见 executor 的 WEB_SESSION_LOST 分支）
         rebuild: () => serializeFirstTurn({ ...options, extraPrompt, siteId }),
       },

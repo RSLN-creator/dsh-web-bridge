@@ -332,14 +332,36 @@ window.__ModuleLoader__.load({
         // 保留判定依据字段：旧实现只挑 4 个字段进列表，把后端已经算好的
         // loginBasis/loginCheckedAt 丢掉了——「未登录」于是看起来像凭空断言。
         .map(s => ({
-          siteId: s.siteId, loggedIn: s.loggedIn, initialized: s.initialized, busy: s.busy,
+          // accountKey（0.14.7）：`glm` 或 `glm#2`。**同一站点两个账户是两行**，
+          // 所有状态与动作都必须按 accountKey 索引——用 siteId 做键会让第二行
+          // 把第一行的忙碌状态、登录结果、窗口状态全部覆盖掉，界面看起来
+          // 「点了账户2 却在动账户1」。旧后端无该字段时回落 siteId，可跨版本共存。
+          accountKey: s.accountKey || s.siteId,
+          siteId: s.siteId, slot: s.slot || null,
+          // displayName 由服务端给（`智谱清言 (GLM) (账户2)`）；缺失时回落站点名。
+          displayName: s.displayName || siteName(s.siteId),
+          loggedIn: s.loggedIn, initialized: s.initialized, busy: s.busy,
           loggedInCached: s.loggedInCached === true, loginBasis: s.loginBasis || null,
           loginCheckedAt: s.loginCheckedAt || null, window: s.window || null,
         }))
         .filter(s => !onlySiteId || s.siteId === onlySiteId)
-        .sort((a, b) => (a.siteId === 'deepseek' ? -1 : b.siteId === 'deepseek' ? 1 : siteName(a.siteId).localeCompare(siteName(b.siteId))));
+        .sort((a, b) => {
+          if (a.siteId === 'deepseek' && b.siteId !== 'deepseek') return -1;
+          if (b.siteId === 'deepseek' && a.siteId !== 'deepseek') return 1;
+          const bySite = siteName(a.siteId).localeCompare(siteName(b.siteId));
+          if (bySite !== 0) return bySite;
+          // 同站点内默认槽排前（与后端「默认槽总在第一位」的口径一致）
+          return (a.slot ? 1 : 0) - (b.slot ? 1 : 0);
+        });
+      /** accountKey → { siteId, slot }：`glm#2` → { siteId:'glm', slot:'2' }。 */
+      const siteSlot = (key) => {
+        const i = String(key).indexOf('#');
+        return i === -1 ? { siteId: key, slot: '' } : { siteId: key.slice(0, i), slot: key.slice(i + 1) };
+      };
       const setResult = (sid, r) => setResults(prev => ({ ...prev, [sid]: r }));
       const [winSites, setWinSites] = React.useState({});
+      // windows 由服务端按 accountKey 索引（0.14.7）；旧后端按 siteId，
+      // 而默认槽的 accountKey 就是 siteId，因此两种形态在默认槽上等价。
       const refreshWins = () => api('window').then(w => setWinSites(w?.windows || {})).catch(() => {});
       React.useEffect(() => { refreshWins(); }, []);
       // 四个动作全部走 apiSoft：失败原因落进本行状态，绝不让整块面板崩掉。
@@ -348,7 +370,7 @@ window.__ModuleLoader__.load({
       async function doLogin(sid) {
         setBusySite(sid); setResult(sid, null);
         // 后端要打开有头 Edge 等人工登录，超时必须放宽（等待上限 300s）。
-        const r = await apiSoft('login', { siteId: sid, wait: true, timeoutMs: 300000 }, 330000);
+        const r = await apiSoft('login', { ...siteSlot(sid), wait: true, timeoutMs: 300000 }, 330000);
         if (!r.ok) setResult(sid, { ok: false, text: r.error });
         else {
           const d = r.data;
@@ -364,7 +386,7 @@ window.__ModuleLoader__.load({
       async function checkLogin(sid) {
         // 在独立窗口里登录完后点这里立即确认结果（connect 幂等且轻量）。
         setBusySite(sid); setResult(sid, null);
-        const r = await apiSoft('verify-login', { siteId: sid }, 90000);
+        const r = await apiSoft('verify-login', { ...siteSlot(sid) }, 90000);
         if (!r.ok) setResult(sid, { ok: false, text: '检测失败：' + r.error });
         else {
           const d = r.data;
@@ -386,7 +408,7 @@ window.__ModuleLoader__.load({
         // 桥 profile 与用户的 Edge profile 是两个独立世界，这是两者之间唯一的
         // 桥（真机 2026-09-13：桥 profile 里除 deepseek 外没有任何站点 cookie）。
         setBusySite(sid); setResult(sid, null);
-        const r = await apiSoft('session-import', { siteId: sid }, 180000);
+        const r = await apiSoft('session-import', { ...siteSlot(sid) }, 180000);
         if (!r.ok) setResult(sid, { ok: false, text: '导入失败：' + r.error });
         else {
           const d = r.data;
@@ -403,8 +425,8 @@ window.__ModuleLoader__.load({
       }
       async function toggleWindow(sid) {
         setBusySite(sid); setResult(sid, null);
-        const isOpen = !!winSites[sid]?.open;
-        const r = await apiSoft('window', { siteId: sid, action: isOpen ? 'close' : 'open' }, 120000);
+        const isOpen = !!winSites[sid]?.open;   // sid 是 accountKey，与服务端 windows 键一致
+        const r = await apiSoft('window', { ...siteSlot(sid), action: isOpen ? 'close' : 'open' }, 120000);
         if (!r.ok) setResult(sid, { ok: false, text: r.error });
         else if (r.data?.alreadyOpen) setResult(sid, { ok: true, text: '窗口已存在——已聚焦弹到最前' });
         else setResult(sid, { ok: true, text: isOpen ? '独立窗口已收起，回到无头运行' : '独立窗口已打开（与桥共用登录态）' });
@@ -414,37 +436,37 @@ window.__ModuleLoader__.load({
       }
       if (!list.length) return h('p', { className: 'hwb-hint' }, '站点状态加载中…（中继未启动时不可用）');
       return h('div', { className: 'hwb-sites' },
-        list.map(s => h('div', { key: s.siteId, className: 'hwb-site-block' },
-          h('div', { className: 'hwb-site-row' + (busySite === s.siteId || s.busy ? ' busy' : '') },
+        list.map(s => h('div', { key: s.accountKey, className: 'hwb-site-block' },
+          h('div', { className: 'hwb-site-row' + (busySite === s.accountKey || s.busy ? ' busy' : '') },
             h('span', { className: 'hwb-site-identity' },
               h('span', {
                 className: 'hwb-dot ' + (s.loggedIn === true ? 'ok' : s.loggedIn === false ? 'bad' : 'idle'),
                 'aria-hidden': 'true',
               }),
-              h('span', { className: 'hwb-site-name' }, siteName(s.siteId))),
+              h('span', { className: 'hwb-site-name' }, s.displayName)),
             h('span', {
               className: 'hwb-site-state ' + (s.loggedIn === true ? 'ok' : s.loggedIn === false ? 'bad' : 'idle'),
               title: basisText(s),
             },
               s.loggedIn === true ? (s.loggedInCached ? '已登录(缓存)' : '已登录') : s.loggedIn === false ? '未登录' : '待检查'),
             h('span', { className: 'hwb-row-actions' },
-              h('button', { disabled: busySite !== null, onClick: () => doLogin(s.siteId) },
-                busySite === s.siteId ? '等待登录完成…' : s.loggedIn === true ? '更换账户' : '登录'),
-              h('button', { disabled: busySite !== null, onClick: () => checkLogin(s.siteId) }, '检测'),
+              h('button', { disabled: busySite !== null, onClick: () => doLogin(s.accountKey) },
+                busySite === s.accountKey ? '等待登录完成…' : s.loggedIn === true ? '更换账户' : '登录'),
+              h('button', { disabled: busySite !== null, onClick: () => checkLogin(s.accountKey) }, '检测'),
               h('button', {
                 disabled: busySite !== null,
                 title: '把本机真实 Edge 里该站点的登录态导入桥 profile（读取你的 Edge cookies；无需在桥里再登录一次）',
-                onClick: () => importCookies(s.siteId),
+                onClick: () => importCookies(s.accountKey),
               }, '导入本机登录态'),
               h('button', {
                 disabled: busySite !== null,
                 title: '在独立窗口中打开该站点真实网页（可登录、可聊天，与桥共用登录态）',
-                onClick: () => toggleWindow(s.siteId),
+                onClick: () => toggleWindow(s.accountKey),
               }, '独立窗口'))),
-          results[s.siteId] && h('p', {
-            className: 'hwb-hint indent ' + (results[s.siteId].ok ? 'ok' : results[s.siteId].tone === 'idle' ? '' : 'bad'),
+          results[s.accountKey] && h('p', {
+            className: 'hwb-hint indent ' + (results[s.accountKey].ok ? 'ok' : results[s.accountKey].tone === 'idle' ? '' : 'bad'),
             role: 'status',
-          }, (results[s.siteId].ok ? '✓ ' : '✗ ') + siteName(s.siteId) + '：' + results[s.siteId].text))),
+          }, (results[s.accountKey].ok ? '✓ ' : '✗ ') + s.displayName + '：' + results[s.accountKey].text))),
         h('p', { className: 'hwb-hint indent' },
           subHint
             ? '子代理所选站点的账户行：登录/更换账户与其它站点同一套逻辑（真实 Edge 窗口一次性登录），登录态按站点各自持久化；与主线同站点时两者天然共享登录。'
