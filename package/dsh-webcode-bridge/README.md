@@ -1,8 +1,62 @@
 # Harness Web Bridge
 
-已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.14.4。
+已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.14.5。
 
-安装：`pnpm pack` 后执行 `dsh plugin --profile web add ./dsh-webcode-bridge-0.14.4.tgz`，重启 `dsh web`。需要 Node.js 20+、系统 Edge；无需浏览器扩展。
+安装：`npm pack` 后执行 `node scripts/install-profiles.mjs`（或 `dsh plugin --profile web add ./dsh-webcode-bridge-0.14.5.tgz`），重启 `dsh web`。需要 Node.js 20+、系统 Edge；无需浏览器扩展。
+
+> 0.14.5 起发布流程收进仓库：`scripts/verify-pack.mjs` 逐文件核对 tarball 与工作树
+> （改完代码忘了重新 pack 时直接报错），`scripts/install-profiles.mjs` 先删旧目录再解包
+> （绕开 pnpm 对同版本 tarball「Already up to date」不重解的坑）。两条都是真实踩过的坑。
+
+## 0.14.5
+
+**修掉两个由真机会话日志定位的缺陷，并把右栏按官方审美重排。**
+
+### 超长提示词写不进输入框（`PROMPT_WRITE_STALLED`）
+
+真机证据（`session-c710ef6e` 的 turn 2 终局，逐字）：
+
+```
+locator.fill: Timeout 30000ms exceeded
+  - locator resolved to <textarea … placeholder="给 DeepSeek 发送消息 ">
+  - fill("# 可用本地工具…(+807789)
+```
+
+一次性把 80 万字符交给 `fill()` 时，Playwright 在网页侧整段卡住，30s 后超时；卡住期间
+**没有任何中间态可读**。现在按 `composerWritePlan` 分块写入、块间回读长度，连续两块不增长即
+抛 `PROMPT_WRITE_STALLED`，错误里带**已写/总长度**与元素现场（标签、id、placeholder、可见性）。
+决策抽成纯函数（`composerWritePlan` / `stallStep`），`test/composer-write.test.mjs` 12 项钉住边界。
+
+### `<tool_result>` 外壳漏进正文
+
+同一会话的 `assistant/message` seq=587 里，网页模型把工具结果连同外壳吐了回来：
+
+```
+block 9  text len=198  <tool_result>\n{"mcp_action":"result","name":"edit",…
+block 11 text len=200  </tool_result>\n{"mcp_action":"result","name":"write",…
+```
+
+协议边界锚点只认 `tool_call`，于是边界落在**外壳之后**的 JSON 上，`<tool_result>\n`（13 字符）被当正文发出。
+现在 `tool_result|tool_results` 进锚点，但**故意不进 transport 判定**——工具结果不是工具调用，
+绝不能被当成待执行的调用。`test/protocol-leak.test.mjs` +2 项钉住这条区分。
+
+### 右栏重排（对齐官方右栏的实测尺寸）
+
+- **顶层工具条**：当前站点名 + 8px 状态点 + 右侧四颗 **28px 图标按钮**（刷新 / 独立窗口 /
+  新面板 / 浮动），尺寸与官方 `ExpandButton` 实测值一致（`width/height:28px`、`border-radius:28px`、
+  hover `--dsw-alias-interactive-bg-hover`）。文字全部进 `title`/`aria-label`。
+- **站点标签条**降为次级导航：紧凑胶囊（26px / 圆角 13px），登录态从「标签内文案」改为
+  **色点 + tooltip**（长文案正是把标签条挤爆的原因）；去掉了两端 mask 渐隐——官方右栏不用
+  这种表达，且渐变本身就是观感上的「遮挡」。滚轮横向滚动保留（原生非被动监听）。
+- 空态/错误态统一成官方 guide 卡片形态（`.5px` 边框、`bg-layer-1`、标题+说明+主按钮三层）。
+
+### 会话日志归因工具（长期资产）
+
+`test-mock/parse-session-log.mjs`：DSH 的会话落盘是**多帧拼接**的 zstd，`zstdDecompressSync`
+只解第一帧（1.3 MB 的文件解出 220 字节），这个坑上一轮会话连踩三次。工具按 zstd magic 切帧逐帧解压，
+输出事件直方图、轮次结局、失败项、工具调用与用户输入。归因报告见 `doc/session-log-review.md`。
+
+## 0.14.4
 
 原生「设置 > 网页桥接」管理登录与启用开关。默认沿用 `~/.dsh/webcode-edge-profile`。
 模型分组 Harness Web Bridge 暴露全部内容服务站点（`site:model` 限定 id）；显示名为
@@ -12,6 +66,8 @@
 ## 0.14.4
 
 **修掉「打开右侧网页之后掉登录」，并把等待时间变成可核对的两个数。**
+
+（本节以下为 0.14.4 的原始记录，保留不动。）
 
 ### 掉登录（豆包真机报障）
 
