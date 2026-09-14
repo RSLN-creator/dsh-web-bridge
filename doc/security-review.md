@@ -186,13 +186,25 @@ consent 文件、把「已同意」静默变回「首次运行」。
   驱动 profile 或本包树内（`openai.js:244-256`）。**注意**：控制面的
   `POST session-import` 没有这层目录限制（`web-control.js:348-361`），见第 6 节。
 
-### 3.3 镜像对 cookie 的处理
+### 3.3 镜像对 cookie 的处理（0.14.4 重写）
 
-`lib/mirror.js` 会剥离响应里的 `set-cookie` 域/安全属性并回写
-（`rewriteCookie`，`mirror.js:260-265`），上游 `set-cookie` 会被改写后回给浏览器，
-同时 best-effort 写回驱动 profile（`mirror.js:605-609`）；
-请求侧若无 cookie 则从驱动 profile 取（`mirror.js:541-547`）。
-`content-security-policy` 等响应头在 `STRIP_RESPONSE` 里被剥离（`mirror.js:36-41`）。
+两个消费方向各自按 RFC 6265 解析，抽成纯模块 `lib/cookies.js`：
+
+- **回给浏览器**（`rewriteSetCookieForMirror`）：去掉 `Domain`（跨域会被整枚丢弃）、
+  `SameSite=None` 收敛成 `Lax`，但 **`Secure` 必须保留**——`__Secure-` / `__Host-`
+  前缀缺 Secure 会被浏览器按前缀规则直接丢弃。旧实现是字符串替换，把 Secure 剥掉，
+  这正是「打开右侧网页后掉登录」的直接原因之一。
+- **写回驱动 profile**（`toPlaywrightCookie`）：删除指令（`Max-Age<=0` / `Expires` 已过）
+  翻译成 `expires: 0`，**不再写成空值**——旧实现会把 profile 里有效的登录 cookie
+  就地抹成空串。`__Secure-` 前缀即使原头没写 Secure 也补上（否则 playwright
+  `addCookies` 抛错，整批一枚都写不进去）。
+- **请求侧合并**（`mergeCookieHeaders`）：profile 优先、请求补缺。旧实现「请求带
+  cookie 就只用请求里的」，于是 iframe 在 `<site>.localhost` 上存过任何一枚 cookie
+  之后，驱动 profile 里真正登录的那份**永远不再发给上游**。
+
+`content-security-policy` 等响应头仍在 `STRIP_RESPONSE` 里被剥离（`mirror.js`）；
+驱动 cookie 读取有 5 秒短缓存（CDP 往返昂贵，一次页面加载会上百次），
+**本镜像写回 cookie 时立即失效**。
 
 ---
 
@@ -334,11 +346,10 @@ consent 文件、把「已同意」静默变回「首次运行」。
    会直接通过（`web-control.js:131`）。没有本机进程级鉴权。
 2. **持久 Edge profile 里存有真实 cookie**（`index.js:54`、`browser-driver.js:660`）。
    桥不对它加密，安全性等同于操作系统文件权限。
-3. **两个状态文件的写入权限不一致**：`webcode-login-state.json`（`browser-driver.js:249`）
-   与 `webcode-sessions-<siteId>.json`（`browser-driver.js:328`）的
-   `writeFileSync` 未传 `mode`，权限随 umask，而 consent / settings / send-state
-   三个文件都是显式 `0o600`（`relay.js:63`、`index.js:398`、`index.js:1060`）。
-   属可修的一致性问题。
+3. ~~**两个状态文件的写入权限不一致**~~ —— **已修复（0.14.4）**：
+   `webcode-login-state.json` 与 `webcode-sessions-<siteId>.json` 的
+   `writeFileSync` 现在都传 `{ mode: 0o600 }`，与 consent / settings / send-state 一致。
+   仍须记住下面那条限定（Windows 上 mode 不生效）。
 
    > **重要限定（本次核实）**：那几个显式 `0o600` 在 **Windows 上实际并不生效**——
    > Node 文档明确说明 `mode` 只对 POSIX 系统有效，Windows 上文件权限由 ACL 决定。
@@ -355,10 +366,12 @@ consent 文件、把「已同意」静默变回「首次运行」。
 5. **`/v1/*` 前端无鉴权**（`openai.js:211-282`）。保护只有「仅回环」+ POST 的
    `csrfSafe`（`openai.js:224-226`）；`GET /v1/models` 与 `GET /bridge/status`
    连 `csrfSafe` 都没有（`openai.js:217-223`）。本地进程可读状态。
-6. **`POST /__webcode/session-import` 接受任意 `sourceProfileDir`**
-   （`web-control.js:348-361`）：只校验目录存在，不做根目录白名单；
-   对比 `openai.js:244-256` 的 `/bridge/import-session` 是有白名单的。
-   两者敏感度相同，防护强度不一致。
+6. ~~**`POST /__webcode/session-import` 接受任意 `sourceProfileDir`**~~ ——
+   **已修复（0.14.4）**：新增 `permittedImportRoots()` / `isWithinRoots()`
+   （`web-control.js` 顶部导出），只允许 DSH home、桥驱动 profile、本包树三个根，
+   与 `openai.js` 的 `/bridge/import-session` **共用同一套判定**——两条入口的
+   防护强度不再有差异。回归用例见 `test/site-mount.test.mjs` 的
+   `session-import 按站点路由`（覆盖「根内不存在」「根外」「根内存在」三条分支）。
 7. **强杀本机浏览器进程的能力**：`killOrphanEdgeForProfile`
    （`browser-driver.js:621-636`）用 PowerShell + WMI `Terminate` 终结命令行里
    含本 `profileDir` 的 `msedge.exe`。匹配按路径精确（`browser-driver.js:626`），

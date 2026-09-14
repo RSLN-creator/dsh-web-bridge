@@ -16,8 +16,9 @@
 | [verify.md](verify.md) | 真机验收矩阵：每个版本要核对的项、取证命令、已知结论 | 发版前；改动驱动/解码/镜像之后 |
 | [long-term-issues.md](long-term-issues.md) | 长期问题台账：已知缺陷、为什么不现在修、若要修从哪下手 | 决定「这个要不要一起修」时 |
 | [security-review.md](security-review.md) | 安全审查：攻击面清单、已做的防护、待办 | 动控制面、cookie、镜像转发时 |
-| [comment-style.md](comment-style.md) | 注释风格：为什么这么写、避免什么 | 写新模块或重构前 |
+| [comment-style.md](comment-style.md) | 注释风格：为什么这么写、避免什么；错误码与交付规范 | 写新模块或重构前 |
 | [review-guide.md](review-guide.md) | 评审指南：怎么审这份代码、常见陷阱 | 接手评审时 |
+| [progress.md](progress.md) | **进度台账**：当前走到哪、下一步是什么、已知环境约束 | 会话开始 / 中断恢复时 |
 
 ## 专题
 
@@ -25,6 +26,7 @@
 | --- | --- |
 | [deepseek-longrun.md](deepseek-longrun.md) | 长跑可靠性专题：无外部干扰连续跑真实任务的判据与踩坑 |
 | [incident-2026-09-11.md](incident-2026-09-11.md) | 事故复盘（含根因、时间线、改进项） |
+| [session-log-review.md](session-log-review.md) | 会话日志归因：最近两次会话的失败点、归因、复现命令 |
 
 ## 调研（doc/research/）
 

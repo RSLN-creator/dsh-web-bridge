@@ -4,6 +4,173 @@
 
 ---
 
+# 0.14.5 会话日志归因修复 + 右栏对齐官方
+
+日期：2026-09-14。环境：Windows、Node v24.18.0。
+
+**范围**：由最近两次 harness 会话日志定位出的两个缺陷（超长提示词写入卡死、
+`<tool_result>` 外壳漏进正文）、右栏按官方实测尺寸重排、发布流程收进仓库。
+
+## 归因（先说结论从哪来）
+
+新增 `test-mock/parse-session-log.mjs` 解析会话日志。**关键坑**：DSH 的
+`session.v3.jsonl.zstd` 是**多帧拼接**的 zstd，`zstdDecompressSync(buf)` 只解第一帧
+——1.3 MB 的文件解出 220 字节（那条 `{"type":"session"}` 头），看起来「日志是空的」。
+上一轮会话连踩三次。工具按 zstd magic（`28 B5 2F FD`）切帧后逐帧解压。
+
+```powershell
+cd package\dsh-webcode-bridge
+node test-mock/parse-session-log.mjs --recent 3 --errors-only
+```
+
+归因全文见 [session-log-review.md](session-log-review.md)。要点：
+
+| 会话 | 事件 | 结局 |
+| --- | --- | --- |
+| `session-c710ef6e` | 1020 | turn 1 ✔ / **turn 2 ✖ error**（`locator.fill` 30s 超时） |
+| `session-e02c4195` | 37 | turn 1 ✔，无产出（同题重开副本，无独立结论） |
+
+## 离线测试
+
+全套 **259 通过 / 0 失败**（逐文件 `node test/<f>`；`node --test` 在本机沙箱下
+`spawn EPERM`）。本轮新增/扩充：
+
+| 测试 | 例数 | 钉住什么 |
+| --- | --- | --- |
+| `test/composer-write.test.mjs` | 12 | 分块计划边界（恰好等于上限仍是 single、0 长度 0 块、非法配置走默认而非 clamp）；停滞判定（单块不涨**不得**判死富文本站点、连续两块才判死、回读 null 不计数不判死） |
+| `test/protocol-leak.test.mjs` | +2（共 11） | `<tool_result>` 是**边界锚点**但**不是** transport 调用；不得被 parse 成 call |
+| `test/client-render.test.mjs` | 6（改写 1） | 状态改色点后，四态仍必须能从 `title`/`aria-label` 读到；长状态文案**不得**再出现在可见文本里 |
+
+## 真机取证（写进代码注释的原始证据）
+
+### P0 超长提示词写入卡死
+
+`session-c710ef6e` 的 turn 2 终局，逐字：
+
+```
+locator.fill: Timeout 30000ms exceeded
+  - waiting for locator('textarea.ds-scroll-area').first()
+  - locator resolved to <textarea rows="2" name="search" … placeholder="给 DeepSeek 发送消息 ">
+  - fill("# 可用本地工具…(+807789)
+```
+
+807,789 字符一次性交给 `fill()` → 网页侧整段卡住 → 30s 超时，且卡住期间无中间态可读。
+修法：`composerWritePlan`（single/chunked）+ 块间回读 + `stallStep` + 错误码
+`PROMPT_WRITE_STALLED`（带已写/总长度与元素现场）。
+
+### P1 `<tool_result>` 漏进正文
+
+同一会话 `assistant/message` seq=587，三个 text 块逐字带外壳：
+
+```
+block 9  len=198  <tool_result>\n{"mcp_action":"result","name":"edit",…
+block 11 len=200  </tool_result>\n{"mcp_action":"result","name":"write",…
+block 13 len=891  </tool_result>\n{"mcp_action":"result","name":"read",…
+```
+
+修前/修后探针（`findProtocolStart`）：
+
+```
+"<tool_result>"       -> index=-1   →   index=0
+"</tool_result>"      -> index=-1   →   index=0
+"普通正文"            -> index=-1        index=-1（不变）
+"if (a) { return; }" -> index=-1        index=-1（不变）
+```
+
+## 发布流程（本轮新增，都是真实踩过的坑）
+
+| 脚本 | 解决什么 |
+| --- | --- |
+| `scripts/verify-pack.mjs` | 0.14.4 曾「改了 mirror.js 但没重新 pack」，装上去是旧代码；现在逐文件 sha256 比对并打印「N/M 逐字相同」 |
+| `scripts/install-profiles.mjs` | pnpm 对**同版本号** tarball 判「Already up to date」不重解；现在先删旧目录再解包 |
+| `scripts/tar.mjs` | 沙箱拦 spawn（`EPERM: spawnSync tar`），发布脚本不能依赖系统 `tar`；纯 Node 解 ustar（含 pax） |
+
+本轮实测：
+
+```
+[verify-pack] 逐字相同 25/25   ✔ tarball 与工作树一致
+web:      version=0.14.5 same=25/25 diff=0 missing=0
+headless: version=0.14.5 same=25/25 diff=0 missing=0
+  lib/browser-driver.js contains "PROMPT_WRITE_STALLED": true
+  lib/agent-preset.js   contains "tool_result|tool_results": true
+  lib/client.cjs        contains "hwb-toolbar": true
+  lib/index.js          contains "composerChunkChars": true
+```
+
+tarball：`dsh-webcode-bridge-0.14.5.tgz`，232,637 B，25 个文件。
+
+## 待真机确认（本轮未做，需人工择时）
+
+1. **重启 DSH 后**右栏新布局目视核对（官方尺寸：28px 控件 / `.5px` 边框 / 24px 卡片圆角 / 15px·13px 排版）。
+2. **composer 分块写入**在真机上不再出现 30s `locator.fill` 超时；若仍超时，应给出
+   `PROMPT_WRITE_STALLED` 与已写进度（而不是光秃秃的超时）。
+3. 豆包掉登录的真机复验（0.14.4 修复项；间隔 ≥20s、最多 3 次，避免触发风控）。
+
+---
+
+# 0.14.4 掉登录修复 + 等待时长 + 右栏多开
+
+日期：2026-09-14。环境：Windows、Node v24.18.0、pnpm 11.25.0。
+
+**范围**：豆包「登录后右侧打开网页会掉登录」的根因修复（`Set-Cookie` 两个消费方向
+按 RFC 6265 重写）、等待发送时长的本会话与累计统计、右栏滚轮/多开/风格统一、
+两项安全审查欠账（导入白名单、状态文件权限）。
+
+## 离线测试
+
+全套 **249/249**（`node --test "test/*.test.mjs"`）。新增两套：
+
+| 测试 | 例数 | 钉住什么 |
+| --- | --- | --- |
+| `test/cookies.test.mjs` | 25 | 删除指令不得写成空值；`__Secure-`/`__Host-` 必须保住 `Secure`；镜像合并时 profile 优先 |
+| `test/wait-stats.test.mjs` | 18 | 本会话与累计同口径；未等待的轮次不进平均值分母；时长格式四档 |
+
+同时修掉两处**测试自身**的问题：
+
+1. `test/mirror.test.mjs` 的旧断言 `doesNotMatch(setCookie, /Domain=\|Secure\|SameSite=None/i)`
+   把「剥掉 Secure」钉成了期望行为——**它锁的正是本次修的 bug**。已改为
+   「Domain 去掉、SameSite=None 收敛、Secure 必须保留」。
+2. `test/tool-loop.test.mjs` 不传 `profileDir`，于是读**用户真实**设置
+   （`sendGapMs: 30000`），退避取 `max(sendGapMs, backoffMinMs)` 变成 30s+30s+60s，
+   撞上 120s 适配器看门狗 → 用例报 `WEB_NO_PROGRESS` 而不是 `RATE_LIMITED`，
+   即**看环境脸色**。已改用一次性临时 profile。
+
+## 真机长跑（新会话，未干扰本对话）
+
+在**复制出来**的 profile 上跑 `test-mock/run-real-longrun.mjs`（1.19 GB 副本，
+原 profile 由运行中的 DSH 持有，全程未杀任何 `msedge.exe`）：
+
+```
+LONGRUN RESULT: PASS
+turns: 5（4 轮工具循环 + 1 轮无工具回忆）
+sessionKey 五轮恒为 longrun-mu0d39jz
+fresh 逐轮 = [true, false, false, false, false]  → sameConversation: true
+轮1 tool-calls list_dir（1 调用）
+轮2 tool-calls 19× count_lines（真实文件）
+轮3 tool-calls write_report → written 675 bytes
+轮4 stop（最终答复）
+回忆轮 答出 9698 == truthTotal 9698  → 同一网页对话内的跨轮记忆成立
+deltasMatch 四轮全 true（无 STREAM_REWRITE、无协议文本泄漏）
+RATE_LIMITED 0 次 · WEB_SESSION_LOST 0 次 · sessionLostCount 0 · 超时 0 次
+发送间隔实际生效：waiting 29s / 25s / 27s / 29s（目标 30000ms，send-to-send）
+```
+
+这是「已有登录状态可长期无外部干扰跑真实任务且不触发风控」的**本轮直接证据**。
+报告：`package/dsh-webcode-bridge/.tmp/longrun-report.md`（675 B，由网页模型自己
+通过真实 `write_report` 工具写出）。
+
+## 待重启核对
+
+当前运行的 DSH 仍是内存里的 **0.14.3**（`hash ad4bf2efa6e0`）；两个 profile
+（web / headless）都已装 **0.14.4** 并逐项核对（`cachedProfileCookies` 与
+`permittedImportRoots` 均在）。重启后应核对 `build.version === '0.14.4'`。
+
+> 安装踩坑（本轮新增）：**同版本号重打包后 pnpm 会判「Already up to date」而不重新解包**，
+> 于是 `node_modules` 里留的是旧 tarball 的内容（`mirror.js` 缺 cookie 缓存）。
+> 必须显式删掉 `node_modules/dsh-webcode-bridge` 再 add，或改版本号。
+
+---
+
 # 0.14.3 真机复验与两个新 bug 修复
 
 日期：2026-09-14。环境：Windows、Node v24.18.0、pnpm 11.25.0、DSH 已重启。
