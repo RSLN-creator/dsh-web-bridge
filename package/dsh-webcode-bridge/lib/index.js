@@ -40,6 +40,10 @@ const DEFAULTS = {
   settingsNs: 'webcode',
   requireConsent: true,
   requestTimeoutMs: 240_000,
+  // 写入 composer 的单块字符上限（0.14.5）。超长提示词一次性交给 Playwright
+  // 的 fill() 会在网页侧整段卡住并以 30s 超时收尾，且没有任何中间态可诊断；
+  // 分块写入 + 块间回读长度让失败更早、且带得出已写进度（PROMPT_WRITE_STALLED）。
+  composerChunkChars: 20_000,
   // 排队上限必须显著大于单轮上限：网页一次只跑一轮，并行子代理会排队；
   // 旧值 300s 只比单轮 240s 多 60s，排在第二位的请求几乎必然「刚开始跑就超时」，
   // 长任务里的并行分支会成片失败。900s 足够跨过 2-3 轮排队。
@@ -1047,6 +1051,7 @@ function imageMarkdown(images) {
     headless: cfg.headless !== false,
     requestTimeoutMs: cfg.requestTimeoutMs,
     loginTimeoutMs: cfg.loginTimeoutMs,
+    composerChunkChars: cfg.composerChunkChars,
     logger: console,
   });
 
@@ -1069,6 +1074,7 @@ function imageMarkdown(images) {
         headless: cfg.headless !== false,
         requestTimeoutMs: cfg.requestTimeoutMs,
         loginTimeoutMs: cfg.loginTimeoutMs,
+        composerChunkChars: cfg.composerChunkChars,
         logger: console,
       });
       try { d.setImageLimitsProvider?.(imageLimitsProvider); } catch { /* 同上 */ }

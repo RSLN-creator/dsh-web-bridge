@@ -162,6 +162,46 @@ export function composerStrategy(info) {
   return 'editable';
 }
 
+/**
+ * 写入计划（纯函数，便于护栏测试）：给定总长度与单块上限，决定一次性写还是分块写。
+ *
+ * 为什么这条决策要单独抽出来：真机 2026-09-14 的 turn/end 里留下了 80 万字符
+ * 一次性 fill 导致 30s 超时的证据（详见 fillComposer 注释）。「多少算太长」是
+ * 一个会随站点变化的阈值，把它写成可断言的数据，比埋在两个 async 循环里可靠。
+ *
+ * 边界：非法 chunkChars（0/NaN/负数）走默认 20_000；clamp 到 [1_000, 200_000]，
+ * 避免配置成 1 导致每字符一次往返（把卡死换成更慢）。
+ */
+export function composerWritePlan({ length = 0, chunkChars = 20_000, kind = 'field' } = {}) {
+  const total = Math.max(0, Math.floor(Number(length) || 0));
+  // 非法值（0 / 负数 / NaN / 非数字）走**默认**，不是走 clamp 的下界：
+  // 「配成 -5」不是一个「很小的块」，而是一个错误配置，语义上应当等价于没配。
+  // （写成 clamp 的话 -5 会被抬成 1000，把错误配置伪装成一个合法的激进值。）
+  const raw = Number(chunkChars);
+  const size = Number.isFinite(raw) && raw > 0 ? Math.max(1_000, Math.min(200_000, raw)) : 20_000;
+  const chunks = total === 0 ? 0 : Math.ceil(total / size);
+  return { mode: total <= size ? 'single' : 'chunked', chunkChars: size, kind, chunks, total };
+}
+
+/**
+ * 停滞判定（纯函数）：块间回读长度不增长即计入停滞，连续两块即判死。
+ *
+ * 为什么是「连续两块」而不是「一块」：富文本编辑器（tiptap/ProseMirror）在
+ * 插入大块文本后需要一拍才把内部文档同步到 DOM，单块回读偶尔会读到旧长度——
+ * 只判一块会把正常的 doubao/kimi 误杀。连续两块不涨，才是真的卡住。
+ *
+ * curLen 为 null 表示回读失败（元素被替换、页面转场）：既不计入停滞、也不重置
+ * 计数，也**不**据此判死——那是另一类故障，由调用方的超时与错误码负责。
+ */
+export function stallStep(prevLen, curLen, stalled) {
+  const prev = typeof prevLen === 'number' ? prevLen : -1;
+  const count = Math.max(0, Number(stalled) || 0);
+  if (curLen == null) return { stalled: count, prevLen: prev, died: false };
+  const len = Number(curLen) || 0;
+  const next = len <= prev ? count + 1 : 0;
+  return { stalled: next, prevLen: len, died: next >= 2 };
+}
+
 export function createBrowserDriver(options = {}) {
   const siteId = options.siteId ?? 'deepseek';
   const site = getSite(siteId);
@@ -176,6 +216,10 @@ export function createBrowserDriver(options = {}) {
     headless: options.headless !== false,
     loginTimeoutMs: options.loginTimeoutMs ?? 300_000,
     requestTimeoutMs: options.requestTimeoutMs ?? 240_000,
+    // 单块写入字符数上限（0.14.5）。超过它就把 composer 分块写入并在块间回读
+    // 长度——一次性写 80 万字符会让 Playwright 的 fill 整段卡死（真机证据见
+    // fillComposer 的注释）。0 或非法值走默认 20_000。
+    composerChunkChars: Number(options.composerChunkChars) > 0 ? Number(options.composerChunkChars) : 20_000,
     decoderPath: options.decoderPath ?? null,
     logger: options.logger ?? console,
   };
@@ -918,18 +962,102 @@ export function createBrowserDriver(options = {}) {
     return composerStrategy(info);
   }
 
-  /** 把文本写进 composer——按真实元素形态分派（见 composerKind 的说明）。 */
+  /**
+   * 把文本写进 composer——按真实元素形态分派（见 composerKind 的说明）。
+   *
+   * 为什么必须分块（0.14.5）：真机会话的 turn/end 里留下了直接证据——
+   *
+   *   locator.fill: Timeout 30000ms exceeded
+   *   - locator resolved to <textarea … placeholder="给 DeepSeek 发送消息">
+   *   - fill("# 可用本地工具…(+807789)
+   *
+   * 一次性把 80 万字符交给 fill() 时，Playwright 在网页侧的执行会整段卡住，
+   * 30 秒后超时；而**卡住期间没有任何中间态可读**，事后只能看到一个光秃秃的
+   * 超时，既不知道写了多少、也不知道元素是否还活着。旧实现唯一的预兆是一句
+   * `large prompt: … consider trimming context` 的 warn，用户看不到。
+   *
+   * 现在：超过阈值就分块写（每块写完回读长度），并设「停滞」判据——
+   * 连续两块长度不增长即抛 PROMPT_WRITE_STALLED，把已写长度、总长度、站点与
+   * 元素现场一起带出来。失败得更早、且可归因。
+   *
+   * @returns {{kind:string, wrote:number}} kind=元素形态，wrote=实际写入字符数
+   */
   async function fillComposer(locator, message) {
     const kind = await composerKind(locator);
-    if (kind === 'field') { await locator.fill(message); return kind; }
+    const text = String(message);
+    // 「一次性写还是分块写」由纯函数决定（可断言，见 composerWritePlan 的注释）。
+    const plan = composerWritePlan({ length: text.length, chunkChars: cfg.composerChunkChars, kind });
+    if (kind === 'field') {
+      if (plan.mode === 'single') { await locator.fill(text); return { kind, wrote: text.length }; }
+      return { kind, wrote: await writeFieldChunked(locator, text, plan.chunkChars) };
+    }
     // contenteditable：fill() 在部分富文本编辑器上不触发框架的 input 事件
     // （tiptap/ProseMirror 靠 beforeinput/input 维护内部文档），因此先聚焦、
     // 清空既有内容，再用键盘级插入——这是与真人输入最接近的路径。
     await locator.click({ timeout: 10_000 }).catch(() => {});
     await locator.focus().catch(() => {});
     try { await page.keyboard.press('Control+A'); await page.keyboard.press('Delete'); } catch { /* 空框 */ }
-    await page.keyboard.insertText(String(message));
-    return kind;
+    if (plan.mode === 'single') { await page.keyboard.insertText(text); return { kind, wrote: text.length }; }
+    let wrote = 0;
+    let step = { stalled: 0, prevLen: -1, died: false };
+    for (let i = 0; i < text.length; i += plan.chunkChars) {
+      const slice = text.slice(i, i + plan.chunkChars);
+      await page.keyboard.insertText(slice);
+      wrote += slice.length;
+      // 让出事件循环：富文本编辑器靠 input 事件重建内部文档，连发不喘气
+      // 会让它把中间状态丢掉（真机 doubao/kimi 的 insertText 长串同样会卡）。
+      await page.waitForTimeout(0);
+      step = stallStep(step.prevLen, (await readComposer(locator))?.length ?? null, step.stalled);
+      if (step.died) throw await writeStalledError(locator, wrote, text.length, kind);
+    }
+    return { kind, wrote };
+  }
+
+  /**
+   * textarea/input 的分块写入。
+   *
+   * 第一块用 `fill`（它会先清空，语义最干净），后续块用键盘级 `insertText`
+   * ——对 textarea 也成立，且不会像 `fill` 那样每次都重建整个值（那正是
+   * 超长文本卡死的来源）。每块后回读长度，用于停滞判定。
+   */
+  async function writeFieldChunked(locator, text, chunkChars) {
+    await locator.fill(text.slice(0, chunkChars));
+    let wrote = chunkChars;
+    let step = { stalled: 0, prevLen: (await readComposer(locator))?.length ?? -1, died: false };
+    for (let i = chunkChars; i < text.length; i += chunkChars) {
+      const slice = text.slice(i, i + chunkChars);
+      // 光标必须在末尾，否则 insertText 会插到开头——先按 End 再插。
+      await locator.press('End').catch(() => {});
+      await page.keyboard.insertText(slice);
+      wrote += slice.length;
+      await page.waitForTimeout(0);
+      step = stallStep(step.prevLen, (await readComposer(locator))?.length ?? null, step.stalled);
+      if (step.died) throw await writeStalledError(locator, wrote, text.length, 'field');
+    }
+    return wrote;
+  }
+
+  /**
+   * 构造「写入停滞」错误：把元素现场与进度一起带出去，便于事后归因。
+   *
+   * 现场取不到（evaluate 抛错）时**不**让错误构造本身失败——那会把
+   * PROMPT_WRITE_STALLED 换成一个无意义的 evaluate 报错，丢掉真正的进度信息。
+   */
+  async function writeStalledError(locator, wrote, total, kind) {
+    const scene = await locator.evaluate((el) => ({
+      tag: (el.tagName || '').toLowerCase(),
+      id: el.id || null,
+      placeholder: el.getAttribute?.('placeholder') || null,
+      visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects?.().length),
+      disabled: el.disabled === true,
+    })).catch(() => null);
+    const err = new Error('PROMPT_WRITE_STALLED: 网页输入框写入停滞——已写 ' + wrote + '/' + total
+      + ' 字符后长度不再增长（元素 ' + (kind === 'field' ? 'textarea/input' : 'contenteditable')
+      + '，现场 ' + JSON.stringify(scene) + '）。这通常是网页端对超长文本的处理卡住，'
+      + '请先压缩上下文再重试。');
+    err.code = 'PROMPT_WRITE_STALLED';
+    err.scene = scene;
+    return err;
   }
 
   /** 回读 composer 里的文本，用于「网页端有没有截断」校验。
