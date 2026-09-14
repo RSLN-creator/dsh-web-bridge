@@ -14,6 +14,7 @@
 | --- | --- | --- | --- |
 | `agent-browser` | Vercel Labs 的浏览器自动化 CLI（Rust，给 AI agent 用） | 未直接采用（同类思路：浏览器自动化作为 agent 能力） | 否 |
 | `agentdock` | 同名多项目：并行 agent 汇诊台 / 独立工具运行时 / provider 无关 Agent 框架 | 「provider 无关适配器」的思路启发了站点契约分层 | 否 |
+| `agent-team`（官方实验包，32） | **DSH 官方** `packages/experimental/*`：Team 领域服务 + 9 个 scoped 工具 + profile bundle | **实际采用（参考实现，2026-09-14 新增）**：九工具名与语义、CAS 任务板、scoped 注册、`writeScopes` 仅警告的立场；详见 `local-refs/agent-teams-reference-notes.md` | 否（已装入 web profile，但是独立插件而非本仓库代码） |
 | `AIstudioProxyAPI` | 用 Camoufox + Playwright 把 Google AI Studio 网页转成 OpenAI 兼容 API | 未直接采用（同类路线佐证） | 否 |
 | `browser-ai-bridge` | 本地 REST 服务，用 Playwright/CDP 驱动真实浏览器会话操作 AI 网页 | 未直接采用（同类路线佐证） | 否 |
 | `chatgpt-gateway` | 浏览器扩展 + Camoufox 网关，免手动标签页访问 ChatGPT Pro | 未直接采用 | 否 |

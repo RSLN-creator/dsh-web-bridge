@@ -25,6 +25,11 @@
 | 12 | 图片预算（可选节） | 低 | 否 | `lib/index.js` |
 | 13 | 网页端「部分流」自愈（可选节） | 低 | 否 | `lib/browser-driver.js` |
 | 14 | Z.ai 无会话地址形状（新，0.14.2） | 中 | 否 | `lib/providers.js`、`lib/browser-driver.js` |
+| 15 | `<call>` / `</call_call>` 残片漏进正文（**已修，0.14.6**） | 中 | 否 | `lib/agent-preset.js`、`test-mock/parse-session-log.mjs` |
+| 16 | 同站多账户 + Team 面板（设计已定，未实现） | — | 否 | `lib/providers.js`、`lib/browser-driver.js`、`lib/client.cjs` |
+| 17 | 工具调用参数缺失族（新，本轮发现，**未归因**） | 中 | 否 | `lib/agent-preset.js`（`fillMissingRequired`）、`lib/index.js` |
+
+错误码视角的横向台账（已做哪些适配 / 残留风险）见 [`bridge-failure-ledger.md`](bridge-failure-ledger.md)。
 
 ---
 
@@ -635,6 +640,89 @@ zai 的每一轮都会走 `unsupported` 分支 → 抛 `WEB_SESSION_LOST` → �
 3. 若最终确认 zai **只**把 id 放在流里、地址栏确实不带，则给
    `CONVERSATION_URL_BUILDERS` 之外补一条「只能靠流 id 续聊」的路径——但那需要
    站点支持「用 API 打开某个会话」，属于新机制，不能靠现有两张表表达。
+
+## 15. `<call>` / `</call_call>` 残片漏进正文（**已修，0.14.6**）
+
+> **状态更新（2026-09-14 晚间）**：本条**已修并已验证**。修法即下方「若要修，从哪下手」的五步，
+> 0.14.6 已全部落地：锚点候选集补 `call_call|call`（只进锚点、不进 transport）、
+> `partialProtocolAt` 前缀表补 `<call` / `<call_call`、`detectProtocolLeak` 同步扩集、
+> 护栏 4 项（含 `<calling>` 反向断言），`protocol-leak` **15/15 通过**。
+> 重启后正面证据：`session-ec60921d` / `session-abaa2740` 零 `protocol-leak` 命中，
+> 而修复前 `session-b01554c3` 有 4 处。
+> 下面保留原文，因为「检测器不能只覆盖已知形态」这条方法论依然有效。
+
+### 现状
+
+`lib/agent-preset.js` 的 `PROTOCOL_ANCHORS[0]` 候选集是
+`(?:tool_call|tool_calls|tool_result|tool_results|calls|function|stories|invoke)`。
+网页模型偶发产出的 `<call>` / `</call>` / `<call_call>` / `</call_call>` **不在集合里**，
+于是 `findProtocolStart` 返回 `index = -1`，这些残片被当正文外发并持久化。
+
+真机证据（`session-698700ea` 的 assistant/message text 块）见 `doc/session-log-review.md` 与
+`doc/bridge-failure-ledger.md` §2：`seq=91/119/179/289/326/569/779` 共 13 处。
+
+用户可见症状：界面上出现 `<>call` 一类碎片。
+
+### 为什么值得优先修
+
+1. **用户直接可见**——与 0.14.5 已修的 `</</` 同族，属「协议文本泄漏」这一类。
+2. **现有护栏够不着**——`detectProtocolLeak` 与被保护的正则**共享同一个盲区**，
+   所以「日志没告警」是假阴性。这是本轮最有价值的发现：**检测器不能只覆盖已知形态**。
+
+### 为什么现在不修
+
+用户明确要求「team 这个最后实现，优先解决前面问题」，而本轮已把优先级放在
+①二维码定位 ②参考归档 ③会话归因 ④失败台账。这条已**完整取证并给出修法**，
+留给下一轮作为 0.14.6 的第一项——修法很小（一处正则 + 一处检测器 + 一条夹具），
+但必须**连带修检测器**，否则下次还是测不出来。
+
+### 若要修，从哪下手
+
+1. `PROTOCOL_ANCHORS[0]` 加 `call_call|call`（放在 `calls` 之后即可）。
+2. **只加进边界锚点，不加进 transport 判定**——残片不是待执行调用。
+   与 0.14.5 对 `tool_result` 的处理立场一致（见 `lib/agent-preset.js:438-443` 的注释）。
+3. `test-mock/parse-session-log.mjs` 的 `detectProtocolLeak` 同步补这两条。
+4. 护栏夹具直接用本文件与 `session-log-review.md` 里的**真实残片字符串**。
+5. 安全边界：`\b` 之后 `call` 只在标签形（`<call>`、`</call>`、`<call `）命中；
+   `<calling>` 里 `call` 后跟 `i`（都是词字符）→ `\b` 不成立，**不会误伤正文**。
+
+## 17. 工具调用参数缺失族：`missing required property "command"`（本轮新发现，**未归因**）
+
+### 现状
+
+`session-ec60921d-08c5-4906-9c1c-d5ab670661c1`（0.14.6 重启后、本轮之前的会话）里有一条：
+
+```
+✖ [tool/result] turn=1 isError: Error: invalid arguments: missing required property "command"
+```
+
+用 `node test-mock/parse-session-log.mjs --recent 3 --errors-only` 复现得到。
+
+### 为什么值得记
+
+1. 它与 composer / 协议残片**都无关**——不是同一族，因此 0.14.5/0.14.6 的修复覆盖不到它。
+2. 它是**本轮之前**最后一条未归因的 `tool/result isError`，若不记账，下一轮会话会以为「都修完了」。
+
+### 为什么现在不归因（而不是不修）
+
+单条样本不足以判定根因。至少三种可能，且需要**不同**的修法：
+
+| 可能 | 判据 | 修法方向 |
+| --- | --- | --- |
+| 网页模型漏产 `command` 参数 | 该 `tool/call` 的 raw JSON 里确实没有该键 | `fillMissingRequired` 已有的补全逻辑是否覆盖这一层？ |
+| 补全逻辑存在但未覆盖该工具 | `fillMissingRequired` 的必填表里缺这条 | 补表 + 护栏 |
+| 流式分块导致参数被截断 | 该 `tool/call` 的 raw 与非流式权威调用不一致 | 走 `TOOL_PROTOCOL_INVALID` 的既有修复路径 |
+
+### 若要归因，从哪下手
+
+1. 用 `parse-session-log.mjs --json` 取出该 `tool/call` 的**原始 raw 参数**与工具名（本轮只拿到了 `tool/result` 的报错文本）。
+2. 对照 `lib/agent-preset.js` 的 `fillMissingRequired` / `coerceArguments`：该工具名是否在必填表里。
+3. 若 raw 里确实没有该键 → 属**模型行为**，修法是补全而非报错；若 raw 里有而 result 报缺 → 属**解析链路**缺陷。
+4. 无论如何先加一条护栏：构造「必填参数缺失」的 raw，断言系统要么补全、要么给出**带工具名与缺失键**的可诊断错误码（现状是宿主原生报错，桥接层没有自己的错误码）。
+
+### 安全边界
+
+本轮**不新增真机探针**（风控纪律）。这条只能靠离线日志与单测推进。
 
 ---
 

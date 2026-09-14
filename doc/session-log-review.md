@@ -113,11 +113,106 @@ Error: present accepts 1 to 8 files
 
 ---
 
+### P1 · `<call>` / `</call_call>` 残片漏进正文（**已修，0.14.6**）
+
+**证据**（`session-698700ea` 的 assistant/message **text** 块，逐字）：
+
+```
+seq=91  step=11  </call_call>
+seq=119 step=15  </call>   （同一步 3 次）
+seq=179 step=23  </call> <call_call> {"mcp_action…
+seq=289 step=37  </call>
+seq=326 step=42  </call_call>
+seq=569 step=80  </call_call>
+seq=779 step=113 </call_call>
+```
+
+`session-c710ef6e`：`seq=548 step=69  </call_call>`（1 次）。
+
+**归因**（源码级）：`lib/agent-preset.js` 的 `PROTOCOL_ANCHORS[0]` 候选集是
+`(?:tool_call|tool_calls|tool_result|tool_results|calls|function|stories|invoke)`——
+**`call` 与 `call_call` 都不在里面**。`<call>` 后面跟 `>`，复数 `calls` 匹配不上；
+`<call_call>` / `</call_call>` 更是完全不在集合里。于是 `findProtocolStart` 返回 `index=-1`，
+残片被当正文 text-delta 外发并持久化。
+
+**附带**：`test-mock/parse-session-log.mjs` 的 `detectProtocolLeak` **也认不出它们**（只认
+`<tool_call>`、`{"mcp_action":"call"`、DSML、`<tool_result>`）——所以「日志没有泄漏告警」
+不等于「没有泄漏」。本轮是靠**直接扫 text 块**抓到的。
+
+**已实施方案（0.14.6）**：锚点候选集补 `call_call|call`；**只加进边界锚点，不加进 transport**
+（残片不是待执行调用，与 0.14.5 对 `tool_result` 的立场一致）；`detectProtocolLeak` 同步补；
+护栏用本节的真实残片字符串。安全性：`\b` 让 `<calling>` 不命中（`call` 后跟 `i` 都是词字符）。
+
+`partialProtocolAt` 前缀表同步补 `<call` / `<call_call`；护栏 4 项（含 `<calling>` 反向断言），
+`protocol-leak` **15/15 通过**。
+
+详见 `doc/bridge-failure-ledger.md` §2。
+
+---
+
+## 3.5 · 0.14.6 重启后复验（2026-09-14 晚间，本轮新增）
+
+重启已生效：进程 PID **22184**，启动 `2026-09-14 19:36:21`，命令 `node .../@deepseek-ai/dsh/lib/bin.js web`。
+
+### 版本与标记
+
+```
+GET http://127.0.0.1:3080/__webcode/status
+→ build.version = 0.14.6，build.hash = f6837b9a8cf1
+```
+
+两个 profile（web / headless）的 `lib/agent-preset.js` 均含：
+
+- `PROTOCOL_ANCHORS[0]` = `(?:tool_call|tool_calls|tool_result|tool_results|call_call|calls|call|function|stories|invoke)`
+- 前缀表 = `['<tool_call','<tool_calls','<call_call','<call',…]`
+
+### 正面证据（修复真的生效）
+
+```
+node test/protocol-leak.test.mjs   → tests 15 / pass 15 / fail 0
+node test-mock/parse-session-log.mjs --recent 3 --errors-only
+```
+
+| 会话 | protocol-leak 命中 |
+| --- | --- |
+| `session-b01554c3`（**修复前**） | **4 处**：`</call>` @106/@103、`</call_call>` @68/@75 |
+| `session-ec60921d`（修复后） | **0** |
+| `session-abaa2740`（本会话） | **0** |
+
+### 「卡住」是否复现
+
+未复现。本会话即由桥接驱动，relay 指标：
+
+```
+lastEndReason = "finished"
+lastRate = { chars: 1150, responseMs: 952, firstResponseMs: 3131, endToEndMs: 4083 }
+```
+
+`--recent 3` 中**无** `locator.fill` 超时。即 0.14.4 上必然复现的 80 万字符
+一次性 `fill()` 缺陷，在 0.14.6 上已消失。
+
+### 新发现：另一族失败（未归因）
+
+`session-ec60921d` 有一条与本轮修复**无关**的失败：
+
+```
+✖ [tool/result] turn=1 isError: Error: invalid arguments: missing required property "command"
+```
+
+它是「工具调用参数缺失」族，已入账 `doc/bridge-failure-ledger.md`（`TOOL_ARGS_MISSING_REQUIRED`）
+与 `doc/long-term-issues.md` 第 17 条，**不预设结论**。
+
+---
+
 ## 4. 结论
 
 - 上一轮会话**不是**「代码没做完」，而是**在收尾前被一个可修的驱动缺陷打断**：P0 的 `locator.fill` 超时。
 - 那个缺陷与它派生出的 P1（`<tool_result>` 漏网）都已在 0.14.5 修掉并加了护栏。
 - 真正让「中断 = 全部重来」的是缺少入库台账——已由 `doc/progress.md` + `.gitignore` 收口。
+- **本轮新增**：`<call>` / `</call_call>` 残片漏进正文——**已在 0.14.6 修复并验证**（锚点 + 前缀表 + 检测器三处同步扩集，护栏 15/15）。
+- 当时那条关键状态事实「0.14.5 尚未安装」**已不再成立**：0.14.6 已装且重启生效，
+  P0 的 30s `locator.fill` 超时未复现（见 §3.5）。用户报告的「思维链卡住、一直没进度」已解除。
+- **仍未归因的一族**：`TOOL_ARGS_MISSING_REQUIRED`（工具调用参数缺失），见 `long-term-issues.md` 第 17 条。
 
 ## 5. 复现命令汇总
 
