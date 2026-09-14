@@ -17,11 +17,11 @@
 
 | 项 | 值 |
 | --- | --- |
-| 工作树版本 | **0.14.6**（已发布 / 已装 / 已验证） |
-| 已装版本（web / headless） | **0.14.6**（重启已生效，PID 22184） |
+| 工作树版本 | **0.14.7**（已发布 / 已装 / 等重启生效） |
+| 已装版本（web / headless） | **0.14.7**（已装，**运行中的进程仍是 0.14.6**——需要一次重启） |
 | 上游 | `origin/main` = `e190257`，本地已同步 |
-| 单测基线 | 249 通过（0.14.4）；0.14.5/0.14.6 新增 `composer-write`(12) 与 `protocol-leak`(+6) |
-| 下一阶段 | **0.14.7 同站多账户**（设计见 `reference/local-refs/agent-teams-reference-notes.md` §7.4） |
+| 单测基线 | **305 通过**（全量 `npm test`，含 M1 PASS）；本轮新增 `accounts`(38) 与 `accounts-integration`(16) |
+| 下一阶段 | **0.14.8 Team 面板**（官方三包已装但不含 client 入口，需自建面板） |
 
 ## 0.14.6（已发布 / 已装 / 已验证）
 
@@ -84,20 +84,69 @@
 - **P1 修复**：`<tool_result>` 加进协议边界锚点（但**不**加进 transport 判定）。
   护栏 `test/protocol-leak.test.mjs` +2 项。
 
-## 下一阶段（0.14.7 同站多账户）
+## 0.14.7（已发布 / 已装 / 等重启生效）—— 同站多账户
 
-用户明确「team 最后实现，优先解决前面问题」。0.14.6 收口后，下一阶段是
-**同站多账户**，设计要点已备好（`reference/local-refs/agent-teams-reference-notes.md` §7.4）：
+用户明确「team 最后实现，优先解决前面问题」。0.14.6 收口后本轮做的是**同站多账户**。
 
-1. **账户槽数据模型**：站点级单份登录态 → 「站点 × 槽」（`<siteId>#<slot>`）；
-   **默认槽保持 `<siteId>`**，历史设置值必须仍可解析。
-2. **模型 id**：`site:model` → `site@slot:model`，保留别名解析与 `MODEL_ALIAS_IDS` 唯一定义处纪律。
-3. **显示**：非默认槽追加 `(账户N)`；默认槽**不加后缀**（既有断言与既有下拉不变）。
-4. **发送间隔**：定为**槽级**（不同登录态风控独立）。
-5. **风控前提**：每槽独立限流、探针串行化、**默认不并发探测**。
+### 数据模型（`lib/accounts.js`，纯函数身份层）
 
-再下一阶段是 **Team 面板**（消费官方 `agentTeams` Remote + 自建面板；
-官方三个包已装但**不含 client 入口**，故不能照抄官方面板）。
+| 概念 | 0.14.6 | 0.14.7 |
+| --- | --- | --- |
+| 账户槽 id | 不存在 | `<siteId>#<slot>`；**默认槽仍是 `<siteId>`**（`#1` 是其别名） |
+| profile 目录 | `<profileDir>/sites/<siteId>` | 默认槽**逐字不变**；非默认槽 `<profileDir>/sites/<siteId>/<slot>` |
+| 模型 id | `site:model` | `site@slot:model`；`site:model` 与全部历史别名照旧解析到默认槽 |
+| 显示名 | `站点短键/模型id` | 非默认槽追加 `(账户N)`；**默认槽不加**（既有断言原样通过） |
+| 发送间隔 | 设置级单值 | **槽级**（`sendGapMsBySlot`），回落链 槽 → 站点键 → 全局 |
+| 设置字段 | — | `accounts: []`（**默认空 = 行为与 0.14.6 完全一致**）、`sendGapMsBySlot: {}` |
+
+### 落地的文件
+
+- **新增** `lib/accounts.js`：`parseAccountKey` / `formatAccountKey` / `formatModelId` /
+  `parseModelId` / `slotProfileDir` / `accountLabel` / `normalizeAccounts` / `slotsForSite` /
+  `sendGapForSlot`（与 `composerWritePlan` 同纪律：决策抽纯函数，调用方只做 IO）。
+- `lib/providers.js`：`listAllModels(accounts)` 展开槽；`resolveWebModel` 支持 `@slot`；
+  默认槽的 id / 显示名 / `accountKey` 与 0.14.6 **逐字相同**。
+- `lib/browser-driver.js`：接受 `slot`，日志前缀带槽（`[webcode-driver:glm#2]`），status 透出 `slot`/`accountKey`。
+- `lib/index.js`：`driverFor(accountKey)` 按槽建独立驱动与独立 profileDir；发送间隔按槽计时；
+  `buildTurn` 的 meta 带 `slot`/`accountKey`；`driverStatus` 按槽展开（含未初始化槽）。
+- `lib/web-control.js`：`login`/`verify-login`/`window`/`session-import`/`connect` 全部按 accountKey 路由；
+  `login-sites` 合并「全站点默认槽 + 已配置非默认槽」；`settings` 写入前归一化 `accounts`/`sendGapMsBySlot`。
+- `lib/client.cjs`：`SiteAccounts` 按 `accountKey` 索引——**两个账户两行，互不覆盖**。
+
+### 顺带修掉的一个真 bug
+
+`resolveWebModel` 首版只处理 `slot !== default` 的分支，导致 `glm@1:glm-5.3`
+（`1` 是默认槽别名）掉进 `split(':')` 兜底、被切成站点 `glm@1` → 报「不支持的网页模型」。
+账户1 本该与默认槽完全等价。已改为**连同默认槽一起交给 `parseModelId`**，并有专门护栏。
+
+### 验证
+
+- `npm test`：**305 通过 / 0 失败**，`run-m1.js` **M1 PASS**。
+- `accounts.test.mjs` 38 项（纯函数全形态）+ `accounts-integration.test.mjs` 16 项
+  （默认槽零位移 / 两槽不串 / 槽级间隔接缝）。
+- `verify-pack`：26 项中 25 项逐字相同，唯一差异是 `package.json` 被 pnpm 规范化掉
+  `packageManager`（逐字段 diff 确认 **field diffs: 1**，且版本一致 0.14.7）。
+- 双 profile 安装标记逐一核对：`accounts.js` 在位、`normalizeSlot`（driver）、
+  `listAllModels(accounts`（providers）、`accountKeyOf`（web-control）、`displayName`（client）、
+  `formatModelId`（index）全部 `True`。
+- 回滚备份：`profiles/{web,headless}/*.bak-2026-09-14-accounts`。
+
+### 重启后要核对的三点
+
+1. `/__webcode/status` 的 `build.version` = **0.14.7**。
+2. 设置页「账户与登录管理」每个站点一行；配置 `accounts` 后**同一站点出现两行**
+   （`智谱清言 (GLM)` 与 `智谱清言 (GLM) (账户2)`），两行状态互不覆盖。
+3. 未配置 `accounts` 时行为与 0.14.6 完全一致（默认槽零位移）。
+
+## 下一阶段（0.14.8 Team 面板）
+
+官方三个 `@deepseek-ai/dsh-experimental-*` 包**已装**（web profile，全部 `0.1.5-rc.1`），
+但它们的 `package.json` 里**没有 `dsh.client` 入口**（只有 profile 包有 `bundle.patch`）——
+即**官方 Team 面板的 client 侧不在已发布 tarball 里**，不能照抄。
+
+因此路线是：服务端复用官方 `agentTeams` Remote method（`view`/`createTask`/`updateTask`），
+本项目自建右栏只读面板（roster 五态 + 任务板），沿用官方九个工具名与语义。
+**必须显式声明**：单进程共享 checkout，并行的是会话与呈现，不是文件系统。
 
 ## 已装入 web profile 的两个新插件（2026-09-14，重启已生效）
 

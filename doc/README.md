@@ -23,6 +23,14 @@
 | [tutorial-phone-access.md](tutorial-phone-access.md) | 手机连接 DSH 教程：选型对比、`dsh-local-link` 安装、配对、安全边界、**二维码位置（§3.5）** | 想从手机/平板访问 DSH 时 |
 | [bridge-failure-ledger.md](bridge-failure-ledger.md) | **桥接失败台账**：错误码 × 已做适配 × 残留风险；含 `<call>` 泄漏根因 | 排查桥接问题；决定先修哪个时 |
 
+## 与账户槽（0.14.7）相关的代码位置
+
+| 代码位置 | 该读的文档 |
+| --- | --- |
+| `lib/accounts.js` | [progress.md](progress.md) 的「0.14.7」一节（数据模型与回落链） |
+| `lib/providers.js`（`listAllModels` / `resolveWebModel`） | `test/accounts-integration.test.mjs`（默认槽零位移的硬证据） |
+| `lib/browser-driver.js`（`slot`） | [long-term-issues.md](long-term-issues.md) 第 7 条（profile 锁与孤儿 Edge） |
+
 ## 专题
 
 | 文档 | 用途 |

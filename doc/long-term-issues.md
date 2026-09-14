@@ -26,10 +26,18 @@
 | 13 | 网页端「部分流」自愈（可选节） | 低 | 否 | `lib/browser-driver.js` |
 | 14 | Z.ai 无会话地址形状（新，0.14.2） | 中 | 否 | `lib/providers.js`、`lib/browser-driver.js` |
 | 15 | `<call>` / `</call_call>` 残片漏进正文（**已修，0.14.6**） | 中 | 否 | `lib/agent-preset.js`、`test-mock/parse-session-log.mjs` |
-| 16 | 同站多账户 + Team 面板（设计已定，未实现） | — | 否 | `lib/providers.js`、`lib/browser-driver.js`、`lib/client.cjs` |
+| 16 | 同站多账户（**已实现，0.14.7**）+ Team 面板（设计已定，未实现） | — | 否 | `lib/accounts.js`、`lib/providers.js`、`lib/browser-driver.js`、`lib/client.cjs` |
 | 17 | 工具调用参数缺失族（新，本轮发现，**未归因**） | 中 | 否 | `lib/agent-preset.js`（`fillMissingRequired`）、`lib/index.js` |
 
 错误码视角的横向台账（已做哪些适配 / 残留风险）见 [`bridge-failure-ledger.md`](bridge-failure-ledger.md)。
+
+> **第 16 条状态更新（2026-09-14 晚间）**：**同站多账户已实现并装入（0.14.7）**——
+> 账户槽 `<siteId>#<slot>`、槽级 profile 目录与发送间隔、`site@slot:model`、
+> 设置页按槽分行的账户管理，全部落地；**默认槽零位移**（`accounts: []` 时行为与 0.14.6
+> 完全一致）。实现要点与验证见 `doc/progress.md` 的「0.14.7」一节。
+> **Team 面板仍未实现**——官方三个包已装但**不含 client 入口**（已发布的 tarball 里
+> 没有可挂载的组件），因此路线是「服务端复用官方 `agentTeams` Remote + 本项目自建只读面板」。
+> 设计见 `reference/local-refs/agent-teams-reference-notes.md` §7。
 
 ---
 
