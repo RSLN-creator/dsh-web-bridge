@@ -525,3 +525,48 @@ test('去臃肿：气泡状按钮圆角应收紧，不保留 16px 的「药丸�
   assert.ok(m, '主按钮未声明 border-radius：' + rule.slice(0, 200));
   assert.ok(Number(m[1]) <= 12, '主按钮圆角 ' + m[1] + 'px 仍偏「药丸」，应与收紧后的卡片一致（≤12px）');
 });
+
+/**
+ * `settings.section` 的会话身份契约（0.15.3 真机缺陷）。
+ *
+ * 真机：设置页花名册恒回 `subAgentsError: "no-session-id"`，永远读不到成员。
+ * 根因是**槽作用域与 inject 参数的错配**：
+ *
+ *   • `settings.section` 在官方槽目录里是 `scope: "root"`；
+ *   • renderer 的 `runInject` 只对**带 binding 的会话级槽**传 `binding.key`，
+ *     root 槽只拿到 `actions`；
+ *   • 旧写法 `inject: (sessionId) => ({ sessionId })` 于是把那个 actions 对象
+ *     当成会话 id 一路送到服务端，服务端解析不出会话，回 no-session-id。
+ *
+ * 正规入口是 official standard prop **`useSessions`**（官方 ui-settings-general
+ * 自己就这么读会话）。这条断言把「不许再用 root 槽的 inject 冒充会话来源」
+ * 钉死——它正是本轮修掉的第三个「引用存在、另一端不存在」型缺陷。
+ */
+test('设置页：会话身份必须经 useSessions 取，不得用 root 槽的 inject 冒充', async () => {
+  const src = bridgeSrcFrom('client.cjs');
+
+  // 1) settings.section 的注册块里不得再有 sessionId 形状的 inject。
+  const regAt = src.indexOf("ctx.slots.inject('settings.section'");
+  assert.ok(regAt > 0, '找不到 settings.section 的注册点');
+  const regEnd = src.indexOf('SettingsSection));', regAt);
+  assert.ok(regEnd > regAt, 'settings.section 未注册 SettingsSection（会话注入层缺失）');
+  const block = src.slice(regAt, regEnd);
+  assert.ok(!/inject\s*:/.test(block),
+    'root 作用域的 settings.section 又声明了 inject —— 它拿不到会话 id，会把 actions 对象当成 sessionId：\n' + block);
+
+  // 2) 必须真的走官方 useSessions 通道。
+  assert.ok(/function SettingsSection\(/.test(src), '缺少 SettingsSection 会话注入层');
+  assert.ok(/props\.useSessions|\.useSessions\b/.test(src), '没有使用官方 useSessions standard prop 读取会话');
+  assert.ok(/useSessions\(s => \(s && s\.current\)/.test(src), 'useSessions 的取值形态变了（应读 state.current）');
+});
+
+test('设置页：useSessions 缺席时优雅降级为 null，不得整块崩掉', async () => {
+  const src = bridgeSrcFrom('client.cjs');
+  // 回落链必须是 useSessions → props.sessionId → null：测试桩与「会话尚未建立」
+  // 都走这条路，且这是**正常情况**而非错误（面板会如实说 no-session-id）。
+  assert.ok(/return current \|\| props\?\.sessionId \|\| null;/.test(src),
+    'useCurrentSessionId 的回落链变了：应为 useSessions → props.sessionId → null');
+  // 无条件调用 hook（条件调用会复现 SiteAccounts 那类 hooks 顺序违规）。
+  assert.ok(/const useSessions = typeof props\?\.useSessions === 'function' \? props\.useSessions : noSessions;/.test(src),
+    'useSessions 的取值被写成条件分支外的形式之外了；必须常量选择后再无条件调用');
+});

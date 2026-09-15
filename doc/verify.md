@@ -4,6 +4,89 @@
 
 ---
 
+# 0.15.3 重启后真机三缺陷（`POST status` / hooks 顺序 / 会话注入）
+
+日期：2026-09-16。环境：Windows、Node v24.18.0、DSH 0.1.5-rc.1。
+
+**触发**：用户重启 DSH 后反馈两件事——① 上一轮的交付文案 markdown 格式错乱；
+② **设置界面丢失，网页桥接栏目一片空白**。
+
+第 ① 件是模型输出层的问题（工具调用被内联进正文），不是代码缺陷，记录在案但不修代码。
+第 ② 件查下去是**三个独立缺陷叠加**，其中两个同属上一轮已经定性的那一家族。
+
+## 三缺陷与修法
+
+### ① 设置页空白：`SiteAccounts` 的 hook 写在提前 `return` 之后
+
+| 项 | 内容 |
+| --- | --- |
+| 现场 | `lib/client.cjs` 的 `SiteAccounts`：3 个 `useState` + 1 个 `useEffect` 之后是一句「站点表为空就返回加载中」，**这句之后**又写了第 5 个 `useState`（`picked`） |
+| 机制 | 首屏 `sites` 未到时只跑 4 个 hook 就 return；`sites` 到达后同一次挂载走到第 5 个。真实 React 对「本次渲染比上次多 hook」是**硬错误** |
+| 后果 | 错误冒泡到 `settings.section` 的 `SlotErrorBoundary`，整块栏目被替换成空占位 —— 即用户看到的「一片空白」 |
+| 为何旧版没有 | 0.14.7 还没有 `picked`，没有这个 4→5 的跳变 |
+| 修法 | 把 `picked` 提到提前 `return` 之前（hook 无条件、按序执行） |
+| 为何原护栏全绿 | `client-render.test.mjs` 的 useState 桩是**按名字取值**的映射，结构上察觉不到顺序/数量违规；且它在切换 payload 时会清空 states，「同一次挂载内 4→5」从未被复现 |
+
+### ② 花名册恒读不到：`status` 只注册了 GET，客户端走 POST
+
+| 项 | 内容 |
+| --- | --- |
+| 现场 | `lib/client.cjs` 的 `api('status', { sessionId })` 带 body ⇒ **POST**；`lib/web-control.js` 只注册了 `'GET status'` |
+| 后果 | 真机 `POST /__webcode/status` ⇒ **HTTP 405**（动作表有同名后缀、方法不匹配时，web-control 的分支会带 `Allow` 头回 405）。花名册那一栏因此永远读不到，`subAgentsError` 报 `no-session-id` |
+| 修法 | `actions['POST status'] = actions['GET status']` —— **别名而非复制实现**：两个方法必须返回逐字节相同的形状，复制一份迟早漂移（那正是本次故障的同族病） |
+| 为何原护栏全绿 | `client-render.test.mjs` 的 mock fetch **不看方法**，任何 URL 都回 200 + JSON。护栏自己的建模失真，把「服务端没这条路由」整个盖住 |
+
+### ③ 会话身份错配：`settings.section` 是 root 作用域，拿不到 sessionId
+
+| 项 | 内容 |
+| --- | --- |
+| 现场 | 0.15.0 给 `settings.section` 写了 `inject: (sessionId) => ({ sessionId })` |
+| 根因 | 该槽在官方契约里是 **`scope: "root"`**；renderer 的 `runInject` 只对**带 binding 的会话级槽**传 `binding.key`，root 槽只拿到 `actions` 对象 |
+| 后果 | 那个 actions 对象被当成会话 id 送到服务端，花名册恒回 `no-session-id` |
+| 修法 | 新增 `SettingsSection` 包装层，经官方 standard prop **`useSessions`** 读 `state.current`（官方 `ui-settings-general` 自己就这么读会话），再以普通 prop 传给纯展示的 `Settings` |
+| 降级 | `useSessions` 缺席（测试桩 / 会话尚未建立）时回落 `props.sessionId → null`，面板如实显示「读不到」而非崩掉 |
+
+## 新增护栏（三条，全部先证明能抓到缺陷）
+
+| # | 护栏 | 抓什么 | 反向验证 |
+| --- | --- | --- | --- |
+| 1 | `test/hooks-order.test.mjs`（2 项） | 组件体顶层「hook 出现在提前 return 之后」 | 把 `picked` 搬回 return 之后 → **红**（报「提前 return 在第 578 行，但第 579 行仍有 hook」）；搬回 → 绿 |
+| 2 | `test/client-server-contract.test.mjs`（2 项） | 客户端 `api(action, body)` 推导出的方法与服务端动作表不一致 | 临时删掉别名 → **红**（精确报 `POST status ← api('status',`）；恢复 → 绿 |
+| 3 | `client-render.test.mjs` 新增 2 项 | root 槽不得用 `inject` 冒充会话来源；降级链必须完整 | 三条反向用例（加回 inject / 去掉 useSessions / 破坏回落链）**全部被抓到** |
+
+> **护栏自身的两次失手也记录在案**（否则会重犯）：
+> `hooks-order` 第一版扫描器不跟踪花括号深度，把嵌套回调里的 hook/return 算进组件体，
+> 误报了 SiteAccounts / Conversation —— 一个会误报的护栏会被直接绕过；
+> 第二版跟踪了深度但漏掉**单行守卫**（`if (cond) return x;`）这一形态，
+> 正是真机缺陷用的写法，反向验证因此**静默漏过**。
+> `client-server-contract` 第一版不认 `actions['X'] = …` 别名注册形态，
+> 修好之后又把「已修」判成「没注册」。
+> 结论：**护栏写完必须反向验证，且反向用例本身要确认「变更真的生效了」**——
+> 第一版 `reverse-session-guard` 有一条正则没匹配上，报告的是「漏过」而不是「未生效」，
+> 差点把没验证的护栏当成已验证。
+
+## 离线验收（全部实跑）
+
+| # | 判据 | 命令 | 结果 |
+| --- | --- | --- | --- |
+| A1 | 全量单测（逐文件） | `node test/<f>` × 35 | **35/35 全绿**（本机 `node --test` glob 仍 `spawn EPERM`） |
+| A2 | 注释闸门 | `node scripts/lint-comments.mjs` | 退出 **0**，125 文件，`error 0, warn 0` |
+| A3 | 打包 | `pnpm pack` | `dsh-webcode-bridge-0.15.3.tgz`（285,437 字节） |
+| A4 | 发布闸门 | `node scripts/verify-pack.mjs <tgz>` | **28/28 逐字相同** + `✔ 接线完好`，退出 **0** |
+| A5 | 装入真机 profile | `node scripts/install-profiles.mjs <tgz> --profiles web` | web **0.15.3**，退出 **0**，无接线告警 |
+| A6 | **安装副本**真机等价复验 | `node .tmp/verify-installed-wiring.mjs` | 真实 `apply()` + 真实 HTTP：`GET 200`、**`POST 200`**（修前 405）；`subAgentsError` = `session-projections-unavailable`（不再 `no-session-id`） |
+
+## 仍需重启后确认
+
+| # | 核对点 | 判据 |
+| --- | --- | --- |
+| 1 | 版本生效 | `GET http://127.0.0.1:3080/__webcode/status` → `build.version` = **0.15.3** |
+| 2 | **设置页不再空白**（缺陷 ①） | 设置 → 「网页桥接」栏目能渲染出账户、花名册、模型、提示词各卡片 |
+| 3 | **花名册能读到**（缺陷 ②③） | `subAgentsError` 不再含 `no-session-id`；有子代理/Team 成员时列表真的列出；空时显示「当前没有正在运行的…」而非「读不到」 |
+| 4 | 0.15.2 遗留项 | 长思考任务应在 ≤180s 内收束并交回 `THINKING_ONLY_NO_ANSWER`；正常长回复不被腰斩 |
+
+---
+
 # 0.15.2 只出思维链卡死修复 + LoopX 移除 + 闸门转正
 
 日期：2026-09-15。环境：Windows、Node v24.18.0。
@@ -70,17 +153,67 @@ LoopX 整体移除；注释闸门转阻断；CI/CD 与审查补强；`REPORT.md`
 **删除后核对**：`skills/` 下 loopx 条目 **0**；运行时目录**不存在**；
 **其余 85 个 skill 目录完好**（证明未误删）；会话技能目录里 7 个 `loopx*` 已消失。
 
-## 真机验收（**未做**，待重启）
+## 重启后的真机核对（2026-09-15 22:50）——**查出一个 P0，已修并复验**
 
-以下**必须由用户在重启 DSH 后确认**，离线无法证明：
+重启后按上表逐项核对，**第 1 项就不过**：`build.version` 确实是 0.15.2，但 `/__webcode/status` 同时返回
+
+```json
+{ "subAgents": [], "team": [],
+  "subAgentsError": "roster-threw: projectRoster is not defined",
+  "teamError":     "roster-threw: projectRoster is not defined" }
+```
+
+### 缺陷：`lib/index.js` 引用了 `projectRoster` 却从未 import 它
+
+| 项 | 内容 |
+| --- | --- |
+| 现场 | `lib/index.js:1755` `rosterOf: (sessionId) => projectRoster(ctx, sessionId)` |
+| 根因 | 全文**没有** `import { projectRoster } from './roster.js'`；`git log -S "from './roster.js'"` 为空，即该文件**从未**导入过 roster 模块 |
+| 引入点 | 0.15.0 主体 `ecd3e31`（feat(bench+roster)）加的花名册注入，import 漏了 |
+| 为何不报错 | `projectRoster` 在**箭头函数体**里，创建时不求值 → 模块加载成功、33/33 测试文件全绿、`node -e "import(...)"` 也不炸 |
+| 真实后果 | 只有真机 `/status` **真的调用**时才抛 `ReferenceError`，被 `web-control.js` 的 `try/catch` 降级成 `roster-threw: …` → `subAgents`/`team` 恒为空数组，**右栏面板永久空白**（与 0.14.9「写死空数组」的可见后果完全一致） |
+| 修法 | 补 `import { projectRoster } from './roster.js';`（含一段说明为什么这行不能删） |
+
+**为什么单测全绿却没抓到**：`test/site-mount.test.mjs` 直接 `createWebControl()`，没有走 `apply()`，
+于是 `rosterOf` 缺省为 `null`，命中「roster-not-wired」分支——**没有任何测试跑过
+「`apply()` → 真实 HTTP → `/__webcode/status`」这条路**。
+
+### 新增两道护栏（先证明能抓到这个 bug，再修）
+
+| # | 护栏 | 位置 | 反向验证 |
+| --- | --- | --- | --- |
+| B1 | 端到端接线测试：真实 `apply()` + 真实 HTTP + `/__webcode/status`，断言 `subAgents`/`team` 是数组且无 `roster-threw` | `test/wiring-roster.test.mjs`（新增，2 项） | **先跑出红**：错误文本与真机 `status` 完全一致（`roster-threw: projectRoster is not defined`），修复后转绿 |
+| B2 | 安装时接线核对：装完当场用正则确认跨模块 `import` 真的在 | `scripts/install-profiles.mjs` 的 `verify()` | 用未修的旧 tarball 实测 → `⚠ web: v0.15.2 ✖ 接线断裂` + **退出码 1** |
+| B3 | 发布闸门接线核对：pack 后确认 tarball 内的 import 存在 | `scripts/verify-pack.mjs` 的 `WIRING` 表 | 用 0.14.7 旧包实测 → `✖ 接线断裂：projectRoster 未从 ./roster.js 导入` + 退出码 1 |
+
+> **顺带修掉一个「永远为红」的闸门**：`verify-pack` 此前对 `package.json` 恒报差异——
+> `pnpm pack` 会剥掉 `packageManager` 字段。一个永远为红的闸门等于没有闸门，
+> 真正的差异会藏在同一片红色里活下来（这次正是如此）。现改为**只豁免 `packageManager`
+> 一个字段**（逐字段比对，其余任何差异照旧失败），并在输出里显式打印豁免项。
+
+### 修复后的复验（全部实跑）
+
+| # | 判据 | 命令 | 结果 |
+| --- | --- | --- | --- |
+| C1 | 新增护栏转绿 | `node test/wiring-roster.test.mjs` | **pass 2 / fail 0** |
+| C2 | 全量单测 | 33 个测试文件逐文件跑 | **33/33 全绿**（本机 `node --test` glob 仍 `spawn EPERM`，故逐文件） |
+| C3 | 重新打包 | `pnpm pack` | `dsh-webcode-bridge-0.15.2.tgz`（282,801 字节，23:47:45） |
+| C4 | 包内容一致性 | `node scripts/verify-pack.mjs <tgz>` | **28/28 逐字相同**；`✔ 接线完好（1 项跨模块引用已钉住）`；退出 **0** |
+| C5 | 装入真机 profile | `node scripts/install-profiles.mjs <tgz> --profiles web` | web **0.15.2**，退出 **0**，无接线告警 |
+| C6 | **安装副本**真机等价复验 | `node .tmp/verify-installed-wiring.mjs` | 在 `~/.dsh/profiles/web/node_modules/…` 上真实 `apply()` + HTTP → `HTTP 200`，`subAgents: []`、`team: []`，`subAgentsError: "session-projections-unavailable"`、`teamError: "official-team-package-not-loaded"` ——**`roster-threw` 消失**，退出 **0** |
+
+C6 是关键：它验的不是源码目录，而是 **DSH 重启后真正会加载的那份文件**。
+
+### 仍需用户在重启后确认的项
 
 | # | 核对点 | 判据 |
 | --- | --- | --- |
-| 1 | 版本生效 | `GET http://127.0.0.1:3080/__webcode/status` → `build.version` = **0.15.2** |
-| 2 | **本故障是否真修** | 复现原场景（长思考任务）。若再出现「只出思维链」：**不应**无限转圈，而应在 ≤180s 内收束并交回一条 `THINKING_ONLY_NO_ANSWER` 提示；`status` 里 `thinkingOnlyTurns` ≥1、`lastStalledSettle.reason` = `thinking-only-settled` |
-| 3 | 未误杀正常长回复 | 正常长回答应完整输出，`thinkingOnlyTurns` **不增长** |
-| 4 | 收束原因可读 | `status.driver.lastEndReason` 能区分 `finished` / `thinking-only-settled` / `partial-wip-settled` / `timeout` |
-| 5 | 重启后无回退 | `conversationReplacedCount` 与 `sessionLostCount` 均为 0 |
+| 1 | 版本生效 | `build.version` = **0.15.2** |
+| 2 | **花名册不再空白**（本次修复的目标） | `subAgentsError` / `teamError` **均不含** `roster-threw`；右栏面板能列出成员而不是空白 |
+| 3 | 本故障是否真修 | 复现原场景（长思考任务）。若再出现「只出思维链」：**不应**无限转圈，而应在 ≤180s 内收束并交回一条 `THINKING_ONLY_NO_ANSWER` 提示；`status` 里 `thinkingOnlyTurns` ≥1、`lastStalledSettle.reason` = `thinking-only-settled` |
+| 4 | 未误杀正常长回复 | 正常长回答应完整输出，`thinkingOnlyTurns` **不增长** |
+| 5 | 收束原因可读 | `status.driver.lastEndReason` 能区分 `finished` / `thinking-only-settled` / `partial-wip-settled` / `timeout` |
+| 6 | 重启后无回退 | `conversationReplacedCount` 与 `sessionLostCount` 均为 0 |
 
 ### 重启前实测的当前真机状态（2026-09-15 19:53，**仍是 0.14.7**）
 
@@ -95,6 +228,24 @@ LoopX 整体移除；注释闸门转阻断；CI/CD 与审查补强；`REPORT.md`
 | `sessionLostCount` | 0 | 会话槽未丢 |
 | `lastEndReason` | `finished` | 最近一轮正常收尾 |
 | `landedId`（最近 12 条 navTrace） | 恒为 `c94e5f35…`，`replaced=false` | 落点稳定 |
+
+### 22:50 复核（**安装了修复版之后、重启之前**）
+
+| 字段 | 值 | 判读 |
+| --- | --- | --- |
+| `build.version` | 0.15.2 | 版本号已生效 |
+| `subAgentsError` | `roster-threw: projectRoster is not defined` | **旧代码仍在进程里**——安装不生效直到重启，与预期一致 |
+| `recoveredTurns` | 1 | 较 19:53 的 6 **归零后重新计**（进程重启过一次） |
+| `thinkingOnlyTurns` | 0 | 期间未出现「只出思维链」 |
+| `lastEndReason` | `finished` | 正常收尾 |
+| `conversationReplacedCount` | 1 | 较 19:53 的 2 **减少**——同样是进程重启后的新计数，非回归 |
+| `sessionLostCount` | 0 | 会话槽未丢 |
+| `loginBasis` / `needLogin` | `input-fallback` / `false` | 登录态正常，无需重新登录 |
+| `transport` | `playwright-edge` | 驱动形态符合预期 |
+
+> **LoopX 移除的持久性复核**：`pnpm-workspace.yaml` 无 `patchedDependencies`、
+> `state.json` 无 loopx 条目、`package.json` 无 loopx 依赖、`patches/` 下补丁已 `.disabled`——
+> 重启后未回退。隔离副本里跑 `pnpm install` 退出 **0**，**未再出现 `ERR_PNPM_UNUSED_PATCH`**。
 
 **两条必须说清楚的口径**：
 
@@ -116,6 +267,11 @@ LoopX 整体移除；注释闸门转阻断；CI/CD 与审查补强；`REPORT.md`
 B-4 那条 29,650 字符消息的归因（`turn/end` 是 `aborted by user`，无法判定）、
 豆包掉登录的真机复验（受风控约束，需人工择时）、GitHub Actions 的实际运行结果
 （需一次真实 push）、以及上面第 2 条那两次 `conversationReplaced` 的具体现场。
+
+**一条方法学教训（值得单独记住）**：这次漏接线能活到真机，靠的是三个恰好同时成立的巧合——
+(1) 引用写在**箭头函数体**里（延迟求值）、(2) 唯一会触发它的路径是**真机 HTTP 调用**、
+(3) 发布闸门**恒为红**（`package.json` 差异），于是真正的差异被淹没。
+「有测试」「有闸门」都不等于「有覆盖」：**必须有人问一句「这条路有没有被真的走一遍」**。
 
 ---
 

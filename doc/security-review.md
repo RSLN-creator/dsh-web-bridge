@@ -1,4 +1,4 @@
-# dsh-webcode-bridge 安全与逻辑评审（0.14.0）
+﻿# dsh-webcode-bridge 安全与逻辑评审（0.14.0）
 
 本文是给评审者的完整安全说明。基线是仓库里 0.4.1 版的《安全与逻辑审查》，
 本次扩写**保留并整合原结论**，同时把每条结论回溯到当前代码；凡与现状不符的旧结论，
@@ -395,7 +395,85 @@ consent 文件、把「已同意」静默变回「首次运行」。
 
 ---
 
-## 7. 结论回顾（与原文对齐）
+## 6.4 0.14.7 / 0.15.0 新增面的安全复核（2026-09-15 补）
+
+**为什么补这一节**：本文档主体写于 2026-09-10，而 0.14.7（同站多账户）与
+0.15.0（真实花名册）在那之后引入了**两个新的数据面**。REPORT.md 的 A-6 Item 6.2
+明确把「`doc/security-review.md` 是否覆盖 `lib/accounts.js` / 槽级 profileDir」
+列为**未取证**项。实测确认：全文对 `accounts` / `slotProfileDir` /
+`parseAccountKey` / `roster` / `agentTeams` 的命中数**均为 0** —— 即此前**确实没有**
+覆盖。本节把它们补上，结论按实测给出。
+
+### 6.4.1 槽级 profileDir 的路径穿越面（0.14.7）
+
+**威胁**：`slotProfileDir(profileDir, siteId, slot)` 把用户可控的两个字符串拼进
+文件系统路径。若拼接前不校验，`glm#../../..` 这类槽名可让桥在任意目录建 profile
+（进而写 cookie、读既有登录态）。这是本插件**最值得盯的一类**面——它直接决定
+「用户设置的字符串能不能逃出预期目录」。
+
+**结论：已加固，实测无逃逸。** 两道白名单正则（`accounts.js:39-40`）：
+
+```
+SLOT_RE    = /^[A-Za-z0-9_-]{1,32}$/
+SITE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
+```
+
+两者都**只允许**字母数字与 `_`/`-`，因此 `/`、`\`、`.`、空格、NUL 全部不可能出现。
+`parseAccountKey` / `formatAccountKey` / `slotProfileDir` 三处都调用 `normalizeSlot`
+或直接测 `SITE_ID_RE`，`slotProfileDir` 在槽名非法时**抛错**而不是回落默认值
+（回落会让用户以为切到了账户2、实际一直在用默认账户）。
+
+**实测（不是读码推断）**：对 9 个真实攻击串逐个跑 `parseAccountKey` +
+`slotProfileDir`，并额外检查结果路径是否逃出 `<root>/sites/`：
+
+| 攻击串 | 结果 |
+| --- | --- |
+| `glm#../../../../etc` | BLOCKED（槽名非法） |
+| `glm#..` / `glm#.` | BLOCKED |
+| `glm#a/b` / `glm#a\b` | BLOCKED |
+| `glm#a b` | BLOCKED |
+| `glm#\0x` | BLOCKED |
+| `../../etc#2` | BLOCKED（**站点 id** 非法） |
+| `glm#` | BLOCKED（槽名为空是拼写错误，不静默当默认槽） |
+
+**9/9 全拦，无一逃出 `root/sites/`。** 另注：`siteId` 在 `driverFor` 里还要过
+`getSite(siteId)`（未知站点直接抛 `未知站点`），所以路径面之外还有一层
+**已知站点白名单**——两道独立防线，不依赖同一处校验。
+
+### 6.4.2 花名册的信息暴露面（0.15.0）
+
+**威胁**：`projectRoster` 经 `/__webcode/status` 暴露「谁在跑」。
+两个需要判断的点：① 是否泄漏了不该给浏览器的内部标识；② 出错时是否把
+宿主内部信息（路径、堆栈）当错误文本回给前端。
+
+**结论：暴露面限于桥自己的只读投影，未发现越界。**
+
+- **只读**：`roster.js` 不调用任何写侧方法（`createTask` / `updateTask` 明示不在此处），
+  也不创建/中断任何 Team 状态。
+- **字段最小化**：Team 行只透出 `id / name / role / status / taskCount`，
+  子代理行只透出 `id / name / status / mode / createdAt`——都是官方 view 的既有字段，
+  桥不额外拼装。
+- **错误文本已截断**：所有 `*Error` 走 `.slice(0, 160)`（`roster.js:116/143/185/188`），
+  且多数是**固定枚举串**（`official-team-package-not-loaded` /
+  `agent-registry-unavailable` / `session-not-found` …）。只有 4 处会带上底层
+  `e.message` 的前 160 字符——**这是有意的**：花名册读不到时，面板必须能说
+  「为什么没有数据」而不是让用户以为是「确实没有成员在跑」（`roster.js` 文件头
+  的「不造假状态」纪律）。160 字符不足以带出完整路径或堆栈。
+- **路由守卫沿用既有面**：`/__webcode/status` 与其余控制面共用同一套同源判定
+  （loopback Host + `Sec-Fetch-Site` + 精确 Origin，`web-control.js:114-132`），
+  0.15.0 **没有**为花名册新开任何绕过守卫的路径。
+
+### 6.4.3 本节仍然不做的声明
+
+- **未做真机渗透测试**：上面是**代码级**复核 + 路径面离线实测。真机上的
+  浏览器行为（实际发起的请求、cookie 域、反代响应头）未在此节验证。
+- **未审计官方包内部**：`agentTeams` 的 `listMembers` 实现属上游
+  `@deepseek-ai/dsh-experimental-agent-team`，本文只审计**桥对它的调用方式**
+  （凭据从哪来、返回值怎么投影、出错怎么降级），不审计上游实现本身。
+- 因此 6.4.1 / 6.4.2 的结论口径是「**桥这一侧已加固且实测无逃逸**」，
+  而不是「整条链路已通过安全认证」。
+
+---
 
 原文《已处理》一节中的以下结论在当前代码里**仍然成立**，位置见括号：
 

@@ -93,7 +93,21 @@ function installInto(tarball, profileDir) {
   if (!written) throw new Error('tarball 里没有可写入的普通文件：' + tarball);
 }
 
-/** 装完当场核对：版本号 + 几个「代表本轮改动」的文件是否真的在。 */
+/**
+ * 装完当场核对：版本号 + 几个「代表本轮改动」的文件是否真的在 + **跨模块接线是否真的接上**。
+ *
+ * 为什么核对里必须有一条「接线」：2026-09-15 真机踩坑——`lib/index.js` 里
+ * `rosterOf: (sessionId) => projectRoster(ctx, sessionId)` 这行在，但顶部的
+ * `import { projectRoster } from './roster.js'` 漏了。后果是：模块照样加载（箭头函数体
+ * 创建时不求值）、**全量单测全绿**，只有真机 `/__webcode/status` 真的调用时才抛
+ * ReferenceError，被 web-control 的 try/catch 降级成
+ * `subAgentsError: "roster-threw: projectRoster is not defined"` —— 面板永久空白，
+ * 而所有「文件都在」的探针都是绿的。所以这里必须在安装时就当场发现。
+ */
+const WIRING = [
+  { need: 'projectRoster', from: './roster.js', file: 'lib/index.js' },
+];
+
 function verify(target) {
   const pkgJson = JSON.parse(fs.readFileSync(path.join(target, 'package.json'), 'utf8'));
   const probes = [
@@ -101,9 +115,19 @@ function verify(target) {
     'lib/cookies.js',
     'lib/client.cjs',
     'lib/browser-driver.js',
+    'lib/roster.js',
   ];
   const missing = probes.filter((p) => !fs.existsSync(path.join(target, p)));
-  return { version: pkgJson.version, missing, target };
+  const wiring = [];
+  for (const w of WIRING) {
+    const src = fs.readFileSync(path.join(target, w.file), 'utf8');
+    // 只认静态 import 声明：`import { a, projectRoster } from './roster.js'`
+    const re = new RegExp(
+      `import\\s*\\{[^}]*\\b${w.need}\\b[^}]*\\}\\s*from\\s*['"]${w.from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}['"]`,
+    );
+    if (!re.test(src)) wiring.push(`${w.need} (应从 ${w.from} 导入，在 ${w.file})`);
+  }
+  return { version: pkgJson.version, missing, wiring, target };
 }
 
 function main(argv) {
@@ -131,7 +155,13 @@ function main(argv) {
       installInto(tarball, profileDir);
       const r = verify(path.join(profileDir, 'node_modules', PKG_NAME));
       results.push({ name, ...r });
-      console.log(`  ✔ ${name}: v${r.version}` + (r.missing.length ? `  ⚠ 缺少 ${r.missing.join(', ')}` : ''));
+      const bad = r.missing.length || r.wiring.length;
+      console.log(
+        (bad ? '  ⚠ ' : '  ✔ ') + `${name}: v${r.version}` +
+          (r.missing.length ? `  缺少文件: ${r.missing.join(', ')}` : '') +
+          (r.wiring.length ? `  ✖ 接线断裂: ${r.wiring.join('; ')}` : ''),
+      );
+      if (r.wiring.length) failed += 1;
     } catch (e) {
       failed += 1;
       console.error(`  ✖ ${name}: ${e?.message || e}`);

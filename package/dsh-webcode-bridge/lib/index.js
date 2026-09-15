@@ -24,6 +24,13 @@ import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart,
 import { createMirror } from './mirror.js';
 import { httpFetch } from './upstream.js';
 import { textOfBlocks } from './flatten.js';
+// 真实花名册（0.15.0）。**这行曾经漏掉过**：下面的 `rosterOf` 注入点照样写着
+// `projectRoster(ctx, sessionId)`，而它是箭头函数体、创建时不求值 —— 于是模块能加载、
+// 全量单测全绿，只有真机 `/__webcode/status` 真的调用时才抛 ReferenceError，
+// 被 web-control 的 try/catch 降级成 `subAgentsError: "roster-threw: projectRoster is not defined"`，
+// 面板永久空白（与 0.14.9「写死空数组」的可见后果一致）。
+// 护栏：test/wiring-roster.test.mjs 走真实 apply() → HTTP → /status 钉住整条路径。
+import { projectRoster } from './roster.js';
 import { estimateTokens, computeSendGap, checkContextBudget } from './metrics.js';
 import { accumulateWait, sanitizeWaitStats, emptyWaitStats, composerWaitLine, waitStatRows, formatDuration } from './wait-stats.js';
 import { renderSettingsPage } from './settings-page.js';

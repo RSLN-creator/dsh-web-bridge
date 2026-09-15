@@ -480,6 +480,28 @@ window.__ModuleLoader__.load({
       };
       const setResult = (sid, r) => setResults(prev => ({ ...prev, [sid]: r }));
       const [winSites, setWinSites] = React.useState({});
+      /**
+       * 已选中账户（0.14.8）：点心选账户即把「本会话要用的账户」切过去。
+       *
+       * ⚠️ **这个 useState 必须在下面那句提前 `return` 之前**（0.15.3 真机修复）。
+       *
+       * 它原先写在 `if (!list.length) return …` 之后，于是：
+       *   • 首屏（`sites` 未到达 ⇒ `list` 为空）只执行到第 4 个 hook 就 return；
+       *   • `sites` 到达后走到这一行，**本次渲染比上次多一个 hook**。
+       * 真实 React 对「hooks 数量变多」是硬错误（"Rendered more hooks than during
+       * the previous render"），错误冒泡到 `settings.section` 的
+       * SlotErrorBoundary，**整块设置栏目被替换成空占位**——用户看到的就是
+       * 「网页桥接栏目一片空白」。0.14.7 里还没有 picked，所以旧版没这个跳变。
+       *
+       * 为什么离线全绿：`client-render.test.mjs` 的 useState 桩是**按名字取值**的
+       * 映射（不是有序链表），结构上就无法察觉 hook 顺序/数量违规；而它在切换
+       * payload 时还会清空状态（第 216 行），于是「同一次挂载内 4 → 5 个 hook」
+       * 这个跳变从来没有被复现过。护栏的建模失真，把整类 bug 盖住了。
+       *
+       * 新护栏见 `test/hooks-order.test.mjs`：它用**强制 hook 顺序规则**的桩，
+       * 在同一次挂载内驱动 sites 从空到有，把这个跳变钉死。
+       */
+      const [picked, setPicked] = React.useState(null);
       // windows 由服务端按 accountKey 索引（0.14.7）；旧后端按 siteId，
       // 而默认槽的 accountKey 就是 siteId，因此两种形态在默认槽上等价。
       const refreshWins = () => api('window').then(w => setWinSites(w?.windows || {})).catch(() => {});
@@ -555,10 +577,6 @@ window.__ModuleLoader__.load({
         await onRefresh?.();
       }
       if (!list.length) return h('p', { className: 'hwb-hint' }, '站点状态加载中…（中继未启动时不可用）');
-      // 已选中账户（0.14.8）：点心选账户即把「本会话要用的账户」切过去。
-      // 选择是**会话级**的（Server 端按 accountKey 建独立驱动与 profileDir），
-      // 因此这里只记一个高亮键 + 调用既有的 connect 路由，不复制任何登录逻辑。
-      const [picked, setPicked] = React.useState(null);
       /**
        * 状态环：三态，颜色只是**加强**而非唯一载体（`aria-label` + `title` +
        * 可见文本三者都要能读出状态）。
@@ -678,10 +696,56 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 设置页。
+     * 设置页外壳：把「当前会话 id」接进来，再交给 `Settings` 渲染。
      *
-     * `sessionId` 由官方 `settings.section` 槽的 `inject` 契约注入（0.15.0 起
-     * 本面板才需要它——花名册里的 subagentCatalog 是**会话级**投影）。
+     * ## 为什么不直接用槽的 `inject`
+     *
+     * 0.15.0 起本面板需要当前会话 id（花名册里的 subagentCatalog 是**会话级**
+     * 投影），当时的写法是给 `settings.section` 加
+     * `inject: (sessionId) => ({ sessionId })`。**那是错的**，真机 0.15.3 暴露：
+     *
+     *   • `settings.section` 在官方契约里是 `scope: "root"`（见
+     *     dsh-cordis-client-runner 的槽目录），而 renderer 的 `runInject` 只对
+     *     **带 binding 的会话级槽**传 `binding.key`；root 槽只拿到 `actions`。
+     *   • 于是 `inject(sessionId)` 里的 `sessionId` 实际是那个 actions 对象——
+     *     一个真值垃圾，被当成会话 id 一路传到服务端，花名册恒回
+     *     `subAgentsError: "no-session-id"`，面板永远读不到成员。
+     *
+     * 官方给这个槽的正规入口是 standard prop **`useSessions`**（renderer 会把它
+     * 作为 React hook 注进 props；官方 ui-settings-general 自己就是这么读会话的）。
+     * 所以会话身份必须经它取，而不是指望 root 槽的 inject。
+     *
+     * ## 为什么要包一层组件
+     *
+     * hook 必须在组件体内无条件调用。`Settings` 是纯展示组件（它自己的 useState
+     * 序列不能因为我们偶尔多调一次 hook 而变化），把会话读取放在这一层，`Settings`
+     * 就继续只吃一个普通的 `sessionId` 值——这也是 `client-render.test.mjs` 直接
+     * 调 `Settings(props)` 的既有契约。
+     */
+    function SettingsSection(props) {
+      const sessionId = useCurrentSessionId(props);
+      return h(Settings, { ...props, sessionId });
+    }
+
+    /** `useSessions` 缺席时的等价空实现，保证调用形态恒定（绝不条件调用 hook）。 */
+    const noSessions = () => null;
+
+    /**
+     * 读当前会话 id：优先官方 `useSessions`，回落到 props 上已有的 `sessionId`。
+     *
+     * 回落分支是给**测试桩**与「会话尚未建立」这两种正常情况用的：此时拿不到
+     * 会话身份，花名册会如实显示「读不到：no-session-id」，而不是整块面板崩掉。
+     */
+    function useCurrentSessionId(props) {
+      const useSessions = typeof props?.useSessions === 'function' ? props.useSessions : noSessions;
+      // 无条件调用——条件调用正是本文件上方 SiteAccounts 刚踩过的那条 hooks 规则。
+      const current = useSessions(s => (s && s.current) || null);
+      return current || props?.sessionId || null;
+    }
+     /**
+     * 设置页本体（纯展示）。
+     *
+     * `sessionId` 由 `SettingsSection` 经官方 `useSessions` 取好后作为普通 prop 传进来。
      * 这里刻意写成 `props?.sessionId` 而不是解构，因为渲染入口不止一个：
      * 宿主槽调用、以及测试里直接调 `Settings()` 都会走到这里，而
      * 「拿不到会话身份」是一个**必须能优雅降级**的正常情况（降级后花名册给
@@ -1388,16 +1452,17 @@ window.__ModuleLoader__.load({
       // ---- 设置页（真实需求重构：登录管理前置、无历史导入） ------------
       own(() => {
         try {
+          // 0.15.3：**不再给这个槽写 `inject: (sessionId) => …`**。
+          //
+          // `settings.section` 是 `scope: "root"`，renderer 只对带 binding 的会话级槽
+          // 传 `binding.key`；root 槽的 inject 拿到的是 actions 对象。旧写法因此把那个
+          // 对象当成会话 id 送到服务端，花名册恒回 `no-session-id`（真机 0.15.3 实测）。
+          // 会话身份改由 `SettingsSection` 经官方 standard prop `useSessions` 取——
+          // 官方 ui-settings-general 自己就是这么读会话的。
           return ctx.slots.inject('settings.section', () => ctx.slots.register({
             name: 'settings.section', id: 'webcode', order: 110,
             label: () => '网页桥接',
-            // 0.15.0：把当前会话 id 一起注入。花名册里的 subagentCatalog 是
-            // **父会话自己的**持久化投影（lib/roster.js 的 projectSubAgents 会
-            // 用 sessions.get(sessionId) 取那一个会话），因此设置页必须知道
-            // 「用户正在看哪个会话」，否则多会话并行时会把别人的子代理列出来。
-            // 与上面 composer.dock 的 WaitLine 用的是同一个官方 inject 契约。
-            inject: (sessionId) => ({ sessionId }),
-          }, Settings));
+          }, SettingsSection));
         } catch (e) { warn('settings section', e); }
       });
 

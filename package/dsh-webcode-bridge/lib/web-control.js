@@ -623,6 +623,34 @@ export function createWebControl(deps = {}) {
     },
   };
 
+  // ── `status` 必须同时接受 GET 与 POST（0.15.3，真机缺陷修复）────────────────
+  //
+  // 真机 2026-09-16：设置页「正在运行（子代理 / Team）」那一栏永远读不到花名册。
+  // 根因不是花名册本身，而是**两端对同一个动作的方法不一致**：
+  //
+  //     lib/client.cjs      api('status', { sessionId })  ← 带 body ⇒ POST
+  //     lib/web-control.js  'GET status'                  ← 只注册了 GET
+  //
+  // 于是真机 POST /__webcode/status ⇒ **405**（上面的 `if (!actions[key])` 分支
+  // 发现同名后缀存在、方法不匹配，就带 Allow 头回 405）。花名册这一栏因此永远
+  // 停在「读不到」，而 `subAgentsError` 报的是 `no-session-id` —— 那个原因本身
+  // 也是真的（sessionId 根本没送达），但它是**后果**，不是根因。
+  //
+  // 为什么离线全绿：`client-render.test.mjs` 的 mock fetch **不看方法**，任何
+  // URL 都回 200 + JSON。护栏自己的建模失真，把「服务端没这条路由」整个盖住了。
+  //
+  // 为什么不把客户端改成 GET：花名册的 subagentCatalog 是**会话级**投影，
+  // sessionId 必须随请求送达，而客户端统一走 `request()` 的「有 body 就 POST」
+  // 契约。两头都收才是对调用方无假设的形态（外部脚本用 GET 也照旧可用）。
+  //
+  // 这里用**别名**而不是复制一份实现：两个方法必须返回逐字节相同的形状，
+  // 复制一份迟早会漂移——那正是这次故障的同族病（两端各写各的）。
+  //
+  // 判据由 `test/client-server-contract.test.mjs` 钉住：它把客户端
+  // `api(action, body)` 推导出的方法与服务端动作表直接对齐，于是这一族
+  // 「调用点存在、另一端没有」的缺陷从此在离线就能红。
+  actions['POST status'] = actions['GET status'];
+
   /**
    * Handle one request. `pathname` is the full path; any suffix that ends
    * with one of the action names (e.g. /__webcode/status, /bridge/web/status)
