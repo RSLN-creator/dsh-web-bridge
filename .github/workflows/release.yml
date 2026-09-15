@@ -1,0 +1,166 @@
+# release.yml — 打 tag 时产出发布 tarball 并挂到 GitHub Release。
+#
+# ## 这个项目**不从 registry 安装**
+#
+# 本插件的安装方式是「本地 tarball 装进 DSH profile」：`README.md` 第 7-8 行写的是
+#   `pnpm install --frozen-lockfile`、`pnpm pack`
+#   `dsh plugin --profile web add ./dsh-webcode-bridge-<版本>.tgz`
+# 因此本工作流**绝不 publish 到任何 registry**（npm / GitHub Packages 都不发）。
+# 唯一的交付物是那个 `.tgz`，挂在 Release 上供人下载后本地安装。
+# 最后一步有一个**守卫**：若工作流里出现 `npm publish` / `pnpm publish` 命令行，构建直接失败。
+#
+# ## 为什么必须跑 scripts/verify-pack.mjs
+#
+# 这个脚本的存在本身就是一次事故的记录（读它的文件头）：0.14.4 发布时 pack 之后又改了
+# `lib/mirror.js` 却**没有重新 pack**，于是装进 profile 的是「旧 mirror.js + 新版本号」的组合——
+# 表面上看版本号对、文件也在，实际跑的是半旧代码，**不报错，只是行为悄悄不对**。
+# 后来重装又踩到 pnpm 对同版本号 tarball 判「Already up to date」而不解包。
+# 两次都靠人工核对文件内容才发现，所以这一步是**发布流程里不可省的一环**：
+# 它逐个比 sha256 并打印「N/M 逐字相同」，哈希不同就是不同。
+#
+# ## 为什么还要校验 tag 与 package.json 的版本号
+#
+# 同一类事故的另一个入口：打了 `v0.14.8` 的 tag，但 `package.json` 还是 `0.14.7`，
+# 于是 Release 上挂着一个名字对不上内容的 tgz。verify-pack 抓不到这个（它只比 tarball 与
+# 工作树），所以单独加一步。两条护栏合起来才覆盖「名字、内容、工作树」三者一致。
+#
+# 用法：`git tag v0.14.8 && git push origin v0.14.8`（tag 必须是 `v` + package.json 的 version）。
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  PKG_DIR: package/dsh-webcode-bridge
+
+jobs:
+  release:
+    name: 打包并发布 tarball
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # 与 ci.yml 同一理由：`pnpm-lock.yaml` 已入库但**已过期**，
+      # `--frozen-lockfile` 实测退出 1（ERR_PNPM_OUTDATED_LOCKFILE，
+      # @deepseek-ai/dsh-client-ui-sidebar-right 的 `*` 范围失配）。
+      # 见 ci.yml 文件头的「环境事实 1」。此处不重复论证。
+      - name: 安装依赖
+        working-directory: ${{ env.PKG_DIR }}
+        run: pnpm install --no-frozen-lockfile --prefer-offline
+
+      # 守卫：本项目不发 registry。若哪天有人把 publish 命令行加了进来，这一步会拦下。
+      # 实现刻意只匹配「像命令的行」：注释里讨论「不 publish」是允许的，否则这段说明本身会把构建弄红。
+      - name: 守卫 — 不得包含向 registry 发布的命令
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -REn '^[[:space:]]*(-[[:space:]]*)?(run:)?[[:space:]]*(npm|pnpm|yarn)[[:space:]]+publish' .github/workflows/; then
+            echo "::error::检测到向 registry 发布的命令。本项目只发布 tarball 到 GitHub Release，绝不 publish 到任何 registry。"
+            exit 1
+          fi
+          echo "OK：工作流中没有任何 publish 命令。"
+
+      - name: 校验 tag 与 package.json 的 version 一致
+        working-directory: ${{ env.PKG_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "tag=$TAG  package.json version=$VERSION"
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "::error::tag ($TAG) 与 package.json 的 version (v$VERSION) 不一致。改了版本号要同步打 tag，否则 Release 上挂的 tgz 名字与内容对不上。"
+            exit 1
+          fi
+
+      # 打 tarball。`pnpm pack` 与 package.json 里的 `pack:release` 脚本是同一条命令
+      # （`"pack:release": "pnpm pack"`），这里直接写 `pnpm pack` 以对齐 README 的安装说明。
+      # 输出落在 PKG_DIR 下，文件名由 npm 规则决定：<name>-<version>.tgz。
+      - name: 打 tarball（pnpm pack）
+        working-directory: ${{ env.PKG_DIR }}
+        run: pnpm pack
+
+      # 发布流程里不可省的一环，理由见文件头。显式传路径而不是让脚本自动挑「最新 tarball」：
+      # 本目录下堆着几十个历史 .tgz，靠 mtime 挑是运气，不是判据。
+      - name: 校验 tarball 与工作树逐字一致（scripts/verify-pack.mjs）
+        working-directory: ${{ env.PKG_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./package.json').version")"
+          TARBALL="dsh-webcode-bridge-${VERSION}.tgz"
+          test -f "$TARBALL" || { echo "::error::pnpm pack 没有产出 $TARBALL"; exit 1; }
+          node ../../scripts/verify-pack.mjs "$TARBALL"
+          echo "TARBALL_NAME=$TARBALL" >> "$GITHUB_ENV"
+
+      # 发布前的最小离线预检：生成物卫生 + 注释纪律。**不跑全量单测**——那是 ci.yml 的职责，
+      # 而 tag 应当打在已经绿过 main 的 commit 上。这里只补两道「几秒钟、但漏了会很尴尬」的检查。
+      # 注释纪律**已转阻断**（2026-09-15，0.15.2）：基线清干净了（error 0 / warn 0），
+      # 与 ci.yml 同步收紧。理由与撤下 `continue-on-error` 的判据见 ci.yml 那一步的注释。
+      - name: 预检 — 生成物卫生
+        working-directory: ${{ env.PKG_DIR }}
+        run: node test-mock/artifacts-check.mjs
+
+      - name: 预检 — 注释纪律（阻断）
+        run: node scripts/lint-comments.mjs
+
+      # 用预装的 gh CLI 而不是第三方 action：少一个供应链面，且 gh 在 ubuntu-latest 上自带。
+      # `gh release create` 在 Release 已存在时会失败，所以先判断再决定 create / upload。
+      - name: 创建 Release 并附上 tarball
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          TGZ="${PKG_DIR}/${TARBALL_NAME}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，改为上传（覆盖同名资产）。"
+            gh release upload "$TAG" "$TGZ" --clobber
+          else
+            gh release create "$TAG" "$TGZ" \
+              --title "$TAG" \
+              --generate-notes
+          fi
+          echo "已发布：$TGZ"
+
+      # 发布结果里带上校验和：下载方可以自己核对拿到的是不是 CI 校验过的那一份
+      # （与 verify-pack 的「哈希不同就是不同」同一立场）。
+      # 版本号在这里**重新推导**，不用上一步通过 $GITHUB_ENV 传下来的变量：
+      # GITHUB_ENV 的值对**后续步骤**的 run 脚本可见，但对 `${{ env.X }}` 模板表达式不可靠
+      # （模板在 job 开始时就求值）。重新推导一次是幂等的，且不依赖这条容易记错的行为。
+      - name: 记录 tarball 校验和
+        working-directory: ${{ env.PKG_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./package.json').version")"
+          TGZ="dsh-webcode-bridge-${VERSION}.tgz"
+          test -f "$TGZ" || { echo "::error::找不到 $TGZ"; exit 1; }
+          sha256sum "$TGZ"
+          {
+            echo "### tarball sha256"
+            echo '```'
+            sha256sum "$TGZ"
+            echo '```'
+            echo "安装：\`dsh plugin --profile web add .\\${TGZ}\`，然后**重启 DSH** 才会加载新版本。"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,180 @@
+# ci.yml — dsh-webcode-bridge 的主闸门（push / PR / 手动）。
+#
+# ## 这个工作流刻意只跑「不需要真机」的部分
+#
+# 本项目的验收面分成两层，`doc/verify.md` 与 `doc/comment-style.md` §9 把它们分得很清楚：
+#
+#   · **离线层**（本工作流）：解析、块协议、会话游标、设置、多站点解码器、基准 harness 的
+#     离线回放、生成物卫生。这些用构造的 chunk 流与 mock 站点跑，**不联网、不碰真机、不启动
+#     浏览器**（§9.1 第 5 条「默认离线」）。
+#   · **真机层**（不在本工作流）：`test-mock/real-*.mjs` 与 `npm run doctor`。它们需要一台
+#     **已登录的 Edge profile**，并且会真实敲 DeepSeek/GLM/Kimi 等站点。CI runner 既没有那份
+#     登录态，也不该替用户去敲——§9.1 第 5 条写明 `--live` 必须显式批准，风控纪律是
+#     「串行 / 每变体 ≤3 次 / 间隔 ≥20s」（依据 `doc/bridge-failure-ledger.md` §3 的 0.14.3
+#     事故）。因此真机验收走人按发版节奏跑的 `doc/verify.md` 矩阵，而不是这里。
+#
+# ## 两个必须写下来的环境事实（本地实测，不是推测）
+#
+# 1. **不能用 `--frozen-lockfile`**：`package/dsh-webcode-bridge/pnpm-lock.yaml` 虽然**已入库**，
+#    但它已**过期**——`pnpm install --frozen-lockfile` 实测退出 1：
+#      ERR_PNPM_OUTDATED_LOCKFILE ... The importer resolution is broken at dependency
+#      "@deepseek-ai/dsh-client-ui-sidebar-right": version "0.1.5-alpha.1" doesn't satisfy range "*"
+#    根因是 `peerDependenciesMeta` 把该 peer 标成 optional、而 lockfile 的 importer 段仍要求
+#    满足 `*`。而 `pnpm install --no-frozen-lockfile` 实测退出 0，且**不改写 lockfile**
+#    （sha256 前后一致）。所以这里用 `--no-frozen-lockfile`，并加 `--prefer-offline` 减少抖动。
+#    这不是「绕过校验」：该 lockfile 对干净安装本就不成立，冻住它只会让 CI 恒红。
+#
+# 2. **Node 20 跑不了 `pnpm test` 里的 glob**：`package.json` 的 test 脚本是
+#      node --test "test/*.test.mjs" && ...
+#    引号让 shell 无法展开，字符串原样交给 Node。而 `--test` 的 **glob 支持是 Node 21 才加入的**
+#    （Node.js 21 发布公告「Support for globs in the Node.js test runner」，PR nodejs/node#47653）。
+#    在 Node 20 上它是字面路径 → 找不到文件 → 必然失败。因此 Node 20 那条腿改用 **bash 展开
+#    glob** 的等价命令（见 `单测（Node 20 …）` 步骤），命令内容与 `pnpm test` 逐字对应。
+#
+# `engines.node` 是 `>=20`，所以 20 与 22 都必须覆盖：只测 22 会放过「在声明支持的最低版本上
+# 根本跑不起来」这类回归——而那正是本项目最想避免的一类「本地绿、用户红」。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支上的旧运行被新推送取代后立即取消：省 runner，也避免旧结论贴在新的 commit 上。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # 包目录：所有 npm 脚本、test-mock 探针都相对它。
+  PKG_DIR: package/dsh-webcode-bridge
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    # 本机 `pnpm test` 实测 564s（9.4 分钟，2026-09-15）。CI 冷缓存 + 两平台差异留足余量。
+    timeout-minutes: 45
+    strategy:
+      # 不要 fail-fast：一个平台的失败会掩盖另一个平台的失败，而两平台失败的**原因通常不同**。
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [20, 22]
+
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+
+      # 版本取自 package/dsh-webcode-bridge/package.json 的 packageManager 字段
+      # （`pnpm@11.25.0+sha512...`）。显式写版本而不是让它自动探测：仓库根没有 package.json，
+      # 自动探测会落空。
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
+
+      - name: 安装 Node ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # 见文件头事实 1：lockfile 存在但已过期，`--frozen-lockfile` 实测退出 1。
+      - name: 安装依赖（--no-frozen-lockfile，理由见文件头）
+        working-directory: ${{ env.PKG_DIR }}
+        run: pnpm install --no-frozen-lockfile --prefer-offline
+
+      # 注释纪律闸门。**已转为阻断**（2026-09-15，0.15.2）。
+      #
+      # 历史：接入时基线未清（19 个 error：CS001 1 个、CS002 5 个、CS003 13 个），
+      # 因此先以 `continue-on-error` 非阻断接入，好让每条 PR 都能看到欠账是增是减。
+      # 那一步的前提是「基线清完后删掉 continue-on-error」——现在前提已满足：
+      #   · CS003 的 13 个是 JSDoc 缺口，已补齐；
+      #   · CS002 的 5 个是**闸门自身的判据 bug**：它按整行扫源码，于是
+      #     `const MARKER_RE = /\b(TODO|FIXME|XXX|HACK)\b/;` 这种**正则字面量**
+      #     里的 TODO 被当成待办注释。已改为先用状态机抽出真正的注释文本再判，
+      #     规则仍然抓得住裸 `TODO`（改动时用「种一条 // TODO fix this later，
+      #     确认报错后再撤回」的方式验证过它没有变空）。
+      #   · CS005 的 4 个 WARN 是散文误报，判据已收紧（要求赋值/调用形态 + CJK 占比）。
+      # 实测 `node scripts/lint-comments.mjs` 现在 error 0 / warn 0、退出码 0。
+      #
+      # 留 `continue-on-error` 长期不动 = 这道闸门等于不存在（这正是它自己注释里
+      # 写下的判据），所以这一行被删掉了。若将来又要临时放行，必须同时写下
+      # 「什么条件下撤回」——否则它会永久留在那里。
+      - name: 注释纪律（scripts/lint-comments.mjs，阻断）
+        run: node scripts/lint-comments.mjs
+
+      # ---- 全量单测：两套等价命令，按 Node 版本分流（见文件头事实 2）----
+
+      - name: 单测（Node ${{ matrix.node }}，pnpm test）
+        if: matrix.node != '20'
+        working-directory: ${{ env.PKG_DIR }}
+        run: pnpm test
+
+      # Node 20 没有 `--test` glob（Node 21 才加），但 bash 的 glob 展开是可靠的：
+      # 不加引号 → shell 先把 test/*.test.mjs 展开成显式文件表 → Node 收到的是真实路径。
+      # 下面这串与 package.json 的 test 脚本**逐字对应**（只差 glob 由谁展开）。
+      - name: 单测（Node 20：--test 无 glob 支持，交给 bash 展开）
+        if: matrix.node == '20'
+        working-directory: ${{ env.PKG_DIR }}
+        shell: bash
+        run: |
+          node --test test/*.test.mjs
+          node test/parse.test.mjs
+          node test/run-m1.js
+          node test-mock/bench-ci.mjs
+          node test-mock/artifacts-check.mjs
+
+      # 基准 harness 的**离线回放**：用录制的 chunk 流配对比较，不联网、不碰真机、不启动浏览器
+      # （doc/comment-style.md §9.1 第 5 条）。`--offline` 是显式声明，等价于默认行为。
+      # 退出码契约（test-mock/prompt-bench.mjs）：0=全通过 / 1=有失败用例 / 2=参数或判据自检失败 /
+      # 3=--live 未获批准。这里**只跑 0 号路径**——负向对照（期望 1）由 bench-ci.mjs 负责，已含在 pnpm test 里。
+      - name: 基准 harness 离线回放
+        working-directory: ${{ env.PKG_DIR }}
+        run: node test-mock/prompt-bench.mjs --offline
+
+      # 单独再跑一次生成物卫生：它在 `pnpm test` 里也有，但这一步是**最快能定位 .gitignore 回归**的
+      # 一步，独立列出可以让失败信息直接落在它头上，而不是埋在整个 pnpm test 的尾部输出里。
+      - name: 生成物卫生（跑一次就会变的文件不得被 git 看见）
+        working-directory: ${{ env.PKG_DIR }}
+        run: node test-mock/artifacts-check.mjs
+
+      # ---- 本地入口自检：`--fast` 走的正是上面三步 ----
+      #
+      # 为什么明知重叠还要跑（**这是刻意的，不是漏删**）：
+      # `scripts/ci-local.mjs` 是 CONTRIBUTING.md 与 doc/ci-cd.md 要求开发者「推之前跑一遍」
+      # 的入口，而它里面有一条**按平台分叉**的逻辑——pnpm 的可执行名在 Windows 上是
+      # `pnpm.cmd`、其它平台是 `pnpm`，以及每步必须显式给 `cwd`。这段逻辑在开发者本机
+      # 只会在一个平台上被走到，另一边永远没人验证；一旦它坏了，表现是「文档让你跑的命令
+      # 直接崩」，而不是任何一条测试变红。
+      #
+      # 代价被压到最小：`--fast` **刻意跳过全量单测**（那是慢的那一步），只跑三个秒级步骤，
+      # 因此重复执行的净成本约 1 秒；换来的是两个平台都验证一次这个入口真的能跑通。
+      # 若将来 CI 时长紧张，删掉这一步是安全的——但**同时要接受**「本机入口只在单平台被验证」。
+      - name: 本地入口自检（scripts/ci-local.mjs --fast）
+        run: node scripts/ci-local.mjs --fast
+
+      # ---- 真机层：**刻意不跑**（见文件头）----
+      # 下面这些步骤**故意不写**，不是遗漏：
+      #   · test-mock/real-verify.mjs（npm run doctor）——需已登录 Edge，发版前由人跑
+      #   · test-mock/real-probe-*.mjs              ——同上，且逐个站点受风控限制
+      #   · test-mock/real-mirror-matrix.mjs        ——需 CDP 附着到桥已开的 Edge
+      # CI runner 没有登录态，也不该替用户敲站点。详见 doc/ci-cd.md「刻意不在 CI 里跑的东西」。
+
+      # 基准产物只在失败时上传：它们是「每次跑都会变」的文件（已被 .gitignore 覆盖），
+      # 成功后上传等于给每次绿构建堆一份没人看的 zip。
+      - name: 上传基准产物（仅失败）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-out-${{ matrix.os }}-node${{ matrix.node }}
+          path: |
+            ${{ env.PKG_DIR }}/test-mock/prompt-bench/out/
+            ${{ env.PKG_DIR }}/test-mock/out/
+          if-no-files-found: ignore
+          retention-days: 14

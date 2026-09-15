@@ -1,0 +1,103 @@
+# codeql.yml — GitHub CodeQL 静态分析（JavaScript/TypeScript）。
+#
+# ## 为什么这个仓库需要它
+#
+# 本项目的攻击面不是教科书式的「用户输入拼 SQL」，而是三类真实存在的东西，`doc/security-review.md`
+# 逐条列过：
+#
+#   1. **控制面路由**（`lib/web-control.js`）——同源 `*.localhost:<port>` 上的 `/__webcode/*`，
+#      带 DNS 重绑定防护。0.14.x 真实修过一次「回环子域被误拦」。
+#   2. **站点反代与 HTML/CSS 改写**（`lib/mirror.js`）——把真实站点的 HTML/脚本改写后注入回环。
+#      这里的注入点（`bootstrap` 运行时钩子、URL 重写）一旦漏了转义，就是自己给自己开后门。
+#   3. **凭据流转**（`lib/cookies.js`）——把本机 Edge 的登录态采纳进桥 profile。
+#
+# 这三处都不是「一眼能看出错」的代码，适合交给静态分析做**不做判断的扫描**：它不替代
+# `doc/review-guide.md` 的人工审查（15 个源码文件 + 三条不可越界约束），但能把
+# 「原型污染 / 正则拒绝服务 / 路径穿越 / 不安全的随机数」这类与业务语义无关的缺陷扫出来。
+#
+# ## 关于构建模式
+#
+# 用默认的 `none` 构建模式，**不做** autobuild：本仓库没有编译步骤（`type: "module"`，
+# 源码即产物，`pnpm pack` 只是打 tar）。让它跑 `pnpm install` 反而会把
+# `package/dsh-webcode-bridge/pnpm-lock.yaml` 过期的问题拖进来（见 ci.yml 文件头「环境事实 1」）。
+# 源码在仓库里，CodeQL 直接读文件即可。
+#
+# ## 调度
+#
+# 除 push/PR 外，加了每周一次的定时扫描：CodeQL 的查询包会更新（新规则、新 CWE 覆盖），
+# 而本仓库的 `main` 可能几周不动。没有定时扫描的话，「上周还干净的代码今天变红」这件事
+# 永远不会被发现——直到下一次有人改那个文件。
+#
+# ## 扫描范围的排除（每一类都有具体理由，不是「减负」）
+#
+# 把不该扫的东西扫进来会让告警列表被噪声淹没，真问题反而被埋掉：
+#   · `reference/**`                —— 上游/参考仓库的只读副本（逆向参考、他人实现），
+#                                      它们的缺陷不是本项目的缺陷，也不该由本项目修。
+#   · `test-mock/**/out/**`         —— 每次跑基准都会重新生成的产物（JSON/CSV/MD）。
+#   · `.tmp/**`                     —— 本地暂存：会话导出、tgz 解包验证、排查脚本。
+#   · `package/output/**`           —— 打包与真机探针的输出目录。
+#   · `**/*.tgz`                    —— 二进制发布物，静态分析读不了也不该读。
+#
+# 注意**不排除** `test/**`：本仓库的测试是护栏本身（协议泄漏、账户槽位移、稳态收束），
+# 它们里有真实逻辑，静态分析在测试里抓到的缺陷同样值得看。
+#
+# `paths-ignore` 用锚点 + 别名复用，而不是在两个触发器下各写一遍：这两份清单**必须**
+# 逐字相同，写两遍就一定会漂移，而漂移的表现是「PR 上没扫、push 后才发现」——
+# 那种失败不会报错，只会让某个缺陷静默漏过 PR 审查。
+
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: &paths-ignore
+      - 'reference/**'
+      - 'package/dsh-webcode-bridge/test-mock/**/out/**'
+      - 'package/output/**'
+      - '.tmp/**'
+      - '**/*.tgz'
+  pull_request:
+    branches: [main]
+    paths-ignore: *paths-ignore
+  schedule:
+    # 每周一 03:17 UTC（避开整点：GitHub 的高峰排队时段）。
+    - cron: '17 3 * * 1'
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: 分析 JavaScript/TypeScript
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      # 上传 SARIF 到 code scanning 需要 security-events: write。
+      # 在 PR 来自 fork 时该权限受限，CodeQL 会退化为「只分析不上传」，不会让构建失败。
+      security-events: write
+      contents: read
+      actions: read
+
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+
+      - name: 初始化 CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          # 仓库里只有 JS（`.js`/`.cjs`/`.mjs`）与浏览器侧 bundle（`lib/client.cjs`），
+          # 没有 TS 编译产物需要额外语言。
+          languages: javascript-typescript
+          # 构建模式 none：见文件头「关于构建模式」——本仓库没有编译步骤。
+          build-mode: none
+          queries: security-and-quality
+
+      - name: 执行分析
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: '/language:javascript-typescript'
