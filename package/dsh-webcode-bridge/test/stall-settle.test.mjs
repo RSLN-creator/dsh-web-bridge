@@ -22,6 +22,8 @@
 //   · 剥计时文案只认「整行是该形态」，正文里出现「思考中」三个字是内容，不能动。
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import os from 'node:os';
+import path from 'node:path';
 import { shouldSettleStalledThinking, answerDomLength } from '../lib/metrics.js';
 
 const NOW = 1_000_000;   // performance.now() 口径即可，用固定数便于断言
@@ -117,4 +119,47 @@ test('空输入与纯空白 → 0（不产生 NaN 污染比较）', () => {
 test('真实回答不受影响（含换行的多段正文按原文长度算）', () => {
   assert.equal(answerDomLength('第一段\n第二段'), 7);
   assert.equal(answerDomLength('code:\nconst a = 1;'), 18);
+});
+
+// ---- ③ 接线：配置必须真的到达判据 -----------------------------------------
+//
+// 这一组是**接线护栏**，与上面两组的「判据本身对不对」是两回事。
+//
+// 为什么必须单独钉：0.15.2 最初只加了 driver 那一侧的默认值，index.js 既没在
+// DEFAULTS 声明 `answerTimeoutMs`、也没在 createBrowserDriver 时传进去。结果
+// 行为是对的（driver 内部默认恰好也是 180s），但**配置层完全够不着它**——
+// 任何人想调这个值都会发现自己改的东西没有任何效果。这类「静默不生效」缺陷
+// 不会让任何断言变红，只会让下一次真机排障时少一个旋钮。
+//
+// 判据故意选「传进去能不能读到」而不是「默认值等于多少」：前者能抓住
+// 「加了配置项但忘了接」这一整类问题，后者只能抓住某一次写错常量。
+
+const NO_LAUNCH = {
+  siteId: 'deepseek',
+  site: 'https://chat.deepseek.com/',
+  profileDir: path.join(os.tmpdir(), 'webcode-stall-test-no-launch'),
+  headless: true,
+};
+
+test('driver 把构造时的 answerTimeoutMs 透出到 status（接线存在）', async () => {
+  const { createBrowserDriver } = await import('../lib/browser-driver.js');
+  // 构造不会启动浏览器（launch 是惰性的，在 ensure() 里），所以这一步是纯离线。
+  const d = createBrowserDriver({ ...NO_LAUNCH, answerTimeoutMs: 12_345 });
+  assert.equal(d.status().answerTimeoutMs, 12_345);
+});
+
+test('未给 answerTimeoutMs 时 driver 退回 180s 默认（不是 undefined）', async () => {
+  const { createBrowserDriver } = await import('../lib/browser-driver.js');
+  const d = createBrowserDriver({ ...NO_LAUNCH });
+  // undefined 会让 shouldSettleStalledThinking 直接 return false（判据整体关闭），
+  // 也就是这一整条防线静默消失——比配错数值更危险。
+  assert.equal(d.status().answerTimeoutMs, 180_000);
+});
+
+test('answerTimeoutMs 接受 0 表示显式关闭该判据', async () => {
+  const { createBrowserDriver } = await import('../lib/browser-driver.js');
+  const d = createBrowserDriver({ ...NO_LAUNCH, answerTimeoutMs: 0 });
+  // 0 必须**保留为 0**（而不是被 `|| 默认值` 吃掉变成 180_000）：
+  // shouldSettleStalledThinking 把 cap<=0 读成「关闭」，这是唯一的关闸手段。
+  assert.equal(d.status().answerTimeoutMs, 0);
 });

@@ -15,7 +15,7 @@ LoopX 整体移除；注释闸门转阻断；CI/CD 与审查补强；`REPORT.md`
 
 | # | 判据 | 命令 | 结果 |
 | --- | --- | --- | --- |
-| A1 | 全量单测 | `node --test "test/*.test.mjs"` | **418 通过 / 0 失败**，`duration_ms 566589` |
+| A1 | 全量单测 | `node --test "test/*.test.mjs"` | **421 通过 / 0 失败**，`duration_ms 566724` |
 | A1b | 完整测试链 | `pnpm test` | 退出 **0**（含 parse / M1 / bench-ci / artifacts-check） |
 | A2 | 注释闸门 | `node scripts/lint-comments.mjs` | 退出 **0**，`error 0，warn 0`（122 文件） |
 | A3 | 生成物卫生 | `node test-mock/artifacts-check.mjs` | 退出 0（3 生成物被忽略、4 源文件仍可跟踪） |
@@ -28,16 +28,24 @@ LoopX 整体移除；注释闸门转阻断；CI/CD 与审查补强；`REPORT.md`
 | A10 | 安装标记核对 | 逐文件 grep | 两 profile 均 True：`shouldSettleStalledThinking`、`answerDomLength`、`lastAnswerAt`、`thinking-only-settled`、`THINKING_ONLY_NO_ANSWER`、`thinkingOnlyNotice`、`projectRoster`、`proseSafeEnd`、`toolcall` |
 | A11 | 安装副本字节一致 | sha256 比对 | web / headless 的 `lib/bench.js` 与工作树**逐字节相同**（改完代码重新 pack 的证据） |
 
-## 本次新增护栏 `test/stall-settle.test.mjs`（12 项）
+## 本次新增护栏 `test/stall-settle.test.mjs`（15 项 = 12 判据 + 3 接线）
 
 | 类别 | 用例 |
 | --- | --- |
 | 正向 | 到硬上限即收束；上限可配置；`>=` 而非 `>`；计时文案剥完长度为 0；计时文案后跟真实回答只算回答长度 |
 | **反向安全线** | 正文持续产出 → **永不命中**（长回复不被腰斩）；上限 0/非法 → **判据关闭**（不是「立刻收束」）；缺 `lastAnswerAt` 基线 → 不收束；正文里出现「思考中」三个字是内容、不被剥掉；空输入不产生 NaN |
+| **接线护栏**（3 项） | driver 把构造时的 `answerTimeoutMs` 透出到 status；缺省回落 180s（**不是 `undefined`**）；`0` 被保留为「显式关闭」而非被 `\|\| 默认值` 吃掉 |
 
 > 其中「缺基线」一条抓到一个真 bug：`Number(null)` 是 `0` 且 `Number.isFinite(0)` 为真，
 > 只判 `isFinite` 会把缺失时间戳读成「epoch 0」＝「已等一万年」，于是每轮缺字段时
 > 第一个 tick 就判死——**比不修更坏**。已改为同时挡 `<= 0`。
+>
+> 三项接线护栏的来历：复查时发现 0.15.2 **最初漏接了配置** —— 只在
+> `browser-driver.js` 加了默认值，而 `index.js` 既没在 `DEFAULTS` 声明、也没在两个
+> `createBrowserDriver` call site 传进去。行为恰好是对的（driver 内部默认也是 180s），
+> 但**配置层够不着它**：想调这个上限的人会发现自己改的值没有任何效果。
+> 这类「静默不生效」不会让任何断言变红。判据因此刻意选「传进去能不能读到」，
+> 而不是「默认值等于多少」——前者抓「加了配置项但忘了接」这一整类。
 
 ## 顺带修复（读码时发现，非本次目标）
 
@@ -46,6 +54,7 @@ LoopX 整体移除；注释闸门转阻断；CI/CD 与审查补强；`REPORT.md`
 | `index.js` 收尾分支 `assertNonEmpty(out, '', [])` 第二实参写死空串 | 「思考全文都在、正文为空」被判成 `empty response`，**归因线索被抹掉** | 改为交回带现场的 `THINKING_ONLY_NO_ANSWER` 提示，与 `TOOL_UNKNOWN` 同型，任务继续而非整轮作废 |
 | `emitText` 写死 `index: 0` | 工具轮里思考块已占用 0，收尾再写 0 与**已关闭**的 reasoning 块撞下标 | 改为显式传 `nextIndex` |
 | `scripts/ci-local.mjs` 的 `test` 步在 Windows 上从未跑通 | `spawnSync pnpm.cmd EINVAL`（Node 修 CVE-2024-27980 后 `shell:false` 不能 spawn `.cmd`）——**安静地坏了很久**，因为该脚本不在 CI 里跑 | 该步配 `shell:true`；**并把 `ci-local --fast` 加进 CI**，使这类问题当天就暴露 |
+| `answerTimeoutMs` 只在 driver 一侧有默认值，`index.js` 没声明也没传 | 行为恰好正确（内部默认也是 180s），但**配置层够不着**——想调这个上限的人会发现改的值毫无效果 | `DEFAULTS` 声明 + **两个** `createBrowserDriver` call site 都传；补 3 项接线护栏钉住 |
 
 ## LoopX 移除（已执行并核对）
 

@@ -44,6 +44,17 @@ const DEFAULTS = {
   settingsNs: 'webcode',
   requireConsent: true,
   requestTimeoutMs: 240_000,
+  // 「只出思维链、永远不出正文」的绝对上限（0.15.2）。与 requestTimeoutMs 的分工：
+  // 那个是**整轮**（含正常的长思考 + 长正文）的总兜底，240s 到点时用户已经干等
+  // 四分钟且报错看不出原因；这个从**最后一次正文/图片**起算，专抓「思考完就没下文」。
+  //
+  // 为什么必须在这里也列一份：driver 自己有同名默认值（180_000），但**默认值
+  // 只有被显式传进去才生效**。最初只加了 driver 那一侧，index.js 既没在 DEFAULTS
+  // 声明、也没在 createBrowserDriver 时传 —— 结果是「可配置」只对了一半：
+  // 行为正确（driver 内部默认值恰好就是 180s），但配置层完全够不着它，
+  // 任何人想调这个值都会发现自己改的东西没有任何效果。这正是「静默不生效」那一类
+  // 缺陷，所以两处都要有，且注释写明原因。
+  answerTimeoutMs: 180_000,
   // 写入 composer 的单块字符上限（0.14.5）。超长提示词一次性交给 Playwright
   // 的 fill() 会在网页侧整段卡住并以 30s 超时收尾，且没有任何中间态可诊断；
   // 分块写入 + 块间回读长度让失败更早、且带得出已写进度（PROMPT_WRITE_STALLED）。
@@ -1193,6 +1204,9 @@ function imageMarkdown(images) {
     profileDir: cfg.profileDir,
     headless: cfg.headless !== false,
     requestTimeoutMs: cfg.requestTimeoutMs,
+    // 只出思维链的绝对上限（0.15.2）。必须显式传：不传的话 driver 会用它自己的
+    // 默认值，行为看起来一样，但 cfg.answerTimeoutMs 这个配置项就成了摆设。
+    answerTimeoutMs: cfg.answerTimeoutMs,
     loginTimeoutMs: cfg.loginTimeoutMs,
     composerChunkChars: cfg.composerChunkChars,
     logger: console,
@@ -1237,6 +1251,9 @@ function imageMarkdown(images) {
         profileDir: slotProfileDir(cfg.profileDir, siteId, slot, { primary: st.mountAtRelayRoot === true }),
         headless: cfg.headless !== false,
         requestTimeoutMs: cfg.requestTimeoutMs,
+        // 同默认 driver：非默认槽的驱动也要拿到这个上限，否则「账户2 卡住」
+        // 与「默认槽卡住」的行为会不一致——而两个槽走的是同一份代码。
+        answerTimeoutMs: cfg.answerTimeoutMs,
         loginTimeoutMs: cfg.loginTimeoutMs,
         composerChunkChars: cfg.composerChunkChars,
         logger: console,
