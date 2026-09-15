@@ -73,11 +73,40 @@ LoopX 整体移除；注释闸门转阻断；CI/CD 与审查补强；`REPORT.md`
 | 4 | 收束原因可读 | `status.driver.lastEndReason` 能区分 `finished` / `thinking-only-settled` / `partial-wip-settled` / `timeout` |
 | 5 | 重启后无回退 | `conversationReplacedCount` 与 `sessionLostCount` 均为 0 |
 
+### 重启前实测的当前真机状态（2026-09-15 19:53，**仍是 0.14.7**）
+
+重启前的对照基线，重启后请拿同一组字段比对：
+
+| 字段 | 值 | 判读 |
+| --- | --- | --- |
+| `build.version` | **0.14.7** | 旧版本，符合预期（安装不生效直到重启） |
+| `recoveredTurns` | **6** | ⚠️ 本轮会话期间从 4 涨到 6 |
+| `lastRecovered.reason` | **`stream_ended_before_finished`**，`status=WIP`，`chars=296` | ⚠️ 正是 0.15.2 要处理的那一族 |
+| `conversationReplacedCount` | **2** | ⚠️ 本轮从 0 涨到 2 |
+| `sessionLostCount` | 0 | 会话槽未丢 |
+| `lastEndReason` | `finished` | 最近一轮正常收尾 |
+| `landedId`（最近 12 条 navTrace） | 恒为 `c94e5f35…`，`replaced=false` | 落点稳定 |
+
+**两条必须说清楚的口径**：
+
+1. **`recoveredTurns` 增长不必然是缺陷。** 它统计的是「网页没送 FINISHED、
+   但正文已经解出来」的轮次，驱动把已有内容当本轮结果交出去（`stream_ended_before_finished`）
+   并让下一轮续写。这是 0.13.x 就有的**有意的自愈**。它涨到 6 说明这个形态在真机上
+   **相当常见**——这正是 0.15.2 要把「只出思维链」和「正文写完了没送 FINISHED」
+   分开计数的原因：混在一起时，前者的现场会被后者的正常计数淹没。
+
+2. **`conversationReplacedCount=2` 不等于「每轮新开对话」回归。**
+   该计数只统计 `storedBefore && result.sessionId && storedBefore !== result.sessionId`
+   （`browser-driver.js:1638`），即「导航回既有会话，但落到的 id 与存的不同」。
+   最近 12 条 navTrace **全部 `replaced=false` 且 landedId 恒定**，说明当前落点稳定。
+   两次发生在更早（保留窗口只覆盖 2.5 分钟），其现场已随 navTrace 环形缓冲滚出，
+   **本轮无法归因** —— 如实记为「发生过 2 次，现场不可得」，不猜。
+
 **未验证/不归因项**（不谎报，见 `REPORT.md` §F）：`no_response_frames` 逐字复现的根因
 （需真机 SSE 抓包）、两次 `edit status=error` 的根因（日志错误体是 `[object Object]`）、
 B-4 那条 29,650 字符消息的归因（`turn/end` 是 `aborted by user`，无法判定）、
 豆包掉登录的真机复验（受风控约束，需人工择时）、GitHub Actions 的实际运行结果
-（需一次真实 push）。
+（需一次真实 push）、以及上面第 2 条那两次 `conversationReplaced` 的具体现场。
 
 ---
 
