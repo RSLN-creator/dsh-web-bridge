@@ -22,6 +22,7 @@
 | [tutorial-agent-teams.md](tutorial-agent-teams.md) | 官方 Agent Teams 插件教程：身份、版本锁定理由、安装、9 个工具用法、边界 | 想用/升级/排查 agent team 时 |
 | [tutorial-phone-access.md](tutorial-phone-access.md) | 手机连接 DSH 教程：选型对比、`dsh-local-link` 安装、配对、安全边界、**二维码位置（§3.5）** | 想从手机/平板访问 DSH 时 |
 | [bridge-failure-ledger.md](bridge-failure-ledger.md) | **桥接失败台账**：错误码 × 已做适配 × 残留风险；含 `<call>` 泄漏根因 | 排查桥接问题；决定先修哪个时 |
+| [ci-cd.md](ci-cd.md) | **CI/CD 与代码审查**：流水线分工、刻意不在 CI 里跑的东西、本地复现、发版、必需检查 | 改流水线 / 提 PR / 发版前 |
 
 ## 与账户槽（0.14.7）相关的代码位置
 
@@ -61,4 +62,7 @@
 | `lib/mirror.js` | [long-term-issues.md](long-term-issues.md)、`test/mirror.test.mjs` |
 | `lib/client.cjs` | `test/client-render.test.mjs`（渲染契约）、[agent-ui-design-references.md](research/agent-ui-design-references.md)（样式取值来源） |
 | `lib/prompt-variants.js`、`lib/agent-preset.js` | [prompt-engineering-evidence-2026-09-14.md](research/prompt-engineering-evidence-2026-09-14.md)（变体的文献依据）、`test/prompt-variants.test.mjs` |
-| `test-mock/prompt-bench.mjs` | 同上（实验规范在 [comment-style.md](comment-style.md) §10） |
+| `package/dsh-webcode-bridge/test-mock/prompt-bench.mjs` | [prompt-engineering-evidence-2026-09-14.md](research/prompt-engineering-evidence-2026-09-14.md)（变体的文献依据）+ [comment-style.md](comment-style.md) **§9**（实验与取证纪律、报告模板）+ `test/prompt-bench-harness.test.mjs` |
+| `package/dsh-webcode-bridge/lib/bench.js` | [comment-style.md](comment-style.md) **§9.3**（判据先于实现）+ `test/bench.test.mjs` |
+| 全部源码注释与文档 | [comment-style.md](comment-style.md) **§10**（注释与文档是能力放大器） |
+| `.github/workflows/`、`scripts/lint-comments.mjs`、`scripts/ci-local.mjs` | [ci-cd.md](ci-cd.md)（流水线分工、刻意不跑的东西、本地复现）、[CONTRIBUTING.md](../CONTRIBUTING.md) |

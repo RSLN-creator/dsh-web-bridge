@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "note": "负向对照用例（验收 F）：判据与 harness 默认产物**方向相反**，因此必然报失败。用途是证明「判据层真的判得出来」——没有这份文件，'harness 永远通过' 这种假绿无法被排除。跑法：node test-mock/prompt-bench.mjs --cases test-mock/prompt-bench/negative-control/cases.json（期望退出码非 0）。注意 negative-control 不是 CI 的绿色用例，它是**故意红**的：任何自动跑全绿的地方都不要把它纳入。",
+  "coverageNote": "0.14.9 补齐判据覆盖面。原先只有一条 validate-check，同时压 expectCalls / expectFinish / expectTextIncludes 三条，于是「只把某一条判据写坏成恒真」时负向对照**仍然会红**（被另外两条拉住）——假绿检测存在缺口。这不是推测：实测把 expectCalls 的检查改成 `if (false && ...)` 之后，bench-ci 四类退出码依然全部符合预期。现在七条判据各有独立用例，坏哪条，对应用例就会变绿，bench-ci 立刻报红。配套产物登记在 test-mock/prompt-bench.mjs 的 RESPONSES / DELIBERATELY_FAILING_RESPONSES 里（id 一一对应）。",
+  "cases": [
+    {
+      "id": "validate-check",
+      "family": "PROTOCOL_RESIDUE",
+      "note": "默认产物是一段干净的纯文本收尾（零调用、finish=stop），而本用例却要求两次调用、要求 tool-calls 收尾、要求正文含一段产物里绝不存在的文字。三条判据**同时**不成立，因此它同时证明 expectCalls / expectFinish / expectTextIncludes 三条都在真的判。对应的产物在 test-mock/prompt-bench.mjs 的 RESPONSES['validate-check']（默认基线）与 DELIBERATELY_FAILING_RESPONSES['validate-check']（自检用）里登记——两侧都登记是有意的：不登记的话 harness 的判据自检会直接拦下这道题（'没有故意写错的产物，判据无法被反证'）。",
+      "expectCalls": ["pwsh", "read"],
+      "expectFinish": "tool-calls",
+      "expectTextIncludes": ["这段文字不存在于任何产物里"]
+    },
+    {
+      "id": "nc-require-args",
+      "family": "TOOL_ARGS_MISSING_REQUIRED",
+      "note": "requireArgs 的独立负向用例：要求第 0 个调用带一个任何产物都没有的参数键。产物里该调用存在、参数非空、序列也对，所以 expectCalls / expectArgsAt / expectFinish 都不会先失败——唯一能判出这条的就是 requireArgs。若 requireArgs 被写坏成恒真，本用例会变绿，这正是 0.14.9 要堵的缺口。",
+      "requireArgs": [{ "index": 0, "keys": ["__no_such_arg_key__"] }]
+    },
+    {
+      "id": "nc-expect-args-at",
+      "family": "TOOL_ARGS_MISSING_REQUIRED",
+      "note": "expectArgsAt 的独立负向用例：要求第 0 个调用的 command 等于一个绝不成立的值，即「键存在但值不对」。它与 requireArgs 是两条不同代码路径（见 lib/bench.js 里两处不同的 fail 调用），必须各自有负向用例，否则删掉其中一条不会被任何测试发现。",
+      "expectArgsAt": [{ "index": 0, "key": "command", "value": "__absolutely_not_the_real_command__" }]
+    },
+    {
+      "id": "nc-max-text-chars",
+      "family": "TEXT_DELTA_WITHOUT_BLOCK",
+      "note": "maxTextChars 的独立负向用例：上限给 1 字符，任何真实正文都超。产物是纯文本收尾（零调用），所以只有这一条判据会失败。这条判据特别值得钉死：正文取不到时它会**永远通过**（lib/bench.js 里 delta-only-no-block 那题的注释记着这个失效模式）。",
+      "maxTextChars": 1
+    },
+    {
+      "id": "nc-expect-no-leak",
+      "family": "PROTOCOL_RESIDUE",
+      "note": "expectNoLeak 的独立负向用例：产物**故意**带两处真机取证过的残片形态（</call> 与半截的 </call_call>，见 doc/bridge-failure-ledger.md §2 的 seq=91/179），而判据要求 leaks 为空，因此必然失败。这条同样有已知的失效模式：残片识别一旦退化成「永远认为没有残片」，本用例就会变绿。",
+      "expectNoLeak": true
+    }
+  ]
+}

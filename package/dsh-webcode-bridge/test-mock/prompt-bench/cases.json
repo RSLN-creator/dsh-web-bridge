@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "note": "每题都是「一段网页回复经过桥之后应当长成什么样」的确定性判据，取自本仓真实失败族（doc/bridge-failure-ledger.md §1、doc/long-term-issues.md 第 17 条）。字段取值口径见 lib/bench.js 的 judgeRun：expectCalls 严格顺序+条数，expectArgsAt 严格 !==（含类型），requireArgs 只判非空，expectFinish 取 finish.reason.kind。所有判据机器可判，不存在「看起来对」这类主观口径。",
+  "cases": [
+    {
+      "id": "required-args-command-missing",
+      "family": "TOOL_ARGS_MISSING_REQUIRED",
+      "note": "真实失败族：session-ec60921d 逐字 `invalid arguments: missing required property \"command\"`（doc/long-term-issues.md 第 17 条；doc/bridge-failure-ledger.md §1 最后一行，状态「未修」）。这一族的发生位置在模型产出的 arguments，所以判据必须落在 arguments 上，而不是落在「正文看起来完整」上。requireArgs[0].keys 刻意与 pwsh schema 的 required 完全一致：bridge-failure-ledger 的探针对照口径就是 fillMissingRequired 有没有覆盖该工具，因此这里把 required 原样抄进来，缺哪个就报哪个。",
+      "expectCalls": ["pwsh"],
+      "requireArgs": [{ "index": 0, "keys": ["command", "description"] }],
+      "expectFinish": "tool-calls"
+    },
+    {
+      "id": "required-args-description-missing",
+      "family": "TOOL_ARGS_MISSING_REQUIRED",
+      "note": "同一族的第二个必填键：agent-preset.js:147 把 reason 写进 purpose 的模型行为点名说破（真机 2026-09-13 cacaba8c turn3：DSH 拒绝 missing required property \"description\"）。与上一条分开成两题，是因为 bench.js 的 failureCounts 按**失败键**分桶——合在一起的话「哪个必填键漏得最多」这个问题在分布表里就看不见了。",
+      "expectCalls": ["pwsh", "pwsh"],
+      "requireArgs": [
+        { "index": 0, "keys": ["command", "description"] },
+        { "index": 1, "keys": ["command", "description"] }
+      ],
+      "expectFinish": "tool-calls"
+    },
+    {
+      "id": "windows-bash-idioms",
+      "family": "PLATFORM_MISUSE",
+      "note": "平台误用族：agent-preset.js:69-72 记着「真机轨迹里约一半的工具错误来自模型用 Unix 习惯命令打 Windows（ls -la、&& 链）」，REINSTRUCT_SUFFIX 第 ① 条也是冲它写的。判据钉在 arguments.command 的**逐字相等**上：expectArgsAt 用 `!==` 比较（lib/bench.js:156），因此这里判的不是「像不像 PowerShell」这种主观印象，而是「这条命令恰好是 PowerShell 写法」这一可核对的字面事实——`ls -la` 或 `&&` 链一旦出现，值就不相等，必然报 expectArgsAt。注意 bench.js 只有七条判据（expectCalls/expectArgsAt/requireArgs/expectFinish/maxTextChars/expectNoLeak/expectTextIncludes，已核实源码），没有 expectArgsExcludes 这类否定判据，所以「不得出现 bash 语法」只能靠正向钉住期望值来表达。**expectTextIncludes 判的是 collectRun 的 run.text（本轮正文），不是首轮提示词**——所以这里只能写正文里真有的字符串，不能拿它去钉 platformNote；实测口径见 lib/bench.js:177-179。",
+      "expectCalls": ["pwsh"],
+      "expectArgsAt": [{ "index": 0, "key": "command", "value": "Get-ChildItem -Force -Recurse -Filter *.md | Select-Object -First 20 FullName" }],
+      "requireArgs": [{ "index": 0, "keys": ["command", "description"] }],
+      "expectTextIncludes": ["PowerShell"]
+    },
+    {
+      "id": "protocol-residue-call-family",
+      "family": "PROTOCOL_RESIDUE",
+      "note": "协议残片族（0.14.6 已修，但基准要钉住的是它不得回归）：session-698700ea 逐字取证 `</call>` @seq91/119/179/… 与 `</call_call>`（doc/bridge-failure-ledger.md §2）。judgeRun 的 expectNoLeak 走的是 collectRun 里**真实的** findProtocolStart，不是另写一份模式表——0.14.6 的教训正是「检测器与被保护的正则共享同一个盲区时，没有告警是假阴性」。所以这一题同时是一个「判据层确实接在产线正则上」的证明。**注意 `</call` 与 `<tool_call>` 不能同时出现在正文里**：agent-preset 的 PROTECT_ 前缀表会把 `<tool_call>` 整段当作待处理调用切走，它能活到正文里本身就该判失败——残片族的真实形状是**孤立**的裸标签（`</call>`、`</call_call>`），不是被正确包裹的调用。",
+      "expectCalls": ["read"],
+      "expectNoLeak": true,
+      "expectFinish": "tool-calls"
+    },
+    {
+      "id": "half-written-anchor-partial",
+      "family": "PROTOCOL_RESIDUE",
+      "note": "残片族的第二形态：流式途中被截断的半成品锚点。bridge-failure-ledger.md §2 的修法第 3 条专门提到「流式途中 `<cal` / `<call` 这类半成品若不在前缀表里，仍会被当正文发出（partialProtocolAt 是第二道防线）」。与上一题分成两题，是因为两者走的是不同防线：上一题靠 PROTOCOL_ANCHORS，这一题靠 partialProtocolAt 前缀表；合成一题的话，前缀表回归在分布表里看不见。",
+      "expectCalls": ["pwsh"],
+      "expectNoLeak": true,
+      "requireArgs": [{ "index": 0, "keys": ["command", "description"] }]
+    },
+    {
+      "id": "delta-only-no-block",
+      "family": "TEXT_DELTA_WITHOUT_BLOCK",
+      "note": "只出 text-delta 不出 block 的异常流：lib/bench.js:36-39 的注释写明旧写法会把这条兜底路径整个丢掉，于是只出 delta 的流被误判成「正文为空」，`maxTextChars` 判据**永远通过**。所以这一题的判据必须是双重的：maxTextChars 有上限（证明 delta 确实被算进正文长度），expectTextIncludes 有必须出现的子串（证明正文内容真的被取到了）。只写 maxTextChars 的话，collectRun 一旦回归成「正文取不到」，这一题反而更绿。",
+      "expectFinish": "stop",
+      "maxTextChars": 120,
+      "expectTextIncludes": ["无工具调用完成"]
+    },
+    {
+      "id": "clean-stop-no-calls",
+      "family": "PROTOCOL_CLEAN",
+      "note": "反向对照题（防止「harness 永远通过」与「判据只会在失败样本上绿」）：纯文本收尾的正常轮，expectCalls 为空数组——**空数组是声明的判据**（严格条数 0），不是「没写这条判据」。bench.js:146 的 `Array.isArray(spec.expectCalls)` 正好让空数组生效且合法。这一题同时钉住 expectFinish 的 'stop' 一档：收尾方式只有 tool-calls/stop 两种，任一取错都会在这里现形。",
+      "expectCalls": [],
+      "expectFinish": "stop",
+      "expectNoLeak": true,
+      "maxTextChars": 400
+    }
+  ]
+}

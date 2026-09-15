@@ -25,19 +25,65 @@
 | 12 | 图片预算（可选节） | 低 | 否 | `lib/index.js` |
 | 13 | 网页端「部分流」自愈（可选节） | 低 | 否 | `lib/browser-driver.js` |
 | 14 | Z.ai 无会话地址形状（新，0.14.2） | 中 | 否 | `lib/providers.js`、`lib/browser-driver.js` |
-| 15 | `<call>` / `</call_call>` 残片漏进正文（**已修，0.14.6**） | 中 | 否 | `lib/agent-preset.js`、`test-mock/parse-session-log.mjs` |
-| 16 | 同站多账户（**已实现，0.14.7**）+ Team 面板（设计已定，未实现） | — | 否 | `lib/accounts.js`、`lib/providers.js`、`lib/browser-driver.js`、`lib/client.cjs` |
+| 15 | `<call>` / `</call_call>` 残片漏进正文（**已修，0.14.6**；无下划线族 **0.15.0**） | 中 | 否 | `lib/agent-preset.js`、`test-mock/parse-session-log.mjs` |
+| 16 | 同站多账户（**已实现，0.14.7**）+ Team 面板（**已实现，0.15.0**） | — | 否 | `lib/accounts.js`、`lib/providers.js`、`lib/browser-driver.js`、`lib/client.cjs`、`lib/roster.js` |
 | 17 | 工具调用参数缺失族（新，本轮发现，**未归因**） | 中 | 否 | `lib/agent-preset.js`（`fillMissingRequired`）、`lib/index.js` |
+| 18 | **协议原文被持久化进助手正文**（新，0.15.0，**已修**） | 高 | 否 | `lib/agent-preset.js`（`proseSafeEnd`/`normalizeDsml`）、`lib/index.js` |
 
 错误码视角的横向台账（已做哪些适配 / 残留风险）见 [`bridge-failure-ledger.md`](bridge-failure-ledger.md)。
 
-> **第 16 条状态更新（2026-09-14 晚间）**：**同站多账户已实现并装入（0.14.7）**——
-> 账户槽 `<siteId>#<slot>`、槽级 profile 目录与发送间隔、`site@slot:model`、
-> 设置页按槽分行的账户管理，全部落地；**默认槽零位移**（`accounts: []` 时行为与 0.14.6
-> 完全一致）。实现要点与验证见 `doc/progress.md` 的「0.14.7」一节。
-> **Team 面板仍未实现**——官方三个包已装但**不含 client 入口**（已发布的 tarball 里
-> 没有可挂载的组件），因此路线是「服务端复用官方 `agentTeams` Remote + 本项目自建只读面板」。
-> 设计见 `reference/local-refs/agent-teams-reference-notes.md` §7。
+> **第 16 条状态更新（2026-09-15）**：**Team 面板已实现（0.15.0）**。
+> 0.14.9 只做到了「子代理与 Team 分两区渲染」，数据源却是**写死的空数组**——
+> 面板永远显示「当前没有正在运行的子代理或 Team 成员」。
+> 0.15.0 通过新增 `lib/roster.js` 接上真实数据源：Team 成员走官方
+> `agentTeams` 服务的 `listMembers(agent)`，子代理走当前会话的
+> `subagentCatalog` 持久化投影。两个分区独立降级，读不到时给空数组
+> **并带上原因**（`teamError` / `subAgentsError`），面板据此把「确实没有」
+> 与「读不到」分开说。负向断言见 `test/roster.test.mjs`。
+
+> **第 18 条（0.15.0 新增，已修）——协议原文被持久化进助手正文**
+>
+> **现象**：assistant/message 的 **text 块**里带着整段 DSML 协议原文被写进会话。
+> 真机逐码点取证（不是肉眼）：
+>   - 会话 `e5cb719c`（子代理）step 6：354 字符的 text 块，散文之后是
+>     `<` + U+FF5C×2 + `DSML` + U+FF5C×2 + **U+0020** + `calls` + `>`，
+>     随后 `invoke name="pwsh"`、`parameter name="command"`；
+>   - 会话 `session-a6835ca1` step 22：同一形态，**21,905 字符**被写进会话。
+>
+> **为什么边界探测没拦住它**：`findProtocolStart` 在这两段上返回的是
+> `{index: 99/65, transport: true}`——**探测是对的**。但那一轮网页流是断的
+> （`no_response_frames` / `stream_ended_before_finished`），invoke 的 JSON
+> 只到一半，`parseAgentReply` 返回 **0 个调用**，收尾于是走「没有调用 ⇒ 整段
+> 都是正文」的分支，把 `finalText` 全量当 text-delta 发了出去。**漏洞在收尾，
+> 不在探测**。
+>
+> **两个叠加的成因**：
+> 1. **`normalizeDsml` 不吃标记后的空格**。旧实现只把 `<` 换成 `<`，
+>    空格留在原地，归一化结果是 `< calls>` 而不是 `<calls>`。锚点写作
+>    `<\s*\/?\s*(?:…)` 容忍了 `<\s`，所以**边界照样探得到**（这就是它一直没被
+>    发现的原因）；但 `partialProtocolAt` 的前缀表是**精确字符串**，`< calls`
+>    不是任何一项的前缀，流式半成品防线因此整条失效。
+> 2. **收尾不复用探测结论**。「没有可执行调用」被当成了「整段都是正文」，
+>    而不是「正文最多到边界为止」。流式期间开过文本块的那条分支更直接：
+>    `finalText.slice(textSent.length)` 里的 `textSent` 记的是「已发到哪」，
+>    不是「最多能发到哪」——两者在断流轮里不相等。
+>
+> **修法**：
+> - `normalizeDsml` 在标记后**确实跟着已知标记名**时连空格一起吃（带 lookahead，
+>   避免把普通换行也吃掉、凭空接出假标签）；
+> - 新增 `proseSafeEnd(text, from)`：正文的安全终点只有一个判据，探测与收尾
+>   共用（完整锚点优先，否则扣住半成品标记）；
+> - `lib/index.js` 的**两条**收尾分支都改用它，并给被扣住的字符数打 `warn` 留痕
+>   ——静默丢弃会让「模型什么都没干」与「模型调用了但流断了」在日志里长得一样。
+>
+> **护栏**：`test/protocol-leak.test.mjs` 的 `proseSafeEnd` 用例组（含
+> 「标记后带空格」「截断在标记中间」两个真机形态）+
+> `test/protocol-leak.test.mjs` 的锚点/检测器一致性断言。
+>
+> **与第 15 条的关系**：同一族问题的第 3 次。第 15 条留下的方法论
+> 「检测器不能只覆盖已知形态」在本条上第 2 次生效——这次是**归一化**与
+> **收尾**两处各自漏了一种形态，而它们都共享同一个假阴性外观
+> （「日志没有泄漏告警」）。
 
 ---
 
@@ -693,6 +739,23 @@ zai 的每一轮都会走 `unsupported` 分支 → 抛 `WEB_SESSION_LOST` → �
 4. 护栏夹具直接用本文件与 `session-log-review.md` 里的**真实残片字符串**。
 5. 安全边界：`\b` 之后 `call` 只在标签形（`<call>`、`</call>`、`<call `）命中；
    `<calling>` 里 `call` 后跟 `i`（都是词字符）→ `\b` 不成立，**不会误伤正文**。
+
+## 16. 同站多账户 + Team 面板（**均已实现**）
+
+> **状态（2026-09-15 补齐标题）**：本条此前只写在开头的引用块里，**正文没有 `## 16`
+> 标题**，导致一览表有 15/16/17 而正文只有 `## 15` 与 `## 17`——跳号会让按编号
+> 检索的人以为这条被删了。现补上正标题，内容与开头引用块一致。
+
+- **同站多账户**：0.14.7 落地（`lib/accounts.js` 纯函数身份层 + `lib/providers.js`
+  展开槽 + 槽级 `profileDir`）。默认槽与 0.14.6 逐字相同（零位移纪律），
+  未配置 `accounts` 时行为完全不变。
+- **Team 面板**：0.15.0 落地。0.14.9 只做到「子代理与 Team 分两区渲染」，
+  数据源却是**写死的空数组**——面板永远显示「当前没有正在运行的子代理或 Team 成员」。
+  0.15.0 通过新增 `lib/roster.js` 接上真实数据源：Team 成员走官方 `agentTeams`
+  服务的 `listMembers(agent)`，子代理走当前会话的 `subagentCatalog` 持久化投影。
+  两个分区独立降级，读不到时给空数组**并带上原因**（`teamError` /
+  `subAgentsError`），面板据此把「确实没有」与「读不到」分开说。
+  负向断言见 `test/roster.test.mjs`。
 
 ## 17. 工具调用参数缺失族：`missing required property "command"`（本轮新发现，**未归因**）
 
