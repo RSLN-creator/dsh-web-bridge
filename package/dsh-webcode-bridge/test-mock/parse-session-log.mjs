@@ -280,6 +280,14 @@ export function summarize(session, { textChars = 400 } = {}) {
 export function detectProtocolLeak(text) {
   const patterns = [
     /<tool_call>/i,
+    /<\/tool_call>/i,
+    // 无下划线的 `toolcall` / `toolcalls`（0.15.0）：0.14.6 扩集时漏掉的一族，而它
+    // 恰恰出现在**最新两个会话**里（session-94966bd8 seq=2798/2983、session-f9010b75
+    // seq=812）。当时本检测器与 lib/agent-preset.js 的 PROTOCOL_ANCHORS 共享同一个盲区，
+    // 于是那些 text 块里的残片**一个告警都没有**——又是假阴性。
+    // 两条断言同时钉住同步性：test/protocol-leak.test.mjs 的
+    // 「六种形态 probe 与 parser 必须一致」+ 本文件的 --errors-only 真机扫描。
+    /<\/?\s*toolcalls?(?![\w-])/i,
     /\{\s*"mcp_action"\s*:\s*"call"/i,
     /<\s*[｜|]{1,2}DSML[｜|]{1,2}/i,
     /<\/tool_result>/i,
