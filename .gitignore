@@ -19,13 +19,21 @@ package/dsh-webcode-bridge/test-mock/.test-build/
 
 # 打包/探针输出（tgz、真机探针日志），不入库
 package/output/
-# 发布 tarball 本体同样不入库。它**看起来**像交付物，所以最容易被顺手 git add：
-# 2026-09-15 实测工作树里就躺着 0.14.7 与 0.15.2 两个 tgz（共约 530 KB）。
-# 为什么必须排除：tgz 是 `pnpm pack` 的**产物**，每次打包字节都可能不同（时间戳、
-# 规范化），入库等于把「同名不同内容」这类混淆搬进历史——而本项目已经因为
+# 发布 tarball：**新增的不入库**。它看起来像交付物，所以最容易被顺手 git add：
+# 2026-09-15 实测工作树里躺着 0.14.7 与 0.15.2 两个 tgz（共约 530 KB，已从待提交
+# 列表里挡掉）。tgz 是 `pnpm pack` 的**产物**，每次打包字节都可能不同（时间戳、
+# 规范化），继续入库等于把「同名不同内容」的混淆搬进历史——而本项目已经因为
 # 「同版本号换内容」踩过坑（见 scripts/verify-pack.mjs 的文件头）。
-# 真正要分发的 tarball 走 GitHub Release（.github/workflows/release.yml），
-# 不进仓库；本地要装就用 scripts/install-profiles.mjs 现打现装。
+# 要分发的 tarball 走 GitHub Release（.github/workflows/release.yml），不进仓库。
+#
+# ⚠ **这条规则管不了已经在库里的 56 个历史 tgz（共 5.55 MB）** —— 这是 gitignore
+#   的固有语义：它对已跟踪文件无效（`git check-ignore` 对它们返回 1）。
+#   本次**刻意不删**它们，理由是 doc/ci-cd.md §6.2 的回滚步骤明确依赖它们：
+#     「回滚：装回上一个版本的 tgz（package\ 下存着历史版本）」
+#   删掉等于让那条文档失效，而这不是本轮的目标。
+#   因此现状是有意为之：**历史 tgz 留在库里供回滚，新 tgz 一律挡在库外。**
+#   若将来决定清理，正确做法是 `git rm --cached`（保留磁盘文件）并同步改写
+#   doc/ci-cd.md §6.2 的回滚一节，两者必须一起做。
 *.tgz
 # 真机矩阵的每次运行证据（JSON + 截图，可再生；截图在 .tmp/shots 已被 .tmp/ 覆盖）
 package/dsh-webcode-bridge/test-mock/out/
