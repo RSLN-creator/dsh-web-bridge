@@ -16,7 +16,7 @@ import { toPlaywrightCookie } from './cookies.js';
 import { getSite, getContract, resolveWebModel, conversationNav, conversationIdFromUrl } from './contract.js';
 import { DEFAULT_SLOT, normalizeSlot } from './accounts.js';
 import { selectWebModel, pickerUsable } from './model-picker.js';
-import { deriveLastRate, shouldSettleWip } from './metrics.js';
+import { deriveLastRate, shouldSettleWip, shouldSettleStalledThinking, answerDomLength } from './metrics.js';
 import child_process from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -203,6 +203,20 @@ export function stallStep(prevLen, curLen, stalled) {
   return { stalled: next, prevLen: len, died: next >= 2 };
 }
 
+/**
+ * 建一个站点驱动实例：用真实 Edge 打开站点、登录、发消息、收流、回读会话 id。
+ *
+ * 一个实例 = **一个「站点 × 账户槽」**（0.14.7 起）。同站点两个账户是两个实例、
+ * 两个独立 profileDir——共用会让两边的登录态互相覆盖，界面上表现为「点了账户2
+ * 却在动账户1」。
+ *
+ * 驱动是本桥**唯一**持有浏览器状态的地方：所有镜像、控制面、OpenAI 前端最终都
+ * 汇到它的 `sendTurn`。因此这里的取舍一律偏向「宁可慢、不要错」：分块写入
+ * composer、空流宽限重绑、WIP 稳态巡检，都是为了不让长任务被一次抖动打死。
+ *
+ * @param {object} [options] siteId/site/profileDir/headless/超时/composerChunkChars/logger…
+ * @returns {object} driver 实例（sendTurn/status/login/interact/diagnostics…）
+ */
 export function createBrowserDriver(options = {}) {
   const siteId = options.siteId ?? 'deepseek';
   const site = getSite(siteId);
@@ -230,6 +244,11 @@ export function createBrowserDriver(options = {}) {
     // 长度——一次性写 80 万字符会让 Playwright 的 fill 整段卡死（真机证据见
     // fillComposer 的注释）。0 或非法值走默认 20_000。
     composerChunkChars: Number(options.composerChunkChars) > 0 ? Number(options.composerChunkChars) : 20_000,
+    // 「只出思维链、永远不出正文」的绝对上限（0.15.2）。与 requestTimeoutMs 的分工：
+    // 那个是**整轮**（含正常的长思考 + 长正文）的总兜底，240s 到点时用户已经干等
+    // 四分钟且报错是通用 timeout；这个从**最后一次正文/图片**起算，专抓「思考完
+    // 就没下文」这一形态。0 / 非有限值 = 关闭该判据（见 metrics.shouldSettleStalledThinking）。
+    answerTimeoutMs: Number(options.answerTimeoutMs) >= 0 ? Number(options.answerTimeoutMs) : 180_000,
     decoderPath: options.decoderPath ?? null,
     logger: options.logger ?? console,
   };
@@ -286,6 +305,11 @@ export function createBrowserDriver(options = {}) {
   // 根因）。这里记次数与最近一次现场，让「会话槽反复丢失」变成一个可核对的数字。
   let sessionLostCount = 0;
   let lastSessionLost = null;  // { at, reason, siteId, hasStoredSession, chars }
+  // 0.15.2（用户报「长时间后只有思维链卡住，harness 端没有任何报错，没有下一步」）：
+  // 「只出思维链、正文一个字符都没来」被硬上限收束的次数与现场。与 recoveredTurns
+  // 分列而不是合并——那是「内容保住了」，这是「内容根本没来」，修法完全不同。
+  let thinkingOnlyTurns = 0;
+  let lastStalledSettle = null;  // { at, reason, thinkingChars, answerChars, waitedMs }
   let wipWatch = null;       // { timer } 当前轮次的稳态巡检器
   // 注册表必须在驱动创建时就加载（0.12.2）：启动时的自动登录核验先于 ensure()
   // 直接 launch 出活页，首个轮次的 ensure() 见 ctx/page 存活便提前返回，注册表
@@ -432,6 +456,17 @@ export function createBrowserDriver(options = {}) {
   let launching = null;
   let interaction = Promise.resolve();
   let lastTurn = null;
+  // [DIAG-nav] 导航轨迹（临时诊断，见 doc/diagnosis-fresh-chat-per-turn.md §6）：
+  // 「每轮新开对话」必须变成可复核的现场。记录每轮导航前后的地址与会话 id 变化，
+  // 只保留最近 40 条，**不改变任何行为**（纯记录）。
+  const navTrace = [];
+  let conversationReplacedCount = 0;
+  function pushNavTrace(entry) {
+    try {
+      navTrace.push({ at: Date.now(), ...entry });
+      while (navTrace.length > 40) navTrace.shift();
+    } catch { /* 诊断绝不影响主链路 */ }
+  }
   let conversations = new Map();
   let storeLoaded = false;
   // 有头展示窗口：openWindow 打开，headlessMode 记录「无头会话是否曾在
@@ -502,6 +537,12 @@ export function createBrowserDriver(options = {}) {
       lastLogin,
       recoveredTurns,
       lastRecovered,
+      // 0.15.2：只出思维链、正文一个字符都没来的轮次。与 recoveredTurns 分列——
+      // 那是「内容保住了」，这是「内容根本没来」，用户看到的都是「卡住」但下一步
+      // 完全不同。answerTimeoutMs 一并透出，便于确认这条防线是否真在生效。
+      thinkingOnlyTurns,
+      lastStalledSettle,
+      answerTimeoutMs: cfg.answerTimeoutMs,
       // 0.14.0：「网页已回复但桥卡住」的可观测面——本轮为什么收束（finished /
       // partial-wip-settled / timeout / dom-capture），以及超时那一刻的页面现场
       //（captureAlive + replyChars）。旧实现只把现场 warn 到宿主控制台。
@@ -511,6 +552,10 @@ export function createBrowserDriver(options = {}) {
       sessionLostCount,
       lastSessionLost,
       lastTurn,
+      // [DIAG-nav] 导航轨迹与「会话 id 被换掉」计数：把「每轮新开对话」从
+      // 用户可见的怪异现象变成可复核的读数（见 doc/diagnosis-fresh-chat-per-turn.md）。
+      navTrace: navTrace.slice(-12),
+      conversationReplacedCount,
       lastRate: deriveLastRate(lastFinished, selectedModel),
       conversations: Object.fromEntries(conversations),
       transport: 'playwright-edge',
@@ -585,6 +630,10 @@ export function createBrowserDriver(options = {}) {
             if (active.firstResponseAt == null) active.firstResponseAt = performance.now();
             // WIP 稳态的「流还在动」证据：任何一帧增量都推迟收束判定。
             active.lastProgressAt = performance.now();
+            // 0.15.2：「正文真的来了」的独立时刻。它与 lastProgressAt 刻意分开——
+            // 思考增量刷新前者、**不**刷新这个。混成一个的话，「一直思考」与
+            // 「思考完给出正文」在判据上无法区分，硬上限就永远判不出来。
+            active.lastAnswerAt = performance.now();
             active.text += t;
             try { active.onDelta?.(t); } catch {}
           },
@@ -597,6 +646,9 @@ export function createBrowserDriver(options = {}) {
           onImage: (img) => {
             if (img) active.images.push(img);
             active.lastProgressAt = performance.now();
+            // 图片是交付物，与正文同等对待：只出图不出字是合法形态（识图轮），
+            // 不能被「只出思维链」的硬上限误判成卡死。
+            active.lastAnswerAt = performance.now();
             try { active.onImage?.(img) } catch {}
           },
         });
@@ -680,6 +732,21 @@ export function createBrowserDriver(options = {}) {
    * 消息长度停止增长**。任何一条还在动就绝不收束——思考阶段本就可能十几秒不吐
    * 正文，只看流停会把正常长回复判死（反向单测钉住这条安全线）。
    *
+   * ## 0.15.2 新增第三条判据：只出思维链的硬上限
+   *
+   * 上面那条双条件有一个结构性盲区（真机故障：「长时间后只有思维链卡住，harness
+   * 端没有任何报错，没有下一步」）：思考阶段网页会把「思考中 / Thought for Ns」
+   * 计时文案持续写进同一个助手节点，节点 `innerText.length` 因此一直变长，
+   * `lastDomGrowthAt` 被无休止刷新 → **「DOM 停长」永远不成立** → 收束器永不动作。
+   * 而看门狗按「最后一个增量」计时，思考增量同样刷新它，也判不出来。于是唯一
+   * 兜底是 240s 总超时，报错还是通用 `web turn timed out`。
+   *
+   * 两条修法都已落地，缺一不可：
+   *   ① DOM 采样改量**剥掉计时文案后**的真实回答长度（metrics.answerDomLength），
+   *      让「只剩计时器在动」重新等于「DOM 停长」；
+   *   ② 再加一条**绝对墙钟**判据 shouldSettleStalledThinking：自最后一次正文/图片
+   *      起超过 cfg.answerTimeoutMs 就收束，完全不看 DOM、不看思考。
+   *
    * 收尾方式刻意与既有 partial 路径同形（把已有内容当本轮结果交出去），因此
    * 上层的工具协议解析、部分流自愈、空回复判定全部照旧，不新增第二条收尾通路。
    */
@@ -688,33 +755,49 @@ export function createBrowserDriver(options = {}) {
     const tick = async () => {
       const a = active;
       if (!a) return;
-      let domLen = null;
+      // 采样返回**原始 innerText**，剥计时文案在 Node 侧做：注入浏览器的函数里
+      // 不能用模块作用域，而且把判据留在 metrics.answerDomLength 才能离线单测。
+      let domText = null;
       try {
-        domLen = await page?.evaluate?.(() => {
+        domText = await page?.evaluate?.(() => {
           const last = [...document.querySelectorAll('.markdown, [data-message-author-role="assistant"], .ds-markdown')].pop();
-          return last ? (last.innerText || '').length : 0;
+          return last ? (last.innerText || '') : '';
         });
-      } catch { domLen = null; }
+      } catch { domText = null; }
       if (active !== a) return;                              // 轮次已结束或被替换
+      const domLen = typeof domText === 'string' ? answerDomLength(domText) : null;
       if (typeof domLen === 'number') {
         a.domAvailable = true;
         if (a.lastDomLen == null || domLen > a.lastDomLen) a.lastDomGrowthAt = performance.now();
+        // 记下「页面节点确实有字、但剥掉计时文案后等于没内容」——这是本故障的
+        // 现场特征，写进 settled_by 让人一眼认出，而不是笼统的 partial-wip-settled。
+        a.domTimerOnly = domLen === 0 && String(domText || '').trim().length > 0;
         a.lastDomLen = domLen;
       } else {
         // 页面取不到（关窗/导航中）：退回「仅流停」判定，并如实标注收束原因。
         a.domAvailable = false;
       }
+      const now = performance.now();
       const bodyReady = Boolean(a.text) || Boolean(a.thinking) || (Array.isArray(a.images) && a.images.length > 0);
-      if (!bodyReady || !shouldSettleWip({
-        now: performance.now(),
+      if (!bodyReady) { a.wipTimer = setTimeout(tick, WIP_IDLE_MS); return; }
+      // 第三条判据优先判定：它不需要 DOM，也不被思考增量推迟。
+      const stalled = shouldSettleStalledThinking({ now, lastAnswerAt: a.lastAnswerAt, hardCapMs: cfg.answerTimeoutMs });
+      if (!stalled && !shouldSettleWip({
+        now,
         lastProgressAt: a.lastProgressAt,
         lastDomGrowthAt: a.lastDomGrowthAt,
         domAvailable: a.domAvailable,
         wipIdleMs: WIP_IDLE_MS,
       })) { a.wipTimer = setTimeout(tick, WIP_IDLE_MS); return; }
       // 已达稳态：网页这一轮事实上结束了，只是没送 FINISHED。按已有正文收束。
-      const reason = a.domAvailable ? 'partial-wip-settled' : 'partial-wip-settled(dom-unavailable)';
-      warn(`wip steady state — settling turn with ${String(a.text || '').length} chars (${reason})`);
+      // 收束原因如实区分三种来历，不再一律 partial-wip-settled——「只出思维链」
+      // 与「正文写完没送 FINISHED」的下一步完全不同，混成一个词等于没有线索。
+      const reason = stalled ? 'thinking-only-settled'
+        : a.domAvailable ? (a.domTimerOnly ? 'partial-wip-settled(dom-timer-only)' : 'partial-wip-settled')
+        : 'partial-wip-settled(dom-unavailable)';
+      const answerChars = String(a.text || '').length;
+      warn(`wip steady state — settling turn with ${answerChars} chars answer / `
+        + `${String(a.thinking || '').length} chars thinking (${reason})`);
       const result = a.decoder ? a.decoder.finish() : null;
       if (!result) {
         // 捕获链从未建立：没有可信正文，交给既有超时路径报错（不伪造结果）。
@@ -725,6 +808,19 @@ export function createBrowserDriver(options = {}) {
         : { ...result, complete: false, partial: true, reason: result.reason || reason };
       a.settled_by = reason;
       lastEndReason = reason;
+      // 只出思维链的轮次单独计数并留现场：这是「没有报错、没有下一步」的唯一
+      // 事后线索，混进 recoveredTurns 会让「内容保住了」与「内容根本没来」不可分。
+      if (stalled) {
+        thinkingOnlyTurns += 1;
+        lastStalledSettle = {
+          at: Date.now(),
+          reason,
+          thinkingChars: String(a.thinking || '').length,
+          answerChars,
+          waitedMs: Math.round(now - (Number(a.lastAnswerAt) || now)),
+          domTimerOnly: a.domTimerOnly === true,
+        };
+      }
       const resolve = a.resolve;
       finishActive();
       resolve(patched);
@@ -1205,27 +1301,44 @@ export function createBrowserDriver(options = {}) {
       } else {
         let ready = false;
         let challenge = null;
-        try {
-          const target = String(navigate);
-          // 「已在目标会话上」判定要用 **cid/会话 id**，不能用 URL 字符串前缀。
-          // 真机 2026-09-14：站点自己会把地址补成 `?lang=zh&cid=X`（首轮落点就是
-          // 这个），而桥拼的目标是 `?cid=X`——startsWith 判为「不同」，于是**白白
-          // 整页重载一次**，而重载正好会撞上风控验证页。idsMatch 用站点声明的解析
-          // 器比会话 id，语义正确且不会因参数顺序/多余参数误判。
-          const wantId = conversationIdFromUrl(siteId, target);
-          const haveId = conversationIdFromUrl(siteId, page.url());
-          const alreadyThere = Boolean(wantId && haveId && wantId === haveId)
-            || page.url().startsWith(target);
-          if (!alreadyThere) {
-            await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+        const target = String(navigate);
+        // 续聊韧性（0.14.8）：导航回既有会话时，SPA 冷加载偶发拿不到 composer
+        //（页面仍在 hydrate / 首屏竞态），旧实现立刻判「会话已不可达」→
+        // WEB_SESSION_LOST → 上层把整段首轮提示词重放进一个**新**网页对话。
+        // 真机 2026-09-15 实测：`sessionLostCount` 在十分钟内涨到 2，每次都伴随
+        // 一次 39 万字符重写 —— 用户看到的就是「每轮把上下文放进新对话」。
+        //
+        // 会话真被删是少数，瞬时加载失败是多数，所以**先重试一次再下结论**。
+        // 重试只针对「没有风控页」的情形：命中风控页时再撞一次只会加重风控
+        //（doc/bridge-failure-ledger.md §3 的纪律）。
+        for (let attempt = 0; attempt < 2 && !ready; attempt += 1) {
+          if (attempt > 0) {
+            warn(`resume navigation not ready — retrying once (site=${siteId}, ${nav.reason || 'n/a'})`);
+            await sleep(1500);
           }
-          await page.waitForSelector(SEL.input, { timeout: 20_000 }).catch(() => {});
-          // 风控/验证页要在判定登录态**之前**识别：那种页面上的 textarea 全是隐藏的
-          // 脚本模板，judgeLoggedIn 会把它们当成「输入框在 = 已登录」，随后 fill
-          // 必然超时（这正是 GLM 深链第二轮的失败形态）。
-          challenge = await detectChallenge(page);
-          ready = !challenge && await judgeLoggedIn(page);
-        } catch { ready = false; }
+          try {
+            // 「已在目标会话上」判定要用 **cid/会话 id**，不能用 URL 字符串前缀。
+            // 真机 2026-09-14：站点自己会把地址补成 `?lang=zh&cid=X`（首轮落点就是
+            // 这个），而桥拼的目标是 `?cid=X`——startsWith 判为「不同」，于是**白白
+            // 整页重载一次**，而重载正好会撞上风控验证页。idsMatch 用站点声明的解析
+            // 器比会话 id，语义正确且不会因参数顺序/多余参数误判。
+            const wantId = conversationIdFromUrl(siteId, target);
+            const haveId = conversationIdFromUrl(siteId, page.url());
+            const alreadyThere = Boolean(wantId && haveId && wantId === haveId)
+              || page.url().startsWith(target);
+            if (!alreadyThere) {
+              await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+            }
+            await page.waitForSelector(SEL.input, { timeout: 20_000 }).catch(() => {});
+            // 风控/验证页要在判定登录态**之前**识别：那种页面上的 textarea 全是隐藏的
+            // 脚本模板，judgeLoggedIn 会把它们当成「输入框在 = 已登录」，随后 fill
+            // 必然超时（这正是 GLM 深链第二轮的失败形态）。
+            challenge = await detectChallenge(page);
+            ready = !challenge && await judgeLoggedIn(page);
+          } catch { ready = false; }
+          throwIfAborted();
+          if (challenge) break;
+        }
         throwIfAborted();
         if (!ready) {
           // 会话在网页端已被删除或过期。旧实现在这里静默改开新会话、把这轮的
@@ -1300,6 +1413,12 @@ export function createBrowserDriver(options = {}) {
           // 二者是「可以收束」的双条件；只满足一条绝不收束（不截断长回复）。
           lastProgressAt: performance.now(),
           lastDomGrowthAt: performance.now(),
+          // 0.15.2 第三条防线（见 metrics.shouldSettleStalledThinking）：最后一次
+          // 收到**正文/图片**的时刻，思考增量不刷新它。与上面两个并存，语义不同：
+          //   lastProgressAt  任何增量（含思考）→ 「流还活着吗」
+          //   lastDomGrowthAt 页面助手节点变长     → 「页面还在写吗」
+          //   lastAnswerAt    正文/图片            → 「到底有没有回答」（本条）
+          lastAnswerAt: performance.now(),
           domAvailable: true,
           wipTimer: null,
           settled_by: null,
@@ -1477,6 +1596,12 @@ export function createBrowserDriver(options = {}) {
       fresh,
       sessionId: existing?.webSessionId,
     });
+    pushNavTrace({
+      phase: 'nav', key: String(key || 'main'), requestedFresh: fresh,
+      state: nav.state, reason: nav.reason || null,
+      storedId: existing?.webSessionId || null,
+      pageUrl: safeUrl(page?.url?.() || ''),
+    });
     if (nav.state === 'unsupported') {
       sessionLostCount += 1;
       lastSessionLost = {
@@ -1509,6 +1634,17 @@ export function createBrowserDriver(options = {}) {
     }
     // 身份优先来自地址、其次来自流（C-1）。两者都拿不到时才丢掉会话槽——
     // 而这种情况在 GLM/Z.ai 上曾经是**恒态**（旧实现只认 DeepSeek 的地址形状）。
+    const storedBefore = existing?.webSessionId || null;
+    if (storedBefore && result.sessionId && storedBefore !== result.sessionId) conversationReplacedCount += 1;
+    pushNavTrace({
+      phase: 'done', key: String(key || 'main'),
+      navigate: navigate === 'fresh' ? 'fresh' : 'resume',
+      storedBefore,
+      landedId: result.sessionId || null,
+      pageUrl: safeUrl(page?.url?.() || ''),
+      replaced: Boolean(storedBefore && result.sessionId && storedBefore !== result.sessionId),
+      messageChars: String(message || '').length,
+    });
     if (result.sessionId) rememberConversation(key, result.sessionId);
     else if (navigate !== 'fresh') forgetConversation(key);
     return result;

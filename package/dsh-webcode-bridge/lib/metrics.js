@@ -30,6 +30,19 @@ export const MODEL_TYPES_BY_UI = Object.freeze({
   classic: Object.freeze({ deepseek: 'expert' }),
   unified: Object.freeze({ deepseek: 'default' }),
 });
+
+/**
+ * 该模型在当前 UI 代际下应该发出的 `model_type`。
+ *
+ * 用途是**核验**而不是构造：驱动实际发出请求后回读请求体，拿这个期望值比对，
+ * 不一致就是 UI 代际判断错了（网页改版），此时如实报出来，而不是把差异吞掉
+ * 让用户以为「模型变笨了」。认不出该 modelId 时返回 `null`（= 不作断言），
+ * 而不是猜一个值——猜错会让核验变成误报来源。
+ *
+ * @param {string} modelId 模型 id
+ * @param {'classic'|'unified'} [ui] UI 代际；未知代际回落 classic
+ * @returns {string|null} 期望的 model_type，认不出时为 null
+ */
 export function expectedModelType(modelId, ui = 'classic') {
   return (MODEL_TYPES_BY_UI[ui] ?? MODEL_TYPES_BY_UI.classic)[modelId] ?? null;
 }
@@ -108,6 +121,97 @@ export function shouldSettleWip({ now, lastProgressAt, lastDomGrowthAt, domAvail
   if (!(now - Number(lastProgressAt) >= idle)) return false;   // 流还在动 → 绝不动
   if (!domAvailable) return true;                              // 页面不可用：退回仅流停判定
   return now - Number(lastDomGrowthAt) >= idle;                // 页面还在长 → 绝不动
+}
+
+/**
+ * 「只有思维链、永远不出正文」的绝对上限判定（0.15.2）——**第三条防线**。
+ *
+ * ## 为什么 `shouldSettleWip` 单独不够（真机故障：只出思维链然后卡死）
+ *
+ * 上面那条判据是双条件「流停 **且** 页面 DOM 助手消息停止增长」。它有一个
+ * 结构性盲区：DeepSeek 在思考阶段会把「思考中 / Thought for Ns」这类**计时文案**
+ * 持续写进同一个助手节点。采样器量的是该节点的 `innerText.length`，于是
+ * `lastDomGrowthAt` 被计时器无休止地刷新——**「DOM 停长」这条永远不成立**，
+ * 收束器永不动作。而看门狗（`index.js` 的 `nextWithIdle`）按「最后一个 delta」
+ * 计时，思考增量同样刷新它，也判不出「还活着但永远不回答」。
+ *
+ * 结果是：模型思考完就停住、正文一个字符都不来、DOM 只剩计时器在动，两条防线
+ * 都认为「还在进行」，唯一的兜底是 240s 的驱动总超时——且报错是通用
+ * `web turn timed out`，看不出「只出了思维链」。
+ *
+ * ## 判据为什么是「自从有过正文以来」而不是「最后一次任何增量」
+ *
+ * 关键是**只认正文**：`lastAnswerAt` 在正文 delta 与图片到达时刷新，**思考增量
+ * 刻意不刷新**。这样「一直思考」与「思考完给出正文」在判据上是两种不同状态——
+ * 前者会一路逼近上限，后者一有正文就归零。若把思考也算进「进展」，本函数就退化成
+ * 了 `shouldSettleWip` 的重复，修不了任何东西。
+ *
+ * ## 安全线（必须有反向单测）
+ *
+ * - 有正文在持续产出 → `lastAnswerAt` 不断刷新 → **永不命中**，长回复不会被截断。
+ * - 思考还在动、但正文没来 → 本函数**会**在硬上限命中。这是**有意**的取舍：
+ *   只出思考不出正文对用户就是「卡死」，宁可如实报「只有思考没有回答」让会话
+ *   继续，也不要让界面无限转圈。语义由调用方在 `settled_by` 里如实标注。
+ *
+ * @param {object} o
+ * @param {number} o.now           当前时刻（与 `lastAnswerAt` 同口径即可）
+ * @param {number} o.lastAnswerAt  最后一次收到**正文/图片**的时刻（思考不算）
+ * @param {number} o.hardCapMs     绝对上限；<=0 或非有限值 = 关闭该判据
+ * @returns {boolean} true = 只出思维链且已到硬上限，应按已有内容收束本轮
+ */
+export function shouldSettleStalledThinking({ now, lastAnswerAt, hardCapMs } = {}) {
+  const cap = Number(hardCapMs);
+  if (!Number.isFinite(cap) || cap <= 0) return false;         // 未配置 → 判据关闭
+  const base = Number(lastAnswerAt);
+  // 没有基线（从未收到过任何正文）时必须如实返回 false。
+  //
+  // **必须同时挡 null**：`Number(null)` 是 0 且 `Number.isFinite(0)` 为真，只判
+  // isFinite 的话缺失的基线会被读成「epoch 0」——也就是「已经等了一万年」，
+  // 于是每一轮缺字段时都在第一个 tick 被判死。那是比不修更坏的回归
+  // （单测「缺 lastAnswerAt 基线」就是钉这一条的）。
+  if (!Number.isFinite(base) || base <= 0) return false;
+  return Number(now) - base >= cap;
+}
+
+/**
+ * 页面助手节点的「真实回答」长度 —— 剥掉思考计时文案后的字符数（0.15.2）。
+ *
+ * ## 为什么需要剥（真机故障：只出思维链然后卡死）
+ *
+ * `shouldSettleWip` 的双条件之一是「页面 DOM 的助手消息长度停止增长」。旧实现
+ * 直接量最后一个助手节点的 `innerText.length`，而 DeepSeek 在思考阶段会把
+ * 「思考中…」「Thought for 12s」这类**计时文案**持续写进同一个节点——秒数一变，
+ * 长度就变，于是 `lastDomGrowthAt` 被无休止刷新，**「DOM 停长」永远不成立**，
+ * 收束器永不动作。计时器在动 ≠ 模型在产出内容。
+ *
+ * 因此这里把计时形态整段剥掉再量长度：只留真正的回答正文。
+ *
+ * ## 剥的边界（宁可少剥，不可多剥）
+ *
+ * 只认**整行**的计时形态（`思考中`、`深度思考中`、`Thought for Ns`、
+ * `已思考 N 秒`，可带省略号与首尾空白），且**逐行**判定——不是只剥尾部。
+ * 理由是真实 DOM 形状：思考区在回答**上方**，计时行出现在开头而不是结尾；
+ * 只剥尾部等于什么都没剥。正文中间出现「思考中」这三个字（比如模型在解释这个
+ * 概念）只要不独占一行就不受影响。
+ *
+ * 匹配不上就原样返回，最坏情况退化成旧行为（量到计时器长度），不会把正文量少。
+ *
+ * @param {string} text 助手节点 innerText
+ * @returns {number} 剥掉计时行后的字符数
+ */
+export function answerDomLength(text) {
+  const raw = String(text ?? '');
+  if (!raw) return 0;
+  // 计时文案的形态（中英双语，秒数可变）：
+  //   中文：思考中 / 深度思考中 / 已思考 12 秒 / 思考了 12 秒
+  //   英文：Thought for 12s / Thinking / Thinking...
+  // 统一要求「整行只由该形态构成」，避免吃掉正文里的普通句子。
+  const TIMER_LINE = /^\s*(?:(?:深度思考中|思考中|已思考\s*\d+\s*秒|思考了\s*\d+\s*秒|Thought\s+for\s+\d+\s*s(?:ec(?:onds?)?)?|Thinking)[.…]{0,3})\s*$/i;
+  const kept = raw
+    .split(/\r?\n/)
+    .filter((line) => !TIMER_LINE.test(line))
+    .join('\n');
+  return kept.trim().length;
 }
 
 /**

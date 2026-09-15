@@ -20,7 +20,7 @@ import { createRelay } from './relay.js';
 import { createOpenAiFront } from './openai.js';
 import { createBrowserDriver } from './browser-driver.js';
 import { createWebControl, buildSessionEvents, mainLineOf } from './web-control.js';
-import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, readCallAt, partialProtocolAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeDsml } from './agent-preset.js';
+import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, proseSafeEnd, readCallAt, partialProtocolAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeDsml } from './agent-preset.js';
 import { createMirror } from './mirror.js';
 import { httpFetch } from './upstream.js';
 import { textOfBlocks } from './flatten.js';
@@ -103,7 +103,10 @@ function sleepSignal(ms, signal) {
   });
 }
 
-/** Pull image attachments out of message blocks in **every** shape DSH uses.
+const IMAGE_DATA_URL = /^data:(image\/[\w.+-]+);base64,(.+)$/s;
+
+/**
+ * 从 DSH 消息块里取出图片附件——覆盖 DSH 用到的**全部**形状。
  *
  * 三类来源，标成 tagged entry 交给 resolveImages 统一落成 base64：
  *   • `durable` — DSH 原生块 `{type:'image', attachment:ImageAttachmentRef}`。
@@ -113,9 +116,11 @@ function sleepSignal(ms, signal) {
  *     旧会话回放）。data URL 就地解码，不落盘。
  *   • `remote`  — http(s) URL，由 resolveRemoteImages 抓取（≤8MB）。
  *
- * 返回 [{ name, contentType, kind, ref?|data?|url? }]。
+ * 认不出的一律**跳过而不是抛错**：这里是入口路径，一条畸形块不该让整轮失败。
+ *
+ * @param {Array} messages DSH 消息数组
+ * @returns {Array<{name: string, contentType: string, kind: string, ref?: object, data?: string, url?: string}>}
  */
-const IMAGE_DATA_URL = /^data:(image\/[\w.+-]+);base64,(.+)$/s;
 export function imagesOfMessages(messages) {
   const out = [];
   let idx = 0;
@@ -267,8 +272,11 @@ function resolveLlm(ctx) {
  *  引用 apply 内的绑定。这些字段正是判断「网页没生成」还是「捕获链死了」所需
  *  的最小信息，旧实现只把它们 warn 到宿主控制台。 */
 function idleTimeoutError(timeoutMs, scene) {
+  const stalled = scene?.lastStalledSettle;
   const hint = scene
-    ? `（页面${scene.preview ? '在' : '不在'}${scene.lastRecovered ? `，最近一次部分流：${scene.lastRecovered.reason} ${scene.lastRecovered.chars} 字` : ''}）`
+    ? `（页面${scene.preview ? '在' : '不在'}${scene.lastRecovered ? `，最近一次部分流：${scene.lastRecovered.reason} ${scene.lastRecovered.chars} 字` : ''}`
+      + `${stalled ? `，最近一次只出思维链：思考 ${stalled.thinkingChars} 字 / 正文 ${stalled.answerChars} 字（${stalled.reason}）` : ''}`
+      + `${scene.lastEndReason ? `，本轮收束原因 ${scene.lastEndReason}` : ''}）`
     : '';
   const err = new Error(`WEB_NO_PROGRESS: 网页侧超过 ${Math.round(timeoutMs / 1000)}s 没有任何新内容${hint} — 本轮已中止，可重试`);
   err.code = 'WEB_NO_PROGRESS';
@@ -358,6 +366,23 @@ function frontClaims(pathname) {
     pathname === '/bridge/login' || pathname === '/bridge/import-session';
 }
 
+/**
+ * 插件入口：DSH 加载本包时调用一次，之后整轮生命周期都挂在它注册的东西上。
+ *
+ * 这里按顺序搭起四层，**顺序有依赖**，不要重排：
+ *   1. 驱动层（`driverFor`）——站点 × 账户槽的 Edge 实例，唯一持有浏览器状态的地方；
+ *   2. relay + OpenAI 兼容前端——把驱动串行化并暴露标准端点；
+ *   3. DSH 的 LLM provider 适配器（`llm.registerAdapter`）——网页模型由此进入
+ *      Harness 原生工具循环；
+ *   4. 控制面与镜像——`/__webcode/*` 路由（客户端面板的数据源）与右侧栏同源镜像。
+ *
+ * `ctx.effect` 用于登记清理：会话卸载时路由、驱动、relay 都要按序释放，
+ * 否则会留下孤儿 Edge 进程占着 profile 锁（见 long-term-issues 第 7 条）。
+ *
+ * @param {object} ctx cordis 上下文（已声明 inject 的 llm / webServer）
+ * @param {object} [config] 插件配置（端口、站点、profileDir、发送间隔…）
+ * @returns {void}
+ */
 export function apply(ctx, config = {}) {
   const cfg = { ...DEFAULTS, ...(config || {}) };
   // Stable fingerprint surfaced in /__webcode/status so a packed installation
@@ -563,6 +588,11 @@ export function apply(ctx, config = {}) {
             recoveredTurns: st.recoveredTurns ?? 0,
             lastRecovered: st.lastRecovered ?? null,
             lastEndReason: st.lastEndReason ?? null,
+            // 0.15.2：只出思维链的硬上限现场。看门狗超时时，这三个字段能把
+            // 「网页没生成」与「思考完就不回答」在报错文本里直接分开。
+            thinkingOnlyTurns: st.thinkingOnlyTurns ?? 0,
+            lastStalledSettle: st.lastStalledSettle ?? null,
+            answerTimeoutMs: st.answerTimeoutMs ?? null,
           };
         } catch { return null; }
       };
@@ -654,7 +684,25 @@ export function apply(ctx, config = {}) {
         // 只出图不出字的回复是合法的（识图模式的常见形态），不能在追加图片
         // markdown 之前就按「空回复」判死。
         assertNonEmpty(acc, thinkAcc, endImages);
+        // 0.15.2：纯聊天轮的同一个洞——`assertNonEmpty` 放行了「只有思考」的轮次
+        // （第二个实参就是 thinkAcc），但下面既没有正文块、也没有任何交回会话的
+        // 内容，于是界面上就是「思考完就没了」。与工具轮同型处置：把归因提示当
+        // 正文发出。**不能只改 acc**——本轮的 text-delta 早在 ev.delta 分支发过了，
+        // 只赋值不发 delta 的话块内容与已外发内容不一致（界面依旧空白）。
+        const thinkingOnly = !acc.trim() && !endImages.length && Boolean(String(thinkAcc || '').trim());
+        if (thinkingOnly) {
+          acc = thinkingOnlyNotice(thinkAcc, idleScene());
+          warn(acc);
+        }
         const imageMd = imageMarkdown(endImages);
+        if (imageMd) {
+          acc += imageMd;
+          yield* openText();
+          yield { type: 'text-delta', index: textIndex, text: imageMd };
+        } else if (thinkingOnly) {
+          yield* openText();
+          yield { type: 'text-delta', index: textIndex, text: acc };
+        }
         if (imageMd) {
           acc += imageMd;
           yield* openText();
@@ -868,7 +916,9 @@ export function apply(ctx, config = {}) {
           + `本会话只有这些工具：${available.join(', ') || '（无）'}。`
           + '请改用上面列出的工具名重新发起调用；如果任务不需要工具，请直接给出结论。';
         warn(notice);
-        yield* emitText(notice, turn);
+        // index 传 nextIndex：上面 closeThink() 已经关掉了思考块（它占用 0），
+        // 写死 0 会让正文块与已关闭的 reasoning 块撞下标。
+        yield* emitText(notice, turn, nextIndex);
         return;
       }
       // 流式期间已开块的调用必须与最终解析结果对齐。不对齐有两种来历：
@@ -991,7 +1041,47 @@ export function apply(ctx, config = {}) {
         turn.commit();
         yield* closeThink();
         const imageMd = imageMarkdown(endImages);
-        const out = imageMd ? finalText + imageMd : finalText;
+        // 0.15.0 真机修复（会话 e5cb719c step6 / session-a6835ca1 step22）：
+        // 「没有调用」**不等于**「全文都是正文」。断流的轮次（no_response_frames /
+        // stream_ended_before_finished）里，协议边界探得到、调用却因参数只到一半而
+        // 解析不出——旧实现在这里把 finalText 整段当正文发，255 字符（另一例
+        // 21,905 字符）的 DSML 协议原文就是这样被写进会话并持久化的。
+        // 判据只有一个：proseSafeEnd 复用边界探测的同一套形态知识。
+        const safe = proseSafeEnd(finalText, textSent.length);
+        const prose = finalText.slice(0, safe);
+        const out = imageMd ? prose + imageMd : prose;
+        // 被扣住的协议尾巴必须留痕：静默丢弃会让「模型这轮什么都没干」与
+        // 「模型调用了但流断了」在日志里长得一模一样，下一次没人能归因。
+        const withheld = finalText.length - safe;
+        if (withheld > 0) {
+          warn(`withheld ${withheld} chars of protocol text from assistant prose`
+            + `（边界探测已命中但没有可执行的完整调用：本轮按断流处理，未把协议原文外发）`);
+        }
+        // 整段正文都被协议占满（safe === 0）时 out 为空——此时**不能**走 emitText
+        // 的空回复路径把整轮判死。断流轮的正确语义是「本轮没有可交付正文」，
+        // 交给上层按已有工具结果继续，而不是抛 empty response。
+        if (!out.trim() && withheld > 0) {
+          yield* finishChunks(turn, '', 'stop');
+          return;
+        }
+        // 0.15.2：**只出思维链、正文一个字符都没来**（用户报「长时间后只有思维链
+        // 卡住，harness 端没有任何报错，没有下一步」）。
+        //
+        // 旧实现在这里无条件 assertNonEmpty(out, '', []) —— 注意第二个实参写死空串，
+        // 于是「思考全文都在、正文为空」被判成 `empty response from web AI`。
+        // 归因线索就此抹掉：用户与下一次会话看到的都是「空回复」，而真相是模型
+        // 思考完就没下文。这两者的下一步完全不同（前者要重试，后者要查思考为何
+        // 没转成正文），报成同一个错等于没有线索。
+        //
+        // 处置与 TOOL_UNKNOWN 同型：**不抛错**，把一条带现场的提示作为本轮回复交回
+        // 会话，任务因此继续而不是整轮作废、等用户手动催。
+        if (!out.trim() && !withheld && String(thinkAcc || '').trim()) {
+          const notice = thinkingOnlyNotice(thinkAcc, idleScene());
+          warn(notice);
+          // 同上：closeThink() 已关掉思考块，正文必须用新的下标。
+          yield* emitText(notice, turn, nextIndex);
+          return;
+        }
         assertNonEmpty(out, '', []);
         yield* emitText(out, turn);
         return;
@@ -1000,20 +1090,32 @@ export function apply(ctx, config = {}) {
       turn.commit();
       const imageMd = imageMarkdown(endImages);
       if (imageMd) finalText += imageMd;
-      const tail = finalText.slice(textSent.length);
+      // 单调边界：正文最多发到 proseSafeEnd 允许的位置。这一条与上面 !textOpen 分支
+      // 是同一个洞的两个出口——真机 21,905 字符那条泄漏走的正是这里：流式期间正文块
+      // 已经开过（textOpen=true），收尾时 finalText 里那 21,905 字符协议原文被
+      // slice(textSent.length) 一次全发了出去。textSent 由流式循环维护，它记的是
+      // 「已经发到哪」，不是「最多能发到哪」——两者在断流轮里不相等。
+      const proseLimit = proseSafeEnd(finalText, textSent.length);
+      const tail = finalText.slice(textSent.length, proseLimit);
       if (tail) yield { type: 'text-delta', index: textIndex, text: tail };
-      yield { type: 'block-end', index: textIndex, block: { type: 'text', text: finalText } };
+      const withheld = finalText.length - proseLimit;
+      if (withheld > 0) {
+        warn(`withheld ${withheld} chars of protocol text from assistant prose tail`);
+      }
+      // 块内容必须与外发的 delta 逐字一致，否则界面上这一块会凭空多出协议原文。
+      const proseBlock = proseSent.slice(proseBlockStart) + tail;
+      yield { type: 'block-end', index: textIndex, block: { type: 'text', text: proseBlock } };
       yield* closeThink();
-            yield* finishChunks(turn, finalText + thinkAcc, 'stop');
+            yield* finishChunks(turn, proseBlock + thinkAcc, 'stop');
     },
   };
   llm.registerAdapter([cfg.providerId], adapter);
 
   /** Valid minimal text chunk sequence. */
-async function* emitText(text, turn) {
-  yield { type: 'block-start', index: 0, blockType: 'text' };
-  yield { type: 'text-delta', index: 0, text };
-  yield { type: 'block-end', index: 0, block: { type: 'text', text } };
+async function* emitText(text, turn, index = 0) {
+  yield { type: 'block-start', index, blockType: 'text' };
+  yield { type: 'text-delta', index, text };
+  yield { type: 'block-end', index, block: { type: 'text', text } };
   yield { type: 'usage', usage: { inputTokens: inputTokensOf(turn), outputTokens: estimateTokens(text) } };
   yield { type: 'finish', reason: { kind: 'stop' } };
 }
@@ -1029,6 +1131,38 @@ function assertNonEmpty(text, thinkText, images) {
   if (!String(text ?? '').trim() && !String(thinkText ?? '').trim() && !(Array.isArray(images) && images.length)) {
     throw new Error('webcode relay: empty response from web AI');
   }
+}
+
+/**
+ * 「只出思维链、没有正文」的归因提示（0.15.2）。
+ *
+ * 与 `TOOL_UNKNOWN` 通知同型：**不抛错**，把一条带现场的文本当本轮回复交回会话，
+ * 让任务继续。抛错会让整轮作废、界面上只看到一次失败，用户得手动再催——而那正是
+ * 用户报的「没有下一步」。
+ *
+ * 三条现场缺一不可：
+ *   • 思考尾部 —— 模型到底在想什么、有没有停在半句；
+ *   • 收束原因 —— `thinking-only-settled` 是硬上限收束，`stream_ended_before_finished`
+ *     是网页断流，`no_response_frames` 是零响应帧；修法完全不同；
+ *   • 计数 —— `thinkingOnlyTurns` 连续增长说明这是稳定复现的形态，不是偶发。
+ *
+ * @param {string} thinkAcc 本轮已累积的思考全文
+ * @param {object|null} scene 驱动现场（driverFor(...).status() 的最小投影）
+ * @returns {string} 作为助手回复交回会话的提示文本
+ */
+function thinkingOnlyNotice(thinkAcc, scene) {
+  const think = String(thinkAcc || '');
+  const tail = think.length > 200 ? '…' + think.slice(-200) : think;
+  const bits = [];
+  if (scene?.lastEndReason) bits.push(`本轮收束原因 ${scene.lastEndReason}`);
+  if (Number.isFinite(scene?.thinkingOnlyTurns)) bits.push(`只出思维链累计 ${scene.thinkingOnlyTurns} 次`);
+  if (scene?.lastStalledSettle?.reason) bits.push(`上次现场 ${scene.lastStalledSettle.reason}`);
+  const detail = bits.length ? `（${bits.join('，')}）` : '';
+  return `THINKING_ONLY_NO_ANSWER: 网页只产出了思考内容、正文一个字符都没有${detail}。`
+    + `本轮已按「没有可交付正文」收束，任务可以继续。`
+    + `思考末尾：${tail || '（空）'}。`
+    + '如果连续出现，说明模型停在思考里没有转入正文——请重试一次；'
+    + '若仍复现，请附上这段提示以便按收束原因归因。';
 }
 
 /** 每轮收尾的 usage + finish 事件对（outputTokens 口径：正文+思考一起估）。 */
@@ -1464,10 +1598,16 @@ function imageMarkdown(images) {
           // 槽身份三个字段（slot / accountKey / profileDir）在**两条分支里都要有**：
           // 前端把 sites 当同一个列表渲染，缺字段的行会让「未初始化」的槽无法显示成
           // 「glm (账户2)」而退化成裸 siteId，两行看起来一模一样。
-          return { siteId: st.id, siteName: st.name, origin: st.origin, slot: acc.slot, accountKey: acc.key, displayName: accountLabel(st.name, acc.slot), profileDir: slotDir, initialized: false, running: false, busy: false, loggedIn: has ? cached.loggedIn : null, loggedInCached: has && cached.loggedIn === true, loginBasis: trusted ? cached.basis : (cached ? 'stale' : null), loginCheckedAt: cached ? cached.at : null, needLogin: has && cached.loggedIn === false, selectedModel: null, window: null, loginState: 'idle', lastLogin: null };
+         return { siteId: st.id, siteName: st.name, origin: st.origin, slot: acc.slot, accountKey: acc.key, displayName: accountLabel(st.name, acc.slot), profileDir: slotDir, initialized: false, running: false, busy: false, loggedIn: has ? cached.loggedIn : null, loggedInCached: has && cached.loggedIn === true, loginBasis: trusted ? cached.basis : (cached ? 'stale' : null), loginCheckedAt: cached ? cached.at : null, needLogin: has && cached.loggedIn === false, selectedModel: null, window: null, loginState: 'idle', lastLogin: null, sessionLostCount: 0, lastSessionLost: null };
         }
         const s = d.status();
-        return { siteId: st.id, siteName: st.name, origin: st.origin, slot: acc.slot, accountKey: acc.key, displayName: accountLabel(st.name, acc.slot), profileDir: s.profileDir ?? null, initialized: true, running: s.running, busy: s.busy, loggedIn: s.loggedIn, loggedInCached: s.loggedInCached === true, loginBasis: s.loginBasis ?? null, loginCheckedAt: s.loginCheckedAt ?? null, needLogin: s.needLogin, selectedModel: s.selectedModel, window: s.window ?? null, loginState: s.loginState ?? 'idle', lastLogin: s.lastLogin ?? null };
+        // sessionLostCount / lastSessionLost 必须**逐槽**透出（0.14.8 账户头像）：
+        // 前端要按账户显示「会话没了」的浅红状态环，而这两个读数原先只在
+        // driver.status() 顶层有——`sites` 的每一行都没有。没有它，UI 就只能
+        // 靠 loggedIn 猜，或者干脆写死一个假状态（那是用户明确不要的）。
+        // 未初始化的槽给 0/null（不是 omit）：前端按键索引，缺字段会让该行
+        // 退化成「undefined 次」，看起来像读数坏了。
+        return { siteId: st.id, siteName: st.name, origin: st.origin, slot: acc.slot, accountKey: acc.key, displayName: accountLabel(st.name, acc.slot), profileDir: s.profileDir ?? null, initialized: true, running: s.running, busy: s.busy, loggedIn: s.loggedIn, loggedInCached: s.loggedInCached === true, loginBasis: s.loginBasis ?? null, loginCheckedAt: s.loginCheckedAt ?? null, needLogin: s.needLogin, selectedModel: s.selectedModel, window: s.window ?? null, loginState: s.loginState ?? 'idle', lastLogin: s.lastLogin ?? null, sessionLostCount: s.sessionLostCount ?? 0, lastSessionLost: s.lastSessionLost ?? null };
       }
     },
     loginTrigger: (accountKey) => driverFor(accountKey || 'deepseek').openLogin(),
@@ -1591,6 +1731,11 @@ function imageMarkdown(images) {
     contextWindowOf: (m) => contextWindowFor(m),
     // 等待发送时长的累计账本（设置页「累计」+ 输入框底下的「本次会话」同源）。
     waitStatsOf: (sessionId) => waitStatsSnapshot(sessionId),
+    // 真实花名册（0.15.0）：子代理来自本会话的 subagentCatalog 持久化投影，
+    // Team 成员来自官方 agentTeams 服务。两者各自独立降级，读不到时给空数组
+    // 并把原因放进 *Error（面板据此区分「确实没有」与「读不到」）。
+    // sessionId 决定看**哪个会话**的子代理目录——面板轮询时会带上它。
+    rosterOf: (sessionId) => projectRoster(ctx, sessionId),
   });
   const mirror = createMirror({
     siteOrigin: new URL(cfg.site).origin,
