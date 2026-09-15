@@ -121,6 +121,11 @@ export function createWebControl(deps = {}) {
     settingsStore = null, // { get: () => ({extraPrompt}), set: (value) => ({extraPrompt}) }
     contextWindowOf = null, // (model) → number — 与 resolveModel/预算闸同一个取值函数
     waitStatsOf = null,     // (sessionId?) → { total, session } — 等待发送时长累计账本
+    // (sessionId?) → { team, subAgents, teamError, subAgentsError } — 真实花名册
+    // 的取值函数（0.15.0）。由 lib/index.js 注入，内部走 lib/roster.js。
+    // 缺省 null 时 /status 给空数组 + 'roster-not-wired'，独立启动的桥
+    // （无 DSH 上下文，也就没有 agents/sessionProjections 服务）因此仍然可用。
+    rosterOf = null,
   } = deps;
   const log = (...a) => logger.log?.('[webcode-web]', ...a);
   const warn = (...a) => logger.warn?.('[webcode-web]', ...a);
@@ -285,9 +290,45 @@ export function createWebControl(deps = {}) {
       return driver.interact(body);
     },
     'GET diagnostics': async () => ({ ok: true, ...(await driver.diagnostics()) }),
-    'GET status': async () => ({
+    'GET status': async (body) => ({
       ok: true,
       build: { hash: config.buildHash || null, version: config.version || null },
+      // 花名册的两个分区（用户要求「子代理和team效果需要单独区分」）。
+      //
+      // 为什么**分两个字段**而不是一个带 type 的数组：两者的信息结构本来就不同
+      //（子代理从属于发起它的会话，Team 成员平级、带任务板归属），前端要按不同
+      // 缩进与分组渲染（doc/research/agent-ui-design-references.md §4.5）。
+      // 合成一个数组会把「谁从属于谁」这个结构丢掉。
+      //
+      // 0.15.0 起这两个字段接的是**真实数据源**（lib/roster.js）：
+      //   • team ← 官方 agentTeams 服务的 listMembers（Team 花名册，带 role/status）；
+      //   • subAgents ← 本会话 subagentCatalog 持久化投影（父会话记下的直接子代理目录）。
+      // 两个 `*Error` 字段是这次一并加上的：旧实现恒给空数组，于是面板上的
+      // 「当前没有正在运行的子代理或 Team 成员」既可能是**确实没有**，也可能是
+      // **读不到**（官方包没装、服务未注册、凭据解析失败）——两者长得一模一样。
+      // 现在读不到时 `*Error` 非空，面板照实说「读不到花名册」并给出原因，
+      // 仍然坚持「不得造假状态」：宁可为空 + 带原因，也不编一个 roster。
+      ...(typeof config.rosterOf === 'function' || typeof rosterOf === 'function'
+        ? (() => {
+          try {
+            const r = (rosterOf || config.rosterOf)(body?.sessionId || null) || {};
+            return {
+              subAgents: Array.isArray(r.subAgents) ? r.subAgents : [],
+              team: Array.isArray(r.team) ? r.team : [],
+              subAgentsError: r.subAgentsError ?? null,
+              teamError: r.teamError ?? null,
+            };
+          } catch (e) {
+            // 花名册读失败**不能**让整个 /status 挂掉：状态页还有登录、
+            // 限流、恢复轮次等一堆更要紧的信息，那些与花名册无关。
+            return {
+              subAgents: [], team: [],
+              subAgentsError: `roster-threw: ${String(e?.message || e).slice(0, 160)}`,
+              teamError: `roster-threw: ${String(e?.message || e).slice(0, 160)}`,
+            };
+          }
+        })()
+        : { subAgents: [], team: [], subAgentsError: 'roster-not-wired', teamError: 'roster-not-wired' }),
       relay: relay ? (({ running, consent, consentPersistent, requireConsent, busy, queueLength, activeRequests, lastError, metrics }) => ({
         running, consent, consentPersistent, requireConsent, busy, queueLength, activeRequests, lastError, metrics,
       }))(relay.status()) : null,
@@ -627,6 +668,19 @@ export function createWebControl(deps = {}) {
           sendJson(req, res, { ok: false, error: 'request body too large' }, 413);
           return true;
         }
+      } else {
+        // GET 也要能带参数（0.15.0）：花名册是**按会话**读的
+        //（subagentCatalog 投影挂在发起会话自己的日志上），而轮询花名册的
+        // 天然形态是 GET /__webcode/status?sessionId=…。此前 GET 一律收
+        // 空对象，`/status` 因此拿不到会话身份，只能读「当前进程里最后一个
+        // 会话」——多会话并行时会显示别人的子代理。解析 query 是最小改动：
+        // 不新增端点、不改变既有 GET 的语义（无 query 时行为与以前逐字相同）。
+        // 只取第一层标量，值一律按字符串处理；重复键取最后一个（与 URLSearchParams
+        // 的 get() 一致），不做数组展开——控制面不需要那层复杂度。
+        try {
+          const qs = String(req.url || '').split('?')[1] || '';
+          for (const [k, v] of new URLSearchParams(qs)) body[k] = v;
+        } catch { /* 畸形 query 按无参数处理 */ }
       }
       const result = await actions[key](body);
       sendJson(req, res, result, 200);

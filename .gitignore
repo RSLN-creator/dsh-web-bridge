@@ -19,8 +19,27 @@ package/dsh-webcode-bridge/test-mock/.test-build/
 
 # 打包/探针输出（tgz、真机探针日志），不入库
 package/output/
+# 发布 tarball 本体同样不入库。它**看起来**像交付物，所以最容易被顺手 git add：
+# 2026-09-15 实测工作树里就躺着 0.14.7 与 0.15.2 两个 tgz（共约 530 KB）。
+# 为什么必须排除：tgz 是 `pnpm pack` 的**产物**，每次打包字节都可能不同（时间戳、
+# 规范化），入库等于把「同名不同内容」这类混淆搬进历史——而本项目已经因为
+# 「同版本号换内容」踩过坑（见 scripts/verify-pack.mjs 的文件头）。
+# 真正要分发的 tarball 走 GitHub Release（.github/workflows/release.yml），
+# 不进仓库；本地要装就用 scripts/install-profiles.mjs 现打现装。
+*.tgz
 # 真机矩阵的每次运行证据（JSON + 截图，可再生；截图在 .tmp/shots 已被 .tmp/ 覆盖）
 package/dsh-webcode-bridge/test-mock/out/
+# 提示词基准 harness 的每次运行产物（report.md/report.json/records.csv）。
+# 必须单独列一条：规则是**按路径**匹配的，`test-mock/out/` 不覆盖
+# `test-mock/prompt-bench/out/`。2026-09-15 实测：漏了这条时 git status 会列出
+# 三个「每次跑都变」的生成物（records.csv 含时间戳），极易被顺手 git add -A
+# 提进库里——这正是「临时产物混进提交」这类漂移的典型形态。
+package/dsh-webcode-bridge/test-mock/prompt-bench/out/
+# 基准 OOM 事故的原始留痕（0.14.8 那次堆耗尽）。**它是「每次跑都可能变」的产物，
+# 不是证据本体**——真正的证据（约 4GB 堆耗尽、669849ms）已经逐字写进 lib/bench.js
+# 的注释里，读者不需要这个文件也能看懂那次事故。2026-09-15 裁决：不入库，并把它
+# 从 bench.js 的注释引用里摘掉（注释指向一个读者手上没有的文件，比没有引用更坏）。
+package/dsh-webcode-bridge/bench-out.txt
 
 # 本地暂存（排查脚本、npm 缓存、tgz 解包验证），历史上从未入库
 .tmp/
@@ -30,3 +49,8 @@ package/dsh-webcode-bridge/test-mock/out/
 .Codex/
 .codex/
 PLAN*.md
+
+# 会话抓取报告（2026-09-15）：对最近若干次本地 DSH 会话的取证记录。
+# 它引用了会话 id、真实路径与用户原话，属于**本地私有留痕**，与 PLAN*.md
+# 同一条口径。要对外发布的结论一律回写进 doc/ 下的入库文档。
+REPORT.md

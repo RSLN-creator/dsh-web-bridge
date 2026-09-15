@@ -1,7 +1,7 @@
 {
   "name": "dsh-webcode-bridge",
-  "version": "0.14.7",
-  "description": "Harness Web Bridge: DeepSeek web models, native Harness tool loops, DSH native right-sidebar tab and native settings; multi-account slots per site.",
+  "version": "0.15.2",
+  "description": "Harness Web Bridge: DeepSeek web models, native Harness tool loops, DSH native right-sidebar tab and native settings; multi-account slots per site; real Team/subagent roster panel.",
   "type": "module",
   "main": "./lib/index.js",
   "bin": {
@@ -9,13 +9,18 @@
   },
   "scripts": {
     "start": "node bin/bridge-standalone.js",
-    "test": "node --test \"test/*.test.mjs\" && node test/parse.test.mjs && node test/run-m1.js",
+    "test": "node --test test/*.test.mjs && node test/parse.test.mjs && node test/run-m1.js && node test-mock/bench-ci.mjs && node test-mock/artifacts-check.mjs",
+    "lint:comments": "node ../../scripts/lint-comments.mjs",
+    "ci:local": "node ../../scripts/ci-local.mjs",
+    "bench": "node test-mock/prompt-bench.mjs",
+    "bench:experiments": "node test-mock/prompt-bench.mjs --experiments --json",
+    "artifacts:check": "node test-mock/artifacts-check.mjs",
     "doctor": "node test-mock/real-verify.mjs",
     "pack:release": "pnpm pack"
   },
   "license": "MIT",
   "engines": {
-    "node": ">=20",
+    "node": ">=22",
     "dsh": ">=0.1.0-rc.6"
   },
   "dsh": {

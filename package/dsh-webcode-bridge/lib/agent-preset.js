@@ -25,8 +25,37 @@ const TRAIN_NOTE = '[系统提示] 请保持工具调用格式：以 <tool_call>
 const TRAIN_NOTE_GLM = '[系统提示] 请保持工具调用格式：先写一行 ```json，其内为单个 JSON 对象 {"mcp_action":"call","name":"工具名","purpose":"原因","arguments":{…}}，再以一行 ``` 结束；不要用 <tool_call> 等标签包裹（会被本网页拦截丢失）。';
 /** 按站点取再教学提示——增量轮的 resultBlock 与首轮教学必须同一立场，否则
  *  模型刚被纠回代码块形状，第 5 个工具结果又把它教回标签形状。 */
-export function trainNoteFor(siteId) {
-  return siteId === 'glm' ? TRAIN_NOTE_GLM : TRAIN_NOTE;
+export function trainNoteFor(siteId, extra = '') {
+  const base = siteId === 'glm' ? TRAIN_NOTE_GLM : TRAIN_NOTE;
+  // extra 只在实验变体里非空；默认路径（'' ）返回值与 0.14.7 逐字相同。
+  return extra ? base + extra : base;
+}
+
+/**
+ * 「重述关键约束」后缀（**实验变体 V1 专用**；默认路径不追加）。
+ *
+ * 为什么值得试：ACL Findings《Improving Long Context Instruction Following》
+ * 实测「周期性重述指令」（Reinstruct）显著优于「只靠一次系统提示」。而现有
+ * TRAIN_NOTE 只重述**格式**，没有重述**约束**——工具错误里占比最高的是
+ * 「必填字段没给」与「用 Unix 命令打 Windows」这两类，恰好都是格式之外的事。
+ *
+ * 为什么不直接改默认：NeurIPS 2024《On the Worst Prompt Performance of LLMs》
+ * 表明提示词效果**不稳定且无法提前识别最差形态**（Llama-2-70B 最好最差差
+ * 45.48%），既有技巧对最差表现的提升「impact is limited」。因此默认路径保持
+ * 0.14.7 逐字不变，改进必须先有实测数据再谈转正。
+ * 依据与出处：doc/research/prompt-engineering-evidence-2026-09-14.md。
+ */
+const REINSTRUCT_SUFFIX = Object.freeze({
+  base: '\n[关键约束重述] ① 本机是 Windows：命令与路径按 PowerShell 写（用 $env:NAME，不要用 bash 的 && 链）。'
+    + '② arguments 必须含 schema 里 required 的每个字段（pwsh 必须同时给 command 与 description）。'
+    + '③ 不得虚构工具结果：没有真实数据就先发起调用，拿到结果再继续。',
+  present: '④ 写/改完用户要拿到手的文件后，在最终答复之前必须调 present 声明它们。',
+});
+
+/** 按变体拼出 trainNote 的附加后缀。`present` 只在会话真的注册了 present 时附加。 */
+export function trainExtraFor(variant, { hasPresent = false } = {}) {
+  if (variant !== 'reinstruct') return '';
+  return REINSTRUCT_SUFFIX.base + (hasPresent ? REINSTRUCT_SUFFIX.present : '');
 }
 /** 单个工具描述的保留上限。DSH 的工具描述本身就是提示词主体（最长实测约
  *  400 字符，含「路径必须绝对」「不要产出超大输出」这类硬约束），旧实现的
@@ -64,6 +93,12 @@ export function buildPreset(options = {}) {
   const extraPrompt = typeof options.extraPrompt === 'string' && options.extraPrompt.trim() ? options.extraPrompt.trim() : '';
   if (extraPrompt) parts.push('[全局指令]\n' + extraPrompt);
   const tools = Array.isArray(options.tools) ? options.tools : [];
+  // 实验变体 slim（**默认关闭**）：首轮更短。依据 arXiv 2510.05381「长上下文
+  // 本身有害，即使检索完美」。取值刻意用「显式传入」而不是全局开关——
+  // 默认路径必须与 0.14.7 逐字相同，任何收敛都要先有配对数据。
+  const descLimit = Number.isFinite(options.toolDescLimit) && options.toolDescLimit > 0
+    ? options.toolDescLimit : MAX_TOOL_DESC_CHARS;
+  const slim = options.slim === true;
   // present 是「交付物」的唯一声明入口：只有本会话真的注册了它，才值得教模型去调
   // ——不能让模型去调用一个不存在的工具（那会白费一轮并撞 TOOL_UNKNOWN）。
   const hasPresent = tools.some((t) => t && t.name === 'present');
@@ -71,7 +106,7 @@ export function buildPreset(options = {}) {
     const lines = [];
     for (const t of tools) {
       if (!t || typeof t.name !== 'string') continue;
-      const desc = typeof t.description === 'string' ? t.description.slice(0, MAX_TOOL_DESC_CHARS) : '';
+      const desc = typeof t.description === 'string' ? t.description.slice(0, descLimit) : '';
       let params = '';
       try { params = JSON.stringify(t.parameters ?? {}); } catch { params = '{}'; }
       if (params.length > MAX_TOOL_SCHEMA_CHARS) params = params.slice(0, MAX_TOOL_SCHEMA_CHARS) + '…(schema 已截断)';
@@ -129,8 +164,13 @@ export function buildPreset(options = {}) {
       '# 使用准则',
       '本会话的最终目标由用户的最新消息决定。除非用户只是闲聊/要观点，否则默认应优先通过真实工具获取数据，而不是凭记忆或设想作答。',
       '判断是否需要调用工具，应看"这个回答是否依赖本机真实文件、目录或命令执行结果"——依赖就用，不依赖就不用；能用一次调用覆盖就不用多次。',
-      '没有真实依据时不要编造文件内容、命令输出或执行结果；卡住就明确说明缺什么信息。',
-      '不要为了显得勤快而堆砌无用调用，也不要为了省事而把本可使用真实工具解决的事强行用文字搪塞。',
+      // slim 变体只保留上面两条（判据「要不要用工具」与「用几次」），
+      // 把「不要编造」「不要堆砌」两条合并进第 2 条——它们本就是同一约束的
+      // 正反两面。默认路径（slim !== true）四条逐字不动。
+      ...(slim ? [] : [
+        '没有真实依据时不要编造文件内容、命令输出或执行结果；卡住就明确说明缺什么信息。',
+        '不要为了显得勤快而堆砌无用调用，也不要为了省事而把本可使用真实工具解决的事强行用文字搪塞。',
+      ]),
     ].join('\n'));
   }
   return parts.join('\n\n');
@@ -186,12 +226,15 @@ function clip(s) {
 }
 
 /**
- * Incremental turn text: everything NEW since `sent` (a count of consumed
- * messages). New user text goes through as-is; tool results become
- * mcp_action result fences; assistant messages the web side already produced
- * are skipped but still counted. Returns { text, consumed } — consumed is
- * always messages.length so the cursor advances on success only (the caller
- * decides when to commit).
+ * tool_call_id → 工具名 的索引，用于把 `role: 'tool'` 的结果消息对回它是谁的结果。
+ *
+ * 为什么需要它：DSH 的 tool 消息只带 `tool_call_id`（见下面 `serializeDelta` 里
+ * `idToName.get(m.tool_call_id)`），而回传给网页的 result 信封必须写**工具名**，
+ * 否则网页模型看到的是一个裸 id，无法判断那是哪个工具的结果。
+ *
+ * 只看 assistant 消息里的 tool-call 块：那是唯一携带 `{ id, name }` 配对的地方。
+ * 取不到名字的 id 记成 `'unknown'`——宁可显式写 unknown，也不要让信封里出现
+ * 一个空名字（空名字会让网页把结果当成格式错误而丢弃）。
  */
 function toolNames(msgs) {
   const idToName = new Map();
@@ -204,6 +247,22 @@ function toolNames(msgs) {
   return idToName;
 }
 
+/**
+ * 增量轮的首轮之后文本：只发 `sent` 之后**新增**的部分（`sent` 是已消费的消息条数）。
+ *
+ * 新用户文本原样透传；工具结果变成 `mcp_action: result` 围栏；网页侧自己产出的
+ * assistant 消息跳过但仍计数——不计数的话游标永远推不动，同一段会被反复发出去。
+ *
+ * 返回值里的 `consumed` 恒为 `messages.length`（而不是「成功发到第几条」）：
+ * 只有调用方知道这一轮到底算不算数，由它决定何时推进游标。桥不替它做这个判断。
+ *
+ * @param {Array} messages DSH 传来的完整消息数组
+ * @param {number} sent 已消费的消息条数（游标）
+ * @param {number} [toolResultsSent] 已发过的工具结果条数（决定何时附训练提示）
+ * @param {Map<string,string>} [knownNames] 预先算好的 id→名字索引；不传就现算
+ * @param {string} [note] 附加的 system_note（训练提示 / 协议提醒）
+ * @returns {{text: string, consumed: number}}
+ */
 export function serializeDelta(messages, sent, toolResultsSent = 0, knownNames, note) {
   const msgs = Array.isArray(messages) ? messages : [];
   const segs = [];
@@ -340,6 +399,21 @@ export function coerceArguments(args, schema) {
  */
 const FILLABLE_REQUIRED = /^description$/;
 
+/**
+ * 按 schema 补齐缺失的**纯描述性**必填参数，避免 DSH 因缺一个 description 就整次拒绝。
+ *
+ * 只有 `description` 在白名单里（`FILLABLE_REQUIRED`）——它是展示在 UI 上的
+ * 用途概述，补错也只是措辞不贴切；`command` / `objective` / `file_path` 这类
+ * 语义字段一旦猜错就是**执行错的事**，绝不代填。
+ *
+ * 值来源两级：envelope 的 `purpose`（模型自述的调用原因）→ 已给参数中第一个
+ * 非空字符串。两级都取不到就保持缺失，交给 DSH 报它自己的错——桥不吞不猜。
+ *
+ * @param {object} args 网页解析出的参数（已经过 coerceArguments）
+ * @param {object} schema 该工具的 parameters（JSON Schema）
+ * @param {string} [purpose] 调用 envelope 里的 purpose 字段（若有）
+ * @returns {{args: object, filled: string[]}} filled 是被补齐的参数名
+ */
 export function fillMissingRequired(args, schema, purpose) {
   const out = (args && typeof args === 'object' && !Array.isArray(args)) ? { ...args } : {};
   const filled = [];
@@ -415,7 +489,7 @@ function jsonObjectIn(text) {
  * Falls back to the strict whole-reply {"tool":...} shape for compat.
  */
 /**
- * DeepSeek 网页版的 DSML 变形归一：竖线全角化成对出现（<tool_calls>，
+ * DeepSeek 网页版的 DSML 变形归一：竖线全角化成对出现（< calls>，
  * U+FF5C）、或丢开头 <。reference/deepseek-free-api 的 strip_dsml_markup 用
  * chr(0xff5c) 处理同一问题。把 DSML 前缀整体剥掉还原成裸 XML 标签。
  *
@@ -424,13 +498,32 @@ function jsonObjectIn(text) {
  *   这个：全角 DSML 被 parseAgentReply 收下，却被流式探测放过，协议原文
  *   已作为 text-delta 发给显示层）。test/protocol-leak.test.mjs 用真机夹具
  *   锁住两者的一致性。
+ *
+ * 0.15.0 修掉一个**真实形态漏网**：标记与标签名之间会夹一个空格。
+ * 真机逐码点取证（会话 e5cb719c step6 / session-a6835ca1 step22 的 text 块）：
+ *
+ *   U+003C U+FF5C U+FF5C D S M L U+FF5C U+FF5C **U+0020** c a l l s U+003E
+ *
+ * 旧实现只把 `<` 换成 `<`，**不吃那个空格**，于是归一化结果是
+ * `< calls>` 而不是 `<calls>`。后果分两处：
+ *   • `findProtocolStart` 的锚点写作 `<\s*\/?\s*(?:…)`，容忍 `<\s`，所以**边界仍然
+ *     探得到**——这也是为什么没人发现（泄漏的 21,905 字符正文里，边界其实是对的）；
+ *   • `partialProtocolAt` 的前缀表是**精确字符串**（`'<tool_call'`…），`< calls`
+ *     不是任何一项的前缀，于是「标记刚写一半」的尾部扣留失效。
+ * 修法：只在**后面确实跟着已知标记名**时才连空格一起吃（带 lookahead 的那条），
+ * 其余情况退回「只剥标记、不动空格」的旧行为——避免把 `<` 之后的普通
+ * 换行也吃掉，凭空把散文接成 `<hello` 这种假标签。
  */
 export function normalizeDsml(text) {
   return String(text ?? '')
-    .replace(/<[\uFF5C|]+\s*DSML\s*[\uFF5C|]+/gi, '<')
-    .replace(/<\/[\uFF5C|]+\s*DSML\s*[\uFF5C|]+/gi, '</')
+    // 带开头 `<`，且后面确实是已知标记名：连标记后的空格一起吃掉。
+    // 先写这条、再写不吃空格的兜底——正则按书写顺序执行，前者命中后后者不再有机会。
+    .replace(/<\s*[\uFF5C|]+\s*DSML\s*[\uFF5C|]+\s*(?=(?:tool_calls?|toolcall|toolcalls|tool_call|calls|invoke|parameter|call)\b)/gi, '<')
+    // 兜底：仍是标记，但后面不是已知标记名——只剥标记，保留其后的空白
+    .replace(/<\s*[\uFF5C|]+\s*DSML\s*[\uFF5C|]+/gi, '<')
+    .replace(/<\/\s*[\uFF5C|]+\s*DSML\s*[\uFF5C|]+\s*/gi, '</')
     // 丢开头 < 的裸标记（<invoke …）：只在后跟已知标记名时补 <，避免误伤正文
-    .replace(/(^|[^\w<])[\uFF5C|]+\s*DSML\s*[\uFF5C|]+(?=(?:tool_calls|calls|invoke|parameter)\b)/gi, '$1<');
+    .replace(/(^|[^\w<])[\uFF5C|]+\s*DSML\s*[\uFF5C|]+\s*(?=(?:tool_calls?|calls|invoke|parameter)\b)/gi, '$1<');
 }
 
 /** 协议文本起点的锚点。命中最早的一个即为边界。 */
@@ -450,8 +543,26 @@ const PROTOCOL_ANCHORS = [
   // `<call_call>` / `</call_call>` 更是完全不在集合里。于是 findProtocolStart
   // 返回 -1，残片被当正文 text-delta 外发并持久化（用户看到「界面出现 <>call」）。
   // 同样只进锚点、不进 transport——残片不是待执行的调用。
+  // `toolcall` / `toolcalls`（**无下划线**）也必须在列（0.15.0）：这是 0.14.6 那次修复
+  // **没盖住**的一族，且发生在最新两个会话里，不是历史遗留。真机证据（会话日志逐块扫描，
+  // 只认 text 块；reasoning 块不外发，不计）：
+  //   session-94966bd8 seq=2798  text 块仅 34 字符，内容就是闭标签 + 开标签 + 调用 JSON 头
+  //   session-94966bd8 seq=2983  text 块 1,061 字符，散文之后紧跟完整调用 JSON
+  //   session-f9010b75 seq=812   text 块 29,650 字符，含整段被当文本发出的调用 JSON，
+  //                              其后是数百次重复的闭合标签噪声
+  // 为什么旧集合救不了它：`<` `/` 之后必须从候选词起匹配，位置落在 `t` 上，而集合里只有
+  // `tool_call`（需要一个下划线），**没有无下划线的那一族**；0.14.6 追加的 `call` 也救不了
+  // ——`call` 要从 `c` 开始，无下划线族的首字母是 `t`。于是 findProtocolStart 返回 -1，
+  // 残片被当正文外发并持久化。与 `call` / `call_call` / `tool_result` 同纪律：**只进锚点，
+  // 不进 transport**——它是不是「待执行的调用」由 parseAgentReply 按内容判定，不靠标签名猜。
+  //
+  // 这是 `doc/long-term-issues.md` 第 15 条方法论的第 2 次生效：
+  // **检测器不能只覆盖已知形态**。扩锚点时 `test-mock/parse-session-log.mjs` 的
+  // `detectProtocolLeak` 与 `test/protocol-leak.test.mjs` 的夹具必须同步，否则下次
+  // 「日志没有泄漏告警」仍然是假阴性。
+  //
   // 安全性：`\b` 让 `<calling>` 不命中（`call` 后跟 `i` 都是词字符，词边界不成立）。
-  /<\s*\/?\s*(?:tool_call|tool_calls|tool_result|tool_results|call_call|calls|call|function|stories|invoke)\b/i, // 半角标签
+  /<\s*\/?\s*(?:tool_call|tool_calls|toolcall|toolcalls|tool_result|tool_results|call_call|calls|call|function|stories|invoke)\b/i, // 半角标签
   /<[\uFF5C|]*\s*DSML\s*[\uFF5C|]*/i,                              // <（真机主形态）
   /[\uFF5C|]+\s*DSML\s*[\uFF5C|]+/i,                               // 丢开头 < 的 ｜DSML｜
   /```/,                                                           // ```json 围栏
@@ -499,6 +610,15 @@ export function findProtocolStart(text, from = 0) {
   // 必须同样认得，否则协议原文先以 text-delta 泄进 UI（0.9.6 的 transport 门
   // 只认 mcp_action，漏了这一形状）。
   const fenceCallAhead = /^```/.test(suffix) && /"arguments"\s*:/.test(suffix.slice(0, 400));
+  // transport（「这段可能是待执行的调用」）**刻意保持与 0.14.6 逐字相同**，不跟着锚点扩集。
+  // 理由（0.15.0 的取舍，写下来免得下次有人「顺手补齐」）：transport 的唯一消费点是
+  // lib/index.js 流式循环里「正文外发到哪里为止」的判据。`rest.transport === false` 时仍有
+  // `tagAhead`（首字符是 `<`）兜底，一样停在锚点；`transport === true` 只是让停得更早一点点。
+  // 也就是说，把无下划线族加进 transport 对**已覆盖**的路径没有任何行为增益，却会让
+  // 「什么算调用」的知识在两处重复——而 0.9.4 / 0.14.6 两次事故的共同教训正是
+  // 「两处形态知识一漂移就泄漏」。真正判定「这是不是调用」的始终是 parseAgentReply 按
+  // 内容解析（JSON 配平 + name + 工具表校验），不是标签名。判断对不对由
+  // test/protocol-leak.test.mjs 的「六种形态 probe 与 parser 必须一致」断言钉住。
   const transport = /^<\s*(?:tool_call|tool_calls|calls|function|stories|invoke)\b|^\*\*Calling:|\*\*Calling:|"mcp_action"\s*:\s*"call"|^\s*\{\s*"tool"/i.test(suffix) || fenceCallAhead;
   return { index, name, transport };
 }
@@ -564,7 +684,11 @@ export function partialProtocolAt(text, scope = 24) {
   const raw = String(text ?? '');
   const s = normalizeDsml(raw);
   const n0 = Math.min(s.length, Math.max(2, scope));
-  const prefixes = ['<tool_call', '<tool_calls', '<call_call', '<call', '<invoke', '<parameter', '<function', '<stories', '**Calling:'];
+  // 无下划线的 `toolcall` / `toolcalls`（0.15.0）与上面锚点扩集**必须同时到**：
+  // 少了这里，`<toolcal` 这种流式半成品会被当散文发出去，紧接着 `l>` + 调用 JSON 也漏出
+  // ——正是 0.9.2 记下的那个形态，只是换了一个标签名。前缀表的宽度由
+  // findProtocolStart 里归一化后的实际候选集决定，两者漂移就是泄漏。
+  const prefixes = ['<tool_call', '<tool_calls', '<toolcall', '<toolcalls', '<call_call', '<call', '<invoke', '<parameter', '<function', '<stories', '**Calling:'];
   // 半成品标记的起点下标（归一化串上算出来的，再映射回原串）。
   const locate = (n) => {
     const tail = s.slice(s.length - n);
@@ -575,6 +699,24 @@ export function partialProtocolAt(text, scope = 24) {
     const tail = s.slice(s.length - n);
     if (/[<*]$/.test(tail)) continue;   // 纯前缀（`<` / `**`），继续看更长的
     if (prefixes.some(p => p.startsWith(tail))) return locate(n);
+  }
+  // DSML 标记写到一半（0.15.0 真机实锤）：流被掐断时尾部可能是 `...<｜` 或
+  // `...<｜｜DSM`。**归一化救不了这一段**——normalizeDsml 的两条规则都要求
+  // `DSML` 四个字母齐全，`DSM` 不匹配任何一条，于是 s 里它原样还在，
+  // 上面按 `<` 开头的 prefix 比较也一个都不命中，半成品就这样被当散文发出去。
+  // 真机证据：会话 session-a6835ca1 seq=812 那条 29,650 字符的消息，正文里同时
+  // 有完整调用 JSON 和成串的闭合标签噪声——断流轮次的尾部形态本来就不可控。
+  // 判据：尾部以 `<` 开头、且其后只由全角/半角竖线、DSML 的字母前缀组成。
+  // 用 lookahead 逐字判，`<｜x` 这种（x 既不是竖线也不是 D/S/M/L）不算半成品，
+  // 普通散文不会被误扣。
+  const dsmlHead = /<[｜|\uFF5C]*(?:D(?:S(?:M(?:L)?)?)?)?$/.exec(s.slice(-scope));
+  if (dsmlHead) {
+    // 至少要有「一个竖线」或「D/S/M/L 里至少一个字母」，否则 `<` 单个字符
+    // 交给下面那条通用规则处理，避免把普通的 `<` 结尾也判成 DSML 半成品。
+    if (/[｜|\uFF5C]|[DSML]/.test(dsmlHead[0])) {
+      const at = raw.lastIndexOf(dsmlHead[0]);
+      if (at >= 0) return at;
+    }
   }
   // 结尾是「刚起头的标签」（`<` / `</` / `<div` 这类还可能是协议标签的前缀）
   if (/(^|[^<])(<\/?|<\/?[A-Za-z_][\w-]*)$/.test(s.slice(-scope))) {
@@ -600,6 +742,74 @@ export function stripProtocolText(text) {
   return index < 0 ? raw : raw.slice(0, index).trimEnd();
 }
 
+/**
+ * 正文的**安全终点**：从 `from` 起，`text` 中最后一个可以安全当正文外发的下标。
+ *
+ * ## 为什么必须有这个函数（0.15.0，真机实锤，不是推测）
+ *
+ * `stripProtocolText` 只能在**收尾已经认出调用**时当兜底；但真机存在一条
+ * 「协议边界已探到、调用却永远认不出」的路径，两处收尾都漏了：
+ *
+ * 会话 `e5cb719c`（子代理，step 6）与 `session-a6835ca1`（主会话，step 22）的
+ * assistant/message **text 块**里，把整段协议原文持久化了。逐码点核对（不是肉眼）：
+ *
+ *   U+003C U+FF5C U+FF5C U+0044 U+0053 U+004D U+004C U+FF5C U+FF5C U+0020
+ *   U+0063 U+0061 U+006C U+006C U+0073 U+003E
+ *
+ * 即 **`<` + 全角竖线×2 + `DSML` + 全角竖线×2 + 空格 + `calls` + `>`**，随后是
+ * `invoke name="pwsh"` 与 `parameter name="command"`。三点关键事实：
+ *
+ * 1. `findProtocolStart` 对这两段返回的是 `index=99/65, transport=true` —— **边界探测
+ *    没坏**，它正确地在协议起点停住了；
+ * 2. 但那一轮的网页流是断的（`no_response_frames` / `stream_ended_before_finished`），
+ *    invoke 的 JSON 只到一半，`parseAgentReply` 于是返回 **0 个调用**；
+ * 3. 收尾分支「没有调用」时走的是把 `finalText` 整段当正文的那条路 —— 它**没有**
+ *    再过一次边界，于是 `finalText.slice(textSent.length)` 把 255 字符（另一例 21,905
+ *    字符）的协议原文当 text-delta 发了出去，并作为 text 块写进会话。
+ *
+ * 所以漏洞不在探测，而在**收尾没有复用探测的结论**。这个函数就是那条复用：
+ * 「正文最远能发到哪」只该有一个判据，探测和收尾必须用同一个。
+ *
+ * 与 `stripProtocolText` 的分工：那个从 0 扫、用于「已确认无调用」的整段清理；
+ * 这个从 `from` 扫、用于**流式已经发过一部分**之后「还能再发多少」。
+ * 两者都只认 `findProtocolStart` 这一套形态知识，不另起一份。
+ *
+ * @param {string} text 累积的完整文本（收尾时的权威全文）
+ * @param {number} [from] 已经外发到的下标（结果不会小于它，保证单调、不重复发）
+ * @returns {number} 可以外发的排他终点
+ */
+export function proseSafeEnd(text, from = 0) {
+  const raw = String(text ?? '');
+  const base = Math.max(0, Math.min(Number(from) || 0, raw.length));
+  const rest = findProtocolStart(raw, base);
+  if (rest.index >= 0) return Math.max(base, rest.index);
+  // 没有完整锚点，但尾部可能正卡在一个写了一半的标记上（流被掐断的典型形态：
+  // 真机 seq=812 那条 29,650 字符的消息里就是「完整调用 JSON 之后跟着一串
+  // 重复的闭合标签噪声」）。半成品一样不是正文，按同一个判据扣住。
+  const markerAt = partialProtocolAt(raw);
+  if (markerAt >= base) return markerAt;
+  return raw.length;
+}
+
+/**
+ * 把网页回复解析成工具调用列表（同时原样返回归一化后的全文）。
+ *
+ * 宽容地接受调用围栏周围的散文——这正是围栏协议的意义——但每个围栏必须是一个
+ * 合法的、点名了工具的单个 JSON 对象。识别四种围栏形状，让适配器不依赖网页模型
+ * 偏爱哪一种：
+ *   1) ```json … ``` 代码围栏（本桥的 webcode 协议）；
+ *   2) `<tool_call> … </tool_call>`（也含 `<function>` / `<stories>`）标签围栏
+ *      （opplean / web-agent 风格，DeepSeek 网页版倾向产出这个）；
+ *   3) 裸 `<invoke name="…">` XML（含 `<parameter>` 与畸形属性两种形态）；
+ *   4) `**Calling:** \`name\`` 的网页原生渲染。
+ * 最后回落兼容形态：整条回复就是一个 `{"tool": ...}` 对象。
+ *
+ * **只看内容，不看标签名**：`<toolcall>`（无下划线）这类外壳与 `<tool_call>`
+ * 同等对待——外壳叫什么不重要，里面是不是一个配平的、名字在工具表里的 JSON 才算数。
+ *
+ * @param {string} text 网页累积回复全文
+ * @returns {{calls: Array<{name: string, arguments: object, purpose?: string}>, text: string}}
+ */
 export function parseAgentReply(text) {
   if (!text) return { calls: [], text: '' };
   let s = String(text);

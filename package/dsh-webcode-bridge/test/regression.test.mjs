@@ -850,6 +850,38 @@ test('会话命名优先取网页端真实标题，取不到才回落本地启�
 
 const bridgeSrc = (rel) => readFileSync(new URL('../lib/' + rel, import.meta.url), 'utf8');
 
+/**
+ * 取 `fromMarker` 之后、**到下一个 `toMarker`（不含）为止**的源码片段。
+ *
+ * 为什么需要它（2026-09-15 的假红教训）：
+ * 本文件原先用「从某锚点起固定 N 个字符」定位（`src.slice(at, at + 2800)`）。
+ * 那是**按字符距离**而不是**按代码结构**定位，于是只要在锚点和目标之间多写一段
+ * 注释，目标就会被推出窗口，测试报「必须用独立的 navReason 标注风控」——而
+ * `challenge-page` 其实还在，行为也完全正确（`lib/browser-driver.js` 的
+ * `err.navReason = challenge ? 'challenge-page' : 'conversation-gone'`）。
+ *
+ * 实测证据：`let challenge = null;` 到 `challenge-page` 的距离，
+ * HEAD 是 2084 字符（落在 2800 窗口内 → 通过），工作树是 3195 字符
+ * （被续聊重试循环的注释推出窗口 → 假红）。
+ *
+ * 所以这里的口径是：**断言应当只依赖代码结构，不依赖字符距离**。
+ * 结构性边界用「下一个同级声明/函数」做终点，注释增减不再影响结论。
+ *
+ * @param {string} src 源码全文
+ * @param {string} fromMarker 起点标记（取它之后）
+ * @param {string[]} untilMarkers 终点候选（取**第一个出现**的那个；都找不到则取到文件末尾）
+ */
+function regionFrom(src, fromMarker, untilMarkers = []) {
+  const at = src.indexOf(fromMarker);
+  assert.ok(at > 0, '找不到起点标记：' + fromMarker);
+  let end = src.length;
+  for (const m of untilMarkers) {
+    const i = src.indexOf(m, at + fromMarker.length);
+    if (i > at && i < end) end = i;
+  }
+  return src.slice(at, end);
+}
+
 test('发送间隔基准必须落盘（重启后第一轮也要生效），不许退回纯内存', () => {
   const src = bridgeSrc('index.js');
   // 基准文件：真机「设了 10 秒、重启后第一条立刻发出去」的根因就是它不存在。
@@ -945,9 +977,8 @@ test('窗口声明可见性（B-3）：模型目录与状态里能核对自己�
 test('登录回退判定必须要求 composer **可见**（只数个数会被风控页骗过）', () => {
   const src = bridgeSrc('browser-driver.js');
   assert.match(src, /async function visibleComposerCount\(/, '应有「可见 composer」判定');
-  const at = src.indexOf('async function judgeLoggedIn(');
-  assert.ok(at > 0, '应有 judgeLoggedIn');
-  const body = src.slice(at, at + 2600);
+  // 用函数体边界（到下一个顶层 async function 为止），不用固定 2600 字符窗口。
+  const body = regionFrom(src, 'async function judgeLoggedIn(', ['async function visibleComposerCount(']);
   assert.ok(/return await visibleComposerCount\(p\) > 0;/.test(body),
     '回退判定必须走 visibleComposerCount');
   assert.ok(!/locator\(SEL\.input\)\.count\(\) > 0/.test(body),
@@ -956,8 +987,7 @@ test('登录回退判定必须要求 composer **可见**（只数个数会被风
 
 test('可见 composer 判定必须遍历**全部**候选选择器（GLM 的 composer 是裸 textarea）', () => {
   const src = bridgeSrc('browser-driver.js');
-  const at = src.indexOf('async function visibleComposerCount(');
-  const body = src.slice(at, at + 1400);
+  const body = regionFrom(src, 'async function visibleComposerCount(', ['\nasync function ', '\nfunction ']);
   // 真机 probe-27：GLM 真实 composer 是 <textarea>（id=null、placeholder=null），
   // 只认 SEL.input 的第一个候选（textarea#chat-input）会漏掉它 → 正常页被判未登录。
   assert.ok(/split\(','\)/.test(body), '必须切分候选选择器列表');
@@ -969,15 +999,14 @@ test('可见 composer 判定必须遍历**全部**候选选择器（GLM 的 comp
 test('风控/验证页必须在判定登录态之前识别，并如实报成 challenge-page', () => {
   const src = bridgeSrc('browser-driver.js');
   assert.match(src, /async function detectChallenge\(/, '应有风控页识别');
-  const at = src.indexOf('async function detectChallenge(');
-  const body = src.slice(at, at + 1100);
+  const body = regionFrom(src, 'async function detectChallenge(', ['\nasync function ', '\nfunction ']);
   assert.ok(/滑动验证|访问验证/.test(body), '必须认站点验证页的文案');
   assert.ok(/CF_APP_WAF|aliyun_waf/.test(body), '必须认 WAF 脚本指纹');
 
-  // 调用点：resume 分支里 detectChallenge 必须早于 judgeLoggedIn
-  const rb = src.indexOf('let challenge = null;');
-  assert.ok(rb > 0, 'resume 分支应记录 challenge');
-  const seg = src.slice(rb, rb + 2800);
+  // 调用点：resume 分支里 detectChallenge 必须早于 judgeLoggedIn。
+  // 定位用**结构边界**（从记录 challenge 的锚点到该分支的下一个闭合），
+  // 不用固定字符窗口——见 regionFrom 的注释（2026-09-15 假红教训）。
+  const seg = regionFrom(src, 'let challenge = null;', ['loggedIn = true;']);
   const dc = seg.indexOf('detectChallenge(page)');
   const jl = seg.indexOf('judgeLoggedIn(page)');
   assert.ok(dc > 0 && jl > dc, 'detectChallenge 必须在 judgeLoggedIn 之前（否则隐藏 textarea 会骗过登录判定）');
@@ -988,13 +1017,61 @@ test('风控/验证页必须在判定登录态之前识别，并如实报成 cha
 
 test('「已在目标会话上」按会话 id 判定，不靠 URL 字符串前缀', () => {
   const src = bridgeSrc('browser-driver.js');
-  const at = src.indexOf('const wantId = conversationIdFromUrl(');
-  assert.ok(at > 0, '必须用会话 id 比较，而不是裸 startsWith');
-  const seg = src.slice(at, at + 700);
+  assert.match(src, /const wantId = conversationIdFromUrl\(/, '必须用会话 id 比较，而不是裸 startsWith');
+  // 结构边界：从 wantId 声明到该语句所在的 if 块结束（用下一个 `}\n` 之前更可靠的是
+  // 下一个可识别锚点 alreadyThere 之后的闭合）。这里取到 `await page.waitForSelector`。
+  const seg = regionFrom(src, 'const wantId = conversationIdFromUrl(', ['await page.waitForSelector(SEL.input']);
   assert.ok(/conversationIdFromUrl\(siteId, target\)/.test(seg), '目标地址解析 id');
   assert.ok(/conversationIdFromUrl\(siteId, page\.url\(\)\)/.test(seg), '当前地址解析 id');
   assert.ok(/alreadyThere/.test(seg), '应先判断「已经在上面」再决定是否 goto');
 });
+
+// ── 0.14.9：文档索引完整性（文档是能力的一部分，断链等于断索引）───────────────
+//
+// 为什么这些必须是测试而不是一次性检查：`doc/README.md` 的作用是「该读哪份文档」
+// 的入口，而入口指向不存在的文件时，读者（尤其是下一轮 agent）会认为「没有这份
+// 文档」而不是「链接写错了」。0.14.8 真实发生过：README 指
+// `test-mock/prompt-bench.mjs`（真实路径在 package/dsh-webcode-bridge 下）并
+// 指向不存在的 `comment-style.md §10`，两处都没人发现，直到逐条核对。
+
+// test/ → package/dsh-webcode-bridge/ → package/ → 仓库根 → doc/
+const DOC_DIR = new URL('../../../doc/', import.meta.url);
+
+test('doc/README.md 的每个相对链接都必须真实存在（Test-Path 等价）', () => {
+  const md = readFileSync(new URL('README.md', DOC_DIR), 'utf8');
+  const broken = [];
+  let checked = 0;
+  for (const m of md.matchAll(/\[[^\]]*\]\(([^)]+)\)/g)) {
+    const link = m[1];
+    if (/^https?:\/\//.test(link)) continue;
+    checked++;
+    try { readFileSync(new URL(link.split('#')[0], DOC_DIR)); }
+    catch { broken.push(link); }
+  }
+  assert.ok(checked > 0, 'README 里一个相对链接都没解析到（正则或文件结构变了？）');
+  assert.deepEqual(broken, [], 'README 指向不存在的文件：' + broken.join(', '));
+});
+
+test('被文档引用的章节号必须真实存在（§N 不得指向未写的章节）', () => {
+  const style = readFileSync(new URL('comment-style.md', DOC_DIR), 'utf8');
+  // comment-style.md 里已写出的章节号集合
+  const written = new Set();
+  for (const m of style.matchAll(/^##\s+(\d+)\./gm)) written.add(Number(m[1]));
+  assert.ok(written.size >= 10, 'comment-style.md 的章节数异常（预期至少到 §10），实际：' + [...written].join(','));
+
+  // 全仓文档里对 comment-style.md §N 的引用
+  const refs = [];
+  for (const rel of ['README.md', 'research/prompt-engineering-evidence-2026-09-14.md']) {
+    const text = readFileSync(new URL(rel, DOC_DIR), 'utf8');
+    for (const m of text.matchAll(/comment-style\.md\)?\s*(?:的)?\s*§\s*(\d+)/g)) refs.push({ rel, n: Number(m[1]) });
+    for (const m of text.matchAll(/comment-style\.md`?\s*§\s*(\d+)/g)) refs.push({ rel, n: Number(m[1]) });
+  }
+  assert.ok(refs.length >= 3, '没有解析到任何 §N 引用（正则应至少命中 README 与研究文档）');
+  const dangling = refs.filter(r => !written.has(r.n));
+  assert.deepEqual(dangling.map(r => r.rel + ' §' + r.n), [],
+    '引用了 comment-style.md 中不存在的章节（0.14.8 真实踩过：5 处引用 §10 但文件只写到 §8）');
+});
+
 
 
 

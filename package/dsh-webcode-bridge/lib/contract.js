@@ -54,6 +54,17 @@ export const SITE_CONTRACTS = Object.freeze(
   Object.fromEntries(SITES.map((s) => [s.id, s.id === 'deepseek' ? DEEPSEEK_WEB_CONTRACT : genericContract(s)])),
 );
 
+/**
+ * 取某站点的会话导航契约（三态）。
+ *
+ * 这是驱动侧**唯一**的会话地址知识入口：驱动不该自己写死「会话 id 在 URL 的哪一段」，
+ * 否则站点改版时要改的地方会散落各处。认不出站点返回 `null`（= 没有契约），
+ * 由调用方决定回落策略，而不是在这里给一个「差不多」的默认契约——错的契约
+ * 比没有契约更难排查（它会静默指向错误会话）。
+ *
+ * @param {string} siteId 站点 id
+ * @returns {object|null} 该站点的契约，未登记时为 null
+ */
 export function getContract(siteId) {
   return SITE_CONTRACTS[siteId] ?? null;
 }

@@ -81,8 +81,9 @@ foreach ($p in @('@deepseek-ai/dsh-experimental-agent-team-profile','@deepseek-a
 前置：web profile 必须已含 `@deepseek-ai/dsh-base`（本机有，是 bundles 第一项）。
 
 ```powershell
-# 1) 安装。本机 pnpm install 会因无关依赖 dsh-loopx-plugin 的证书问题整体失败，
-#    所以务必带 NODE_OPTIONS（Node 24 用系统证书库）。
+# 1) 安装。本机 Node 证书链与 GitHub tarball 不兼容，若 profile 里还有走
+#    GitHub release tarball 的依赖，pnpm install 会整体失败——带上 NODE_OPTIONS
+#    （Node 24 用系统证书库）可以避免。
 $env:NODE_OPTIONS='--use-system-ca'
 
 # 2) 安装单元 + 把两个子包钉到 rc.1（见 §2）

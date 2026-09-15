@@ -6,6 +6,21 @@ import { httpFetch } from './upstream.js';
 import { isLoopbackHost } from './loopback.js';
 import { rewriteSetCookieForMirror, mergeCookieHeaders } from './cookies.js';
 
+/**
+ * 同源镜像：把真实站点页面转发到本机，供右侧栏 iframe 直接加载。
+ *
+ * 为什么必须镜像而不是让 iframe 直接指向站点：站点会拒绝被跨源嵌入
+ * （`X-Frame-Options` / CSP `frame-ancestors`），而且跨源下拿不到页面 token。
+ * 镜像把上游固定成 `siteOrigin`，是**同源中继而不是开放代理**——不接任意目标，
+ * 因此不构成 SSRF 面。页面 token 只注入到中继源的 storage 里，不回传调用方。
+ *
+ * 站点 HTML 里的绝对/根相对/协议相对 URL 会被改写到同源前缀，并注入一层运行时
+ * 钩子（fetch/XHR/createElement）兜住 webpack 懒加载才拼出来的地址；详见 README
+ * 与 `test/mirror.test.mjs`（顺序很关键：先改写 HTML，再注入 bootstrap）。
+ *
+ * @param {object} [options] siteOrigin / getToken / getCookies / assetOrigins / mountPrefix…
+ * @returns {object} mirror 实例（handle(req,res,pathname) 等）
+ */
 export function createMirror(options = {}) {
   const {
     siteOrigin = 'https://chat.deepseek.com',

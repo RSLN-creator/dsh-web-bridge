@@ -638,6 +638,17 @@ export function resolveWebModel(value = DEFAULT_MODEL_ID) {
   throw new Error('不支持的网页模型：' + id);
 }
 
+/**
+ * 按站点 id 取站点定义（模型目录、源站、静态域、契约）。
+ *
+ * 返回 `null` 而不是抛错或回落默认站点：调用方几乎都处在一个「用户给了个
+ * 拼错的 siteId」的路径上，抛错会让整个面板 500，回落默认站点则会**静默操作
+ * 另一个站点**（比报错危险得多）。所以这里如实说「没有这个站点」，让调用方
+ * 决定是报错还是给默认值。
+ *
+ * @param {string} siteId 站点 id
+ * @returns {object|null} 站点定义，未登记时为 null
+ */
 export function getSite(siteId) {
   return SITES.find((s) => s.id === siteId) ?? null;
 }

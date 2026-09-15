@@ -17,11 +17,122 @@
 
 | 项 | 值 |
 | --- | --- |
-| 工作树版本 | **0.14.7**（已发布 / 已装 / 等重启生效） |
-| 已装版本（web / headless） | **0.14.7**（已装，**运行中的进程仍是 0.14.6**——需要一次重启） |
-| 上游 | `origin/main` = `e190257`，本地已同步 |
-| 单测基线 | **305 通过**（全量 `npm test`，含 M1 PASS）；本轮新增 `accounts`(38) 与 `accounts-integration`(16) |
-| 下一阶段 | **0.14.8 Team 面板**（官方三包已装但不含 client 入口，需自建面板） |
+| 工作树版本 | **0.15.2**（已打包 / 已装 / 等重启生效） |
+| 已装版本（web / headless） | **0.15.2**（已装，**运行中的进程仍是旧的**——需要一次重启） |
+| 上游 | `origin/main` = `e190257`（本地领先，未推送） |
+| 单测基线 | **418 通过 / 0 失败**（`node --test "test/*.test.mjs"`，`duration_ms ≈ 567000`） |
+| 注释闸门 | **error 0 / warn 0，退出码 0**（已转**阻断**，进 CI 必需检查） |
+| 下一阶段 | 真机验证（用户重启后） |
+
+> **0.14.7 时的基线「305 通过」已过期**。本轮实测 **418**，增量来自三处：
+> `accounts`(38) + `accounts-integration`(16) 在 0.14.7 已计入 305；之后新增
+> `roster`(真实花名册)、`bench`/`prompt-bench-harness`（基准层）、
+> `stall-settle`(12，本轮新增)。**台账此前一直没跟上**——这正是「记账未收口」的
+> 同一族问题，写在这里以免下次又拿旧数当基线。
+
+## 0.15.2（本轮）—— 修「只出思维链然后卡死」+ LoopX 移除 + 闸门转正
+
+用户原话（逐字）：**「长时间后只有思维链卡住，harness 端，没有任何报错，没有下一步」**。
+注意这不是 0.14.0 修过的那一类（那类是「网页早写完了却没送 FINISHED」）。
+
+### 根因：0.14.0 的双条件判据有结构性盲区
+
+0.14.0 的 `shouldSettleWip` 判据是「流停 **且** 页面 DOM 助手消息停止增长」。盲区在于：
+**思考阶段网页把「思考中 / Thought for 5s」这类计时文案持续写进同一个助手节点**，
+节点 `innerText.length` 因此一直变长 → `lastDomGrowthAt` 被无休止刷新 →
+**「DOM 停长」永远不成立** → 收束器永不动作。而看门狗按「最后一个增量」计时，
+思考增量同样刷新它，也判不出来。唯一兜底是 240s 总超时，报错还是通用 `web turn timed out`。
+
+一句话教训：**任何依赖「还在动」的判据，都要问一句「这个『动』会不会是假的」**——
+计时器在动不是模型在产出内容。
+
+### 修法（三条，缺一不可）
+
+| # | 位置 | 改动 |
+| --- | --- | --- |
+| ① | `lib/metrics.js` `answerDomLength` | DOM 采样改量**剥掉整行计时文案后**的真实回答长度，让「只剩计时器在动」重新等于「DOM 停长」 |
+| ② | `lib/metrics.js` `shouldSettleStalledThinking` | **绝对墙钟**判据：自最后一次**正文/图片**起超过 `answerTimeoutMs`（默认 180s）即收束，不看 DOM、不看思考 |
+| ③ | `lib/browser-driver.js` `startWipWatch` | 接线：新增 `lastAnswerAt`（**只由正文/图片刷新，思考不刷新**）；`settled_by` 如实区分 `thinking-only-settled` / `partial-wip-settled(dom-timer-only)` / 其余 |
+
+### 顺带修掉的两个真缺陷
+
+1. **`empty response` 抹掉归因**：`lib/index.js` 收尾分支原本无条件
+   `assertNonEmpty(out, '', [])` —— 第二个实参写死空串，于是「思考全文都在、正文为空」
+   被判成空回复。改成：正文空 + 无调用 + 思考非空 → **不抛错**，交回一条带现场的
+   `THINKING_ONLY_NO_ANSWER` 提示（含思考尾部 200 字、收束原因、累计次数），
+   与既有 `TOOL_UNKNOWN` 同型，任务因此**继续**而不是整轮作废。
+2. **`emitText` 写死下标 0**：工具轮里思考块已用掉 0（`openThink` 从 nextIndex 分配），
+   收尾再写 0 会与**已关闭**的 reasoning 块撞下标。`TOOL_UNKNOWN` 与本次新增的
+   `THINKING_ONLY_NO_ANSWER` 两条路径都落在这条缝上。已改为显式传 `nextIndex`。
+
+### 可观测
+
+`status()` 新增 `thinkingOnlyTurns`、`lastStalledSettle`（含 `thinkingChars` / `answerChars` /
+`waitedMs` / `domTimerOnly`）、`answerTimeoutMs`；`idleScene()` 与 `WEB_NO_PROGRESS`
+报错文本同步带上，看门狗超时时能直接读出「只有思考、没有回答」。
+
+### 护栏 `test/stall-settle.test.mjs`（12 项）
+
+正向：到上限即收束、上限可配置、计时文案剥完为 0。
+**反向安全线（同等重要）**：正文持续产出 → 永不命中（不腰斩长回复）；
+上限为 0/非法 → **判据关闭**而不是「立刻收束」；缺 `lastAnswerAt` 基线 → 不收束；
+正文里出现「思考中」三个字是内容、不被剥掉。
+
+> 其中「缺基线」那条抓到一个真 bug：`Number(null)` 是 `0` 且 `isFinite(0)` 为真，
+> 只判 `isFinite` 会把缺失的时间戳读成「epoch 0」＝「已等一万年」，
+> 于是每轮缺字段时第一个 tick 就判死。**这比不修更坏**，已改成同时挡 `<= 0`。
+
+### LoopX 整体移除（已完成，2026-09-15）
+
+用户决定舍弃。**本仓库零代码引用**（`package/` 与 `scripts/` 下 `git grep -i loopx` 命中 0），
+也**未被任何活动配置引用**（`~/.dsh/settings.yaml`、`.agent-presets/`、`profiles/web/package.json`
+三处均无）。因此移除的是仓库外的东西，已按下列清单**全部删除并逐项核对**：
+
+| 项 | 内容 | 体积 |
+| --- | --- | --- |
+| 运行时本体 | `~/.agents/runtime/dsh-loopx-plugin` | 104.92 MB / 2272 文件 |
+| 7 个 skill | `loopx`、`loopx-benchmark`、`loopx-doc-registry`、`loopx-pr-program`、`loopx-pr-review`、`loopx-project`、`loopx-self-repair` | 0.31 MB |
+| 3 个锁/安装记录 | `.loopx-skill-install.json`、`.loopx-workflow-skills.lock{,.holder.json}` | ~2 KB |
+| **合计** | | **约 105.22 MB** |
+
+**删除后核对**：`skills/` 下 loopx 条目 **0** 个；`runtime/dsh-loopx-plugin` 不存在；
+**其余 85 个 skill 目录完好**（证明没有误删）；会话技能目录里 7 个 `loopx*` 技能已消失。
+
+**仓库内保留不动**：
+- `doc/progress.md`（本节）、`doc/verify.md`、`scripts/install-profiles.mjs` 里对它的 3 处提及
+  已改写成**通用教训**——任何走 GitHub tarball 的依赖都会踩同一条证书坑，
+  这条知识比「某个包曾经坏过」更耐用。
+- `REPORT.md` 的取证记录保留（它已被 `.gitignore` 排除，属本地私有留痕）。
+- **不**给 `.gitignore` 加 `.loopx/`：该目录从未存在于本仓库，加一条空规则是噪音。
+  （REPORT 的 C-5 因此关闭为「不适用」，而不是「已修」。）
+
+### 注释闸门转正
+
+`scripts/lint-comments.mjs` 从「非阻断」改为**阻断**，并进 CI 必需检查。关键修法：
+原 CS002 按**整行扫源码**，于是 `const MARKER_RE = /\b(TODO|…)\b/;` 这种
+**正则字面量**里的 `TODO` 被当成待办注释——一个「查待办注释」的规则在读代码。
+改为先用状态机抽出真正的注释文本再判。**并验证了它没变成空壳**：种一条真
+`// TODO fix this later` → 确认报错 → 撤回 → 恢复 0。细节见 `doc/ci-cd.md` §4。
+
+### CI/CD 与审查补强
+
+- `ci.yml`：注释闸门删 `continue-on-error`；新增 `scripts/ci-local.mjs --fast` 自检
+  （`--fast` 跳过慢的全量单测，净成本约 1 秒，换来两个平台都验证一次本机入口的
+  按平台分叉逻辑）；`release.yml` 同步转阻断。
+- 新增 `.github/CODEOWNERS`（**须先把 `@owner` 换成真实账号**）。
+- `codeql.yml`：加 `paths-ignore`（`reference/**`、产物目录、`.tmp/**`、`*.tgz`）。
+- `doc/review-guide.md`：新增「卡死类缺陷的审查要点」——**任何等待/超时/收束逻辑
+  必须同时给出绝对上限与反向单测**。
+- `doc/ci-cd.md`：§4 改写为转正说明（含 CS002 判据 bug 的完整记录）、§7 必需检查清单更新。
+
+### 文档收口（REPORT C-8）
+
+- `doc/README.md` 表格列错位已修（LoopX 那行已随移除删掉，全表 3 列一致，27 个链接全部可解析）。
+- `doc/long-term-issues.md`：补上缺失的 `## 16` 正标题（此前一览表有 15/16/17，
+  正文只有 15 和 17，跳号会让人以为这条被删了）。
+- `PLAN.md:3` 版本头 `0.14.5` → `0.15.2`。
+
+## 0.14.7（已发布 / 已装）—— 同站多账户
 
 ## 0.14.6（已发布 / 已装 / 已验证）
 
@@ -205,8 +316,13 @@ turn/end reason = {\"kind\":\"error\",\"error\":{\"message\":\"locator.fill: Tim
 
 ## 已知环境约束（不要重新踩）
 
-- `pnpm install` 会因无关依赖 `dsh-loopx-plugin`（GitHub tarball）证书校验失败而整体失败
-  → 安装走手动解包。
+- `pnpm install` 曾因一个**无关依赖**（走 GitHub release tarball 的包）证书校验失败
+  （`UNABLE_TO_VERIFY_LEAF_SIGNATURE`）而整体失败 → 安装走手动解包
+  （`scripts/install-profiles.mjs`）。**这是通用约束**：依赖树里只要还有任何一个包从
+  GitHub tarball 拉，这条路径就会再踩一次。可用的绕过是 `$env:NODE_OPTIONS='--use-system-ca'`
+  （Node 24+ 用系统证书库），见 `doc/verify.md`。
+  > 0.15.2：那个具体依赖（LoopX 插件）已被用户决定整体舍弃，本仓库不再引用它；
+  > 上面这条作为**通用教训**保留。
 - git 远端 HTTPS 证书校验失败 → 推送/拉取用 `GIT_SSL_NO_VERIFY=1`（仅本机网络问题的
   绕过，不改全局 git 配置）。
 - **反复深链同一会话地址会触发站点风控**（0.14.3 事故）：探针要节制，间隔 ≥20s、

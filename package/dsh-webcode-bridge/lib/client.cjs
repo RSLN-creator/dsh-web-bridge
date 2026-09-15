@@ -1,3 +1,20 @@
+// client.cjs — DSH Web 客户端面（浏览器侧 bundle，**不是** ESM 模块）。
+//
+// 为什么是这个形状：DSH 的客户端插件用 `window.__ModuleLoader__.load({ id, factory })`
+// 注册，factory 内部用 CommonJS 的 `require` 取宿主依赖（react / react-dom /
+// @deepseek-ai/dsh-client-ui-primitives）。因此本文件**不能**写成 ESM，也**不能**
+// import `lib/` 下的任何模块——它是单文件 bundle，服务端那半边的一切（格式化、
+// 取值、判定）都必须通过 `/__webcode/*` 端点或由服务端算好后经 /status 透出。
+// 这条约束解释了很多看着「绕」的地方：例如等待时长的文案在服务端算（wait-stats.js），
+// 而不是在这里再写一份 formatDuration——两份实现迟早会长得不一样。
+//
+// 本文件承载三块界面：
+//   1. 官方右侧栏的网页镜像面板（sidebar.right.pane.tab）与标签动作菜单；
+//   2. 原生设置页「网页桥接」分区（settings.section）：账户/登录、花名册、模型、提示词；
+//   3. 输入框底下的等待速览（conversation.composer.dock）与会话头右上角开关。
+//
+// 纪律：**只读、不造假状态**。任何拿不到的真实值都如实显示「未知 / 读不到」，
+// 绝不回落成一个看起来正常的默认值（详见各组件上方注释）。
 window.__ModuleLoader__.load({
   id: 'dsh-webcode-bridge',
   factory(require, module) {
@@ -325,6 +342,100 @@ window.__ModuleLoader__.load({
      * onlySiteId：只渲染该站点一行（子代理卡内联所选子代理站点的账户管理，
      * 与「账户与登录管理」卡片同一套状态与端点，不另起第二套真相）。
      */
+    /**
+     * 「谁在跑」只读花名册：把**子代理**与 **Team 成员**分开展示（0.14.9）。
+     *
+     * 用户原话：「子代理和team效果需要单独区分」。为什么必须分开，而不是合成
+     * 一个列表——依据是两者的**结构性差异**（doc/research/agent-ui-design-references.md
+     * §4.5，引官方文档对比表）：
+     *   - 子代理：结果**回报给调用方** → 在 UI 上**从属于**发起它的会话（缩进层级）。
+     *   - Team：成员**互相发消息**、共享任务板 → 在 UI 上**平级**（同一层级）。
+     * 混在一起会出现两种误导：把「父会话的一个子任务」看成与 Team 成员同等，
+     * 或把平级的 teammate 画成某个会话的下属。
+     *
+     * 数据来源纪律（与账户头像同一条）：**只读、不造假状态**。
+     * 这里只消费 /__webcode/status 的 `subAgents` 与 `team` 两段（0.15.0 起由
+     * 服务端 lib/roster.js 从官方 agentTeams 服务与本会话 subagentCatalog
+     * 投影**真实读出**，不再是空数组占位）。
+     *
+     * 两个分区各自可能「读不到」而不是「为空」，两者在界面上必须分开说：
+     *   • 确实没有成员 → 「当前没有正在运行的子代理或 Team 成员。」
+     *   • 读不到       → 「读不到花名册：<原因>」
+     * 旧实现把两者都画成同一句话，用户无法判断是 Team 没在用还是桥坏了。
+     * 空列表是**状态**（确实没有），不是错误；`*Error` 才是错误。
+     *
+     * sessionId 必须一起带上：subagentCatalog 是**父会话自己的**持久化投影，
+     * 不带会话身份的话服务端只能猜，多会话并行时会显示别人的子代理。
+     */
+    function AgentRoster({ sessionId }) {
+      const [rows, setRows] = React.useState(null);
+      React.useEffect(() => {
+        if (!sessionId) { setRows({ sub: [], team: [], err: null }); return () => {}; }
+        let alive = true;
+        const pull = () => api('status', { sessionId })
+          .then(r => {
+            if (!alive) return;
+            setRows({
+              sub: Array.isArray(r?.subAgents) ? r.subAgents : [],
+              team: Array.isArray(r?.team) ? r.team : [],
+              // 两个原因合并成一个可读句子；两个都为空才是「真的没有」。
+              err: r?.teamError && r?.subAgentsError
+                ? (r.teamError === r.subAgentsError ? r.teamError : r.teamError + ' / ' + r.subAgentsError)
+                : (r?.teamError || r?.subAgentsError || null),
+            });
+          })
+          .catch(e => { if (alive) setRows({ sub: [], team: [], err: String(e?.message || e) }); });
+        pull();
+        const t = setInterval(pull, 5000);
+        return () => { alive = false; clearInterval(t); };
+      }, [sessionId]);
+      if (rows === null) return h('p', { className: 'hwb-hint' }, '花名册加载中…');
+      // 状态词必须与颜色**同时**出现（调研 §5 点名：颜色不得是唯一载体）。
+      const stateOf = (x) => {
+        const s = String(x?.status || x?.state || '').toLowerCase();
+        if (['running', 'working', 'busy'].includes(s)) return { k: 'ok', t: '工作中' };
+        if (['idle'].includes(s)) return { k: 'idle', t: '空闲' };
+        if (['provisioning', 'starting', 'pending'].includes(s)) return { k: 'idle', t: '启动中' };
+        if (['failed', 'error'].includes(s)) return { k: 'bad', t: '失败' };
+        if (['inactive', 'stopped', 'done', 'completed'].includes(s)) return { k: '', t: '已停止' };
+        return { k: '', t: s || '未知' };
+      };
+      const row = (x, key, nested) => {
+        const st = stateOf(x);
+        return h('div', { key, className: 'hwb-roster-row' + (nested ? ' nested' : '') },
+          h('span', { className: 'hwb-dot ' + st.k, 'aria-hidden': 'true' }),
+          h('span', { className: 'hwb-roster-name' },
+            // 平级/从属的差别在**缩进**里表达（nested 走 CSS padding-left），
+            // 不靠颜色，也不靠文案重复解释。
+            String(x?.name || x?.id || x?.agentId || '（未命名）')),
+          h('span', { className: 'hwb-roster-state' }, st.t),
+          // 任务归属：Team 成员的任务板归属是它「平级」的具体体现，只读展示。
+          x?.taskCount != null && h('span', { className: 'hwb-roster-task' }, '任务 ' + x.taskCount));
+      };
+      const sub = rows.sub, team = rows.team;
+      if (!sub.length && !team.length) {
+        // 「确实没有」与「读不到」是两件事，界面必须分开说：
+        // 前者是正常状态，后者是桥/官方包的问题，用户要能据此去排查。
+        return h('div', { className: 'hwb-roster' },
+          rows.err
+            ? h('p', { className: 'hwb-hint' }, '读不到花名册（' + rows.err + '）：这不代表没有成员在跑，而是数据源不可用。')
+            : h('p', { className: 'hwb-hint' }, '当前没有正在运行的子代理或 Team 成员。'));
+      }
+      return h('div', { className: 'hwb-roster' },
+        // 部分可用时同样要说清楚：有 Team 行但子代理读不到，不能装作子代理为空。
+        rows.err && h('p', { className: 'hwb-hint' }, '部分分区读不到（' + rows.err + '）。'),
+        // 子代理区：缩进——它们是**本会话**派生出来的，不是平级的同事。
+        sub.length > 0 && h('div', { className: 'hwb-roster-group' },
+          h('p', { className: 'hwb-roster-head' }, '子代理（属于本会话）'),
+          sub.map((x, i) => row(x, 's' + i, true))),
+        // Team 区：平级。并如实说明「并行的是会话与呈现，不是文件系统」
+        // ——官方明文没有 worktree、没有文件锁，假装隔离会误导。
+        team.length > 0 && h('div', { className: 'hwb-roster-group' },
+          h('p', { className: 'hwb-roster-head' }, 'Team 成员（平级）'),
+          team.map((x, i) => row(x, 't' + i, false)),
+          h('p', { className: 'hwb-hint' }, 'Team 成员共享同一个 checkout：并行的是会话与呈现，不是文件系统。')));
+    }
+
     function SiteAccounts({ sites, onRefresh, onlySiteId, subHint }) {
       const [busySite, setBusySite] = React.useState(null);
       const [results, setResults] = React.useState({});
@@ -343,6 +454,15 @@ window.__ModuleLoader__.load({
           loggedIn: s.loggedIn, initialized: s.initialized, busy: s.busy,
           loggedInCached: s.loggedInCached === true, loginBasis: s.loginBasis || null,
           loginCheckedAt: s.loginCheckedAt || null, window: s.window || null,
+          // 0.14.8 账户头像的状态环依据：**必须一起挑进来**。
+          // 这正是上面那句注释（「旧实现只挑 4 个字段，把后端算好的字段丢掉」）
+          // 警告过的同一个坑——只挑「登录三件套」会让 sessionLostCount 恒为
+          // undefined，于是「会话没了」的浅红状态**永远不可能出现**：
+          // ringOf 里 `undefined > 0` 是 false，账户只会显示绿/灰。
+          // 缺省 0/null 而不是 undefined，便于下游直接比较。
+          needLogin: s.needLogin === true,
+          sessionLostCount: Number.isFinite(s.sessionLostCount) ? s.sessionLostCount : 0,
+          lastSessionLost: s.lastSessionLost || null,
         }))
         .filter(s => !onlySiteId || s.siteId === onlySiteId)
         .sort((a, b) => {
@@ -435,14 +555,72 @@ window.__ModuleLoader__.load({
         await onRefresh?.();
       }
       if (!list.length) return h('p', { className: 'hwb-hint' }, '站点状态加载中…（中继未启动时不可用）');
+      // 已选中账户（0.14.8）：点心选账户即把「本会话要用的账户」切过去。
+      // 选择是**会话级**的（Server 端按 accountKey 建独立驱动与 profileDir），
+      // 因此这里只记一个高亮键 + 调用既有的 connect 路由，不复制任何登录逻辑。
+      const [picked, setPicked] = React.useState(null);
+      /**
+       * 状态环：三态，颜色只是**加强**而非唯一载体（`aria-label` + `title` +
+       * 可见文本三者都要能读出状态）。
+       *
+       * 来源必须是真实读数（用户明确要求，不得造假状态）：
+       *   ok     ← loggedIn === true                      （已登录）
+       *   dead   ← sessionLostCount > 0 或 needLogin      （会话没了/登录失效）
+       *   idle   ← 其余（待检查/未初始化）
+       *
+       * 「会话没了」为什么取 sessionLostCount：见 lib/index.js 的 driverStatus，
+       * 该字段由驱动在 WEB_SESSION_LOST 时自增（0.14.8 起逐槽透出）。用 loggedIn
+       * 冒充「会话没了」是错的——登录态还在、失效的是网页会话，两者会同时为真。
+       */
+      const ringOf = (s) => {
+        if (s.sessionLostCount > 0 || s.needLogin === true) return 'dead';
+        if (s.loggedIn === true) return 'ok';
+        return 'idle';
+      };
+      const ringText = (s) => {
+        const r = ringOf(s);
+        return r === 'ok' ? '正常' : r === 'dead'
+          ? (s.sessionLostCount > 0 ? '会话已失效 ' + s.sessionLostCount + ' 次' : '登录已失效')
+          : '待检查';
+      };
+      /**
+       * 点心选账户：把该账户**接上**（选中态 + 真实连接）。
+       *
+       * 为什么必须带 `accountKey`：`site@slot`（0.14.7）下 glm 与 glm#2 是两个
+       * 独立 profile，只传 siteId 会连到默认槽——用户点「账户2」却在动账户1，
+       * 正是 0.14.7 修掉的那个 bug。`siteSlot()` 负责拆 `glm#2`。
+       *
+       * 为什么用 apiSoft 而不是 api：连接失败（站点不可达/未登录）只该落进
+       * 本行提示，不该让整块设置面板崩掉（与 doLogin/checkLogin 同一纪律）。
+       */
+      async function pickAccount(s) {
+        setPicked(p => (p === s.accountKey ? null : s.accountKey));
+        setBusySite(s.accountKey); setResult(s.accountKey, null);
+        const r = await apiSoft('connect', { ...siteSlot(s.accountKey) }, 90000);
+        if (!r.ok) setResult(s.accountKey, { ok: false, text: '连接失败：' + r.error });
+        else setResult(s.accountKey, { ok: true, text: '已选中该账户，后续会话将使用它' });
+        setBusySite(null);
+      }
       return h('div', { className: 'hwb-sites' },
         list.map(s => h('div', { key: s.accountKey, className: 'hwb-site-block' },
           h('div', { className: 'hwb-site-row' + (busySite === s.accountKey || s.busy ? ' busy' : '') },
             h('span', { className: 'hwb-site-identity' },
-              h('span', {
-                className: 'hwb-dot ' + (s.loggedIn === true ? 'ok' : s.loggedIn === false ? 'bad' : 'idle'),
-                'aria-hidden': 'true',
-              }),
+              // 账户头像：28×28 圆框（与图标按钮同尺寸，视觉对齐——
+              // doc/research/agent-ui-design-references.md §4.4「账户头像 28×28 圆」）。
+              // 点击即选中该账户；已选中的加 `picked` 描边。
+              h('button', {
+                type: 'button',
+                className: 'hwb-avatar ' + ringOf(s) + (picked === s.accountKey ? ' picked' : ''),
+                // 颜色不是唯一载体：这里同时给出可读文本与 tooltip。
+                'aria-label': s.displayName + '：' + ringText(s) + (picked === s.accountKey ? '（当前账户）' : ''),
+                'aria-pressed': picked === s.accountKey ? 'true' : 'false',
+                title: s.displayName + '：' + ringText(s) + (s.lastSessionLost ? '（最近一次：' + (s.lastSessionLost.reason || '未知原因') + '）' : ''),
+                onClick: () => pickAccount(s),
+              },
+                // 头像内容取站点短键首字符（无图片资源，也不引入网络依赖）；
+                // 真正表达状态的是外圈那一道环。
+                h('span', { className: 'hwb-avatar-glyph', 'aria-hidden': 'true' },
+                  (siteName(s.siteId) || s.siteId).slice(0, 1))),
               h('span', { className: 'hwb-site-name' }, s.displayName)),
             h('span', {
               className: 'hwb-site-state ' + (s.loggedIn === true ? 'ok' : s.loggedIn === false ? 'bad' : 'idle'),
@@ -499,7 +677,19 @@ window.__ModuleLoader__.load({
           h('dt', null, r.label), h('dd', null, r.value))));
     }
 
-    function Settings() {
+    /**
+     * 设置页。
+     *
+     * `sessionId` 由官方 `settings.section` 槽的 `inject` 契约注入（0.15.0 起
+     * 本面板才需要它——花名册里的 subagentCatalog 是**会话级**投影）。
+     * 这里刻意写成 `props?.sessionId` 而不是解构，因为渲染入口不止一个：
+     * 宿主槽调用、以及测试里直接调 `Settings()` 都会走到这里，而
+     * 「拿不到会话身份」是一个**必须能优雅降级**的正常情况（降级后花名册给
+     * 「读不到：no-session-id」，而不是整块面板崩掉）。
+     * 用解构会让缺 props 直接抛 TypeError，把整页设置打成白屏。
+     */
+    function Settings(props) {
+      const sessionId = props?.sessionId || null;
       const [status, setStatus] = React.useState(null);
       const [error, setError] = React.useState('');
       const [pending, setPending] = React.useState(false);
@@ -572,6 +762,13 @@ window.__ModuleLoader__.load({
         h('div', { className: 'hwb-card' },
           h('h3', { className: 'hwb-group first' }, '账户与登录管理'),
           h(SiteAccounts, { sites, onRefresh: refresh })),
+
+        // 谁在跑：子代理与 Team 成员**分开两区**（0.14.9）。放在账户之后，
+        // 因为「有哪些账户」是更常动的事（Apple「按重要性排序」）。
+        // sessionId 一路传到花名册：subagentCatalog 是会话级投影（0.15.0）。
+        h('div', { className: 'hwb-card' },
+          h('h3', { className: 'hwb-group first' }, '正在运行（子代理 / Team）'),
+          h(AgentRoster, { sessionId })),
 
         h('div', { className: 'hwb-card' },
           h('h3', { className: 'hwb-group first' }, '模型管理'),
@@ -1021,14 +1218,25 @@ window.__ModuleLoader__.load({
         ".hwb-settings h2{font-size:20px;font-weight:500;line-height:28px;letter-spacing:0;margin:0 0 2px}",
         ".hwb-lead{font-size:13px;line-height:22px;color:var(--dsw-alias-label-tertiary,#8a8f98);margin:0}",
         ".hwb-build{font-size:11px;line-height:16px;color:var(--dsw-alias-label-caption,#9aa0a6);margin:-6px 0 0;font-variant-numeric:tabular-nums}",
-        ".hwb-card{border:.5px solid var(--dsw-alias-border-l4,#8884);border-radius:16px;background:var(--dsw-alias-bg-layer-1,transparent);padding:4px 16px 10px}",
-        ".hwb-group{font-size:14px;font-weight:500;line-height:22px;color:var(--dsw-alias-label-primary,inherit);margin:14px 0 4px}",
-        ".hwb-group.first{margin-top:14px}",
-        ".hwb-row{display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap;padding:12px 0;border-bottom:1px solid var(--dsw-alias-border-l3,#8883)}",
-        ".hwb-row:last-child{border-bottom:0}",
-        ".hwb-row-label{flex:0 0 128px;min-width:96px;font-size:13px;line-height:20px;padding-top:6px;color:var(--dsw-alias-label-secondary,inherit)}",
+        // ---- 0.14.9 去臃肿：按调研出来的 token 表收紧 --------------------
+        // 用户原话：「做到简洁高效美观，而不是现在的臃肿」。数值不是拍脑袋，
+        // 逐条来自 doc/research/agent-ui-design-references.md §4.4 的 token 表
+        //（该表由 Apple HIG 可执行约束 + Fluent 2 的 4px 阶梯 + 官方包实测值得出）：
+        //   卡片圆角 16 → 12px   （Apple「简洁」取向，§4.4 明列「从现 16px 收紧」）
+        //   行内边距 12 → 8px    （Fluent 基础单位 4 的倍数，§4.4「从现 12px 收紧」）
+        //   标签列宽 128 → 96px  （Apple「omit unnecessary words」，§4.4 明列）
+        //   行分隔线 → 删除       （Fluent 原文「spacing creates logical sections
+        //                         without having to use lines」= 删线，用间距）
+        // 删线而不是改成更浅的线：目标就是让分组靠**间距**表达，留着线等于没改。
+        ".hwb-card{border:.5px solid var(--dsw-alias-border-l4,#8884);border-radius:12px;background:var(--dsw-alias-bg-layer-1,transparent);padding:4px 16px 10px}",
+        ".hwb-group{font-size:14px;font-weight:500;line-height:22px;color:var(--dsw-alias-label-primary,inherit);margin:16px 0 4px}",
+        ".hwb-group.first{margin-top:16px}",
+        // 分隔靠间距：行间距 8px（§4.4）取代原来的 1px 底线。
+        // gap 同时承担「分组内行距」，因此这里用 row-gap 让相邻两行分开。
+        ".hwb-row{display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap;padding:8px 0}",
+        ".hwb-row-label{flex:0 0 96px;min-width:96px;font-size:13px;line-height:20px;padding-top:6px;color:var(--dsw-alias-label-secondary,inherit)}",
         ".hwb-row-main{flex:1;min-width:240px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}",
-        ".hwb-row button,.hwb-settings button{height:32px;padding:0 14px;font:inherit;font-size:13px;line-height:30px;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border:.5px solid var(--dsw-alias-border-l3,#8885);border-radius:16px;cursor:pointer;transition:background .12s ease}",
+        ".hwb-row button,.hwb-settings button{height:32px;padding:0 14px;font:inherit;font-size:13px;line-height:30px;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border:.5px solid var(--dsw-alias-border-l3,#8885);border-radius:12px;cursor:pointer;transition:background .12s ease}",
         ".hwb-row button:hover:not(:disabled),.hwb-settings button:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,#8882)}",
         ".hwb-row button:disabled,.hwb-settings button:disabled{opacity:.45;cursor:default}",
         ".hwb-model-select,.hwb-prompt-input{min-width:220px;max-width:340px;padding:6px 10px;font:inherit;font-size:13px;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border:.5px solid var(--dsw-alias-border-l3,#8885);border-radius:8px}",
@@ -1038,9 +1246,10 @@ window.__ModuleLoader__.load({
         ".hwb-hint.ok{color:var(--dsw-alias-state-success-primary,#2e7d32)}",
         ".hwb-hint.bad{color:var(--dsw-alias-state-error-primary,#93443e)}",
         ".hwb-consent{display:flex;align-items:center;gap:8px;font-size:13px}",
-        ".hwb-sites{display:flex;flex-direction:column}",
-        ".hwb-site-block{padding:8px 0;border-bottom:1px solid var(--dsw-alias-border-l3,#8883)}",
-        ".hwb-site-block:last-of-type{border-bottom:0}",
+        ".hwb-sites{display:flex;flex-direction:column;gap:8px}",
+        // 同一条「删线，用间距」：账户块之间靠 8px 间距（由 .hwb-sites 的 gap 提供）
+        // 分开，不再画 1px 底线。
+        ".hwb-site-block{padding:0}",
         ".hwb-site-row{display:flex;align-items:center;gap:12px;padding:4px 0;flex-wrap:wrap}",
         ".hwb-site-row.busy{opacity:.55}",
         ".hwb-site-identity{flex:1;display:inline-flex;align-items:center;gap:8px;min-width:140px;font-size:13px}",
@@ -1050,6 +1259,29 @@ window.__ModuleLoader__.load({
         ".hwb-dot{width:8px;height:8px;border-radius:50%;flex:none;display:inline-block;background:var(--dsw-alias-label-tertiary,#9aa0a6)}",
         ".hwb-dot.ok{background:var(--dsw-alias-state-success-primary,#2e7d32)}",
         ".hwb-dot.bad{background:var(--dsw-alias-state-error-primary,#93443e)}",
+        // 账户头像（0.14.8）：28×28 圆框 + 外圈状态环。
+        // 尺寸取自 doc/research/agent-ui-design-references.md §4.4「账户头像 28×28 圆」
+        // （与图标按钮同尺寸，视觉对齐）。圆角用 50% 而非固定 px——等比圆框。
+        // 状态环用 `border` 实现（而不是 outline/box-shadow）：border 参与布局，
+        // 三种状态的框大小恒定，切换时不会让整行跳动。
+        // 颜色**不是唯一载体**：aria-label/title/可见文本都带状态，见 SiteAccounts.
+        ".hwb-avatar{width:28px;height:28px;padding:0;flex:none;border-radius:50%;cursor:pointer;background:transparent;display:inline-flex;align-items:center;justify-content:center;border:2px solid var(--dsw-alias-label-tertiary,#9aa0a6)}",
+        ".hwb-avatar.ok{border-color:var(--dsw-alias-state-success-primary,#2e7d32)}",
+        ".hwb-avatar.dead{border-color:var(--dsw-alias-state-error-primary,#93443e)}",
+        ".hwb-avatar.picked{box-shadow:0 0 0 2px var(--dsw-alias-label-primary,#1f2328)}",
+        ".hwb-avatar:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#3b82f6);outline-offset:1px}",
+        ".hwb-avatar-glyph{font-size:12px;line-height:1;color:var(--dsw-alias-label-secondary,inherit);pointer-events:none}",
+        // 花名册（0.14.9）：子代理缩进、Team 平级。
+        // 缩进用 padding-left（24px = Fluent size240）而不是符号/颜色——层级是
+        // 空间关系，用空间表达最直接；颜色已经被「状态」占用，复用会语义冲突。
+        ".hwb-roster{display:flex;flex-direction:column;gap:12px;padding:4px 0}",
+        ".hwb-roster-group{display:flex;flex-direction:column;gap:4px}",
+        ".hwb-roster-head{font-size:12px;line-height:18px;margin:0;color:var(--dsw-alias-label-tertiary,#8a8f98)}",
+        ".hwb-roster-row{display:flex;align-items:center;gap:8px;font-size:13px;line-height:20px;min-height:24px}",
+        ".hwb-roster-row.nested{padding-left:24px}",
+        ".hwb-roster-name{color:var(--dsw-alias-label-primary,inherit);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
+        ".hwb-roster-state{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,inherit);flex:none}",
+        ".hwb-roster-task{font-size:12px;line-height:18px;padding:0 8px;border-radius:9px;flex:none;color:var(--dsw-alias-label-secondary,inherit);border:.5px solid var(--dsw-alias-border-l3,#8885)}",
         ".hwb-site-state{font-size:12px;line-height:18px;padding:1px 8px;border-radius:10px;border:.5px solid var(--dsw-alias-border-l3,#8885);color:var(--dsw-alias-label-secondary,inherit)}",
         ".hwb-site-state.ok{color:var(--dsw-alias-state-success-primary,#2e7d32);border-color:var(--dsw-alias-state-success-primary,#2e7d32)}",
         ".hwb-site-state.bad{color:var(--dsw-alias-state-error-primary,#93443e);border-color:var(--dsw-alias-state-error-primary,#93443e)}",
@@ -1158,7 +1390,13 @@ window.__ModuleLoader__.load({
         try {
           return ctx.slots.inject('settings.section', () => ctx.slots.register({
             name: 'settings.section', id: 'webcode', order: 110,
-            label: () => '网页桥接', inject: () => ({}),
+            label: () => '网页桥接',
+            // 0.15.0：把当前会话 id 一起注入。花名册里的 subagentCatalog 是
+            // **父会话自己的**持久化投影（lib/roster.js 的 projectSubAgents 会
+            // 用 sessions.get(sessionId) 取那一个会话），因此设置页必须知道
+            // 「用户正在看哪个会话」，否则多会话并行时会把别人的子代理列出来。
+            // 与上面 composer.dock 的 WaitLine 用的是同一个官方 inject 契约。
+            inject: (sessionId) => ({ sessionId }),
           }, Settings));
         } catch (e) { warn('settings section', e); }
       });

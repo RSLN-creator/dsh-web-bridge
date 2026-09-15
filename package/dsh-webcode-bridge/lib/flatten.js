@@ -43,6 +43,21 @@ export function flattenOpenAiMessages(messages = []) {
 /** Pull image attachments out of OpenAI chat.messages (HTTP front path).
  *  data: URL 内联解码；https URL 原样透出（由驱动侧决定是否抓取）。 */
 const OPENAI_IMAGE_DATA = /^data:(image\/[\w.+-]+);base64,(.+)$/s;
+
+/**
+ * 从 OpenAI 形状的 `chat.messages` 里取出图片附件（HTTP 前端通路）。
+ *
+ * 与 `lib/index.js` 的 `imagesOfMessages` 是**两条不同入口**的同一件事：
+ * 那条走 DSH 原生会话消息，这条走 OpenAI 兼容前端收到的请求体。两者形状不同
+ * （这里是 OpenAI 的 `image_url` / data URL），所以不能合并——但解码规则与
+ * 安全边界必须一致，改动其中一条时请对照另一条。
+ *
+ * `data:` URL 就地解码；`http(s)` URL 原样透出，由驱动侧决定是否去抓
+ * （抓取属于网络行为，不在纯函数里做）。
+ *
+ * @param {Array} messages OpenAI chat.messages
+ * @returns {Array<{name?: string, contentType: string, data?: string, url?: string}>}
+ */
 export function imagesOfOpenAiMessages(messages = []) {
   const out = [];
   for (const m of messages) {

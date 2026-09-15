@@ -4,6 +4,83 @@
 
 ---
 
+# 0.15.2 只出思维链卡死修复 + LoopX 移除 + 闸门转正
+
+日期：2026-09-15。环境：Windows、Node v24.18.0。
+
+**范围**：用户报的「长时间后只有思维链卡住，harness 端没有任何报错，没有下一步」；
+LoopX 整体移除；注释闸门转阻断；CI/CD 与审查补强；`REPORT.md` 可修项收口。
+
+## 离线验收（本次实跑，全部退出码 0）
+
+| # | 判据 | 命令 | 结果 |
+| --- | --- | --- | --- |
+| A1 | 全量单测 | `node --test "test/*.test.mjs"` | **418 通过 / 0 失败**，`duration_ms 566589` |
+| A1b | 完整测试链 | `pnpm test` | 退出 **0**（含 parse / M1 / bench-ci / artifacts-check） |
+| A2 | 注释闸门 | `node scripts/lint-comments.mjs` | 退出 **0**，`error 0，warn 0`（122 文件） |
+| A3 | 生成物卫生 | `node test-mock/artifacts-check.mjs` | 退出 0（3 生成物被忽略、4 源文件仍可跟踪） |
+| A4 | 基准离线回放 | `node test-mock/prompt-bench.mjs --offline` | 退出 0（14/14） |
+| A5 | 本地入口全量 | `node scripts/ci-local.mjs` | **4/4 PASS**（lint / artifacts / bench / test，569.6s） |
+| A6 | 工作流 YAML | PyYAML 解析三个 workflow | 全部 OK，触发器与 job 名符合预期 |
+| A7 | 打包 | `pnpm pack` | 产出 `dsh-webcode-bridge-0.15.2.tgz`（281,632 字节） |
+| A8 | 包内容一致性 | `node scripts/verify-pack.mjs <tgz>` | **27/28 逐字相同**；唯一差异是 `packageManager` 被 pnpm 规范化剥离（逐字段 diff 证明 field diffs: 1，版本一致 0.15.2） |
+| A9 | 双 profile 安装 | `node scripts/install-profiles.mjs <tgz>` | web **0.15.2** / headless **0.15.2** |
+| A10 | 安装标记核对 | 逐文件 grep | 两 profile 均 True：`shouldSettleStalledThinking`、`answerDomLength`、`lastAnswerAt`、`thinking-only-settled`、`THINKING_ONLY_NO_ANSWER`、`thinkingOnlyNotice`、`projectRoster`、`proseSafeEnd`、`toolcall` |
+| A11 | 安装副本字节一致 | sha256 比对 | web / headless 的 `lib/bench.js` 与工作树**逐字节相同**（改完代码重新 pack 的证据） |
+
+## 本次新增护栏 `test/stall-settle.test.mjs`（12 项）
+
+| 类别 | 用例 |
+| --- | --- |
+| 正向 | 到硬上限即收束；上限可配置；`>=` 而非 `>`；计时文案剥完长度为 0；计时文案后跟真实回答只算回答长度 |
+| **反向安全线** | 正文持续产出 → **永不命中**（长回复不被腰斩）；上限 0/非法 → **判据关闭**（不是「立刻收束」）；缺 `lastAnswerAt` 基线 → 不收束；正文里出现「思考中」三个字是内容、不被剥掉；空输入不产生 NaN |
+
+> 其中「缺基线」一条抓到一个真 bug：`Number(null)` 是 `0` 且 `Number.isFinite(0)` 为真，
+> 只判 `isFinite` 会把缺失时间戳读成「epoch 0」＝「已等一万年」，于是每轮缺字段时
+> 第一个 tick 就判死——**比不修更坏**。已改为同时挡 `<= 0`。
+
+## 顺带修复（读码时发现，非本次目标）
+
+| 缺陷 | 后果 | 修法 |
+| --- | --- | --- |
+| `index.js` 收尾分支 `assertNonEmpty(out, '', [])` 第二实参写死空串 | 「思考全文都在、正文为空」被判成 `empty response`，**归因线索被抹掉** | 改为交回带现场的 `THINKING_ONLY_NO_ANSWER` 提示，与 `TOOL_UNKNOWN` 同型，任务继续而非整轮作废 |
+| `emitText` 写死 `index: 0` | 工具轮里思考块已占用 0，收尾再写 0 与**已关闭**的 reasoning 块撞下标 | 改为显式传 `nextIndex` |
+| `scripts/ci-local.mjs` 的 `test` 步在 Windows 上从未跑通 | `spawnSync pnpm.cmd EINVAL`（Node 修 CVE-2024-27980 后 `shell:false` 不能 spawn `.cmd`）——**安静地坏了很久**，因为该脚本不在 CI 里跑 | 该步配 `shell:true`；**并把 `ci-local --fast` 加进 CI**，使这类问题当天就暴露 |
+
+## LoopX 移除（已执行并核对）
+
+删除清单（全部在仓库外，本仓库零代码引用、零活动配置引用）：
+
+| 项 | 体积 |
+| --- | --- |
+| `~/.agents/runtime/dsh-loopx-plugin`（2272 文件） | 104.92 MB |
+| 7 个 `loopx*` skill | 0.31 MB |
+| 3 个锁/安装记录文件 | ~2 KB |
+| **合计** | **约 105.22 MB** |
+
+**删除后核对**：`skills/` 下 loopx 条目 **0**；运行时目录**不存在**；
+**其余 85 个 skill 目录完好**（证明未误删）；会话技能目录里 7 个 `loopx*` 已消失。
+
+## 真机验收（**未做**，待重启）
+
+以下**必须由用户在重启 DSH 后确认**，离线无法证明：
+
+| # | 核对点 | 判据 |
+| --- | --- | --- |
+| 1 | 版本生效 | `GET http://127.0.0.1:3080/__webcode/status` → `build.version` = **0.15.2** |
+| 2 | **本故障是否真修** | 复现原场景（长思考任务）。若再出现「只出思维链」：**不应**无限转圈，而应在 ≤180s 内收束并交回一条 `THINKING_ONLY_NO_ANSWER` 提示；`status` 里 `thinkingOnlyTurns` ≥1、`lastStalledSettle.reason` = `thinking-only-settled` |
+| 3 | 未误杀正常长回复 | 正常长回答应完整输出，`thinkingOnlyTurns` **不增长** |
+| 4 | 收束原因可读 | `status.driver.lastEndReason` 能区分 `finished` / `thinking-only-settled` / `partial-wip-settled` / `timeout` |
+| 5 | 重启后无回退 | `conversationReplacedCount` 与 `sessionLostCount` 均为 0 |
+
+**未验证/不归因项**（不谎报，见 `REPORT.md` §F）：`no_response_frames` 逐字复现的根因
+（需真机 SSE 抓包）、两次 `edit status=error` 的根因（日志错误体是 `[object Object]`）、
+B-4 那条 29,650 字符消息的归因（`turn/end` 是 `aborted by user`，无法判定）、
+豆包掉登录的真机复验（受风控约束，需人工择时）、GitHub Actions 的实际运行结果
+（需一次真实 push）。
+
+---
+
 # 0.14.5 会话日志归因修复 + 右栏对齐官方
 
 日期：2026-09-14。环境：Windows、Node v24.18.0。
@@ -312,15 +389,17 @@ GLM 原始 SSE 帧：`.tmp/sse-glm-probe/sse-glm-*.log`（2177 B，`conversation
 
 ## 本轮踩到的坑（重要，下次直接照做）
 
-1. **`pnpm install` 会被无关依赖整死，并顺带删掉我们的包。** 本机 `web` profile 的
-   `dsh-loopx-plugin` 指向 GitHub release tarball，安装时报
-   `UNABLE_TO_VERIFY_LEAF_SIGNATURE` → `TypeError: fetch failed`，整体失败；而我们
-   先 `Remove-Item node_modules/dsh-webcode-bridge` 再装，于是包被删掉却没装上
+1. **`pnpm install` 曾被一个无关依赖整死，并顺带删掉我们的包。** 该依赖指向 GitHub
+   release tarball，安装时报 `UNABLE_TO_VERIFY_LEAF_SIGNATURE` → `TypeError: fetch failed`，
+   整体失败；而我们先 `Remove-Item node_modules/dsh-webcode-bridge` 再装，于是包被删掉却没装上
    （`node_modules/dsh-webcode-bridge` 消失）。**解法**：
    `$env:NODE_OPTIONS='--use-system-ca'`（Node 24 用系统证书库），一次通过。
    这是本机 Node 证书链与 GitHub 的兼容问题，**与本插件无关**。
    教训：清目录 + 安装这条路径在依赖坏了的时候会把「已装」变成「没装」，
    失败后必须**立刻核对 `node_modules`**，不能只看退出码。
+   > 0.15.0 更新：那个无关依赖（`dsh-loopx-plugin`）已被用户决定**整体舍弃**并从
+   > web profile 移除，证书问题随之消失。本条保留作为**通用教训**——只要还有任何一个
+   > 依赖走 GitHub tarball，同一条路径就会再踩一次。
 2. **验证必须落到文件哈希**：`pnpm install` 退出码为 0 也可能装出旧内容
    （0.14.1 记录的第 2 条）。本轮改为「解包 tarball → 与工作区逐文件比 → 与安装副本
    逐文件比」，三处一致（22/23 + package.json 等价、安装副本 23/23）才算过。

@@ -12,7 +12,7 @@
 // 变体表与 agent-preset.js 的分支一一对应，且由 test/prompt-variants.test.mjs
 // 钉住：glm 变体不得出现 <tool_call>，默认变体必须出现；两者必须互不相同。
 
-import { serializeFirstTurn, trainNoteFor } from './agent-preset.js';
+import { serializeFirstTurn, trainNoteFor, trainExtraFor } from './agent-preset.js';
 
 /** 适配分支表：id → { label, siteIds, siteId }（siteId 是喂给 serializeFirstTurn 的） */
 export const VARIANT_SPECS = Object.freeze([
@@ -35,6 +35,47 @@ export const VARIANT_SPECS = Object.freeze([
   },
 ]);
 
+/**
+ * 实验变体（**默认不返回**，只有 `buildPromptVariants({ experiments: true })` 才附上）。
+ *
+ * 为什么与 VARIANT_SPECS 分开：前者是**已生效的生产分支**（站点 → 分支的映射，
+ * 由 variantIdForSite 决定，测试钉死只有 glm 例外）；后者是**尚未转正的候选**，
+ * 只能被基准实验显式拉出来跑，绝不能悄悄进入真实会话的选路。
+ * 这个分离本身就是纪律：提示词改动在拿到配对数据之前不进默认路径。
+ *
+ * 两个候选各自的文献依据见 doc/research/prompt-engineering-evidence-2026-09-14.md：
+ *   · reinstruct ← ACL Findings《Improving Long Context Instruction Following》
+ *     实测「周期性重述指令」显著优于「只靠一次系统提示」；而现有 TRAIN_NOTE 只
+ *     重述格式、不重述约束，正是缺口。
+ *   · slim ← arXiv 2510.05381《Context Length Alone Hurts...》：即使检索完美，
+ *     长上下文本身也导致性能下降 → 首轮不是越长越好。
+ */
+export const EXPERIMENT_SPECS = Object.freeze([
+  {
+    id: 'reinstruct',
+    label: '实验 A：增量轮重述关键约束（格式 + 平台/必填/present）',
+    siteId: undefined,
+    excludes: ['glm'],
+    trainExtra: 'reinstruct',
+    slim: false,
+    note: '在既有的「每 5 个工具结果重贴格式」之上，追加平台、必填字段、不得虚构、'
+      + 'present 四条关键约束的重述。依据 ACL Reinstruct；默认路径不变，需实测数据才转正。',
+  },
+  {
+    id: 'slim',
+    label: '实验 B：首轮精简（准则 4→2 条、工具描述上限 1200→800）',
+    siteId: undefined,
+    excludes: ['glm'],
+    trainExtra: '',
+    slim: true,
+    note: '首轮提示词更短。依据 arXiv 2510.05381「长上下文本身有害」。'
+      + '注意这是**双向**候选：精简可能减少干扰，也可能丢掉必要约束，必须由判据说话。',
+  },
+]);
+
+/** slim 实验变体的工具描述上限（默认路径是 agent-preset 的 1200）。 */
+const SLIM_TOOL_DESC_LIMIT = 800;
+
 /** 预览用的占位工具集：真实工具清单拿不到时用它，并在 note 里说明是占位。 */
 const PLACEHOLDER_TOOLS = [
   { name: 'read', description: '读取本地文件文本内容。', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },
@@ -51,10 +92,11 @@ const PLACEHOLDER_TOOLS = [
  * @param {object} [options.lastPreset] 最近一次真实首轮（index.js 的 lastPresetInfo）
  * @returns {{variants: Array, toolsSource: string, active: object|null}}
  */
-export function buildPromptVariants({ tools, extraPrompt, system, lastPreset } = {}) {
+export function buildPromptVariants({ tools, extraPrompt, system, lastPreset, experiments = false } = {}) {
   const real = Array.isArray(tools) && tools.length > 0;
   const toolList = real ? tools : PLACEHOLDER_TOOLS;
-  const variants = VARIANT_SPECS.map((spec) => ({
+  const specs = experiments ? [...VARIANT_SPECS, ...EXPERIMENT_SPECS] : VARIANT_SPECS;
+  const variants = specs.map((spec) => ({
     id: spec.id,
     label: spec.label,
     note: spec.note,
@@ -62,10 +104,19 @@ export function buildPromptVariants({ tools, extraPrompt, system, lastPreset } =
     // 从 SITES 现算，避免这里再维护一份站点清单。
     siteIds: spec.only ? [...spec.only] : null,   // null = 除 excludes 外全部
     excludes: spec.excludes ? [...spec.excludes] : [],
+    // 实验变体标记：只供基准实验（test-mock/prompt-bench.mjs）显式拉取时区分。
+    // 旧注释写的是「前端据此把它们与生产分支分开渲染」，但客户端从来没有这个分支
+    // （lib/client.cjs 里没有任何 experimental 感知的渲染），是一句失效注释。
+    // 现状是**更保守**的：实验变体不接进 GUI 下拉——它们还没转正，接进去会让用户
+    // 以为选了就生效，而真实会话的选路仍只由 variantIdForSite 决定。
+    experimental: Boolean(spec.trainExtra || spec.slim),
     // 现算：与真正发出去的那一份走同一个函数。
-    text: serializeFirstTurn({ messages: [], tools: toolList, extraPrompt, system, siteId: spec.siteId }),
+    text: serializeFirstTurn({
+      messages: [], tools: toolList, extraPrompt, system, siteId: spec.siteId,
+      ...(spec.slim ? { slim: true, toolDescLimit: SLIM_TOOL_DESC_LIMIT } : {}),
+    }),
     // 再教学提示也一并露出——增量轮第 5 个工具结果会重贴它，立场必须与首轮一致。
-    trainNote: trainNoteFor(spec.siteId || 'default'),
+    trainNote: trainNoteFor(spec.siteId || 'default', trainExtraFor(spec.trainExtra, { hasPresent: toolList.some((t) => t && t.name === 'present') })),
   }));
   const active = lastPreset
     ? {

@@ -66,6 +66,20 @@ function publicStatus(relay) {
   };
 }
 
+/**
+ * OpenAI 兼容前端：把 relay 包装成 `/v1/chat/completions` 等标准端点。
+ *
+ * 存在的意义是让**任何** OpenAI 客户端（脚本、其它工具、curl）都能借这条
+ * 已登录的网页通路，而不必理解本桥的 webcode 协议。它挂在 relay 上，
+ * 由 `lib/index.js` 通过 `onHttp` 回调接进来。
+ *
+ * `modelInfo` 里的取值函数（如 `sendGapMsOf`）必须**当场调用**而不是建前端时
+ * 快照：设置页改完就该立刻生效，快照会让改动看起来「没保存成功」。
+ *
+ * @param {object} relay createRelay 的实例
+ * @param {object} modelInfo { modelId, modelName, providerId, sendGapMsOf }
+ * @returns {object} 前端实例（handle(req,res,pathname) 等）
+ */
 export function createOpenAiFront(relay, modelInfo) {
   const { modelId, modelName, providerId, sendGapMsOf } = modelInfo;
   const allowedOrigins = (relay?.config?.allowedOrigins || []).map((s) => String(s).toLowerCase());

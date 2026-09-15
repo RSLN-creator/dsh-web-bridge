@@ -3,9 +3,12 @@
 //
 // 为什么不用 `pnpm install`（真实踩坑，两条都要记住）：
 //
-//   1. 本机 `pnpm install` 会因**无关依赖** `dsh-loopx-plugin`（GitHub release
-//      tarball）报 `UNABLE_TO_VERIFY_LEAF_SIGNATURE` → `fetch failed`，整体失败。
-//      它和本插件毫无关系，但足以让安装根本跑不起来。
+//   1. 本机 `pnpm install` 曾因一个**无关依赖**（走 GitHub release tarball 的包）报
+//      `UNABLE_TO_VERIFY_LEAF_SIGNATURE` → `fetch failed`，整体失败。它和本插件毫无
+//      关系，但足以让安装根本跑不起来。
+//      **这条是通用教训，不是某个包的问题**：只要依赖树里还有任何一个包从 GitHub
+//      tarball 拉，同一条路径就会再踩一次。可用的绕过是让 Node 用系统证书库
+//      （`$env:NODE_OPTIONS='--use-system-ca'`，Node 24+），见 doc/verify.md。
 //   2. 即使绕过第 1 条，pnpm 对**同版本号**的 tarball 会判「Already up to date」，
 //      连解包都不做 —— 0.14.4 就这样装上去过一份陈旧副本（改了 mirror.js 但装的
 //      是旧文件），且不报任何错。

@@ -17,6 +17,21 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { estimateTokens } from './metrics.js';
 
+/**
+ * 本机 relay：一个只绑回环的 HTTP 服务，扮演「网页模型的 OpenAI 兼容端点」。
+ *
+ * 它存在的意义是把**单进程共享的浏览器驱动**串行化：DSH 可能同时发多个请求，
+ * 而网页会话只有一个输入框，并发写入必然互相踩。relay 因此做三件事：
+ *   1. 排队（`queueTimeoutMs` 内串行执行，超时才放弃）；
+ *   2. 同意闸（`requireConsent`：用户没在设置页授权就不接受任何请求）；
+ *   3. 把驱动吐出的增量转发成 SSE 给调用方。
+ *
+ * 安全边界：`host` 默认 `127.0.0.1`，**不要**改成 0.0.0.0——这个端口背后是
+ * 用户已登录的网页会话，暴露到局域网等于把账号交出去。
+ *
+ * @param {object} [options] 配置覆盖（port/host/executor/onHttp/logger…）
+ * @returns {object} relay 实例（start/stop/status/submit 等）
+ */
 export function createRelay(options = {}) {
   const cfg = {
     ...options,
