@@ -65,6 +65,7 @@
 
 - `deepseek-web-behavior.md`、`deepseek-newui-2026-09-10.md` — 站点前端行为与改版记录
 - `reference-projects.md` — 参考实现清单与来源
+- `task-board-vs-agentteams-graph.md` — **Graph Engineering 对照分析**：`dsh-task-board`（cron 驱动的执行台账，无依赖边）与官方 AgentTeams 任务图（`blockedBy` DAG + 全图环检测，但**无调度器**）的逻辑拆解，以及落地一张可自动推进的任务图还需要考虑什么
 - `prompt-engineering-evidence-2026-09-14.md` — **提示词工程实测证据与差评**（NeurIPS/ACL/arXiv 五篇；含「不能宣称最优」「必须披露 harness」两条立场）
 - `agent-ui-design-references.md` — **UI 设计语言**（Apple HIG 可执行约束、Fluent 4px 间距全表、Harness 官方 token 实测清单、teammate 面板信息架构）
 - `real-probe-*.json`、`sse-samples/` — 真机探针输出与 SSE 样本
