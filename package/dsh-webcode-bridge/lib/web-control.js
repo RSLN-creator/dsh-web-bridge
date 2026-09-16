@@ -312,23 +312,43 @@ export function createWebControl(deps = {}) {
         ? (() => {
           try {
             const r = (rosterOf || config.rosterOf)(body?.sessionId || null) || {};
-            return {
-              subAgents: Array.isArray(r.subAgents) ? r.subAgents : [],
-              team: Array.isArray(r.team) ? r.team : [],
-              subAgentsError: r.subAgentsError ?? null,
-              teamError: r.teamError ?? null,
+            const fail = (m) => {
+              const msg = `roster-threw: ${String(m).slice(0, 160)}`;
+              return { subAgents: [], team: [], tasks: [], subAgentsError: msg, teamError: msg, tasksError: msg };
             };
+            try {
+              return {
+                subAgents: Array.isArray(r.subAgents) ? r.subAgents : [],
+                // Team 成员（平级）。`members` 是官方 TeamView 的词，`team` 是
+                // 0.15.0 起的旧名——**两个都给**，任何一端的改名都不会让另一端
+                // 读到 undefined（本文件顶部记的那一族缺陷正是「一端改了、
+                // 另一端不存在」，不值得在同一个字段上再犯一次）。
+                team: Array.isArray(r.team) ? r.team : (Array.isArray(r.members) ? r.members : []),
+                members: Array.isArray(r.members) ? r.members : (Array.isArray(r.team) ? r.team : []),
+                // 任务板是**团队级**事实（官方 TeamView.tasks）：状态、被谁卡住、
+                // 写哪些文件、是否就绪。没有它，「Team 成员平级」只剩一个名字。
+                tasks: Array.isArray(r.tasks) ? r.tasks : [],
+                subAgentsError: r.subAgentsError ?? null,
+                teamError: r.teamError ?? r.membersError ?? null,
+                tasksError: r.tasksError ?? null,
+              };
+            } catch (e) {
+              return fail(e?.message || e);
+            }
           } catch (e) {
             // 花名册读失败**不能**让整个 /status 挂掉：状态页还有登录、
             // 限流、恢复轮次等一堆更要紧的信息，那些与花名册无关。
+            const msg = `roster-threw: ${String(e?.message || e).slice(0, 160)}`;
             return {
-              subAgents: [], team: [],
-              subAgentsError: `roster-threw: ${String(e?.message || e).slice(0, 160)}`,
-              teamError: `roster-threw: ${String(e?.message || e).slice(0, 160)}`,
+              subAgents: [], team: [], members: [], tasks: [],
+              subAgentsError: msg, teamError: msg, tasksError: msg,
             };
           }
         })()
-        : { subAgents: [], team: [], subAgentsError: 'roster-not-wired', teamError: 'roster-not-wired' }),
+        : {
+          subAgents: [], team: [], members: [], tasks: [],
+          subAgentsError: 'roster-not-wired', teamError: 'roster-not-wired', tasksError: 'roster-not-wired',
+        }),
       relay: relay ? (({ running, consent, consentPersistent, requireConsent, busy, queueLength, activeRequests, lastError, metrics }) => ({
         running, consent, consentPersistent, requireConsent, busy, queueLength, activeRequests, lastError, metrics,
       }))(relay.status()) : null,

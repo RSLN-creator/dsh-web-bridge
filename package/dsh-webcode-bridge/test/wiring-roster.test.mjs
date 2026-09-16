@@ -146,8 +146,14 @@ test('★ 接线：注入点接上完整服务桩时，/status 必须真的读�
   const member = { id: 'session-lead-1', name: 'lead', role: 'lead', status: 'running' };
   const child = { id: 'session-child-1', label: 'reviewer', createdAt: 1_700_000_000_000, mode: 'one-shot' };
   const services = {
-    agentTeams: { listMembers: () => [member], listTasks: () => [] },
-    agents: { list: () => [{ id: 'session-lead-1' }, { id: 'session-child-1' }] },
+    agentTeams: { listMembers: () => [member], listTasks: () => [{ id: 't1', subject: '修 405', status: 'pending', ownerName: 'lead', blockedBy: [], writeScopes: ['lib/'], ready: true }] },
+    // 0.15.4：权威凭据取法是 `agents.get(sessionId)`，不是遍历 `list()`。
+    // 桩必须提供 get，否则这条护栏会因为「桩缺方法」而红——那是桩的失真，
+    // 不是实现的缺陷（本文件顶部记的那一族教训）。
+    agents: {
+      get: (id) => (id === 'session-lead-1' ? { id: 'session-lead-1' } : undefined),
+      list: () => [{ id: 'session-lead-1' }, { id: 'session-child-1' }],
+    },
     sessions: { get: () => ({ id: 'session-lead-1' }) },
     sessionProjections: {
       snapshot: (_session, keys) => (keys.includes('subagentCatalog')
@@ -161,10 +167,19 @@ test('★ 接线：注入点接上完整服务桩时，/status 必须真的读�
     assert.equal(r.status, 200);
     assert.equal(r.json.teamError, null, '真实服务可用时不该报错：' + r.json.teamError);
     assert.equal(r.json.subAgentsError, null, '真实服务可用时不该报错：' + r.json.subAgentsError);
+    assert.equal(r.json.tasksError, null, '真实服务可用时不该报错：' + r.json.tasksError);
     assert.deepEqual(r.json.team.map((m) => m.name), ['lead'], 'Team 成员必须从 agentTeams 服务读出来');
     assert.deepEqual(r.json.team.map((m) => m.role), ['lead']);
+    // members 是 team 的同值别名（官方 TeamView 的词）。
+    assert.deepEqual(r.json.members, r.json.team, 'members 必须与 team 同值');
+    // 任务板是团队级事实，必须与成员一起到达。
+    assert.deepEqual(r.json.tasks.map((t) => t.subject), ['修 405']);
+    assert.deepEqual(r.json.tasks.map((t) => t.status), ['pending']);
     assert.deepEqual(r.json.subAgents.map((s) => s.name), ['reviewer'], '子代理必须从 subagentCatalog 投影读出来');
-    // 运行态只在 agent 注册表里还真有这个 id 时才给（roster.js 的「不编造状态」纪律）。
-    assert.equal(r.json.subAgents[0].status, 'running');
+    // **目录路径不给运行时状态**：subagentCatalog 条目本身不含 activity，
+    // 桥不替官方断言「运行中」（0.15.4 修）。权威状态在官方
+    // `subagents.listChildren` 那条路上，本用例没装那个服务，所以这里就是「未知」。
+    assert.ok(!('status' in r.json.subAgents[0]),
+      '投影路径不得推断 status（旧实现用 agents.list() 猜 running，会把已结束的显示成运行中）');
   });
 });

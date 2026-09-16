@@ -89,6 +89,25 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * 把若干个「读不到的原因」合并成一句可读文本，**去掉重复**。
+     *
+     * 为什么需要去重：Team 成员与任务板同源（都走官方 `listTasks`/`listMembers`），
+     * 同一个失败会在两处各报一次。旧实现把两句一模一样的话用 ` / ` 拼起来，
+     * 读起来像两个独立的问题——**同一句话重复一遍不是「更多信息」**。
+     *
+     * @param {Array<string|null|undefined>} list 候选原因
+     * @returns {string|null} 去重后的合并原因，全空时返回 null
+     */
+    function uniqReasons(list) {
+      const seen = [];
+      for (const v of list || []) {
+        const s = v ? String(v) : '';
+        if (s && !seen.includes(s)) seen.push(s);
+      }
+      return seen.length ? seen.join(' / ') : null;
+    }
+
     const MODEL_NAMES = { deepseek: 'DeepSeek' };
     // 站点显示名 + 多站点模型目录（打开时从 /__webcode/models 拉取）
     const SITE_NAMES = { deepseek: 'DeepSeek', glm: '智谱清言', chatgpt: 'ChatGPT', kimi: 'Kimi', qwen: '通义千问', doubao: '豆包', grok: 'Grok', claude: 'Claude', gemini: 'Gemini', zai: 'Z.ai (GLM 海外版)' };
@@ -354,11 +373,12 @@ window.__ModuleLoader__.load({
      * 或把平级的 teammate 画成某个会话的下属。
      *
      * 数据来源纪律（与账户头像同一条）：**只读、不造假状态**。
-     * 这里只消费 /__webcode/status 的 `subAgents` 与 `team` 两段（0.15.0 起由
-     * 服务端 lib/roster.js 从官方 agentTeams 服务与本会话 subagentCatalog
-     * 投影**真实读出**，不再是空数组占位）。
+     * 这里只消费 /__webcode/status 的四段：`subAgents`（子代理）、`team`/`members`
+     * （Team 成员，两个名字同值，官方 TeamView 用 members）、`tasks`（团队任务板）。
+     * 0.15.0 起由服务端 lib/roster.js 从官方 agentTeams / subagents 服务与本会话
+     * 的 subagentCatalog 投影**真实读出**，不再是空数组占位。
      *
-     * 两个分区各自可能「读不到」而不是「为空」，两者在界面上必须分开说：
+     * 四个分区各自可能「读不到」而不是「为空」，两者在界面上必须分开说：
      *   • 确实没有成员 → 「当前没有正在运行的子代理或 Team 成员。」
      *   • 读不到       → 「读不到花名册：<原因>」
      * 旧实现把两者都画成同一句话，用户无法判断是 Team 没在用还是桥坏了。
@@ -366,25 +386,31 @@ window.__ModuleLoader__.load({
      *
      * sessionId 必须一起带上：subagentCatalog 是**父会话自己的**持久化投影，
      * 不带会话身份的话服务端只能猜，多会话并行时会显示别人的子代理。
+     * 0.15.4 起服务端还会用它当 Team 的**唯一权威凭据**——旧实现挨个试
+     * `agents.list()`，而官方 `tryMembership` 对任何顶层会话都返回 lead 且不抛错，
+     * 于是面板读到的是「进程里第一个别的会话的 lead」。
      */
     function AgentRoster({ sessionId }) {
       const [rows, setRows] = React.useState(null);
       React.useEffect(() => {
-        if (!sessionId) { setRows({ sub: [], team: [], err: null }); return () => {}; }
+        if (!sessionId) { setRows({ sub: [], team: [], tasks: [], err: null, taskErr: null }); return () => {}; }
         let alive = true;
         const pull = () => api('status', { sessionId })
           .then(r => {
             if (!alive) return;
             setRows({
               sub: Array.isArray(r?.subAgents) ? r.subAgents : [],
-              team: Array.isArray(r?.team) ? r.team : [],
-              // 两个原因合并成一个可读句子；两个都为空才是「真的没有」。
-              err: r?.teamError && r?.subAgentsError
-                ? (r.teamError === r.subAgentsError ? r.teamError : r.teamError + ' / ' + r.subAgentsError)
-                : (r?.teamError || r?.subAgentsError || null),
+              // 两个名字取同一个值：官方 TeamView 叫 members，0.15.0 起本项目
+              // 叫 team。哪一端改名都不会让这行读到 undefined。
+              team: Array.isArray(r?.team) ? r.team : (Array.isArray(r?.members) ? r.members : []),
+              tasks: Array.isArray(r?.tasks) ? r.tasks : [],
+              // 原因合并成一个可读句子；**同类原因只报一次**（Team 侧与任务板
+              // 同源失败时会把同一句话重复两遍，读起来像两个问题）。
+              err: uniqReasons([r?.teamError || r?.membersError, r?.subAgentsError]),
+              taskErr: uniqReasons([r?.tasksError]),
             });
           })
-          .catch(e => { if (alive) setRows({ sub: [], team: [], err: String(e?.message || e) }); });
+          .catch(e => { if (alive) setRows({ sub: [], team: [], tasks: [], err: String(e?.message || e), taskErr: null }); });
         pull();
         const t = setInterval(pull, 5000);
         return () => { alive = false; clearInterval(t); };
@@ -397,7 +423,12 @@ window.__ModuleLoader__.load({
         if (['idle'].includes(s)) return { k: 'idle', t: '空闲' };
         if (['provisioning', 'starting', 'pending'].includes(s)) return { k: 'idle', t: '启动中' };
         if (['failed', 'error'].includes(s)) return { k: 'bad', t: '失败' };
-        if (['inactive', 'stopped', 'done', 'completed'].includes(s)) return { k: '', t: '已停止' };
+        // inactive 的官方语义是「成员存在但未加载，唤醒时仍会收到排队消息」
+        // （agent-team README.md:63）。旧实现把它显示成「已停止」，用户会以为成员
+        // 没了、要去重新创建——而正确动作只是发消息唤醒它。
+        // 真正终态（done/completed）与停用（stopped）另算，不与该词混用。
+        if (['inactive'].includes(s)) return { k: '', t: '未加载（可唤醒）' };
+        if (['stopped', 'done', 'completed'].includes(s)) return { k: '', t: '已结束' };
         return { k: '', t: s || '未知' };
       };
       const row = (x, key, nested) => {
@@ -408,18 +439,59 @@ window.__ModuleLoader__.load({
             // 平级/从属的差别在**缩进**里表达（nested 走 CSS padding-left），
             // 不靠颜色，也不靠文案重复解释。
             String(x?.name || x?.id || x?.agentId || '（未命名）')),
+          // 模型（Team 成员行才有）：谁跑在哪个模型上是 Team 与子代理最直观的
+          // 差别之一，只读展示，不做解释。
+          x?.model && h('span', { className: 'hwb-roster-model' }, String(x.model)),
           h('span', { className: 'hwb-roster-state' }, st.t),
-          // 任务归属：Team 成员的任务板归属是它「平级」的具体体现，只读展示。
+          // 任务归属：**只统计归到这个成员名下的**任务（服务端按官方 ownerName 算）。
+          // 旧实现给的是团队任务总数，对每个成员都一样——那是假事实。
           x?.taskCount != null && h('span', { className: 'hwb-roster-task' }, '任务 ' + x.taskCount));
       };
-      const sub = rows.sub, team = rows.team;
-      if (!sub.length && !team.length) {
+      /**
+       * 任务板：**团队级**事实（官方 TeamView.tasks），不是某个成员的属性。
+       *
+       * 为什么值得单独一块 UI：「Team 成员平级」如果只显示名字，用户看不出他们
+       * 在协作什么。这里如实显示状态、归属、被谁卡住、写哪些文件、是否就绪
+       * ——全部原样来自官方 `listTasks`，桥不重新解释。
+       */
+      const taskBoard = (tasks) => h('div', { className: 'hwb-roster-group' },
+        h('p', { className: 'hwb-roster-head' }, 'Team 任务板'),
+        tasks.map((t, i) => {
+          const s = String(t?.status || '');
+          const label = s === 'in_progress' ? '进行中' : s === 'completed' ? '已完成' : s === 'pending' ? '待办' : (s || '未知');
+          const k = s === 'in_progress' ? 'ok' : s === 'completed' ? '' : 'idle';
+          return h('div', { key: 'k' + i, className: 'hwb-roster-row' },
+            h('span', { className: 'hwb-dot ' + k, 'aria-hidden': 'true' }),
+            h('span', { className: 'hwb-roster-name' }, String(t?.subject || t?.id || '（无标题）')),
+            t?.ownerName && h('span', { className: 'hwb-roster-model' }, String(t.ownerName)),
+            h('span', { className: 'hwb-roster-state' }, label),
+            // 被阻塞的任务必须能看出「被什么卡住」，否则「ready=false」只是一句黑话。
+            Array.isArray(t?.blockedBy) && t.blockedBy.length > 0
+              && h('span', { className: 'hwb-roster-task' }, '阻塞于 ' + t.blockedBy.length + ' 项'),
+            // 写范围重叠是 advisory 而不是锁（官方 writeScopeWarnings）——
+            // 官方已经算好了，原样透出，不在桥里重算。
+            Array.isArray(t?.writeScopeWarnings) && t.writeScopeWarnings.length > 0
+              && h('span', { className: 'hwb-roster-task' }, '写范围告警'));
+        }),
+        h('p', { className: 'hwb-hint' }, '任务板是团队级的：成员平级、写范围只是提醒而不是锁。'));
+      const sub = rows.sub, team = rows.team, tasks = rows.tasks;
+      if (!sub.length && !team.length && !tasks.length) {
         // 「确实没有」与「读不到」是两件事，界面必须分开说：
         // 前者是正常状态，后者是桥/官方包的问题，用户要能据此去排查。
+        if (rows.err) {
+          return h('div', { className: 'hwb-roster' },
+            h('p', { className: 'hwb-hint' }, '读不到花名册（' + rows.err + '）：这不代表没有成员在跑，而是数据源不可用。'));
+        }
+        // 0.15.5（P3-4）：空 Team + 无错误时，必须明说「本会话不是 Team 成员」。
+        //
+        // 官方语义（agent-team README.md:128）：**每个普通顶层会话都是隐式 Team 的
+        // Lead**；而 Team 工具只对成员安装（tool-agent-team/lib/index.js:533）。
+        // 所以「自己是 lead」不等于「存在一个团队」——旧实现只画一行 lead，
+        // 让用户以为有团队在协作，实际上 `spawn_teammate` 根本没挂载。
+        // 这里如实说明状态，并给出可执行的下一条动作。
         return h('div', { className: 'hwb-roster' },
-          rows.err
-            ? h('p', { className: 'hwb-hint' }, '读不到花名册（' + rows.err + '）：这不代表没有成员在跑，而是数据源不可用。')
-            : h('p', { className: 'hwb-hint' }, '当前没有正在运行的子代理或 Team 成员。'));
+          h('p', { className: 'hwb-hint' }, '本会话不是 Team 成员（Team 工具未挂载）。'),
+          h('p', { className: 'hwb-hint' }, '也没有正在运行的子代理。子代理与 Team 是两件事：子代理从属于发起它的会话，Team 成员是同一 Lead 下的平级协作域。'));
       }
       return h('div', { className: 'hwb-roster' },
         // 部分可用时同样要说清楚：有 Team 行但子代理读不到，不能装作子代理为空。
@@ -433,7 +505,8 @@ window.__ModuleLoader__.load({
         team.length > 0 && h('div', { className: 'hwb-roster-group' },
           h('p', { className: 'hwb-roster-head' }, 'Team 成员（平级）'),
           team.map((x, i) => row(x, 't' + i, false)),
-          h('p', { className: 'hwb-hint' }, 'Team 成员共享同一个 checkout：并行的是会话与呈现，不是文件系统。')));
+          h('p', { className: 'hwb-hint' }, 'Team 成员共享同一个 checkout：并行的是会话与呈现，不是文件系统。')),
+        tasks.length > 0 && taskBoard(tasks));
     }
 
     function SiteAccounts({ sites, onRefresh, onlySiteId, subHint }) {
@@ -1346,6 +1419,9 @@ window.__ModuleLoader__.load({
         ".hwb-roster-name{color:var(--dsw-alias-label-primary,inherit);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
         ".hwb-roster-state{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,inherit);flex:none}",
         ".hwb-roster-task{font-size:12px;line-height:18px;padding:0 8px;border-radius:9px;flex:none;color:var(--dsw-alias-label-secondary,inherit);border:.5px solid var(--dsw-alias-border-l3,#8885)}",
+        // 成员跑在哪个模型上：与「任务 N」同族的只读小标签，但不是计数，
+        // 所以不给边框（边框在本面板里一直表示「一条可读的状态/计数」）。
+        ".hwb-roster-model{font-size:12px;line-height:18px;flex:none;color:var(--dsw-alias-label-tertiary,#8a8f98);max-width:40%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
         ".hwb-site-state{font-size:12px;line-height:18px;padding:1px 8px;border-radius:10px;border:.5px solid var(--dsw-alias-border-l3,#8885);color:var(--dsw-alias-label-secondary,inherit)}",
         ".hwb-site-state.ok{color:var(--dsw-alias-state-success-primary,#2e7d32);border-color:var(--dsw-alias-state-success-primary,#2e7d32)}",
         ".hwb-site-state.bad{color:var(--dsw-alias-state-error-primary,#93443e);border-color:var(--dsw-alias-state-error-primary,#93443e)}",

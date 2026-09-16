@@ -19,6 +19,7 @@ import path from 'node:path';
 import { createRelay } from './relay.js';
 import { createOpenAiFront } from './openai.js';
 import { createBrowserDriver } from './browser-driver.js';
+import { zeroProgressDecision } from './zero-progress.js';
 import { createWebControl, buildSessionEvents, mainLineOf } from './web-control.js';
 import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, proseSafeEnd, readCallAt, partialProtocolAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeDsml } from './agent-preset.js';
 import { createMirror } from './mirror.js';
@@ -39,7 +40,25 @@ export const name = 'webcode-bridge';
 
 // cordis service injection: declaring these is REQUIRED before ctx.webServer /
 // ctx.llm property access is permitted ("cannot get property ... without inject").
-export const inject = ['llm', 'webServer'];
+//
+// 0.15.5（P2-1）：把 roster.js 真正依赖的服务**显式声明**出来。
+// 旧实现只有 llm/webServer，其余全靠 roster.js 的 serviceOf() 用 ctx.get 兜底——
+// 那条兜底路径是必要的（cordis 版本差异下取法不稳），但**不能是唯一**路径：
+// 未声明时取属性会抛，兜底一旦失效，整块花名册会静默消失。
+//
+// 服务名逐个核实过注册点，不是凭印象写的（本轮实测）：
+//   agents               ← dsh-agent/lib/index.js:299            super(ctx,'agents')
+//   sessions             ← dsh-session/lib/index.js:1315          super(ctx,'sessions')
+//   sessionProjections   ← dsh-session-projection/lib/index.js:52 super(ctx,'sessionProjections')
+//   subagents            ← dsh-subagent/lib/index.js:2853         super(ctx,'subagents')
+//
+// **故意不加 `agentTeams`**：它由实验包 `@deepseek-ai/dsh-experimental-agent-team` 提供，
+// 是否挂载取决于 profile 组合。把它写进 inject 会让整个插件在未挂载该实验包的
+// profile 上卡在 waiting——症状是「桥整个不见了」，比花名册少一块严重得多。
+// 它继续走 serviceOf 的可选读取 + 独立降级（teamError 如实说明原因）。
+//
+// 兜底路径保留：serviceOf 仍同时试 ctx[name] 与 ctx.get(name)。
+export const inject = ['llm', 'webServer', 'agents', 'sessions', 'sessionProjections', 'subagents'];
 
 const DEFAULTS = {
   port: 8931,
@@ -856,6 +875,12 @@ export function apply(ctx, config = {}) {
           //    → 同样停在该锚点，等下一个增量消歧，绝不越过；
           //  • 其余 → 发到半成品标记之前；没有半成品标记就全发（短尾巴留给
           //    下一次增量消歧）。
+          //
+          // 前提（0.15.6 写下，免得下次有人以为这里是绝对安全的）：`rest.index < 0`
+          // 这一支等价于「探测认为这里没有协议」——**它必须真的可信**。0.15.5 的
+          // 围栏窗口取错让 `rest.index` 恒为 -1，正文于是被整段放行（协议泄漏）。
+          // 现在两处都修了，且 `proseSafeEnd` 另有独立兜底（见 agent-preset.js 的
+          // 同名函数）。改动这一段之前先读那条注释。
           const proseLimit = (rest.index >= 0 && rest.transport) ? boundary
             : (rest.index >= 0 && tagAhead) ? boundary
             : (markerAt >= 0 ? markerAt : Math.max(0, acc.length - PROSE_TAIL_CHARS));
@@ -910,7 +935,15 @@ export function apply(ctx, config = {}) {
       const endImages = Array.isArray(end?.images) && end.images.length ? end.images : genImages;
       assertNonEmpty(finalText, thinkAcc, endImages);
 
-      const { calls } = parseAgentReply(finalText);
+      const { calls, diagnostics } = parseAgentReply(finalText);
+      // 0.15.6：**丢调用不再静默**。旧实现的 `takeObj` 把「看起来是调用、但解析
+      // 不出来」和「这段本来就不是调用」压成同一个结果，一次丢调用在会话、在 UI、
+      // 在日志里都不留痕——参数含 markdown 围栏的 write 调用被丢、报告从未落盘，
+      // 就是这样躲过全部既有断言的（真机回归，见 test/fence-nested-call.test.mjs）。
+      // 诊断文本含协议片段，属于排查线索，只进日志不进会话正文。
+      if (diagnostics?.length) {
+        for (const d of diagnostics.slice(0, 3)) warn(`parse: ${d}`);
+      }
       let valid = calls.filter((c) => tools.some((t) => t?.name === c.name));
       // GLM-5.3 强制思考（reference/zai-copilot-chat 的 dialect 佐证：5.3 起思考
       // 不可关）：真机确认模型会把工具调用写进思考流而不是正文，正文解析不到时
@@ -1078,26 +1111,32 @@ export function apply(ctx, config = {}) {
         // 整段正文都被协议占满（safe === 0）时 out 为空——此时**不能**走 emitText
         // 的空回复路径把整轮判死。断流轮的正确语义是「本轮没有可交付正文」，
         // 交给上层按已有工具结果继续，而不是抛 empty response。
-        if (!out.trim() && withheld > 0) {
-          yield* finishChunks(turn, '', 'stop');
-          return;
-        }
-        // 0.15.2：**只出思维链、正文一个字符都没来**（用户报「长时间后只有思维链
-        // 卡住，harness 端没有任何报错，没有下一步」）。
         //
-        // 旧实现在这里无条件 assertNonEmpty(out, '', []) —— 注意第二个实参写死空串，
-        // 于是「思考全文都在、正文为空」被判成 `empty response from web AI`。
-        // 归因线索就此抹掉：用户与下一次会话看到的都是「空回复」，而真相是模型
-        // 思考完就没下文。这两者的下一步完全不同（前者要重试，后者要查思考为何
-        // 没转成正文），报成同一个错等于没有线索。
+        // 0.15.5 修复（真机实证，子代理会话 ecad7b6a step2）：旧实现把这条判定
+        // **放在「只有思考」之前**，于是漏掉了一整类零进展轮——网页把全部内容都从
+        // 思考通道送来（实测 thinkAcc=201 字符英文推理、正文空、
+        // `usage.outputTokens: 0`、`turn/end reason: completed`），收尾时 finalText
+        // 非空却被边界探测判为协议（withheld > 0）→ 直接静默 stop。
+        // 后果是 agent loop 认为本轮「无事完成」：子代理零产出（两篇笔记 MISSING、
+        // reference/ 无任何新克隆），而 thinkAcc 明明有内容。
         //
-        // 处置与 TOOL_UNKNOWN 同型：**不抛错**，把一条带现场的提示作为本轮回复交回
-        // 会话，任务因此继续而不是整轮作废、等用户手动催。
-        if (!out.trim() && !withheld && String(thinkAcc || '').trim()) {
+        // 正确顺序：**先判「只有思考」，再判「正文全是协议」**。前者有思考可归因，
+        // 必须给出提示让任务继续；后者才是真正的「本轮没有可交付正文」。
+        //
+        // 0.15.2 原设计（纯聊天轮同型）：旧实现在这里无条件
+        // assertNonEmpty(out, '', []) —— 第二个实参写死空串，于是「思考全文都在、
+        // 正文为空」被判成 `empty response from web AI`，归因线索就此抹掉。
+        // 处置与 TOOL_UNKNOWN 同型：**不抛错**，把带现场的提示作为本轮回复交回会话。
+        const decision = zeroProgressDecision({ out, thinkAcc, withheld, imageCount: endImages.length });
+        if (decision === 'thinking-only') {
           const notice = thinkingOnlyNotice(thinkAcc, idleScene());
           warn(notice);
-          // 同上：closeThink() 已关掉思考块，正文必须用新的下标。
+          // closeThink() 已关掉思考块，正文必须用新的下标，不能写死 0。
           yield* emitText(notice, turn, nextIndex);
+          return;
+        }
+        if (decision === 'protocol-withheld') {
+          yield* finishChunks(turn, '', 'stop');
           return;
         }
         assertNonEmpty(out, '', []);

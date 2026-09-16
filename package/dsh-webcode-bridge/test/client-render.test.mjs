@@ -111,9 +111,16 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null 
           // 缺省 null 而不是 []，是为了让「没有该字段」与「确实为空」在测试里可区分。
           // teamError / subAgentsError 一并支持：面板要能把「确实没有」与
           // 「读不到」分开说，这条路径必须有夹具覆盖。
+          // 0.15.4 追加：`members`（官方 TeamView 的词，team 的同值别名）与
+          // `tasks`（团队级任务板）、`tasksError`。四个分区都要能被夹具驱动。
           ...(roster ? {
-            subAgents: roster.subAgents || [], team: roster.team || [],
-            subAgentsError: roster.subAgentsError ?? null, teamError: roster.teamError ?? null,
+            subAgents: roster.subAgents || [],
+            team: roster.team || roster.members || [],
+            members: roster.members || roster.team || [],
+            tasks: roster.tasks || [],
+            subAgentsError: roster.subAgentsError ?? null,
+            teamError: roster.teamError ?? null,
+            tasksError: roster.tasksError ?? null,
           } : {}) };
       }
       else if (u.includes('/__webcode/settings')) body = { ok: true, extraPrompt: '', sendGapMs: 10000, thinkMode: 'auto', subAgentMode: 'own', subAgentSite: 'follow' };
@@ -414,9 +421,20 @@ test('花名册：子代理与 Team 成员必须分成两区，子代理缩进�
   const { errors, tree } = await renderPane({ payloads: [emptyWindows], sites, which: 'settings' });
   assert.deepEqual(errors, [], '花名册渲染抛错：' + errors.map(e => e.message).join('; '));
   // 空态是个**状态**（确实没有在跑的），不是错误：必须给出可读文案。
+  //
+  // 0.15.5（P3-4）改口径：旧文案「当前没有正在运行的子代理或 Team 成员」把
+  // 两件不同的事混成一句——官方语义下「每个普通顶层会话都是隐式 Team 的 Lead」
+  //（agent-team README.md:128），而 Team 工具只对成员安装
+  //（tool-agent-team/lib/index.js:533）。所以「空」的正确解释是
+  //「本会话不是 Team 成员（Team 工具未挂载）」，不是「团队里没人」。
+  // 断言随之改成新口径，**判据强度不变**：仍要求给出可读、可执行的状态说明。
   const empty = treeText(tree);
-  assert.ok(/没有正在运行的子代理或 Team 成员/.test(empty),
-    '空花名册未给出如实说明：' + empty.slice(0, 200));
+  assert.ok(/本会话不是 Team 成员/.test(empty),
+    '空花名册未说明「本会话不是 Team 成员」：' + empty.slice(0, 300));
+  assert.ok(/没有正在运行的子代理/.test(empty),
+    '空花名册未说明子代理侧为空：' + empty.slice(0, 300));
+  // 反向：空态不得被当成错误（那是把「没有」与「读不到」混成一句）。
+  assert.ok(!/读不到花名册/.test(empty), '确实为空时不得报「读不到」：' + empty.slice(0, 300));
 });
 
 test('花名册：有成员时两区标题与状态词都可能被读到（颜色不是唯一载体）', async () => {
@@ -479,6 +497,57 @@ test('★ 花名册：部分分区读不到时仍渲染已有分区，并说明�
   assert.ok(text.includes('recon 子代理'), '可用的成员行必须照常渲染：' + text.slice(0, 300));
   assert.ok(/部分分区读不到/.test(text), '缺的那一半必须被说明：' + text.slice(0, 300));
   assert.ok(text.includes('no-team-member-authority'), '未给出缺那一半的原因：' + text.slice(0, 300));
+});
+
+// ------------------------------------------------------------------ 0.15.4 团队任务板
+
+test('★ 花名册：Team 任务板必须与成员一起渲染（否则「平级」只剩一个名字）', async () => {
+  // 官方 TeamView 是 `{ members, tasks }` —— 任务板是**团队级**事实，不是成员的属性。
+  // 0.15.4 之前桥只透出成员行，用户看不到「他们在协作什么」：谁在做什么、
+  // 被谁卡住、写哪些文件。这条护栏钉住任务板真的到达了界面。
+  const { errors, tree } = await renderPane({
+    payloads: [emptyWindows], which: 'settings',
+    roster: {
+      subAgents: [],
+      team: [{ id: 't1', name: 'reviewer', role: 'teammate', status: 'running', model: 'deepseek:deepseek', taskCount: 1 }],
+      tasks: [{
+        id: 'task-1', subject: '修 POST 405', status: 'in_progress', ownerName: 'reviewer',
+        blockedBy: ['task-0'], writeScopes: ['lib/'], ready: false, writeScopeWarnings: ['与 task-2 重叠'],
+      }],
+    },
+  });
+  assert.deepEqual(errors, [], '任务板渲染抛错：' + errors.map(e => e.message).join('; '));
+  const text = treeText(tree);
+  assert.ok(text.includes('Team 任务板'), '缺少任务板分区：' + text.slice(0, 400));
+  assert.ok(text.includes('修 POST 405'), '任务标题必须渲染：' + text.slice(0, 400));
+  assert.ok(text.includes('进行中'), '任务状态必须是可读文本而不是黑话：' + text.slice(0, 400));
+  assert.ok(text.includes('reviewer'), '任务归属必须显示：' + text.slice(0, 400));
+  assert.ok(/阻塞于 1 项/.test(text), '被阻塞的任务必须能看出「被什么卡住」：' + text.slice(0, 400));
+  assert.ok(/写范围告警/.test(text), '写范围告警（官方算好的）必须透出：' + text.slice(0, 400));
+  // 成员行上的模型：Team 与子代理最直观的差别之一。
+  assert.ok(text.includes('deepseek:deepseek'), '成员模型必须显示：' + text.slice(0, 400));
+  // 写范围是 advisory 而不是锁 —— 官方明文，界面必须说清楚，否则用户会以为有互斥。
+  assert.ok(/写范围只是提醒而不是锁/.test(text), '未说明写范围是 advisory 而非锁');
+});
+
+test('★ 花名册：teamError 与 tasksError 同源失败时不得把同一句话重复两遍', async () => {
+  // Team 成员与任务板都走官方 agentTeams 服务：同一个失败会在两处各报一次。
+  // 旧实现用 ' / ' 硬拼，于是界面出现「X / X」——读起来像两个独立问题。
+  const { errors, tree } = await renderPane({
+    payloads: [emptyWindows], which: 'settings',
+    roster: {
+      subAgents: [], team: [], tasks: [],
+      teamError: 'caller-not-live', subAgentsError: 'no-session-id',
+    },
+  });
+  assert.deepEqual(errors, [], '渲染抛错：' + errors.map(e => e.message).join('; '));
+  const text = treeText(tree);
+  assert.ok(/读不到花名册/.test(text), '未如实报告「读不到」：' + text.slice(0, 300));
+  assert.ok(text.includes('caller-not-live') && text.includes('no-session-id'),
+    '两个**不同**的原因都要出现：' + text.slice(0, 300));
+  // 同一个原因出现两次就是噪音，不是信息。
+  assert.equal((text.match(/caller-not-live/g) || []).length, 1,
+    '同一原因被重复渲染：' + text.slice(0, 300));
 });
 
 // ------------------------------------------------------------------ 0.14.9 去臃肿

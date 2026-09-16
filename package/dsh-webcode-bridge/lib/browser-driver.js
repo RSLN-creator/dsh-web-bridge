@@ -456,9 +456,14 @@ export function createBrowserDriver(options = {}) {
   let launching = null;
   let interaction = Promise.resolve();
   let lastTurn = null;
-  // [DIAG-nav] 导航轨迹（临时诊断，见 doc/diagnosis-fresh-chat-per-turn.md §6）：
-  // 「每轮新开对话」必须变成可复核的现场。记录每轮导航前后的地址与会话 id 变化，
-  // 只保留最近 40 条，**不改变任何行为**（纯记录）。
+  // [DIAG-nav] 导航轨迹：「每轮新开对话」必须变成可复核的现场。
+  // 记录每轮导航前后的地址与会话 id 变化，只保留最近 40 条，
+  // **不改变任何行为**（纯记录）。
+  //
+  // 2026-09-16：原先这里指向 `doc/diagnosis-fresh-chat-per-turn.md` §6，那份一次性
+  // 诊断报告已按用户指示删除。**诊断结论的载体是这个功能本身**——轨迹经 `status()`
+  // 的 `navTrace` 字段对外可读（见下方 status() 里的注释），不依赖那份文档。
+  // 删除文档时保留了它，正因为「可复核的读数」比「一份会过期的叙述」耐用。
   const navTrace = [];
   let conversationReplacedCount = 0;
   function pushNavTrace(entry) {
@@ -553,7 +558,8 @@ export function createBrowserDriver(options = {}) {
       lastSessionLost,
       lastTurn,
       // [DIAG-nav] 导航轨迹与「会话 id 被换掉」计数：把「每轮新开对话」从
-      // 用户可见的怪异现象变成可复核的读数（见 doc/diagnosis-fresh-chat-per-turn.md）。
+      // 用户可见的怪异现象变成可复核的读数。这就是该诊断的交付物本身
+      // （原先指向的 doc/diagnosis-fresh-chat-per-turn.md 已于 2026-09-16 删除）。
       navTrace: navTrace.slice(-12),
       conversationReplacedCount,
       lastRate: deriveLastRate(lastFinished, selectedModel),
