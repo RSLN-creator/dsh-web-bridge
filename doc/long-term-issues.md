@@ -29,7 +29,8 @@
 | 16 | 同站多账户（**已实现，0.14.7**）+ Team 面板（**已实现，0.15.0**） | — | 否 | `lib/accounts.js`、`lib/providers.js`、`lib/browser-driver.js`、`lib/client.cjs`、`lib/roster.js` |
 | 17 | 工具调用参数缺失族（新，本轮发现，**未归因**） | 中 | 否 | `lib/agent-preset.js`（`fillMissingRequired`）、`lib/index.js` |
 | 18 | **协议原文被持久化进助手正文**（新，0.15.0，**已修**） | 高 | 否 | `lib/agent-preset.js`（`proseSafeEnd`/`normalizeDsml`）、`lib/index.js` |
-
+| 21 | **SET 重发吞掉流式增量**（新，0.15.7，**已修**） | 高 | — | `lib/decoder.js`（`emitFragmentDiff`） |
+| 22 | DeepSeek 只出思考不出正文（**未归因**，需真机取证） | 中 | 否 | `lib/metrics.js`、`lib/index.js` |
 错误码视角的横向台账（已做哪些适配 / 残留风险）见 [`bridge-failure-ledger.md`](bridge-failure-ledger.md)。
 
 > **第 16 条状态更新（2026-09-15）**：**Team 面板已实现（0.15.0）**。
@@ -884,6 +885,126 @@ A/B 表（`doc/verify.md` §0.15.6）证明它修好了**被测的那一种形�
 去掉那 3 个字节即可（`security-review.md` 本轮未被改动，所以它**不是**本轮的回归）。
 若要防复发，判据应加进 `scripts/lint-comments.mjs` 或另立一条：
 **扫描范围内任何文件首 3 字节为 `EF BB BF` 即报错**——这比「记得去 BOM」可靠。
+
+---
+
+## 21. **SET 重发吞掉流式增量**：网页有输出、harness 收不到（0.15.7 新发现，**已修**）
+
+### 现象（用户原话）
+
+> **「？怎么回事》明明有输出：`<tool_call>{…}</tool_call>` 却提示
+> THINKING_ONLY_NO_ANSWER」**
+
+用户的观感是「网页明明答了、桥却说它没答」。**这个观感是对的**——问题不在收尾
+判定，而在**接收层的流式增量**。
+
+### 根因
+
+DeepSeek 会把**整份 response 对象**反复重发，`fragments` 每次都比上一次长。
+两种写法在真机都出现过：
+
+- `{o:'SET', p:'',            v:{response:{message_id, role, status, fragments}}}`
+- `{o:'SET', p:'response/fragments', v:[…]}`
+
+旧实现在这两个入口都**整份替换** `response.fragments`，且只在
+`consumeResponse` 的 `isFirst`（第一次见到该 response）时外发增量。于是：
+
+```
+onDelta 累计 acc = 第一帧的内容      ← 界面正文停在半路
+finish().text    = 完整正文          ← 权威全文（所以「明明有输出」）
+```
+
+后果链条（与用户现象逐条对应）：
+
+1. 界面正文停在半路（只有第一批增量被发出）；
+2. `index.js` 的协议边界探测只看 `acc`，后段里的 `<tool_call>` **探不到** →
+   一个 tool-call 块都不开、**工具从未执行**；
+3. 收尾 `finalText`（来自 `finish()`）与 `textSent` 分叉 → 该轮被判成
+   「正文空 + 只有思考」→ 交回 `THINKING_ONLY_NO_ANSWER`，或抛 `STREAM_REWRITE`。
+
+### 离线复现（修前 / 修后）
+
+```js
+// 整份 response 连发三次，内容递增
+d.push(SET([{type:'RESPONSE',content:'Hello'}]))
+d.push(SET([{type:'RESPONSE',content:'Hello world'}]))
+d.push(SET([{type:'RESPONSE',content:'Hello world!'}]))
+d.finish()
+```
+
+| | 流式外发 | `finish().text` | 差值 |
+| --- | --- | --- | --- |
+| 修前 | `"Hello"` | `"Hello world!"` | **漏发 12 字符** |
+| 修后 | `"Hello world!"` | `"Hello world!"` | 一致 |
+
+同理确认的两个附带缺陷：**新增片段**整段漏发（`AAA` vs `AAABBB`）、
+**新增图片**在流式期间不触发 `onImage`（轮次进行中界面无图，只能靠
+`finish()` 事后捞回）。
+
+### 修法
+
+抽出 `DeepSeekStreamDecoder.emitFragmentDiff(next, prev)`，**两个入口共用**，
+按**下标**逐位对比，只发真正新增的部分。三条边界（缺一不可）：
+
+| 情形 | 处置 |
+| --- | --- |
+| 同下标**变长**且以旧内容为前缀 | 只发增长的后缀 |
+| 同下标**被改写**（不以旧内容为前缀） | **不发**，交给收尾的权威比对（补发会变成重复正文） |
+| **新增下标** | 整段当增量发 |
+
+### 护栏
+
+`test/decoder-fragment-diff.test.mjs`（9 项 = 5 判据 + 3 反向安全线 + 1 接线）。
+**反向验证已做**：把 `consumeResponse` 的 diff 外发改回「只在首次」，
+**pass 4 / fail 5**；恢复后 9/9 全绿。
+
+### 为什么值得单独记一条
+
+这是「**修复的覆盖面被高估**」这一族的第 6 个样本（承 #19 的方法论教训）：
+`onDelta`/`finish()` 两条通道**同时存在**，测试却历来只 assert `finish()`
+（它总是对的）而不 assert「流式外发与权威全文逐字一致」，于是这个洞活到了真机。
+**任何「增量通道 + 权威快照」双通道的解码器，都必须有一条把两者钉在一起的断言。**
+
+---
+
+## 22. DeepSeek「只出思考、不出正文」：**未归因**（2026-09-16 新发现）
+
+### 现状
+
+真机会话 `session-fcbb5bf8`（RoboCup / 本地 ssh orangepi-5）step 7：网页**正常
+收尾**（`turn/end reason: completed`、驱动侧 `lastEndReason: finished`、
+`thinkingOnlyTurns: 0`），但该 step 的 `assistant/message` 的 content 只有
+`[reasoning]`（1947 字符，停在 `"Let me test camera over SSH."`），
+**没有 text 块、没有 tool-call 块**。桥按设计交回 `THINKING_ONLY_NO_ANSWER`。
+
+**已核验不是接收层丢内容**：同会话 step 3 的 content 是
+`[reasoning, text("SSH 已通。先摸清…"), tool-call(pwsh)]`——正文通道工作正常；
+且 #21 修复的 SET 增量洞在该轮不适用（该轮零正文增量，非「有增量被吞」）。
+
+### 为什么现在不归因
+
+要区分两种可能，需要拿到**该轮的 SSE 原始帧**：
+
+1. 网页**确实只生成了思考**（模型自身在思考后停止）——则这是模型侧行为；
+2. 网页**生成了正文但没有走捕获链**（SSE 未捕获 / 捕获链未建立）——则是桥的洞。
+
+当前证据只能排除 #21（增量被吞），**不能**在 1 与 2 之间判定。
+
+### 若要归因，从哪下手
+
+1. **先补留痕**：`WEBCODE_SSE_DEBUG=<dir>` 已能落盘原始 SSE 帧
+   （`browser-driver.js` 的 `SSE_DEBUG_DIR` 分支）。复现时开着它，
+   拿到该轮真实帧即可一句话定性。
+2. 对照驱动侧现场：`/__webcode/status` 的 `lastStalledSettle`
+   （`thinkingChars` / `answerChars` / `domTimerOnly`）与
+   `lastEndReason`。`domTimerOnly: true` 说明页面只剩计时文案，
+   偏支持可能性 1。
+3. 若判定为可能性 2，判据应加进 `lib/browser-driver.js` 的捕获链建立处
+   （`onPageCapture` 的 `phase==='start'`），而不是收尾分支。
+
+### 安全边界
+
+**不需要新增真机探针**（风控纪律）。`WEBCODE_SSE_DEBUG` 只在复现时临时开启。
 
 ---
 

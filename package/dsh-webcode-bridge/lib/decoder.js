@@ -219,23 +219,67 @@
       }
       this.applyOperation({ o: this.lastOp, p: this.lastPath, v: root });
     }
+    /**
+     * 按**下标**把「新的 fragments 数组」相对「旧的」增量外发。
+     *
+     * 真机缺陷（用户报告「网页明明有输出，harness 端收不到」，本函数是主修）：
+     * DeepSeek 会把**整份 response 对象**反复重发（`{o:'SET', v:{response:{…}}}`
+     * 与 `{o:'SET', p:'response/fragments'}` 两种写法都出现过），每次 fragments
+     * 都比上一次长。旧实现只在「第一次见到 response」时（isFirst）外发增量，
+     * 之后每一次重发都**整份静默替换**——于是流式通道里 acc 停在第一帧的内容，
+     * 而 finish() 重新读 fragments 拿到的是完整正文。
+     *
+     * 后果链条（这正是用户看到的现象）：
+     *   1. 界面正文停在半路（只有第一批增量被发出）；
+     *   2. `index.js` 的协议边界探测基于 acc，工具调用落在被吞掉的后段里 →
+     *      一个 tool-call 块都不开，工具从未执行；
+     *   3. 收尾时 `finalText`（来自 finish()）与 `textSent` 分叉 → 该轮被判成
+     *      「正文空 + 只有思考」→ 交回 THINKING_ONLY_NO_ANSWER，或抛 STREAM_REWRITE。
+     * 用户看到的就是「明明有输出，却说我没有正文」。
+     *
+     * 三条边界（与 `applyOperation` 的 SET 分支同一套语义，必须一致）：
+     *   • 同下标内容**变长**且以旧内容为前缀 → 只发增长的后缀；
+     *   • 同下标内容被**改写**（不以旧内容为前缀）→ 不发，交给收尾的权威比对；
+     *   • **新增**下标 → 整段当增量发。
+     *
+     * @param {Array} next 新的 fragments（已 readFragment 归一化）
+     * @param {Array} prev 旧的 fragments（首次为 null）
+     */
+    emitFragmentDiff(next, prev) {
+      for (let i = 0; i < next.length; i++) {
+        const f = next[i];
+        const old = Array.isArray(prev) ? prev[i] : null;
+        const grow = (newText, oldText) => {
+          if (!old) return newText;                                   // 新增片段
+          if (newText === oldText) return '';                          // 没变
+          if (newText.startsWith(oldText)) return newText.slice(oldText.length); // 增长
+          return '';                                                   // 改写 → 不发
+        };
+        if (f.type === 'RESPONSE') {
+          const grown = grow(f.content, old?.content ?? '');
+          if (grown) { try { this.onDelta?.(grown); } catch {} }
+        } else if (f.type === 'THINK' || f.type === 'THINKING') {
+          const grown = grow(f.content, old?.content ?? '');
+          if (grown) { try { this.onThink?.(grown); } catch {} }
+        } else if (f.image && !old?.image) {
+          this.pushImage(f.image);
+        }
+      }
+    }
     consumeResponse(response) {
       if (response.role !== 'ASSISTANT' || !Array.isArray(response.fragments)) { this.failed = true; return; }
       const id = readId(response.message_id) || this.readyResponseId;
       if (!id) { this.failed = true; return; }
-      const isFirst = !this.response;
+      const prev = this.response ? this.response.fragments : null;
+      const next = response.fragments.map(readFragment).filter(Boolean);
+      // 先外发增量、再落库：emitFragmentDiff 需要旧的 fragments 做对比，
+      // 且它内部不会修改 this.response（避免「边比边改」读到半新半旧的状态）。
+      this.emitFragmentDiff(next, prev);
       this.response = {
-        fragments: response.fragments.map(readFragment).filter(Boolean),
+        fragments: next,
         id,
         status: typeof response.status === 'string' ? response.status.toUpperCase() : '',
       };
-      if (isFirst) {
-        for (const f of this.response.fragments) {
-          if (f.type === 'RESPONSE' && f.content) { try { this.onDelta?.(f.content); } catch {} }
-          else if ((f.type === 'THINK' || f.type === 'THINKING') && f.content) { try { this.onThink?.(f.content); } catch {} }
-          else if (f.image) this.pushImage(f.image);
-        }
-      }
     }
     pushImage(img) {
       this.images.push(img);
@@ -250,7 +294,17 @@
       if (path === 'response/status' && typeof op.v === 'string') { response.status = op.v.toUpperCase(); return; }
 
       if (path === 'response/fragments') {
-        if (opName === 'SET' && Array.isArray(op.v)) { response.fragments = op.v.map(readFragment).filter(Boolean); return; }
+        if (opName === 'SET' && Array.isArray(op.v)) {
+          // SET 是**整数组替换**：旧实现直接 `response.fragments = 新数组` 就返回，
+          // 于是「新数组里比旧数组多出来的内容」在流式通道上被静默丢掉——
+          // 只有 finish() 重新读 fragments 时才可见。与 consumeResponse 是同一个洞
+          // 的两个入口（DeepSeek 两种写法都会出现），共用 emitFragmentDiff 保证语义一致。
+          const prev = response.fragments;
+          const next = op.v.map(readFragment).filter(Boolean);
+          this.emitFragmentDiff(next, prev);
+          response.fragments = next;
+          return;
+        }
         if (opName === 'APPEND') {
           const values = Array.isArray(op.v) ? op.v : [op.v];
           for (const item of values) {
