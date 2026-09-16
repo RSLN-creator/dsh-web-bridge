@@ -19,11 +19,12 @@
 // ## 步骤与顺序
 //
 //   1. `scripts/lint-comments.mjs`           注释纪律（§10 的机检部分）
-//   2. `test-mock/artifacts-check.mjs`       生成物卫生（跑一次就会变的文件不许被 git 看见）
-//   3. `test-mock/prompt-bench.mjs --offline` 基准 harness 离线回放（不联网、不碰真机）
-//   4. `pnpm test`                           全量单测（`--fast` 跳过）
+//   2. `scripts/check-ledger.mjs`            台账与事实一致（版本号 / 测试文件数）
+//   3. `test-mock/artifacts-check.mjs`       生成物卫生（跑一次就会变的文件不许被 git 看见）
+//   4. `test-mock/prompt-bench.mjs --offline` 基准 harness 离线回放（不联网、不碰真机）
+//   5. `pnpm test`                           全量单测（`--fast` 跳过）
 //
-// 前三步是秒级的，第四步约 10 分钟。因此 `--fast` 只砍第四步——**砍掉的必须是慢的那一步**，
+// 前四步是秒级的，第五步约 10 分钟。因此 `--fast` 只砍第五步——**砍掉的必须是慢的那一步**，
 // 而不是「顺手也砍掉检查」的那一步。
 //
 // ## 用法（Windows / PowerShell）
@@ -85,6 +86,14 @@ const STEPS = [
     args: [path.join('scripts', 'lint-comments.mjs')],
     cwd: repoRoot,
     hint: '逐行输出会指出 file:line + CS00x。若确属误报，改 scripts/lint-comments.mjs 的判据，不要绕过。',
+  },
+  {
+    id: 'check-ledger',
+    title: '台账与事实一致（版本号 / 测试文件数）',
+    cmd: process.execPath,
+    args: [path.join('scripts', 'check-ledger.mjs')],
+    cwd: repoRoot,
+    hint: '改 doc/progress.md 的「当前状态」表让它与事实一致；不要改脚本去迁就台账。',
   },
   {
     id: 'artifacts-check',

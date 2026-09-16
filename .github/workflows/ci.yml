@@ -109,6 +109,20 @@ jobs:
       - name: 注释纪律（scripts/lint-comments.mjs，阻断）
         run: node scripts/lint-comments.mjs
 
+      # ---- 台账一致性（阻断）----
+      #
+      # `doc/progress.md` 自己定的约定是「每完成一项即更新这里」，而这条约定**已经失败三次**
+      # （doc/long-term-issues.md §2.3 抓到过一次，2026-09-16 的状态复核又抓到一次；后者那次
+      # 是「当前状态」表四行全过期 + 两轮工作整段没有台账）。靠自觉失败三次之后，
+      # 正确的反应不是「下次注意」，而是把**机器可判的那两格**（版本号、测试文件数）
+      # 从事实来源现读并与台账逐字比对，不一致就红。
+      #
+      # 为什么放在这里而不是塞进 `pnpm test`：这两件事的性质不同。`pnpm test` 验的是
+      # **代码**，本步验的是**记录**。混在一起会让「台账过期」表现为「单测失败」，
+      # 定位成本立刻上升——而本项目对失败信息的要求是「一眼看出是谁的错」。
+      - name: 台账一致性（scripts/check-ledger.mjs，阻断）
+        run: node scripts/check-ledger.mjs
+
       # ---- 全量单测：两套等价命令，按 Node 版本分流（见文件头事实 2）----
 
       - name: 单测（Node ${{ matrix.node }}，pnpm test）

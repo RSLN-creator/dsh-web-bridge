@@ -17,23 +17,31 @@ reference/*.pdf
 package/dsh-webcode-bridge/test-mock/.*-profile*/
 package/dsh-webcode-bridge/test-mock/.test-build/
 
-# 打包/探针输出（tgz、真机探针日志），不入库
-package/output/
-# 发布 tarball：**新增的不入库**。它看起来像交付物，所以最容易被顺手 git add：
-# 2026-09-15 实测工作树里躺着 0.14.7 与 0.15.2 两个 tgz（共约 530 KB，已从待提交
-# 列表里挡掉）。tgz 是 `pnpm pack` 的**产物**，每次打包字节都可能不同（时间戳、
-# 规范化），继续入库等于把「同名不同内容」的混淆搬进历史——而本项目已经因为
-# 「同版本号换内容」踩过坑（见 scripts/verify-pack.mjs 的文件头）。
+# 打包/探针输出（tgz、真机探针日志），不入库。
+#
+# ⚠ 2026-09-16 修正：本行原先写作 `package/output/`，**从未匹配到任何东西**——
+#   实测 `git check-ignore -v package/output/x.tgz` 命中，但那是因为 `package/output`
+#   这个目录**根本不存在**（check-ignore 对不存在的路径只做文本匹配，不做存在性判断，
+#   所以它「命中」了却什么也没挡住）。真实路径是 `package/dsh-webcode-bridge/output/`
+#   （见 `test-mock/inspect-harness.mjs:42,57` 的 `fs.mkdir('output/playwright')`，
+#   它是**相对包目录**解析的）。结果是该目录从未被忽略，8 个探针产物一直被 git 看得见。
+#   这是「引用点都在、链路的另一端不存在」那一族的第 4 次出现（前三次见 0.15.3 三缺陷）。
+#   `test-mock/artifacts-check.mjs` 现已把这条路径登记为必须被忽略，防复发。
+package/dsh-webcode-bridge/output/
+# 发布 tarball：**一律不入库**。它看起来像交付物，所以最容易被顺手 git add。
+# tgz 是 `pnpm pack` 的**产物**，每次打包字节都可能不同（时间戳、规范化），
+# 继续入库等于把「同名不同内容」的混淆搬进历史——而本项目已经因为「同版本号换内容」
+# 踩过坑（见 scripts/verify-pack.mjs 的文件头）。
 # 要分发的 tarball 走 GitHub Release（.github/workflows/release.yml），不进仓库。
 #
-# ⚠ **这条规则管不了已经在库里的 56 个历史 tgz（共 5.55 MB）** —— 这是 gitignore
-#   的固有语义：它对已跟踪文件无效（`git check-ignore` 对它们返回 1）。
-#   本次**刻意不删**它们，理由是 doc/ci-cd.md §6.2 的回滚步骤明确依赖它们：
-#     「回滚：装回上一个版本的 tgz（package\ 下存着历史版本）」
-#   删掉等于让那条文档失效，而这不是本轮的目标。
-#   因此现状是有意为之：**历史 tgz 留在库里供回滚，新 tgz 一律挡在库外。**
-#   若将来决定清理，正确做法是 `git rm --cached`（保留磁盘文件）并同步改写
-#   doc/ci-cd.md §6.2 的回滚一节，两者必须一起做。
+# ✅ 2026-09-16 **历史欠账已清**：此前库里躺着 56 个历史 tgz（共 5.55 MB），
+#   当时「刻意不删」的理由是 doc/ci-cd.md §6.2 的回滚步骤依赖它们
+#   （「装回上一个版本的 tgz」）。用户于 2026-09-16 决定不再囤积，
+#   两件事**已按那份注释自己写下的要求一起做**：
+#     ① `git rm`（连磁盘一起删，非仅 --cached）；
+#     ② 同步改写 doc/ci-cd.md §6.2 的回滚一节，改为基于 **git 历史 / GitHub Release**。
+#   因此现在 `git ls-files -i -c --exclude-standard` 里**不再有 tgz**。
+#   教训：**回滚应当基于 git 历史（可复现），而不是碰巧留在磁盘上的二进制。**
 *.tgz
 # 真机矩阵的每次运行证据（JSON + 截图，可再生；截图在 .tmp/shots 已被 .tmp/ 覆盖）
 package/dsh-webcode-bridge/test-mock/out/
@@ -51,6 +59,12 @@ package/dsh-webcode-bridge/bench-out.txt
 
 # 本地暂存（排查脚本、npm 缓存、tgz 解包验证），历史上从未入库
 .tmp/
+
+# AgentTeams 团队运行时状态（team.json / inbox/*.jsonl）。
+# 它引用**会话 id 与用户原话**，与 PLAN*.md、REPORT.md 同一条口径：本地私有留痕，不入库。
+# 2026-09-16 之前它没有规则，`git status` 直接列着 `.agent-teams/`，一次 `git add -A`
+# 就会把一个**别的会话的**团队状态连同收件箱提进历史。
+.agent-teams/
 
 # 本地私有留痕与计划文件，不入库不同步（2026-09-13 要求远端清除）
 .claude/

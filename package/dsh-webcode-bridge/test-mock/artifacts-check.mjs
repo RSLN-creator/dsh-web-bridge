@@ -41,6 +41,17 @@ const GENERATED = [
   'package/dsh-webcode-bridge/test-mock/prompt-bench/out/report.md',
   'package/dsh-webcode-bridge/test-mock/prompt-bench/out/report.json',
   'package/dsh-webcode-bridge/test-mock/prompt-bench/out/records.csv',
+  // 2026-09-16 新增：`inspect-harness.mjs` 的探针产物（截图 + 页面全文 + 当前 URL）。
+  // 登记它的直接原因是**这条规则当时是死的**：`.gitignore` 写的是 `package/output/`，
+  // 而真实路径是 `package/dsh-webcode-bridge/output/`（`inspect-harness.mjs:42,57`
+  // 的 `fs.mkdir('output/playwright')` 相对**包目录**解析）。规则「存在但作用域写错」，
+  // 于是这些产物从未被挡住——这正是本文件存在的意义：把「有规则」升级成「规则真的生效」。
+  'package/dsh-webcode-bridge/output/playwright/harness-home.png',
+  'package/dsh-webcode-bridge/output/playwright/harness-task-url.txt',
+  // 2026-09-16 新增：AgentTeams 的运行时状态（team.json / inbox/*.jsonl）。
+  // 它引用会话 id 与用户原话，与 PLAN*.md、REPORT.md 同一条口径：本地私有留痕，不入库。
+  // 它此前**没有任何规则**，`git status` 直接列着 `.agent-teams/`。
+  '.agent-teams/webcode-bridge-0-16/team.json',
 ];
 
 /** 同区域的源文件：它们**必须**仍可被 git 跟踪（防止忽略规则写宽了）。 */
@@ -49,6 +60,9 @@ const SOURCES = [
   'package/dsh-webcode-bridge/test-mock/bench-ci.mjs',
   'package/dsh-webcode-bridge/test-mock/prompt-bench/cases.json',
   'package/dsh-webcode-bridge/test-mock/prompt-bench/negative-control/cases.json',
+  // 与上面那条探针产物同目录的**源码**：它是产物目录里唯一必须留在库里的东西，
+  // 因此正好用来守住「忽略规则没写宽到把 output/ 整个吞掉」这一侧。
+  'package/dsh-webcode-bridge/test-mock/inspect-harness.mjs',
 ];
 
 /** git check-ignore 的判定；返回 true=被忽略。用 -q 只取退出码。 */

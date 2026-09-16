@@ -35,8 +35,13 @@
 #                                      它们的缺陷不是本项目的缺陷，也不该由本项目修。
 #   · `test-mock/**/out/**`         —— 每次跑基准都会重新生成的产物（JSON/CSV/MD）。
 #   · `.tmp/**`                     —— 本地暂存：会话导出、tgz 解包验证、排查脚本。
-#   · `package/output/**`           —— 打包与真机探针的输出目录。
+#   · `package/dsh-webcode-bridge/output/**` —— 探针产物（`inspect-harness.mjs` 的截图与页面全文）。
+#                                      2026-09-16 修正：这里原写作 `package/output/**`，
+#                                      **匹配不到任何东西**（真实路径相对**包目录**解析，见
+#                                      `test-mock/inspect-harness.mjs:42,57`）。同一条错误引用
+#                                      在 `.gitignore` 里也存在过，两处一起改。
 #   · `**/*.tgz`                    —— 二进制发布物，静态分析读不了也不该读。
+#   · `.agent-teams/**`             —— AgentTeams 运行时状态（含会话 id 与用户原话），本地私有留痕。
 #
 # 注意**不排除** `test/**`：本仓库的测试是护栏本身（协议泄漏、账户槽位移、稳态收束），
 # 它们里有真实逻辑，静态分析在测试里抓到的缺陷同样值得看。
@@ -53,8 +58,9 @@ on:
     paths-ignore: &paths-ignore
       - 'reference/**'
       - 'package/dsh-webcode-bridge/test-mock/**/out/**'
-      - 'package/output/**'
+      - 'package/dsh-webcode-bridge/output/**'
       - '.tmp/**'
+      - '.agent-teams/**'
       - '**/*.tgz'
   pull_request:
     branches: [main]

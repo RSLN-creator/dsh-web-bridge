@@ -15,37 +15,46 @@
 #
 # ## 生效前提（**必须做，否则本文件等于不存在**）
 #
-# 把下面的 `@owner` 换成真实的 GitHub 账号。GitHub 对无法解析的 owner 不会报错，
-# 只会静默地不请求任何人——于是「配置了 CODEOWNERS」会变成一种虚假的安心。
-# 换完之后，还要在仓库 Settings → Branches 的分支保护规则里勾上
-# 「Require review from Code Owners」，否则本文件只是注释。
+# 下面的 owner 已换成真实 GitHub 账号 `@RSLN-creator`（2026-09-16，此前是占位符）。
+# 这一条不能只做一半：GitHub 对无法解析的 owner **不会报错**，只会静默地
+# 不请求任何人——于是「配置了 CODEOWNERS」会变成一种虚假的安心。
+#
+# 换完 owner 之后还有**第二步**：在仓库 Settings → Branches 的分支保护规则里勾上
+# 「Require review from Code Owners」，否则本文件只是一份注释。
+#
+# > 换账号时注意：占位符在本文件里出现在**兜底行与每一个分组行**上，共 8 处。
+# > 只改第一处会让其余分组静默失效。
+# > 2026-09-16 已核对：下面 8 条规则行全部指向真实账号，无占位符残留
+# > （核对方式是数 `@RSLN-creator` 的命中行数，不是靠眼睛扫）。
 #
 # 语法：`<路径模式>  <owner...>`。`*` 匹配任意深度，目录以 `/` 结尾。
 
 # 兜底：任何未被子规则覆盖的改动都请求一次审查。放在最前面——CODEOWNERS 是
 # **最后匹配的规则优先**（不是最先），所以更具体的规则写在后面才会生效。
-*                                   @owner
+*                                   @RSLN-creator
 
 # ---- 契约层：协议边界与适配器 ----
 # `lib/agent-preset.js` 的协议锚点 / `proseSafeEnd` 一旦漂移，表现是把 DSML 协议原文
 # 写进用户会话（0.15.0 修过一次 21,905 字符的泄漏）；`lib/index.js` 的收尾语义决定
 # 「只出思维链」这类轮次是继续还是整轮判死。两处都必须有人过目。
-/package/dsh-webcode-bridge/lib/    @owner
+/package/dsh-webcode-bridge/lib/    @RSLN-creator
 
 # ---- 护栏层：测试是这份代码的契约 ----
 # 本仓库的测试不是「补充」，而是把契约钉死的地方（协议泄漏形态、账户槽零位移、
 # 稳态收束的反向安全线）。改测试与改实现同等重要，不能顺手带过。
-/package/dsh-webcode-bridge/test/   @owner
+/package/dsh-webcode-bridge/test/   @RSLN-creator
 
 # ---- 工具与流水线 ----
-/scripts/                           @owner
-/.github/                           @owner
+# `scripts/` 下是审查闸门本身（注释纪律、台账一致性、CI 本地复现）；闸门被放宽
+# 等于它保护的契约被放宽，因此与源码同级别。
+/scripts/                           @RSLN-creator
+/.github/                           @RSLN-creator
 
 # ---- 文档即规范 ----
 # `doc/comment-style.md`（注释与实验纪律）、`doc/verify.md`（真机矩阵）、
 # `doc/security-review.md`（安全边界）都是被当作规范执行的文档，改动需要过目。
-/doc/                               @owner
+/doc/                               @RSLN-creator
 
 # 根目录的规范类文件单独列出（`CONTRIBUTING.md`、`README.md`）。
-/CONTRIBUTING.md                    @owner
-/README.md                          @owner
+/CONTRIBUTING.md                    @RSLN-creator
+/README.md                          @RSLN-creator

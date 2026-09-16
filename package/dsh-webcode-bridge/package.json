@@ -1,6 +1,6 @@
 {
   "name": "dsh-webcode-bridge",
-  "version": "0.15.3",
+  "version": "0.15.6",
   "description": "Harness Web Bridge: DeepSeek web models, native Harness tool loops, DSH native right-sidebar tab and native settings; multi-account slots per site; real Team/subagent roster panel.",
   "type": "module",
   "main": "./lib/index.js",
@@ -11,6 +11,7 @@
     "start": "node bin/bridge-standalone.js",
     "test": "node --test test/*.test.mjs && node test/parse.test.mjs && node test/run-m1.js && node test-mock/bench-ci.mjs && node test-mock/artifacts-check.mjs",
     "lint:comments": "node ../../scripts/lint-comments.mjs",
+    "lint:ledger": "node ../../scripts/check-ledger.mjs",
     "ci:local": "node ../../scripts/ci-local.mjs",
     "bench": "node test-mock/prompt-bench.mjs",
     "bench:experiments": "node test-mock/prompt-bench.mjs --experiments --json",
