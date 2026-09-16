@@ -68,6 +68,8 @@
 //   面板因此能说「为什么没有数据」，而不是让用户以为是「确实没有成员在跑」。
 //   这是本项目一贯的「不造假状态」纪律（同账户头像的三态环）。
 
+import { analyzeTaskGraph } from './task-graph.js';
+
 /**
  * 从 cordis 上下文里取一个服务，容忍两种取法。
  *
@@ -227,8 +229,7 @@ export function projectTasks(ctx, sessionId) {
   try {
     const rows = listTasks(caller);
     if (!Array.isArray(rows)) return { tasks: [], tasksError: 'listTasks-returned-non-array' };
-    return {
-      tasks: rows.map((t) => ({
+    const shaped = rows.map((t) => ({
         id: String(t?.id || ''),
         revision: Number(t?.revision) || 0,
         subject: String(t?.subject || ''),
@@ -243,11 +244,18 @@ export function projectTasks(ctx, sessionId) {
         ...(Array.isArray(t?.writeScopeWarnings) && t.writeScopeWarnings.length
           ? { writeScopeWarnings: t.writeScopeWarnings.map(String) }
           : {}),
-      })),
-      tasksError: null,
-    };
+      }));
+    // 图诊断（0.15.12）：官方只给逐行的 ready 布尔，而面板要回答的是
+    // 「为什么整块板没动 / 在等谁 / 还要多久 / 图本身是不是坏的」——
+    // 那是图级视角，官方数据里没有，由 task-graph.js 纯计算补上。
+    // 图算不出来（rows 形状异常）时不让任务板消失：tasks 照给，graph 为 null。
+    let graph = null;
+    try {
+      graph = analyzeTaskGraph(shaped);
+    } catch { /* 见上：graph 是补充信息，缺了不该连坐 tasks */ }
+    return { tasks: shaped, graph, tasksError: null };
   } catch (e) {
-    return { tasks: [], tasksError: `not-a-team-member: ${String(e?.message || e).slice(0, 160)}` };
+    return { tasks: [], graph: null, tasksError: `not-a-team-member: ${String(e?.message || e).slice(0, 160)}` };
   }
 }
 
@@ -387,18 +395,19 @@ function shapeCatalogEntry(e) {
  *
  * @param {object} ctx cordis 上下文
  * @param {string|null} sessionId 当前会话 id
- * @returns {{team: object[], members: object[], tasks: object[], subAgents: object[],
- *   teamError: string|null, membersError: string|null, tasksError: string|null, subAgentsError: string|null}}
+ * @returns {{team: object[], members: object[], tasks: object[], graph: object|null,
+ *   subAgents: object[], teamError: string|null, membersError: string|null,
+ *   tasksError: string|null, subAgentsError: string|null}}
  */
 export function projectRoster(ctx, sessionId) {
   let team = { team: [], teamError: null };
-  let tasks = { tasks: [], tasksError: null };
+  let tasks = { tasks: [], graph: null, tasksError: null };
   let sub = { subAgents: [], subAgentsError: null };
   try { team = projectTeam(ctx, sessionId); } catch (e) {
     team = { team: [], teamError: `team-projection-threw: ${String(e?.message || e).slice(0, 160)}` };
   }
   try { tasks = projectTasks(ctx, sessionId); } catch (e) {
-    tasks = { tasks: [], tasksError: `task-projection-threw: ${String(e?.message || e).slice(0, 160)}` };
+    tasks = { tasks: [], graph: null, tasksError: `task-projection-threw: ${String(e?.message || e).slice(0, 160)}` };
   }
   try { sub = projectSubAgents(ctx, sessionId); } catch (e) {
     sub = { subAgents: [], subAgentsError: `subagent-projection-threw: ${String(e?.message || e).slice(0, 160)}` };
@@ -409,6 +418,8 @@ export function projectRoster(ctx, sessionId) {
     // 同值别名：官方 TeamView 的词是 members。见函数注释。
     members: teamRows,
     tasks: tasks.tasks,
+    // 图诊断（0.15.12）：官方逐行事实之外的那一层视角。拿不到时为 null。
+    graph: tasks.graph ?? null,
     subAgents: sub.subAgents,
     teamError: team.teamError ?? null,
     membersError: team.teamError ?? null,

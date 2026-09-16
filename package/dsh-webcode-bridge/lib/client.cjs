@@ -113,6 +113,31 @@ window.__ModuleLoader__.load({
       return seen.length ? seen.join(' / ') : null;
     }
 
+    /**
+     * 花名册行的状态词与颜色档。
+     *
+     * **词必须与颜色同时出现**（doc/research/agent-ui-design-references.md §1
+     * 点名：颜色不得是唯一载体），因此返回的是 `{k, t}` 一对，调用方两个都要画。
+     *
+     * `inactive` 的官方语义是「成员存在但未加载，唤醒时仍会收到排队消息」
+     *（agent-team README.md:63）。旧实现把它显示成「已停止」，用户会以为成员
+     * 没了、要去重新创建——而正确动作只是发消息唤醒它。真正终态（done/completed）
+     * 与停用（stopped）另算，不与该词混用。
+     *
+     * 提到模块作用域是因为 Team 面板与设置页花名册读**同一份**状态语义：
+     * 两处各写一份迟早会出现「设置页说空闲、面板说工作中」。
+     */
+    function rosterStateOf(x) {
+      const s = String(x?.status || x?.state || '').toLowerCase();
+      if (['running', 'working', 'busy'].includes(s)) return { k: 'ok', t: '工作中' };
+      if (['idle'].includes(s)) return { k: 'idle', t: '空闲' };
+      if (['provisioning', 'starting', 'pending'].includes(s)) return { k: 'idle', t: '启动中' };
+      if (['failed', 'error'].includes(s)) return { k: 'bad', t: '失败' };
+      if (['inactive'].includes(s)) return { k: '', t: '未加载（可唤醒）' };
+      if (['stopped', 'done', 'completed'].includes(s)) return { k: '', t: '已结束' };
+      return { k: '', t: s || '未知' };
+    }
+
     const MODEL_NAMES = { deepseek: 'DeepSeek' };
     // 站点显示名 + 多站点模型目录（打开时从 /__webcode/models 拉取）
     const SITE_NAMES = { deepseek: 'DeepSeek', glm: '智谱清言', chatgpt: 'ChatGPT', kimi: 'Kimi', qwen: '通义千问', doubao: '豆包', grok: 'Grok', claude: 'Claude', gemini: 'Gemini', zai: 'Z.ai (GLM 海外版)' };
@@ -528,20 +553,8 @@ window.__ModuleLoader__.load({
       }, [sessionId]);
       if (rows === null) return h('p', { className: 'hwb-hint' }, '花名册加载中…');
       // 状态词必须与颜色**同时**出现（调研 §5 点名：颜色不得是唯一载体）。
-      const stateOf = (x) => {
-        const s = String(x?.status || x?.state || '').toLowerCase();
-        if (['running', 'working', 'busy'].includes(s)) return { k: 'ok', t: '工作中' };
-        if (['idle'].includes(s)) return { k: 'idle', t: '空闲' };
-        if (['provisioning', 'starting', 'pending'].includes(s)) return { k: 'idle', t: '启动中' };
-        if (['failed', 'error'].includes(s)) return { k: 'bad', t: '失败' };
-        // inactive 的官方语义是「成员存在但未加载，唤醒时仍会收到排队消息」
-        // （agent-team README.md:63）。旧实现把它显示成「已停止」，用户会以为成员
-        // 没了、要去重新创建——而正确动作只是发消息唤醒它。
-        // 真正终态（done/completed）与停用（stopped）另算，不与该词混用。
-        if (['inactive'].includes(s)) return { k: '', t: '未加载（可唤醒）' };
-        if (['stopped', 'done', 'completed'].includes(s)) return { k: '', t: '已结束' };
-        return { k: '', t: s || '未知' };
-      };
+      // 语义本体在模块作用域的 rosterStateOf——Team 面板与这里读同一份。
+      const stateOf = rosterStateOf;
       const row = (x, key, nested) => {
         const st = stateOf(x);
         return h('div', { key, className: 'hwb-roster-row' + (nested ? ' nested' : '') },
@@ -618,6 +631,247 @@ window.__ModuleLoader__.load({
           team.map((x, i) => row(x, 't' + i, false)),
           h('p', { className: 'hwb-hint' }, 'Team 成员共享同一个 checkout：并行的是会话与呈现，不是文件系统。')),
         tasks.length > 0 && taskBoard(tasks));
+    }
+
+    /**
+     * 花名册数据的**唯一**拉取点（0.15.12）。
+     *
+     * Team 面板、任务板面板与设置页花名册读的是同一份 `/__webcode/status`。
+     * 三处各写一遍 fetch 会有两个立刻可见的代价：轮询相位不同（同屏出现
+     * 「3 个成员」与「2 个成员」），以及错误处理各不相同（一处说「读不到」、
+     * 另一处静默空列表）。所以只留一个 hook，三处都从这里取。
+     *
+     * 返回 `data === null` 表示**还没拿到第一份**（渲染加载态），与
+     * `data.{team,tasks}` 为空数组（确实没有）是两件不同的事——这与本文件
+     * 一贯的「空列表是状态、*Error 才是错误」一致。
+     *
+     * @param {string|null} sessionId 当前会话 id（服务端据此定位 Team 凭据）
+     * @param {number} intervalMs 轮询间隔；0 表示只拉一次
+     * @returns {{data: object|null, err: string|null}} 花名册快照与请求级错误
+     */
+    function useRoster(sessionId, intervalMs) {
+      const [state, setState] = React.useState({ data: null, err: null });
+      React.useEffect(() => {
+        if (!sessionId) {
+          // 没有会话身份是**正常情况**（新会话尚未建立），但花名册确实读不到，
+          // 因此给一份空快照 + 原因，而不是一直停在「加载中…」。
+          setState({ data: { subAgents: [], team: [], tasks: [], graph: null }, err: 'no-session-id' });
+          return () => {};
+        }
+        let alive = true;
+        const pull = () => api('status', { sessionId })
+          .then(r => { if (alive) setState({ data: r || null, err: null }); })
+          .catch(e => { if (alive) setState({ data: null, err: String(e?.message || e) }); });
+        pull();
+        if (!intervalMs) return () => { alive = false; };
+        const t = setInterval(pull, intervalMs);
+        return () => { alive = false; clearInterval(t); };
+      }, [sessionId, intervalMs]);
+      return state;
+    }
+
+    /** 官方任务状态 → 中文标签与色档。任务板与 Team 面板共用，避免两处措辞漂移。 */
+    function taskStatusOf(s) {
+      const v = String(s || '');
+      if (v === 'in_progress') return { k: 'ok', t: '进行中' };
+      if (v === 'completed') return { k: '', t: '已完成' };
+      if (v === 'pending') return { k: 'idle', t: '待办' };
+      if (v === 'deleted') return { k: '', t: '已删除' };
+      return { k: '', t: v || '未知' };
+    }
+
+    /**
+     * **Team 面板**（0.15.12）：一张「谁在这个团队里、各自在忙什么」的只读视图。
+     *
+     * ## 与设置页花名册的分工（不是重复）
+     *
+     * 设置页那栏回答的是**配置期**的问题（有哪些账户、模型怎么选、提示词是什么），
+     * 花名册只是顺带一行。而右栏是**运行期**的常驻视图：用户在做任务时想知道
+     * 「谁在跑、谁空闲、能不能再派活」。因此这里的呈现比设置页更细：
+     * 角色、模型、上下文模式、名下任务数各自成列，并给出可执行的下一步提示。
+     *
+     * ## 数据来源与纪律
+     *
+     * 全部来自 `/__webcode/status`（服务端 lib/roster.js 从官方 `agentTeams`
+     * 的 `listMembers` 真实读出）。**只读、不造假**：读不到时把原因摊开，
+     * 而不是画一行看起来正常的空列表。
+     *
+     * `inactive` 必须显示成「未加载（可唤醒）」——官方 README 明说这种成员仍会
+     * 收到排队消息，显示成「已停止」会让人以为要重新创建（见 rosterStateOf）。
+     *
+     * @param {{sessionId?: string, useSessions?: Function}} props 槽注入的会话身份
+     */
+    function TeamPanel(props) {
+      const sessionId = useCurrentSessionId(props);
+      const { data, err } = useRoster(sessionId, 5000);
+      if (data === null) {
+        return h('div', { className: 'hwb-panel' },
+          h('p', { className: 'hwb-hint' }, err ? '读不到 Team：' + err : 'Team 加载中…'));
+      }
+      const team = Array.isArray(data.team) ? data.team : (Array.isArray(data.members) ? data.members : []);
+      const teamErr = uniqReasons([data.teamError, data.membersError]);
+      const tasks = Array.isArray(data.tasks) ? data.tasks : [];
+      // 只在「有非 lead 成员」时才算作一个真实的团队。官方对任何顶层会话都返回
+      // 一行 lead（agent-team README.md:128），只画那一行会让用户以为有团队在跑。
+      const teammates = team.filter(m => String(m?.role || '') !== 'lead');
+      const counts = team.reduce((acc, m) => {
+        const k = rosterStateOf(m).k;
+        acc[k === 'ok' ? 'working' : k === 'bad' ? 'failed' : 'idle'] += 1;
+        return acc;
+      }, { working: 0, idle: 0, failed: 0 });
+      const memberRow = (m, i) => {
+        const st = rosterStateOf(m);
+        const name = String(m?.name || m?.id || '（未命名）');
+        return h('div', { key: 'm' + i, className: 'hwb-panel-row' },
+          h('span', { className: 'hwb-dot ' + st.k, 'aria-hidden': 'true' }),
+          h('span', { className: 'hwb-panel-title' }, name),
+          m?.role && h('span', { className: 'hwb-chip' }, String(m.role)),
+          m?.model && h('span', { className: 'hwb-panel-meta' }, String(m.model)),
+          // 上下文模式（fresh/fork）是 Team 成员的既有字段，官方给了就透出。
+          m?.context && h('span', { className: 'hwb-panel-meta' }, String(m.context)),
+          h('span', { className: 'hwb-panel-state' }, st.t),
+          m?.taskCount != null && h('span', { className: 'hwb-chip' }, '任务 ' + m.taskCount));
+      };
+      return h('div', { className: 'hwb-panel' },
+        h('div', { className: 'hwb-panel-summary' },
+          h('span', { className: 'hwb-panel-stat' }, '成员 ' + team.length),
+          counts.working > 0 && h('span', { className: 'hwb-panel-stat ok' }, '工作中 ' + counts.working),
+          counts.idle > 0 && h('span', { className: 'hwb-panel-stat' }, '空闲/未加载 ' + counts.idle),
+          counts.failed > 0 && h('span', { className: 'hwb-panel-stat bad' }, '失败 ' + counts.failed),
+          h('span', { className: 'hwb-panel-stat' }, '任务 ' + tasks.length)),
+        teamErr && h('p', { className: 'hwb-hint bad' }, 'Team 分区读不到（' + teamErr + '）——这不代表没有成员，而是数据源不可用。'),
+        team.length === 0 && !teamErr
+          ? h('p', { className: 'hwb-hint' }, '本会话没有任何 Team 成员。官方语义：每个普通顶层会话都是隐式 Team 的 Lead，但只有真正 spawn 过 teammate 才存在一个团队。')
+          : null,
+        // 只有 lead 一行时如实说明——否则用户会以为「团队就我一个人在跑」。
+        team.length > 0 && teammates.length === 0
+          ? h('p', { className: 'hwb-hint' }, '当前只有本会话自己（lead），没有派生出的 teammate。')
+          : null,
+        team.length > 0 && h('div', { className: 'hwb-panel-group' }, team.map(memberRow)),
+        teammates.length > 0 && h('p', { className: 'hwb-hint' },
+          '成员状态为「未加载（可唤醒）」时不必重建：给它发一条消息就会唤醒并继续原来的上下文。'),
+        h('p', { className: 'hwb-hint' },
+          'Team 成员共享同一个 checkout：并行的是会话与呈现，不是文件系统。任务归属与依赖关系见「任务板」标签页。'));
+    }
+
+    /**
+     * **任务板面板**（0.15.12）：官方逐行事实 + 桥自算的**图级**视角。
+     *
+     * ## 为什么不能只把 `listTasks` 画成列表
+     *
+     * 官方每一行都给 `status` / `blockedBy` / `ready` / `writeScopes`，回答的是
+     * 「这一条现在能不能开工」。但用户在任务板上真正要问的是另外三个问题，
+     * 官方数据里一个都没有（对照研究 §3⑧「图的状态必须能一眼看出在等谁」）：
+     *
+     *   1. **为什么整块板没动？** → 「当前阻塞点」：谁在卡住几个下游。
+     *   2. **还要多久？** → **关键路径**（最长依赖链），它是整批任务的下界。
+     *   3. **图本身坏了吗？** → 环 / 自环 / 悬空边。带环的图在界面上表现为
+     *      「一堆永远不 ready 的待办」，看起来像卡死，其实是结构错误。
+     *
+     * 这三条由服务端 `lib/task-graph.js` 纯计算得出（`/status` 的 `graph` 字段），
+     * 本组件只负责呈现，不在浏览器侧重算——两份图论实现迟早会不一致。
+     *
+     * ## 刻意保留的诚实
+     *
+     * `ready` 取**官方算好的布尔**（`readySource: 'official'`）；只有官方没给
+     * 该键时才现算一次并标为 `computed`。桥不重算官方判据，因为重算必然漂移。
+     *
+     * @param {{sessionId?: string, useSessions?: Function}} props 槽注入的会话身份
+     */
+    function TaskBoardPanel(props) {
+      const sessionId = useCurrentSessionId(props);
+      const { data, err } = useRoster(sessionId, 5000);
+      if (data === null) {
+        return h('div', { className: 'hwb-panel' },
+          h('p', { className: 'hwb-hint' }, err ? '读不到任务板：' + err : '任务板加载中…'));
+      }
+      const tasks = Array.isArray(data.tasks) ? data.tasks : [];
+      const taskErr = uniqReasons([data.tasksError]);
+      const g = data.graph && typeof data.graph === 'object' ? data.graph : null;
+      const byId = new Map(tasks.map(t => [String(t.id), t]));
+      /** 一条任务行：状态点 + 标题 + 归属 + 状态 + 阻塞明细。 */
+      const taskRow = (t, i, extra) => {
+        const st = taskStatusOf(t?.status);
+        const blocked = Array.isArray(t?.blockedBy) ? t.blockedBy : [];
+        // 未完成的阻塞者要逐个点名并带**它自己的状态**：否则「被 3 项卡住」看不出
+        // 是「还在跑」（正常等待）还是「已经失败」（需要人处理）。
+        const unresolved = blocked
+          .map(id => byId.get(String(id)))
+          .filter(Boolean)
+          .filter(b => String(b.status) !== 'completed');
+        return h('div', { key: 't' + i, className: 'hwb-panel-row' },
+          h('span', { className: 'hwb-dot ' + st.k, 'aria-hidden': 'true' }),
+          h('span', { className: 'hwb-panel-title', title: String(t?.id || '') }, String(t?.subject || t?.id || '（无标题）')),
+          t?.ownerName && h('span', { className: 'hwb-chip' }, String(t.ownerName)),
+          h('span', { className: 'hwb-panel-state' }, st.t),
+          extra,
+          unresolved.length > 0 && h('span', { className: 'hwb-panel-meta' },
+            '等在 ' + unresolved.map(b => String(b.subject || b.id) + '（' + taskStatusOf(b.status).t + '）').join('、')),
+          Array.isArray(t?.writeScopeWarnings) && t.writeScopeWarnings.length > 0
+            && h('span', { className: 'hwb-chip warn' }, '写范围告警'));
+      };
+      const ready = tasks.filter(t => String(t.status) === 'pending' && t.ready === true);
+      const blockedRows = tasks.filter(t => String(t.status) === 'pending' && t.ready !== true);
+      const running = tasks.filter(t => String(t.status) === 'in_progress');
+      const done = tasks.filter(t => String(t.status) === 'completed');
+      const group = (head, rows, emptyHint) => h('div', { className: 'hwb-panel-group' },
+        h('p', { className: 'hwb-panel-head' }, head + '（' + rows.length + '）'),
+        rows.length ? rows.map((t, i) => taskRow(t, head + i)) : (emptyHint ? h('p', { className: 'hwb-hint' }, emptyHint) : null));
+      return h('div', { className: 'hwb-panel' },
+        h('div', { className: 'hwb-panel-summary' },
+          h('span', { className: 'hwb-panel-stat' }, '共 ' + tasks.length),
+          ready.length > 0 && h('span', { className: 'hwb-panel-stat ok' }, '可开工 ' + ready.length),
+          running.length > 0 && h('span', { className: 'hwb-panel-stat ok' }, '进行中 ' + running.length),
+          blockedRows.length > 0 && h('span', { className: 'hwb-panel-stat bad' }, '被阻塞 ' + blockedRows.length),
+          done.length > 0 && h('span', { className: 'hwb-panel-stat' }, '已完成 ' + done.length)),
+        taskErr && h('p', { className: 'hwb-hint bad' }, '任务板读不到（' + taskErr + '）——这不代表没有任务，而是数据源不可用。'),
+        !taskErr && tasks.length === 0
+          ? h('p', { className: 'hwb-hint' }, '本团队任务板为空。用 Team 工具 create_task 建任务后这里会实时出现（5 秒轮询）。')
+          : null,
+        // ---- 图诊断：官方数据里没有的那一层 ----
+        g && (g.cycles?.length || g.selfLoops?.length || g.missingEdges?.length)
+          ? h('div', { className: 'hwb-panel-group' },
+            h('p', { className: 'hwb-panel-head bad' }, '图结构问题'),
+            g.selfLoops?.length ? h('p', { className: 'hwb-hint bad' },
+              '自环（任务依赖自己）：' + g.selfLoops.join('、') + '。自环是单点错误，改掉那一条依赖即可。') : null,
+            g.cycles?.length ? h('p', { className: 'hwb-hint bad' },
+              '依赖成环（' + g.cycles.length + ' 组）：' + g.cycles.map(c => c.join(' → ')).join('；')
+              + '。环内任务永远不会就绪，必须先断开其中一条边。') : null,
+            g.missingEdges?.length ? h('p', { className: 'hwb-hint bad' },
+              '悬空依赖（指向不存在或已删除的任务）：'
+              + g.missingEdges.slice(0, 8).map(e => e.from + ' → ' + e.to).join('、')
+              + (g.missingEdges.length > 8 ? ' 等 ' + g.missingEdges.length + ' 条' : '')) : null)
+          : null,
+        // ---- 关键路径：整批任务的下界，也是「并行度够不够」的唯一可核对判据 ----
+        g && g.acyclic && g.criticalPathLength > 0
+          ? h('div', { className: 'hwb-panel-group' },
+            h('p', { className: 'hwb-panel-head' }, '关键路径（' + g.criticalPathLength + ' 个任务）'),
+            h('p', { className: 'hwb-hint' },
+              g.criticalPath.map(id => String(byId.get(String(id))?.subject || id)).join(' → ')),
+            h('p', { className: 'hwb-hint' }, '这是最长依赖链：它决定整批任务的最短完成步数，也说明哪些任务值得优先处理。'))
+          : null,
+        g && g.acyclic === false
+          ? h('p', { className: 'hwb-hint bad' }, '图里有环，无法计算关键路径与深度——先修上面的结构问题。')
+          : null,
+        // ---- 当前阻塞点：第一行就是最该处理的那个 ----
+        g && Array.isArray(g.blockedOn) && g.blockedOn.length > 0
+          ? h('div', { className: 'hwb-panel-group' },
+            h('p', { className: 'hwb-panel-head' }, '当前阻塞点（按卡住的下游数排序）'),
+            g.blockedOn.slice(0, 6).map((b, i) => h('div', { key: 'b' + i, className: 'hwb-panel-row' },
+              h('span', { className: 'hwb-dot ' + taskStatusOf(b.status).k, 'aria-hidden': 'true' }),
+              h('span', { className: 'hwb-panel-title' }, String(b.subject || b.id)),
+              b.ownerName && h('span', { className: 'hwb-chip' }, String(b.ownerName)),
+              h('span', { className: 'hwb-panel-state' }, taskStatusOf(b.status).t),
+              h('span', { className: 'hwb-chip' }, '卡住 ' + b.waitingCount + ' 项'))),
+            h('p', { className: 'hwb-hint' }, '「为什么整块板没动」的答案在这里：处理第一行即可解锁最多的下游。'))
+          : null,
+        group('可开工', ready, '当前没有就绪且未开工的任务。'),
+        group('被阻塞', blockedRows, '没有被阻塞的任务。'),
+        group('进行中', running),
+        group('已完成', done),
+        h('p', { className: 'hwb-hint' },
+          '就绪（ready）取官方算好的判据，桥不重算；阻塞明细、关键路径与结构检查由桥补算。'
+          + '写范围重叠只是提醒而不是锁：官方明文没有 worktree，成员共享同一个 checkout。'));
     }
 
     function SiteAccounts({ sites, onRefresh, onlySiteId, subHint }) {
@@ -1622,6 +1876,43 @@ window.__ModuleLoader__.load({
         ".hwb-menu-item{display:block;width:100%;padding:6px 10px;font:inherit;font-size:13px;line-height:20px;text-align:left;color:var(--dsw-alias-label-primary,inherit);background:transparent;border:0;border-radius:8px;cursor:pointer}",
         ".hwb-menu-item:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,#8882)}",
         ".hwb-menu-item:disabled{color:var(--dsw-alias-label-dimmed,#aaa);cursor:default}",
+        // ---- Team 面板 / 任务板面板（0.15.12）--------------------------------
+        //
+        // 尺寸与间距逐条来自 doc/research/agent-ui-design-references.md 的既有约束，
+        // 不新造数值：
+        //   • 基础间距 4px 的倍数（Fluent 基础单位）；分组间距 16px（§4「分区间距」）。
+        //   • 行高 20px / 字号 13px 与官方行一致（§4「控件高度 28px、状态点 8px」同族）。
+        //   • 状态点复用已有的 .hwb-dot（8px），不新写一套——同一个语义只有一个载体。
+        //   • 颜色全部走 token + fallback（§3.2 硬约束 1），不新增硬编码色值。
+        //   • 删线用间距（§2「spacing creates logical sections without lines」）：
+        //     分组之间只有 16px 间距，没有分隔线。
+        //
+        // 两个面板共用一套类名，因为它们的信息结构相同（摘要行 + 若干分组 + 若干行），
+        // 差别只在数据来源。两套类名会让「任务板的行高比 Team 面板大一像素」这类
+        // 漂移永远没人发现。
+        ".hwb-panel{display:flex;flex-direction:column;gap:16px;padding:12px 12px 16px;color:inherit;font-size:13px;line-height:20px}",
+        ".hwb-panel-summary{display:flex;flex-wrap:wrap;align-items:center;gap:8px}",
+        ".hwb-panel-stat{font-size:12px;line-height:18px;padding:1px 8px;border-radius:9px;border:.5px solid var(--dsw-alias-border-l3,#8885);color:var(--dsw-alias-label-secondary,inherit);font-variant-numeric:tabular-nums;white-space:nowrap}",
+        ".hwb-panel-stat.ok{color:var(--dsw-alias-state-success-primary,#2e7d32);border-color:var(--dsw-alias-state-success-primary,#2e7d32)}",
+        ".hwb-panel-stat.bad{color:var(--dsw-alias-state-error-primary,#93443e);border-color:var(--dsw-alias-state-error-primary,#93443e)}",
+        ".hwb-panel-group{display:flex;flex-direction:column;gap:4px}",
+        ".hwb-panel-head{font-size:12px;line-height:18px;margin:0 0 4px;color:var(--dsw-alias-label-tertiary,#8a8f98)}",
+        ".hwb-panel-head.bad{color:var(--dsw-alias-state-error-primary,#93443e)}",
+        // 行：状态点 + 标题 + 若干小标签 + 状态词。
+        // 标题 flex:1 且允许省略号——任务标题可能很长，而右侧的状态/归属必须
+        // 永远可见（那些才是「能不能开工」的判据，不能因为标题长就被挤掉）。
+        ".hwb-panel-row{display:flex;align-items:center;gap:8px;min-height:24px}",
+        ".hwb-panel-title{flex:1;min-width:0;color:var(--dsw-alias-label-primary,inherit);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
+        ".hwb-panel-meta{font-size:12px;line-height:18px;flex:none;max-width:40%;color:var(--dsw-alias-label-tertiary,#8a8f98);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
+        ".hwb-panel-state{font-size:12px;line-height:18px;flex:none;color:var(--dsw-alias-label-secondary,inherit)}",
+        ".hwb-panel .hwb-hint.bad{color:var(--dsw-alias-state-error-primary,#93443e)}",
+        // 小标签（角色 / 归属 / 任务数 / 写范围告警）：与 .hwb-roster-task 同形，
+        // 但独立命名——那个类挂在设置页花名册下，跨面板复用会让两处样式耦合。
+        ".hwb-chip{font-size:12px;line-height:18px;padding:0 8px;border-radius:9px;flex:none;white-space:nowrap;color:var(--dsw-alias-label-secondary,inherit);border:.5px solid var(--dsw-alias-border-l3,#8885)}",
+        ".hwb-chip.warn{color:var(--dsw-alias-state-error-primary,#93443e);border-color:var(--dsw-alias-state-error-primary,#93443e)}",
+        // 空态/加载态：与官方 guide 卡片同一套措辞位置（顶部对齐、不要垂直居中——
+        // 面板常常是窄条，垂直居中的空态会飘在中间显得像加载失败）。
+        ".hwb-panel>p.hwb-hint{margin:0}",
       ].join('');
       document.head.appendChild(style);
       const disposers = [() => style.remove()];
@@ -1666,8 +1957,23 @@ window.__ModuleLoader__.load({
       });
 
       // ---- 官方右侧栏（@deepseek-ai/dsh-client-ui-sidebar-right）--------
+      //
+      // 三个标签页，各自一个独立的 kind：
+      //   • webcode-bridge —— 网页镜像（可多开、可浮动）；
+      //   • webcode-team   —— Team 面板：谁在团队里、各自在忙什么；
+      //   • webcode-tasks  —— 任务板：依赖图、就绪/阻塞、关键路径。
+      //
+      // 为什么是**三个 kind** 而不是一个 kind 内部再分栏：官方契约（tab-registry.d.ts）
+      // 里 kind 就是「这是什么类型的标签页」，每个 kind 有自己的标题、地址识别与
+      // guide 入口；合成一个的话，标签条上会出现三个同名标签，浮动/分屏也无法按
+      // 类型定位。而 pane.tab 座位是 keyed 的（按定义 id 派发），三个 kind 各注册
+      // 自己的 body 即自然成立。
       const TAB_ID = 'dsh-webcode-bridge';
       const TAB_KIND = 'webcode-bridge';
+      const TEAM_ID = 'dsh-webcode-bridge/team';
+      const TEAM_KIND = 'webcode-team';
+      const TASKS_ID = 'dsh-webcode-bridge/tasks';
+      const TASKS_KIND = 'webcode-tasks';
       /**
        * 多开不同网页（0.14.4）。
        *
@@ -1720,10 +2026,75 @@ window.__ModuleLoader__.load({
         } catch (e) { warn('pane.tab body', e); }
       });
 
+      // ---- Team 面板标签页（0.15.12）------------------------------------
+      //
+      // 两个新面板都**不接 address**（patterns 省略）：它们是 page type——
+      // 官方契约说得很清楚，省略 patterns 的类型「is opened by kind」，
+      // 不做地址识别。团队与任务板本来就没有「打开某个资源」的语义。
+      own(() => {
+        try {
+          return ctx.sidebarRightTabs.register({
+            id: TEAM_ID,
+            kind: TEAM_KIND,
+            priority: 'extension',
+            title: () => 'Team',
+            guide: [{
+              order: 56,
+              title: () => 'Team 面板',
+              description: () => '谁在这个团队里、各自在忙什么：角色、模型、任务归属与可唤醒状态（只读）',
+            }],
+          });
+        } catch (e) { warn('sidebarRightTabs.register (team)', e); }
+      });
+      own(() => {
+        try {
+          return ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
+            name: 'sidebar.right.pane.tab', key: TEAM_ID,
+          }, TeamPanel));
+        } catch (e) { warn('pane.tab body (team)', e); }
+      });
+
+      // ---- 任务板标签页（0.15.12）---------------------------------------
+      own(() => {
+        try {
+          return ctx.sidebarRightTabs.register({
+            id: TASKS_ID,
+            kind: TASKS_KIND,
+            priority: 'extension',
+            title: () => '任务板',
+            guide: [{
+              order: 57,
+              title: () => '任务板',
+              description: () => '依赖图视角：可开工 / 被阻塞 / 进行中 / 已完成，含当前阻塞点与关键路径（只读）',
+            }],
+          });
+        } catch (e) { warn('sidebarRightTabs.register (tasks)', e); }
+      });
+      own(() => {
+        try {
+          return ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
+            name: 'sidebar.right.pane.tab', key: TASKS_ID,
+          }, TaskBoardPanel));
+        } catch (e) { warn('pane.tab body (tasks)', e); }
+      });
+
       // ---- 标签动作菜单项：刷新 / 独立窗口（DSH 规范入口） --------------
       // 规范要求菜单项作用于「当前标签」并在动作后关闭菜单（dismiss 必须调，
       // 否则菜单会浮在被换掉的内容上）。动作本身由面板登记（actions 桥）。
+      //
+      // 0.15.12：菜单项现在**只对网页标签页显示**。官方契约原文是「Entries
+      // decide their own visibility from the tab they are given」（slots.d.ts 的
+      // `sidebar.right.tab.menu.item`），因此 owner.tab 必须被用起来。
+      //
+      // 为什么必须加这道判断：本轮之前只有一个 kind，菜单项出现在每个标签上是
+      // 「碰巧正确」；新增 Team / 任务板两个 kind 后，那两项会照样出现在它们
+      // 的菜单里，而 `actions.currentSite()` 返回的是「最后挂载的网页面板」的
+      // 站点——在团队标签页上点「刷新网页」，刷的是另一个面板，用户完全看不出
+      // 发生了什么。这类「点错了地方、但界面有反应」的错最贵。
+      //
+      // 返回 null（而不是空按钮）是官方允许的：菜单渲染时跳过空条目。
       const menuItem = (key, label, run) => function TabMenuItem(owner) {
+        if (String(owner?.tab?.kind || '') !== TAB_KIND) return null;
         const sid = actions.currentSite();
         return h('button', {
           type: 'button', className: 'hwb-menu-item',

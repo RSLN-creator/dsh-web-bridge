@@ -375,8 +375,12 @@ test('★ projectRoster：子代理侧挂了不连坐 Team 侧', () => {
 
 test('★ projectRoster：四个分区键齐全，且 members 是 team 的同值别名', () => {
   const r = projectRoster(ctxWith({}), 's');
+  // 0.15.12 追加 `graph`（图诊断：就绪集/阻塞点/关键路径/结构问题）。
+  // 它**不是**第五个分区——分区仍是四个（team/subAgents/tasks 各带一个 *Error），
+  // graph 是 tasks 的补充视角，服务端算不出来时为 null 而不是缺席。
   assert.deepEqual(Object.keys(r).sort(),
-    ['members', 'membersError', 'subAgents', 'subAgentsError', 'tasks', 'tasksError', 'team', 'teamError']);
+    ['graph', 'members', 'membersError', 'subAgents', 'subAgentsError', 'tasks', 'tasksError', 'team', 'teamError']);
+  assert.equal(r.graph, null, '读不到任务板时不得凭空造一张图');
   assert.ok(Array.isArray(r.team) && Array.isArray(r.subAgents) && Array.isArray(r.tasks) && Array.isArray(r.members));
   assert.ok(r.teamError && r.subAgentsError && r.tasksError, '三个分区都要说明原因');
   // 官方 TeamView 的词是 members，0.15.0 起本项目叫 team —— 两个名字同值，

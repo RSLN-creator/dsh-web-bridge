@@ -334,6 +334,12 @@ export function createWebControl(deps = {}) {
                 // 任务板是**团队级**事实（官方 TeamView.tasks）：状态、被谁卡住、
                 // 写哪些文件、是否就绪。没有它，「Team 成员平级」只剩一个名字。
                 tasks: Array.isArray(r.tasks) ? r.tasks : [],
+                // 图诊断（0.15.12）：官方逐行事实之外的**图级**视角——就绪集、
+                // 当前阻塞点、关键路径、环/自环/悬空边。官方数据里没有这一层，
+                // 而任务板面板要回答的正是「为什么整块板没动 / 在等谁 / 还要多久」
+                //（对照研究 doc/research/task-board-vs-agentteams-graph.md §3⑧）。
+                // 拿不到时为 null，面板如实说「图诊断不可用」，不编造。
+                graph: r.graph && typeof r.graph === 'object' ? r.graph : null,
                 subAgentsError: r.subAgentsError ?? null,
                 teamError: r.teamError ?? r.membersError ?? null,
                 tasksError: r.tasksError ?? null,

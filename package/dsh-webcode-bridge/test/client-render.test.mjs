@@ -38,7 +38,13 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null 
   const saved = { window: global.window, document: global.document, fetch: global.fetch, setInterval: global.setInterval, clearInterval: global.clearInterval };
   const realSetTimeout = global.setTimeout;
   let captured = null;
-  let PaneComponent = null;
+  // 0.15.12：`sidebar.right.pane.tab` 是 **keyed** 座位，本轮起有三个 kind
+  // （网页 / Team / 任务板）各注册一个正文。旧 harness 只留「最后一个注册的」，
+  // 于是新增两个标签页会把网页正文挤掉——那不是产品缺陷，是桩建模失真。
+  // 按 key 收全，再按用途取。
+  const PaneComponents = new Map();
+  /** 已注册的标签页定义（kind → definition），用于断言三个 kind 各自成立。 */
+  const TabDefinitions = new Map();
   let SettingsComponent = null;
   // 0.15.11：输入框底下的等待药丸也必须被真的渲染到。此前没有任何用例捕获
   // `conversation.composer.dock` 的组件，于是「药丸长什么样、点了会怎样」
@@ -127,6 +133,10 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null 
             team: roster.team || roster.members || [],
             members: roster.members || roster.team || [],
             tasks: roster.tasks || [],
+            // 0.15.12：图诊断（就绪集/阻塞点/关键路径/结构问题）由服务端
+            // lib/task-graph.js 算好后经 /status 透出。缺省 null 而不是造一个
+            // 空图——「图算不出来」与「图是空的」在面板上说法不同。
+            graph: roster.graph ?? null,
             subAgentsError: roster.subAgentsError ?? null,
             teamError: roster.teamError ?? null,
             tasksError: roster.tasksError ?? null,
@@ -194,18 +204,19 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null 
       slots: {
         inject: (_n, fn) => fn(),
         register: (def, Comp) => {
-          if (def?.name === 'sidebar.right.pane.tab') PaneComponent = Comp;
+          if (def?.name === 'sidebar.right.pane.tab') PaneComponents.set(def.key, Comp);
           if (def?.name === 'settings.section') SettingsComponent = Comp;
           if (def?.name === 'sidebar.right.tab.menu.item') MenuItems.push(Comp);
           if (def?.name === 'conversation.composer.dock') DockComponent = Comp;
           return () => {};
         },
       },
-      sidebarRightTabs: { register: () => () => {} },
+      // 标签页类型注册：收下定义，便于断言「三个 kind 都存在且都是 page type」。
+      sidebarRightTabs: { register: (def) => { if (def?.kind) TabDefinitions.set(def.kind, def); return () => {}; } },
       sidebarRight: { toggleExpanded() {} },
       get: () => null,
     });
-    assert.ok(PaneComponent, 'sidebar.right.pane.tab 正文从未注册');
+    assert.ok(PaneComponents.size > 0, 'sidebar.right.pane.tab 正文从未注册');
     assert.ok(SettingsComponent, 'settings.section 从未注册');
 
     const flush = () => new Promise((r) => realSetTimeout(r, 0));
@@ -234,10 +245,17 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null 
       return { ...el, children: (el.children || []).map(instantiate) };
     };
     const errors = [];
+    /** which → 座位 key。三个标签页正文与设置页、等待药丸各一条路径。 */
+    const PANE_KEYS = {
+      pane: 'dsh-webcode-bridge',
+      team: 'dsh-webcode-bridge/team',
+      tasks: 'dsh-webcode-bridge/tasks',
+    };
     const Target = which === 'settings' ? SettingsComponent
       : which === 'dock' ? DockComponent
-        : PaneComponent;
+        : PaneComponents.get(PANE_KEYS[which] || PANE_KEYS.pane);
     if (which === 'dock') assert.ok(DockComponent, 'conversation.composer.dock 从未注册');
+    assert.ok(Target, '未注册座位 ' + which + '（已注册：' + [...PaneComponents.keys()].join(', ') + '）');
     // 0.15.0：设置页的官方槽 inject 会喂进**当前会话 id**（花名册的
     // subagentCatalog 是会话级投影，服务端要用它去 sessions.get(sessionId)）。
     // 旧 harness 直接 `Target()` 调，等于模拟了一个「inject 什么都没给」的宿主；
@@ -256,7 +274,7 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null 
         await flush(); await flush(); await flush(); await flush();   // ← 异步 setState 必须在这里落地
       }
     }
-    return { errors, windowHits, tree, menuItems: MenuItems, effectDisposers };
+    return { errors, windowHits, tree, menuItems: MenuItems, effectDisposers, tabDefinitions: TabDefinitions, paneKeys: [...PaneComponents.keys()] };
   } finally {
     global.window = saved.window; global.document = saved.document;
     global.fetch = saved.fetch; global.setInterval = saved.setInterval; global.clearInterval = saved.clearInterval;
@@ -378,10 +396,19 @@ test('右栏：注册全部走 ctx.effect，并把「刷新 / 独立窗口」挂
   assert.ok(effectDisposers.length >= 4, '注册未被 ctx.effect 接管（disposer 数：' + effectDisposers.length + '）');
   // 菜单项：刷新 + 独立窗口，各一个
   assert.equal(menuItems.length, 2, '标签动作菜单项应有两个，实际 ' + menuItems.length);
-  // 菜单项必须能安全渲染（面板未打开时也不得抛错），并如实说明作用于哪个站点
+  // 菜单项必须能安全渲染，并如实说明作用于哪个站点。
+  //
+  // 0.15.12：菜单项现在**只对网页标签页显示**（官方契约原文：「Entries decide
+  // their own visibility from the tab they are given」）。owner 必须带 tab——
+  // 旧用例只给 dismiss，等于模拟了一个「没有 tab 的菜单」，那在新契约下应当
+  // 返回 null（隐藏），因此这里按真实 owner 形状喂进去。
   for (const Item of menuItems) {
+    // 非网页标签页：必须隐藏（返回 null），否则会在 Team/任务板菜单里出现
+    // 一个「刷新网页」——而它作用于**另一个**面板的站点，用户完全看不出来。
+    assert.equal(Item({ dismiss: () => {}, tab: { kind: 'webcode-team' } }), null,
+      '菜单项在非网页标签页上也渲染了——点下去会作用到别的面板');
     let el;
-    assert.doesNotThrow(() => { el = Item({ dismiss: () => {} }); });
+    assert.doesNotThrow(() => { el = Item({ dismiss: () => {}, tab: { kind: 'webcode-bridge' } }); });
     const t = treeText(el);
     assert.ok(t.length > 0, '菜单项没有可见文案');
     assert.match(t, /刷新网页|切换独立窗口/);
@@ -715,6 +742,237 @@ test('设置页：会话身份必须经 useSessions 取，不得用 root 槽的 
   assert.ok(/function SettingsSection\(/.test(src), '缺少 SettingsSection 会话注入层');
   assert.ok(/props\.useSessions|\.useSessions\b/.test(src), '没有使用官方 useSessions standard prop 读取会话');
   assert.ok(/useSessions\(s => \(s && s\.current\)/.test(src), 'useSessions 的取值形态变了（应读 state.current）');
+});
+
+// ------------------------------------------------------------------ 0.15.12 两个新面板
+
+/**
+ * 两个新标签页必须**真的注册**，且必须是 page type。
+ *
+ * 官方契约（tab-registry.d.ts）：省略 `patterns` 的类型是 page type，「is opened by
+ * kind」，不做地址识别。团队与任务板本来就没有「打开某个资源」的语义——若照抄
+ * 网页那个 kind 的写法给它加 patterns，它会去和文件类 kind 抢地址。
+ */
+test('★ 两个新面板：三个 kind 各自注册，且新面板是 page type（无 patterns）', async () => {
+  const { errors, paneKeys, tabDefinitions } = await renderPane({ payloads: [emptyWindows] });
+  assert.deepEqual(errors, [], '注册阶段抛错：' + errors.map(e => e.message).join('; '));
+  for (const kind of ['webcode-bridge', 'webcode-team', 'webcode-tasks']) {
+    assert.ok(tabDefinitions.has(kind), '标签页类型未注册：' + kind + '（已注册：' + [...tabDefinitions.keys()].join(', ') + '）');
+    const def = tabDefinitions.get(kind);
+    assert.equal(typeof def.title, 'function', kind + ' 的 title 必须是 thunk（语言切换要能重读）');
+    assert.equal(def.priority, 'extension', kind + ' 必须声明 extension 优先级');
+    assert.ok(Array.isArray(def.guide) && def.guide.length > 0, kind + ' 缺少 guide 入口');
+  }
+  // 新面板是 page type：不得声明 patterns。
+  for (const kind of ['webcode-team', 'webcode-tasks']) {
+    assert.equal(tabDefinitions.get(kind).patterns, undefined,
+      kind + ' 声明了 patterns —— 它是 page type，不该参与地址识别');
+  }
+  // 三个正文各自占一个 keyed 座位，且 key 互不相同（合成一个会让标签条出现同名项）。
+  assert.equal(new Set(paneKeys).size, paneKeys.length, 'pane.tab 座位 key 有重复：' + paneKeys.join(', '));
+  assert.ok(paneKeys.length >= 3, '新面板正文未注册（座位：' + paneKeys.join(', ') + '）');
+});
+
+/**
+ * Team 面板：成员行必须带可读的角色/状态/归属，且读不到时说「读不到」。
+ *
+ * 为什么不能只断言「不抛错」：那正是本项目已经踩过三次的坑（mock 失真 → 全绿
+ * 但什么也没证明）。这里逐项要求**信息真的到达界面**：状态词、角色、模型、任务数。
+ */
+test('★ Team 面板：成员的角色/状态/模型/任务数都必须渲染成可读文本', async () => {
+  const { errors, tree } = await renderPane({
+    payloads: [emptyWindows], which: 'team',
+    roster: {
+      team: [
+        { id: 's1', name: 'lead', role: 'lead', status: 'running', model: 'deepseek:deepseek' },
+        { id: 's2', name: 'reviewer', role: 'teammate', status: 'idle', context: 'fresh', taskCount: 2 },
+      ],
+      tasks: [],
+    },
+  });
+  assert.deepEqual(errors, [], 'Team 面板渲染抛错：' + errors.map(e => e.message).join('; '));
+  const text = treeText(tree);
+  assert.ok(text.includes('reviewer'), '成员名必须渲染：' + text.slice(0, 400));
+  assert.ok(text.includes('teammate'), '角色必须渲染（官方给的就是这个词，原样透出）：' + text.slice(0, 400));
+  assert.ok(text.includes('空闲'), '成员状态必须是可读词而不是只有色点：' + text.slice(0, 400));
+  assert.ok(text.includes('deepseek:deepseek'), '成员模型必须显示：' + text.slice(0, 400));
+  assert.ok(/任务 2/.test(text), '任务归属数必须显示：' + text.slice(0, 400));
+  assert.ok(text.includes('fresh'), '上下文模式必须透出：' + text.slice(0, 400));
+  // 共享 checkout 的事实不能省：否则「并行面板」看起来像隔离环境。
+  assert.ok(/共享同一个 checkout/.test(text), '未说明 Team 共享 checkout');
+});
+
+/**
+ * Team 面板：`inactive` 必须显示成「未加载（可唤醒）」，不是「已停止」。
+ *
+ * 官方 README（agent-team）明说这种成员仍会收到排队消息。显示成「已停止」会让
+ * 用户去重建一个本来还活着的成员——动作完全错，而界面上看不出错。
+ */
+test('★ Team 面板：inactive 成员必须说「可唤醒」，不得显示成已停止', async () => {
+  const { errors, tree } = await renderPane({
+    payloads: [emptyWindows], which: 'team',
+    roster: { team: [{ id: 's2', name: 'reviewer', role: 'teammate', status: 'inactive' }], tasks: [] },
+  });
+  assert.deepEqual(errors, [], '渲染抛错：' + errors.map(e => e.message).join('; '));
+  const text = treeText(tree);
+  assert.ok(/未加载（可唤醒）/.test(text), 'inactive 未按官方语义显示：' + text.slice(0, 400));
+  assert.ok(!/已停止/.test(text), 'inactive 被显示成「已停止」——用户会去重建一个还活着的成员');
+  assert.ok(/发一条消息就会唤醒/.test(text), '未给出可执行的下一步（怎么唤醒它）');
+});
+
+/**
+ * Team 面板：只有 lead 一行时必须说明「没有派生 teammate」。
+ *
+ * 官方语义：**每个普通顶层会话都是隐式 Team 的 Lead**（agent-team README）。
+ * 因此 `listMembers` 在没有团队时也会返回一行 lead——照单渲染会让用户以为
+ * 有一个团队在协作，而实际上 `spawn_teammate` 根本没挂载。
+ */
+test('★ Team 面板：只有 lead 一行时必须说明「没有派生 teammate」', async () => {
+  const { errors, tree } = await renderPane({
+    payloads: [emptyWindows], which: 'team',
+    roster: { team: [{ id: 's1', name: 'lead', role: 'lead', status: 'running' }], tasks: [] },
+  });
+  assert.deepEqual(errors, [], '渲染抛错：' + errors.map(e => e.message).join('; '));
+  const text = treeText(tree);
+  assert.ok(/没有派生出的 teammate/.test(text),
+    '只有 lead 时未说明「没有派生 teammate」，会被读成「有一个团队」：' + text.slice(0, 400));
+});
+
+/**
+ * 任务板：四组分区必须都在，且「可开工 / 被阻塞」按**官方 ready** 分流。
+ */
+test('★ 任务板：可开工与被阻塞必须分开，且阻塞明细要点名上游与它的状态', async () => {
+  const { errors, tree } = await renderPane({
+    payloads: [emptyWindows], which: 'tasks',
+    roster: {
+      team: [],
+      tasks: [
+        { id: 'a', subject: '跑基线', status: 'in_progress', ownerName: 'lead', blockedBy: [], ready: false },
+        { id: 'b', subject: '可以开工的', status: 'pending', blockedBy: [], ready: true },
+        { id: 'c', subject: '等基线的', status: 'pending', blockedBy: ['a'], ready: false },
+        { id: 'd', subject: '已完成的', status: 'completed', blockedBy: [], ready: false },
+      ],
+    },
+  });
+  assert.deepEqual(errors, [], '任务板渲染抛错：' + errors.map(e => e.message).join('; '));
+  const text = treeText(tree);
+  for (const head of ['可开工', '被阻塞', '进行中', '已完成']) {
+    assert.ok(text.includes(head), '缺少分区：' + head + ' —— ' + text.slice(0, 400));
+  }
+  assert.ok(text.includes('可以开工的'), '就绪任务未渲染：' + text.slice(0, 400));
+  assert.ok(text.includes('等基线的'), '被阻塞任务未渲染：' + text.slice(0, 400));
+  // 阻塞明细必须点名上游**并带它自己的状态**：否则分不清「正常等待」与
+  // 「上游已失败、需要人处理」——那是两个完全不同的动作。
+  assert.ok(/等在 跑基线（进行中）/.test(text),
+    '阻塞明细未点名上游或没带上游状态：' + text.slice(0, 600));
+  // 写范围是 advisory 而不是锁：官方明文，界面必须说清楚。
+  assert.ok(/写范围重叠只是提醒而不是锁/.test(text), '未说明写范围是 advisory');
+  // 就绪来源必须如实标注（官方值 vs 桥现算）。
+  assert.ok(/就绪（ready）取官方算好的判据/.test(text), '未说明就绪判据的来源');
+});
+
+/**
+ * 任务板：图诊断（阻塞点 / 关键路径 / 结构问题）必须真的渲染。
+ *
+ * 这是本轮新增的**图级**视角——官方逐行事实里没有这一层。三条都必须到达界面，
+ * 否则「为什么整块板没动」这个问题在 UI 上仍然没有答案。
+ */
+test('★ 任务板：图诊断三件套（阻塞点 / 关键路径 / 环）都必须渲染', async () => {
+  const graph = {
+    counts: { total: 3, pending: 2, inProgress: 1, completed: 0, ready: 1, blocked: 1, unowned: 0, deleted: 0 },
+    nodes: [],
+    acyclic: true,
+    criticalPath: ['a', 'c'],
+    criticalPathLength: 2,
+    cycles: [],
+    selfLoops: [],
+    missingEdges: [],
+    blockedOn: [{ id: 'a', subject: '跑基线', status: 'in_progress', ownerName: 'lead', waitingCount: 1 }],
+  };
+  const tasks = [
+    { id: 'a', subject: '跑基线', status: 'in_progress', ownerName: 'lead', blockedBy: [], ready: false },
+    { id: 'b', subject: '旁路', status: 'pending', blockedBy: [], ready: true },
+    { id: 'c', subject: '收尾', status: 'pending', blockedBy: ['a'], ready: false },
+  ];
+  const { errors, tree } = await renderPane({
+    payloads: [emptyWindows], which: 'tasks',
+    roster: { team: [], tasks, graph },
+  });
+  assert.deepEqual(errors, [], '图诊断渲染抛错：' + errors.map(e => e.message).join('; '));
+  const text = treeText(tree);
+  assert.ok(/当前阻塞点/.test(text), '缺少「当前阻塞点」分区：' + text.slice(0, 500));
+  assert.ok(/卡住 1 项/.test(text), '阻塞点未给出卡住的下游数：' + text.slice(0, 500));
+  assert.ok(/关键路径（2 个任务）/.test(text), '缺少关键路径：' + text.slice(0, 500));
+  // 关键路径必须用**任务标题**而不是裸 id——裸 id 用户认不出是哪个任务。
+  assert.ok(/跑基线 → 收尾/.test(text), '关键路径未渲染成可读标题链：' + text.slice(0, 600));
+});
+
+/**
+ * 任务板：图结构问题（环 / 自环 / 悬空边）必须红字报出，且说明后果。
+ *
+ * 带环的图在界面上表现为「一堆永远不 ready 的待办」，看起来像卡死，其实是结构错误。
+ * 只说「有环」不够——必须说「环内任务永远不会就绪」。
+ */
+test('★ 任务板：环 / 自环 / 悬空边必须报出，并说明「永远不会就绪」的后果', async () => {
+  const graph = {
+    counts: { total: 2, pending: 2, inProgress: 0, completed: 0, ready: 0, blocked: 2, unowned: 2, deleted: 0 },
+    nodes: [], acyclic: false, criticalPath: [], criticalPathLength: null,
+    cycles: [['a', 'b']], selfLoops: ['c'], missingEdges: [{ from: 'a', to: 'ghost' }],
+    blockedOn: [],
+  };
+  const { errors, tree } = await renderPane({
+    payloads: [emptyWindows], which: 'tasks',
+    roster: { team: [], tasks: [{ id: 'a', subject: 'A', status: 'pending', blockedBy: ['b'], ready: false }], graph },
+  });
+  assert.deepEqual(errors, [], '结构问题渲染抛错：' + errors.map(e => e.message).join('; '));
+  const text = treeText(tree);
+  assert.ok(/图结构问题/.test(text), '缺少图结构问题分区：' + text.slice(0, 500));
+  assert.ok(/依赖成环/.test(text), '未报出环：' + text.slice(0, 500));
+  assert.ok(/永远不会就绪/.test(text), '未说明环的后果（环内任务永远不会就绪）');
+  assert.ok(/自环/.test(text), '未报出自环：' + text.slice(0, 500));
+  assert.ok(/悬空依赖/.test(text), '未报出悬空边：' + text.slice(0, 500));
+  // 带环时**不得**给出关键路径——无定义的东西不该有值。
+  assert.ok(!/关键路径（/.test(text), '带环时仍渲染了关键路径（图上最长路径无定义）');
+  assert.ok(/无法计算关键路径与深度/.test(text), '带环时未说明为何没有关键路径');
+});
+
+/**
+ * 两个新面板的读不到路径：必须说「读不到」+ 原因，不得画成空列表。
+ */
+test('★ 新面板：读不到时必须给原因，不得画成「确实没有」', async () => {
+  const roster = { team: [], tasks: [], teamError: 'caller-not-live', tasksError: 'caller-not-live' };
+  const team = await renderPane({ payloads: [emptyWindows], which: 'team', roster });
+  assert.deepEqual(team.errors, [], 'Team 面板读不到时抛错：' + team.errors.map(e => e.message).join('; '));
+  const teamText = treeText(team.tree);
+  assert.ok(teamText.includes('caller-not-live'), 'Team 面板未给出原因：' + teamText.slice(0, 400));
+  assert.ok(/不代表没有成员/.test(teamText), 'Team 面板未澄清「读不到 ≠ 没有成员」');
+
+  const tasks = await renderPane({ payloads: [emptyWindows], which: 'tasks', roster });
+  assert.deepEqual(tasks.errors, [], '任务板读不到时抛错：' + tasks.errors.map(e => e.message).join('; '));
+  const taskText = treeText(tasks.tree);
+  assert.ok(taskText.includes('caller-not-live'), '任务板未给出原因：' + taskText.slice(0, 400));
+  assert.ok(/不代表没有任务/.test(taskText), '任务板未澄清「读不到 ≠ 没有任务」');
+});
+
+/**
+ * 两个新面板不得在浏览器侧重算图论。
+ *
+ * 图诊断由服务端 `lib/task-graph.js` 算好后经 /status 透出。在浏览器侧再写一份
+ * （比如本地按 blockedBy 推 ready）会立刻产生两份真相：面板说「可开工」、服务端
+ * 说 ready=false，而用户不知道信哪个——这正是本项目反复踩过的那一族缺陷。
+ */
+test('★ 新面板：不得在客户端重算就绪/关键路径（图诊断只有一个来源）', async () => {
+  const src = bridgeSrcFrom('client.cjs');
+  const at = src.indexOf('function TaskBoardPanel');
+  assert.ok(at > 0, '找不到 TaskBoardPanel');
+  // 取到下一个顶层函数为止，避免把别处的代码算进来。
+  const end = src.indexOf('\n    function ', at + 10);
+  const body = src.slice(at, end === -1 ? at + 6000 : end);
+  assert.ok(!/blockedBy\.every\(/.test(body),
+    'TaskBoardPanel 里出现了官方就绪判据的重算 —— 就绪只能取服务端/官方值');
+  assert.ok(!/\.depth\s*=/.test(body) && !/topolog/i.test(body),
+    'TaskBoardPanel 里出现了图算法 —— 图诊断只能来自服务端 graph 字段');
+  assert.ok(/data\.graph|graph\b/.test(body), 'TaskBoardPanel 没有消费服务端的 graph 字段');
 });
 
 test('设置页：useSessions 缺席时优雅降级为 null，不得整块崩掉', async () => {
