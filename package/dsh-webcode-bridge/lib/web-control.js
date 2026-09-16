@@ -19,7 +19,7 @@
 import { listAllModels, SITES, getSite } from './providers.js';
 import { DEFAULT_SLOT, normalizeSlot, formatAccountKey, parseAccountKey, normalizeAccounts } from './accounts.js';
 import { buildPromptVariants } from './prompt-variants.js';
-import { composerWaitLine, waitStatRows, formatDuration } from './wait-stats.js';
+import { composerWaitLine, composerWaitPillLabel, waitStatDetailRows, waitStatRows, formatDuration, sanitizeWaitStats } from './wait-stats.js';
 import { isLoopbackHost, originMatchesHost } from './loopback.js';
 import { httpFetch } from './upstream.js';
 import fs from 'node:fs';
@@ -240,12 +240,18 @@ export function createWebControl(deps = {}) {
       ok: true,
       total,
       session,
-      // 设置页「累计」区块直接渲染这些行。
+      // 设置页「累计」区块直接渲染这些行（0.15.10 起该区块已从设置页移除，
+      // 字段保留：它是累计账本的公开只读面，curl 与旧前端仍可核对）。
       rows: total ? waitStatRows(total) : [],
       // 输入框底下那一条速览（数据不足时为 null，前端据此不渲染）。
       line: composerWaitLine({ session, metrics }) || (total && total.totalWaitMs > 0
         ? '累计等待发送 ' + formatDuration(total.totalWaitMs)
         : null),
+      // 0.15.10：药丸用的短文案（与官方 StatsPills 同为单行 13px），以及点击
+      // 面板的详情行。三者同源同口径，避免「药丸一个数、面板另一个数」。
+      label: composerWaitPillLabel({ session, metrics }),
+      sessionValue: session ? formatDuration(sanitizeWaitStats(session).totalWaitMs) : '',
+      detailRows: waitStatDetailRows({ session, total, metrics }),
     };
   }
 
@@ -379,9 +385,15 @@ export function createWebControl(deps = {}) {
     // 展示文案由**服务端**算好（composerWaitLine / waitStatRows）：client.cjs 是单
     // 文件 bundle，import 不到 lib/ 的模块，若在浏览器侧再写一份 formatDuration，
     // 两个数字迟早会长得不一样——用户就无法信任任何一个。这里一次算清。
-    // 走 POST 是因为要带 sessionId；GET 形态同时保留，便于 curl 核对累计值。
+    // 走 POST 是因为要带 sessionId（本会话读数必需）。**只注册 POST**：
+    // GET 形态一度存在（注释写的是「便于 curl 核对累计值」），但它没有任何
+    // 真实消费方，而 POST 的空 body 形态本来就给出逐字相同的累计视图——
+    //     curl -X POST .../__webcode/wait-stats -d '{}'
+    // 于是那条 GET 是纯粹的死路由。它被 `test/client-server-contract.test.mjs`
+    // 的第二条判据抓到（「同名动作存在但方法对不上」）：客户端只用 POST，
+    // GET 永不抵达。多一条永不抵达的同名路由，只会让「哪个方法是对的」重新
+    // 变成需要猜的事——那正是 0.15.3 那次 405 的同族病根。
     'POST wait-stats': async (body) => waitStatsPayload(body?.sessionId, body?.metrics || null),
-    'GET wait-stats': async () => waitStatsPayload(),
     // 窗口声明可见性（B-3）——「桥向 DSH 声明的上下文窗口」此前只存在于代码里，
     // 用户在 GUI 上看到的占用百分比是相对一个**看不见**的数，越界报错也说不清
     // 比的是哪个值。这里把每个站点的声明值 + 它的**来源**（实测 / 配置覆盖 /

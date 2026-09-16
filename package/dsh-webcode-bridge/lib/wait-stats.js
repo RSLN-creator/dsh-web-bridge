@@ -141,3 +141,65 @@ export function waitStatRows(stats) {
   if (s.updatedAt) rows.push({ label: '最近更新', value: new Date(s.updatedAt).toLocaleString() });
   return rows;
 }
+
+/**
+ * 输入框底下那枚药丸的**短文案**（0.15.10）。
+ *
+ * 与 `composerWaitLine` 的区别是长度预算：官方在同一个槽位放的是 13px 单行
+ * 药丸（ui-chat 的 StatsPills），一行只容得下「一个数 + 一个后缀」。旧实现把
+ * 本会话、距上次发送、限流三件事全塞进一行，于是它只能另起一行、和官方那排
+ * 药丸分成两栏——用户报的「两栏」正是这么来的。
+ *
+ * 这里只留最要紧的那个数：本会话累计等待（等过才有）。限流重试作为后缀附上；
+ * 完全没数据时返回 null，调用方整枚药丸不渲染。其余细节全部进点击面板
+ * （见 {@link waitStatDetailRows}）。
+ *
+ * @param {object} o
+ * @param {object} [o.session] 本会话账本
+ * @param {object} [o.metrics] 本轮 relay.metrics
+ * @returns {string|null}
+ */
+export function composerWaitPillLabel({ session, metrics } = {}) {
+  const s = sanitizeWaitStats(session);
+  const m = metrics || {};
+  const parts = [];
+  if (s.totalWaitMs > 0) parts.push('等待发送 ' + formatDuration(s.totalWaitMs));
+  if (s.rateLimitRetries > 0) parts.push('限流重试 ' + s.rateLimitRetries + ' 次');
+  // 还没等到发过、但已知距上次发送：至少给一个可核对的数，而不是空药丸。
+  if (!parts.length && m.sincePrevSendMs != null) parts.push('距上次发送 ' + formatDuration(m.sincePrevSendMs));
+  if (!parts.length) return null;
+  return parts.join(' · ');
+}
+
+/**
+ * 点击药丸后那面板里的详情行（0.15.10，对齐官方 stat-dialog 的 dl 网格）。
+ *
+ * 官方统计药丸的交互契约是「默认只给一个数，点开才有明细」（StatsPills 的
+ * TimePill/UsagePill 各带一个 stat-dialog）。这里照同一套来：本会话在前、
+ * 累计在后，每行一个可核对的标签值对。空账本不出行——面板不留 `0 ms` 噪音。
+ *
+ * @param {object} o
+ * @param {object} [o.session] 本会话账本
+ * @param {object} [o.total] 累计账本
+ * @param {object} [o.metrics] 本轮 relay.metrics
+ * @returns {{label:string,value:string}[]}
+ */
+export function waitStatDetailRows({ session, total, metrics } = {}) {
+  const s = sanitizeWaitStats(session);
+  const t = total ? sanitizeWaitStats(total) : null;
+  const m = metrics || {};
+  const rows = [];
+  if (s.totalWaitMs > 0 || s.turns > 0) {
+    rows.push({ label: '本次会话等待发送', value: formatDuration(s.totalWaitMs) });
+    rows.push({ label: '本次会话轮次', value: s.turns + ' 轮' });
+    if (s.rateLimitRetries > 0) rows.push({ label: '本次会话限流重试', value: s.rateLimitRetries + ' 次' });
+  }
+  if (m.gapTargetMs > 0) rows.push({ label: '发送间隔目标', value: formatDuration(m.gapTargetMs) });
+  if (m.sincePrevSendMs != null) rows.push({ label: '距上次发送', value: formatDuration(m.sincePrevSendMs) });
+  if (t && t.totalWaitMs > 0) {
+    rows.push({ label: '累计等待发送', value: formatDuration(t.totalWaitMs) });
+    rows.push({ label: '累计已统计', value: t.turns + ' 轮' });
+    if (t.waitedTurns > 0) rows.push({ label: '平均每次等待', value: formatDuration(Math.round(t.totalWaitMs / t.waitedTurns)) });
+  }
+  return rows;
+}

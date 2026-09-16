@@ -21,8 +21,13 @@ window.__ModuleLoader__.load({
     'use strict';
     const React = require('react');
     const { createRoot } = require('react-dom/client');
-    const { IconCodeOutline16 } = require('@deepseek-ai/dsh-client-ui-primitives');
+    // portal 用：把等待药丸挂进官方统计那一行（见 WaitLine / useOfficialStatsHost）。
+    const { createPortal } = require('react-dom');
+    const { IconCodeOutline16, IconQueueOutline14 } = require('@deepseek-ai/dsh-client-ui-primitives');
     const h = React.createElement;
+    // 等待统计用的图标：官方 primitives 没有 gauge/clock 图标，队列图标是同一
+    // 语义域里最近的一个（「还没轮到发送」）。与官方一样只取 14px 线框图标。
+    const IconWait = ({ size }) => h(IconQueueOutline14, { size });
     const inject = ['slots', 'settingsScope', 'sidebarRightTabs', 'sidebarRight'];
     const RELAY_PORT = 8931;
     const relayBase = 'http://127.0.0.1:' + RELAY_PORT;
@@ -207,22 +212,128 @@ window.__ModuleLoader__.load({
      *
      * @param {{sessionId?: string}} owner 由 inject 注入的会话 id
      */
+    /**
+     * 官方统计行的挂载点（0.15.11）。
+     *
+     * ui-chat 的 StatsPills 把根节点标成 `data-composer-stats`，它那条 CSS 是
+     * `display:flex; justify-content:center; gap:12px`——**它本身就是一行**。而
+     * `conversation.composer.dock` 的每个条目都落在 composerStack（列向 flex）里，
+     * 所以另起一个条目必然换行。把本组件 portal 进那个行容器，它就成为该行里
+     * 紧跟官方药丸之后的 flex 子项：居中、间距、换行全部由官方 CSS 决定，
+     * 没有任何写死的偏移量。
+     *
+     * 官方行不存在时（会话尚无任何统计：StatsPills 在 steps===0 && !hasTokens
+     * 时返回 null）返回 null，调用方回落到自建的一行。
+     *
+     * 为什么要观察：dock 条目与官方药丸的挂载时机不同（后者要等第一个统计投影
+     * 到达），首次渲染常常还找不到行。这里用 MutationObserver 盯着 body，行一
+     * 出现就重算并断开观察，避免「必须刷新才同栏」。
+     *
+     * @param {boolean} wanted 本组件是否有内容要显示（false 时不必扫）
+     * @returns {HTMLElement|null} 官方统计行容器
+     */
+    function useOfficialStatsHost(wanted) {
+      const [host, setHost] = React.useState(null);
+      React.useEffect(() => {
+        if (!wanted) { setHost(null); return () => {}; }
+        let observer = null;
+        const find = () => {
+          let found = null;
+          try { found = document.querySelector('[data-composer-stats]'); } catch { found = null; }
+          setHost(prev => (prev === found ? prev : found));
+          return found;
+        };
+        if (find() !== null) return () => {};
+        try {
+          observer = new MutationObserver(() => {
+            if (find() !== null && observer !== null) { observer.disconnect(); observer = null; }
+          });
+          observer.observe(document.body, { childList: true, subtree: true });
+        } catch { observer = null; }
+        return () => { if (observer !== null) observer.disconnect(); };
+      }, [wanted]);
+      return host;
+    }
+
     function WaitLine(owner) {
       const sessionId = owner?.sessionId || null;
-      const [line, setLine] = React.useState('');
+      const [data, setData] = React.useState(null);
+      const [open, setOpen] = React.useState(false);
+      const rootRef = React.useRef(null);
       React.useEffect(() => {
-        if (!sessionId) { setLine(''); return () => {}; }
+        if (!sessionId) { setData(null); return () => {}; }
         let alive = true;
         const pull = () => api('wait-stats', { sessionId })
-          .then(r => { if (alive) setLine(typeof r?.line === 'string' ? r.line : ''); })
+          .then(r => { if (alive) setData(r || null); })
           .catch(() => { /* 中继未起时静默：这条是附加信息，不该刷错误 */ });
         pull();
         // 10 秒一次足够：这个数只在本轮结束后才变，且是本地回环请求。
         const timer = setInterval(pull, 10000);
         return () => { alive = false; clearInterval(timer); };
       }, [sessionId]);
-      if (!line) return null;
-      return h('div', { className: 'hwb-waitline', role: 'status' }, line);
+      // 官方 StatsPills 的关闭语义（0.15.11）。
+      //
+      // 官方那两枚药丸由同一个 useState 驱动（openPill 独占：点另一枚就换过去），
+      // 并由 primitives 的 useDismissOnOutsidePointer 负责「点空白处收起」。本组件
+      // 是独立注册的 dock 条目、拿不到那个 state，因此按同一套语义等价实现：
+      //   • Esc 收起；
+      //   • pointerdown 落在自己 wrap 之外就收起——于是点官方任何一枚药丸（在本 wrap
+      //     之外）时本面板随之关闭，与官方「同时只有一枚开着」的观感一致。
+      // 用 rootRef 而不是整行做边界：点自己面板内部（含滚动条）不会误关。
+      React.useEffect(() => {
+        if (!open) return;
+        const onKey = e => { if (e.key === 'Escape') setOpen(false); };
+        const closeOutside = event => {
+          const root = rootRef.current;
+          if (root && event.target instanceof Node && !root.contains(event.target)) setOpen(false);
+        };
+        document.addEventListener('keydown', onKey);
+        document.addEventListener('pointerdown', closeOutside);
+        return () => {
+          document.removeEventListener('keydown', onKey);
+          document.removeEventListener('pointerdown', closeOutside);
+        };
+      }, [open]);
+      const label = typeof data?.label === 'string' ? data.label : '';
+      const officialHost = useOfficialStatsHost(label !== '');
+      if (!label) return null;
+      const rows = Array.isArray(data?.detailRows) ? data.detailRows : [];
+      // 与官方 stat-dialog 的排布逐项对齐：标题行（图标+标题 / 右侧值）→
+      // 细分隔线 → dl 网格（dt 左、dd 右、tabular-nums）。
+      const content = h('div', {
+        className: 'hwb-waitwrap',
+        ref: rootRef,
+        // 自建一行时用官方同款行的类名（CSS 逐字抄 StatsPills.root）。
+        'data-webcode-wait': officialHost === null ? '' : null,
+      },
+        // 不给按钮挂 role="status"：那会把一个可聚焦控件声明成活区，屏幕阅读器
+        // 会把它当播报文本而非按钮（官方药丸也只给 aria-haspopup/aria-expanded）。
+        h('button', {
+          type: 'button', className: 'hwb-waitpill',
+          'aria-haspopup': 'dialog', 'aria-expanded': open,
+          'aria-label': '等待发送统计：' + label,
+          title: '等待发送统计',
+          onClick: () => setOpen(v => !v),
+        },
+          h(IconWait, { size: 14 }),
+          h('span', { className: 'hwb-waitpill-label' }, label)),
+        open && h('div', { className: 'hwb-waitpanel', role: 'dialog', 'aria-label': '等待发送统计' },
+          h('div', { className: 'hwb-waitpanel-head' },
+            h('span', { className: 'hwb-waitpanel-title' },
+              h(IconWait, { size: 14 }), '等待发送统计'),
+            data?.sessionValue
+              ? h('span', { className: 'hwb-waitpanel-value' }, data.sessionValue)
+              : null),
+          h('div', { className: 'hwb-waitpanel-rule', 'aria-hidden': true }),
+          rows.length
+            ? h('dl', { className: 'hwb-waitpanel-grid' },
+              rows.map(r => h('div', { key: r.label, className: 'hwb-waitpanel-row' },
+                h('dt', null, r.label), h('dd', null, r.value))))
+            : h('p', { className: 'hwb-hint' }, '本会话尚无等待记录。')));
+      // 官方统计行在 → portal 进去（成为该行的第三个 flex 子项，居中/间距/换行
+      // 全由官方那条 CSS 决定）；不在 → 原样返回，dock 自成一行的行为与 0.15.10
+      // 之前一致，但样式抄的是官方同款行。
+      return officialHost === null ? content : createPortal(content, officialHost);
     }
 
     /**
@@ -743,30 +854,12 @@ window.__ModuleLoader__.load({
             + '各站点登录态分开保存在各自 profile 里，互不串号；账户失效时在这里「更换账户」即可。'));
     }
 
-    /**
-     * 设置页的「累计等待发送」区块（0.14.4）。
-     *
-     * 用户要求：设置界面新增统计**所有累计**的等待时长，并且要「简洁直观、
-     * 不要沉在底部」。因此这里做成网格化的键值对（而不是一段长句），放在
-     * 速度卡片顶部——速度与等待本来就是同一件事的两面。
-     *
-     * 数值与文案都由服务端算（/__webcode/wait-stats 的 `rows`），与输入框底下
-     * 那条同源：本文件 import 不到 lib/wait-stats.js。
-     */
-    function WaitStats() {
-      const [rows, setRows] = React.useState(null);
-      React.useEffect(() => {
-        let alive = true;
-        const pull = () => api('wait-stats').then(r => { if (alive) setRows(Array.isArray(r?.rows) ? r.rows : []); }).catch(() => {});
-        pull();
-        const timer = setInterval(pull, 8000);
-        return () => { alive = false; clearInterval(timer); };
-      }, []);
-      if (!rows || !rows.length) return null;
-      return h('dl', { className: 'hwb-waitgrid' },
-        rows.map(r => h('div', { key: r.label },
-          h('dt', null, r.label), h('dd', null, r.value))));
-    }
+    // 0.15.10：设置页的「累计等待发送」区块（WaitStats）已删除。
+    //
+    // 它与输入框底下的药丸读同一份账本（/__webcode/wait-stats），同一个数字
+    // 在两处各渲染一遍——用户原话是「设置界面请你删除重复的」。累计明细现在
+    // 只在药丸的点击面板里出现一次（detailRows：本会话 + 累计同屏），与官方
+    // 「默认只给一个数、点开才有明细」的统计药丸契约一致。
 
     /**
      * 设置页外壳：把「当前会话 id」接进来，再交给 `Settings` 渲染。
@@ -965,7 +1058,9 @@ window.__ModuleLoader__.load({
 
         h('div', { className: 'hwb-card' },
           h('h3', { className: 'hwb-group first' }, '速度与等待'),
-          h(WaitStats),
+          // 0.15.10：设置页不再重复统计等待时长。累计明细已并入输入框底下那枚
+          // 药丸的点击面板（同源同口径），此处只保留「速度」实测指标——用户报
+          // 的「设置界面请你删除重复的」就是指这块与药丸重复的网格。
           h('div', { className: 'hwb-row' }, h('div', { className: 'hwb-row-main' }, h(Metrics, { metrics }))),
           // 「网页端回复了但 harness 这边卡住」（0.14.0）：驱动侧现在会在网页
           // 不发 FINISHED 时按稳态收束，并把次数/最后一次原因记在 status 里。
@@ -1430,13 +1525,41 @@ window.__ModuleLoader__.load({
         ".hwb-badge{display:inline-block;font-size:11px;line-height:16px;padding:0 8px;margin-right:6px;border-radius:8px;border:.5px solid var(--dsw-alias-border-l3,#8885);color:var(--dsw-alias-label-secondary,inherit)}",
         ".hwb-badge.measured{color:var(--dsw-alias-state-success-primary,#2e7d32);border-color:var(--dsw-alias-state-success-primary,#2e7d32)}",
         ".hwb-bar-row{display:flex;align-items:center;gap:12px}",
-        // 输入框底下的等待速览（0.14.4）。官方在同一槽位放一行状态药丸，
-        // 因此这里也只占一行、克制低饱和，不抢输入框的视觉重量。
-        ".hwb-waitline{font-size:12px;line-height:18px;padding:2px 10px;color:var(--dsw-alias-label-tertiary,#8a8f98);font-variant-numeric:tabular-nums}",
-        ".hwb-waitgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px 16px;width:100%}",
-        ".hwb-waitgrid div{display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px}",
-        ".hwb-waitgrid dt{color:var(--dsw-alias-label-tertiary,#8a8f98)}",
-        ".hwb-waitgrid dd{margin:0;color:var(--dsw-alias-label-primary,inherit);font-variant-numeric:tabular-nums}",
+        // 输入框底下的等待药丸（0.15.11）。
+        //
+        // 取值与尺寸逐项抄自官方 ui-chat 的 StatsPills.module.css：药丸
+        // 28px 高、border-radius 24px、padding 1px 8px、gap 6px、14px 线框图标，
+        // 悬停/展开用 interactive-bg-hover + label-secondary。
+        //
+        // 「同栏」由结构决定、不靠边距（0.15.11 重做）：找到官方统计行
+        //（[data-composer-stats]）后由 React portal 把本节点挂进去，它就成了
+        // 该行的兄弟 flex 子项，居中/间距/换行全归官方那条 CSS 管。只有官方行
+        // 缺席时才自建一行，样式逐字抄 StatsPills.root（见下条规则）——两处
+        // 视觉因此一致，也没有任何写死的偏移量会在侧栏挤窄时错位重叠。
+        ".hwb-waitwrap{position:relative;display:inline-flex;min-width:0}",
+        // 官方行缺席时的自建行：逐字抄 StatsPills.root
+        //（width/max-width/padding/justify-content/gap/margin/font-size）。
+        ".hwb-waitwrap[data-webcode-wait]{display:flex;box-sizing:border-box;width:100%;max-width:var(--dsh-chat-content-width);margin:0 auto;padding:4px calc(var(--dsh-composer-side-clearance,16px) + 16px) 0;justify-content:center;gap:12px;font-size:var(--dsh-content-font-size-secondary,13px);line-height:calc(20px + var(--dsh-content-font-delta-secondary,0px))}",
+        ".hwb-waitpill{box-sizing:border-box;max-width:100%;height:28px;display:inline-flex;align-items:center;gap:6px;padding:1px 8px;font:inherit;font-size:13px;line-height:24px;font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--dsw-alias-label-tertiary,#8a8f98);background:0 0;border:none;border-radius:24px;cursor:pointer;transition:background .12s ease,color .12s ease}",
+        ".hwb-waitpill:hover,.hwb-waitpill[aria-expanded=true]{background:var(--dsw-alias-interactive-bg-hover,#8882);color:var(--dsw-alias-label-secondary,inherit)}",
+        ".hwb-waitpill:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#3b82f6);outline-offset:1px}",
+        ".hwb-waitpill svg{flex:none;width:14px;height:14px}",
+        ".hwb-waitpill-label{min-width:0;overflow:hidden;text-overflow:ellipsis}",
+        // 点击面板：尺寸/圆角/阴影/网格逐项对齐官方 stat-dialog.module.css。
+        // 向上展开（bottom:calc(100% + 8px)）而不是向下，因为药丸本身就在输入框
+        // 底下，向下会盖住输入框——官方那两枚药丸同样朝上开。
+        ".hwb-waitpanel{position:absolute;bottom:calc(100% + 8px);right:0;z-index:1100;box-sizing:border-box;width:max-content;min-width:min(300px,100vw - 24px);max-width:min(440px,100vw - 24px);padding:16px;border-radius:12px;border:0;background:var(--dsw-specific-menu,var(--dsw-alias-bg-layer-1,#fff));box-shadow:var(--dsw-elevation-prominent,0 8px 24px #0003);color:var(--dsw-alias-label-secondary,inherit);font-size:12px;line-height:18px;cursor:default;text-align:left}",
+        ".hwb-waitpanel-head{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:8px;color:var(--dsw-alias-label-primary,inherit);font-weight:500}",
+        ".hwb-waitpanel-title{display:inline-flex;align-items:center;gap:6px;min-width:0}",
+        ".hwb-waitpanel-title svg{flex:none;width:14px;height:14px}",
+        ".hwb-waitpanel-value{font-variant-numeric:tabular-nums}",
+        ".hwb-waitpanel-rule{border-top:.5px solid var(--dsw-alias-border-l2,#8883);margin-bottom:10px}",
+        ".hwb-waitpanel-grid{display:grid;grid-template-columns:minmax(76px,auto) minmax(0,1fr);gap:6px 16px;margin:0}",
+        ".hwb-waitpanel-row{display:contents}",
+        ".hwb-waitpanel-grid dt,.hwb-waitpanel-grid dd{min-width:0;margin:0}",
+        ".hwb-waitpanel-grid dt{color:var(--dsw-alias-label-tertiary,#8a8f98)}",
+        ".hwb-waitpanel-grid dd{color:var(--dsw-alias-label-secondary,inherit);font-variant-numeric:tabular-nums;text-align:right}",
+        ".hwb-waitpanel p{margin:0}",
         ".hwb-bar-label{flex:0 0 76px;font-size:12px;color:var(--dsw-alias-label-secondary,inherit)}",
         ".hwb-bar-track{flex:1;height:8px;border-radius:4px;overflow:hidden;background:var(--dsw-alias-interactive-bg-hover,#8882)}",
         ".hwb-bar-fill{display:block;height:100%;border-radius:4px;background:var(--dsw-alias-label-tertiary,#8a8f98);transition:width .2s ease}",

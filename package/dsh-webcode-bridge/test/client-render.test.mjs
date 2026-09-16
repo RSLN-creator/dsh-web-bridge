@@ -40,6 +40,10 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null 
   let captured = null;
   let PaneComponent = null;
   let SettingsComponent = null;
+  // 0.15.11：输入框底下的等待药丸也必须被真的渲染到。此前没有任何用例捕获
+  // `conversation.composer.dock` 的组件，于是「药丸长什么样、点了会怎样」
+  // 这整条路径在测试里是空白——护栏再密也拦不住它回归。
+  let DockComponent = null;
   const MenuItems = [];
   const effectDisposers = [];
   let windowHits = 0;
@@ -92,13 +96,18 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null 
   const mockRequire = (id) => {
     if (id === 'react') return React;
     if (id === 'react-dom/client') return { createRoot: () => ({ render() {} }) };
-    if (id === '@deepseek-ai/dsh-client-ui-primitives') return { IconCodeOutline16: () => null };
+    // 0.15.11：等待药丸用 portal 挂进官方统计那一行，因此真的 require 了 react-dom。
+    // 桩成「就地返回内容」——测试断言的是渲染不抛错与文案，不是 portal 的落点；
+    // 落点由下面「不得靠几何偏移」那条源码护栏钉住。
+    if (id === 'react-dom') return { createPortal: (node) => node };
+    if (id === '@deepseek-ai/dsh-client-ui-primitives') return { IconCodeOutline16: () => null, IconQueueOutline14: () => null };
     throw new Error('unexpected require: ' + id);
   };
 
   try {
     global.window = { __ModuleLoader__: { load: (def) => { captured = def; } } };
-    global.document = { createElement: () => ({ textContent: '', remove() {} }), head: { appendChild() {} } };
+    global.document = { createElement: () => ({ textContent: '', remove() {} }), head: { appendChild() {} }, body: {}, querySelector: () => null, addEventListener() {}, removeEventListener() {} };
+    global.MutationObserver = class { observe() {} disconnect() {} };
     global.setInterval = () => ({});       // 组件的轮询计时器：不 stub 会拖住事件循环
     global.clearInterval = () => {};
     global.fetch = async (url) => {
@@ -138,6 +147,21 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null 
       }
       else if (u.includes('/__webcode/models')) body = { ok: true, models: [{ id: 'deepseek:deepseek', name: 'deepseek/deepseek', siteId: 'deepseek', thinking: true }] };
       else if (u.includes('/__webcode/connect')) body = { ok: true, loggedIn: true };
+      // 0.15.11：等待药丸的数据面。服务端已把文案与明细算好（label / detailRows），
+      // 客户端只负责渲染——夹具照真实载荷形状给，含本会话与累计两类行。
+      else if (u.includes('/__webcode/wait-stats')) body = {
+        ok: true,
+        total: { totalWaitMs: 20000, turns: 9, waitedTurns: 4, rateLimitRetries: 1, updatedAt: 1789000000000 },
+        session: { totalWaitMs: 3000, turns: 2, waitedTurns: 1, rateLimitRetries: 0, updatedAt: 1789000000000 },
+        rows: [{ label: '累计等待发送', value: '20.0 s' }],
+        line: '本次会话等待发送 3.0 s',
+        label: '等待发送 3.0 s',
+        sessionValue: '3.0 s',
+        detailRows: [
+          { label: '本次会话等待发送', value: '3.0 s' },
+          { label: '累计等待发送', value: '20.0 s' },
+        ],
+      };
       // 必须是**忠实**的 Response：真实 client.cjs 走 response.text() +
       // response.headers.get('content-type') 解析（见 lib/client.cjs 的 request()）。
       // 旧 mock 只给 json()，于是 text() 抛错被吞、headers 为 undefined——
@@ -173,6 +197,7 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null 
           if (def?.name === 'sidebar.right.pane.tab') PaneComponent = Comp;
           if (def?.name === 'settings.section') SettingsComponent = Comp;
           if (def?.name === 'sidebar.right.tab.menu.item') MenuItems.push(Comp);
+          if (def?.name === 'conversation.composer.dock') DockComponent = Comp;
           return () => {};
         },
       },
@@ -209,7 +234,10 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null 
       return { ...el, children: (el.children || []).map(instantiate) };
     };
     const errors = [];
-    const Target = which === 'settings' ? SettingsComponent : PaneComponent;
+    const Target = which === 'settings' ? SettingsComponent
+      : which === 'dock' ? DockComponent
+        : PaneComponent;
+    if (which === 'dock') assert.ok(DockComponent, 'conversation.composer.dock 从未注册');
     // 0.15.0：设置页的官方槽 inject 会喂进**当前会话 id**（花名册的
     // subagentCatalog 是会话级投影，服务端要用它去 sessions.get(sessionId)）。
     // 旧 harness 直接 `Target()` 调，等于模拟了一个「inject 什么都没给」的宿主；
@@ -551,6 +579,66 @@ test('★ 花名册：teamError 与 tasksError 同源失败时不得把同一句
 });
 
 // ------------------------------------------------------------------ 0.14.9 去臃肿
+
+test('★ 等待药丸：真的渲染出短读数，且默认不展开明细', async () => {
+  // 这条必须走真实组件（不再只是扫源码）：此前 dock 组件从未被捕获，
+  // 「药丸到底渲染出什么」在测试里是空白。
+  const { errors, tree } = await renderPane({ which: 'dock', payloads: [{}] });
+  assert.deepEqual(errors, [], '药丸渲染抛错');
+  const text = treeText(tree);
+  assert.match(text, /等待发送 3\.0 s/, '药丸必须显示服务端算好的短读数');
+  // 默认收起：明细只在点击后才出现——「默认没有，点击能出现」是用户的要求。
+  assert.ok(!/累计等待发送/.test(text), '明细默认不应展开');
+  assert.ok(!/本会话尚无等待记录/.test(text), '不该显示空态文案');
+});
+
+test('★ 等待药丸：可点（onClick 存在），且 aria 契约完整', async () => {
+  const { errors, tree } = await renderPane({ which: 'dock', payloads: [{}] });
+  assert.deepEqual(errors, []);
+  // 找到药丸按钮并触发它的 onClick（真实组件树的第一次点击）。
+  const buttons = [];
+  const collect = (el) => {
+    if (el === null || el === undefined || typeof el !== 'object') return;
+    if (Array.isArray(el)) { el.forEach(collect); return; }
+    if (typeof el.type === 'function') { collect(el.type(el.props)); return; }
+    if (el.type === 'button') buttons.push(el);
+    (el.children || []).forEach(collect);
+  };
+  collect(tree);
+  assert.ok(buttons.length > 0, '药丸按钮不存在');
+  const pill = buttons[0];
+  // 「默认没有，点击能出现」：收起态 + 真的挂了 onClick（点击由 React 驱动，
+  // 这里能验证的是契约本身——展开态的内容由下一条源码护栏与 wait-stats 单测覆盖）。
+  assert.equal(pill.props['aria-expanded'], false, '默认必须是收起的');
+  assert.equal(pill.props['aria-haspopup'], 'dialog', '对齐官方统计药丸的 aria 契约');
+  assert.equal(typeof pill.props.onClick, 'function', '药丸必须可点（点击才出现明细）');
+  // 官方那两枚药丸只给 aria-haspopup/aria-expanded，不挂 role="status"。
+  assert.equal(pill.props.role, undefined, '按钮不得挂 role="status"');
+  assert.match(String(pill.props['aria-label']), /等待发送/);
+});
+
+test('★ 等待药丸：同栏必须靠 portal 结构，不得用负边距等几何偏移硬拽', () => {
+  // 用户原话：「写死的会被侧面面板挤到重叠的」。0.15.10 用负上边距把本行拽进
+  // 官方那一行，官方行一旦换行（右栏把输入区挤窄）两块内容就叠在一起。
+  // 0.15.11 改成 portal 进 [data-composer-stats] 行容器——这条钉住「结构而非
+  // 偏移」：源码里不许再出现给等待 wrap 算负边距的代码。
+  const src = bridgeSrcFrom('client.cjs');
+  assert.ok(src.includes('createPortal'), 'client.cjs 必须用 portal 挂进官方统计行');
+  assert.ok(src.includes('data-composer-stats'), '必须按官方标记找那一行');
+  assert.ok(!/joinOffset/.test(src), '不得再保留负边距的几何补偿量 joinOffset');
+  assert.ok(!/marginTop:\s*-/.test(src), '不得给等待 wrap 写负上边距');
+  assert.ok(!/\.hwb-waitwrap\.joined/.test(src), '不得保留 joined 的几何 hack 样式');
+});
+
+test('★ 等待药丸：关闭语义必须与官方一致（Esc + 点外部）', () => {
+  // 官方 StatsPills 由 useStatDialog + useDismissOnOutsidePointer 驱动：同一时刻
+  // 只有一枚药丸开着，点别处收起。本组件是独立 dock 条目、拿不到那份 state，
+  // 因此必须等价实现这两个事件，否则面板会一直挂着不自动收缩。
+  const src = bridgeSrcFrom('client.cjs');
+  assert.ok(/key === 'Escape'/.test(src), '必须支持 Esc 收起');
+  assert.ok(src.includes("'pointerdown'"), '必须监听 pointerdown 以复刻官方的点外部关闭');
+  assert.ok(/!root\.contains\(event\.target\)/.test(src), '关闭边界必须是本组件自身，而不是整行');
+});
 
 test('去臃肿：设置页密度 token 必须与调研 token 表一致，且不再用线分隔行', async () => {
   // 用户原话：「做到简洁高效美观，而不是现在的臃肿」。

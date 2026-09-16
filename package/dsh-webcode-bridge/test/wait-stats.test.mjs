@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   waitOfTurn, emptyWaitStats, accumulateWait, sanitizeWaitStats,
-  formatDuration, composerWaitLine, waitStatRows,
+  formatDuration, composerWaitLine, composerWaitPillLabel, waitStatDetailRows, waitStatRows,
 } from '../lib/wait-stats.js';
 
 const NOW = Date.UTC(2026, 8, 14, 12, 0, 0);
@@ -120,6 +120,62 @@ test('composerWaitLine：本会话等待过 → 显示累计与距上次发送',
 test('composerWaitLine：未等待但有限流重试 → 仍给一行', () => {
   const line = composerWaitLine({ session: { totalWaitMs: 0, rateLimitRetries: 2 } });
   assert.match(line, /限流重试 2 次/);
+});
+
+// ---- composerWaitPillLabel（0.15.10）---------------------------------------
+
+test('composerWaitPillLabel：毫无数据时返回 null（调用方据此不渲染整枚药丸）', () => {
+  assert.equal(composerWaitPillLabel({}), null);
+  assert.equal(composerWaitPillLabel({ session: emptyWaitStats(), metrics: {} }), null);
+});
+
+test('composerWaitPillLabel：本会话等待过 → 只给一个短读数（不超过一行）', () => {
+  const label = composerWaitPillLabel({ session: { totalWaitMs: 12_000, turns: 2, waitedTurns: 1 } });
+  assert.equal(label, '等待发送 12.0 s');
+  // 旧的长文案（「本次会话等待发送 … · 距上次发送 …」）是「两栏」的根因：
+  // 它长到放不进官方那一行。药丸文案必须短——这里把它钉住。
+  assert.ok(!label.includes('距上次发送'));
+  assert.ok(label.length < 24);
+});
+
+test('composerWaitPillLabel：限流重试作为后缀附上', () => {
+  assert.equal(composerWaitPillLabel({ session: { totalWaitMs: 0, rateLimitRetries: 2 } }), '限流重试 2 次');
+  assert.equal(
+    composerWaitPillLabel({ session: { totalWaitMs: 3000, rateLimitRetries: 1 } }),
+    '等待发送 3.0 s · 限流重试 1 次');
+});
+
+test('composerWaitPillLabel：还没等待过但已知距上次发送 → 给一个可核对的数', () => {
+  assert.equal(composerWaitPillLabel({ session: emptyWaitStats(), metrics: { sincePrevSendMs: 9400 } }), '距上次发送 9.4 s');
+});
+
+// ---- waitStatDetailRows（0.15.10）-----------------------------------------
+
+test('waitStatDetailRows：空账本不给行（面板不留 0 ms 噪音）', () => {
+  assert.deepEqual(waitStatDetailRows({}), []);
+  assert.deepEqual(waitStatDetailRows({ session: emptyWaitStats() }), []);
+});
+
+test('waitStatDetailRows：本会话与累计同屏，且能区分两者', () => {
+  const rows = waitStatDetailRows({
+    session: { totalWaitMs: 3000, turns: 2, waitedTurns: 1, rateLimitRetries: 1 },
+    total: { totalWaitMs: 20_000, turns: 9, waitedTurns: 4 },
+    metrics: { gapTargetMs: 5000, sincePrevSendMs: 9400 },
+  });
+  const labels = rows.map(r => r.label);
+  assert.ok(labels.includes('本次会话等待发送'));
+  assert.ok(labels.includes('累计等待发送'));
+  assert.equal(rows.find(r => r.label === '本次会话等待发送').value, '3.0 s');
+  assert.equal(rows.find(r => r.label === '累计等待发送').value, '20.0 s');
+  assert.equal(rows.find(r => r.label === '距上次发送').value, '9.4 s');
+  assert.equal(rows.find(r => r.label === '发送间隔目标').value, '5.0 s');
+  // 平均值只在累计里、且只在等待过时给（分母为 0 不许除）。
+  assert.equal(rows.find(r => r.label === '平均每次等待').value, '5.0 s');
+});
+
+test('waitStatDetailRows：累计为 0 时不出现任何累计行', () => {
+  const rows = waitStatDetailRows({ session: { totalWaitMs: 1000, turns: 1, waitedTurns: 1 }, total: emptyWaitStats() });
+  assert.ok(!rows.some(r => r.label.includes('累计')));
 });
 
 // ---- waitStatRows ---------------------------------------------------------
