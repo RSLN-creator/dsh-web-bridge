@@ -29,8 +29,17 @@
 | 16 | 同站多账户（**已实现，0.14.7**）+ Team 面板（**已实现，0.15.0**） | — | 否 | `lib/accounts.js`、`lib/providers.js`、`lib/browser-driver.js`、`lib/client.cjs`、`lib/roster.js` |
 | 17 | 工具调用参数缺失族（新，本轮发现，**未归因**） | 中 | 否 | `lib/agent-preset.js`（`fillMissingRequired`）、`lib/index.js` |
 | 18 | **协议原文被持久化进助手正文**（新，0.15.0，**已修**） | 高 | 否 | `lib/agent-preset.js`（`proseSafeEnd`/`normalizeDsml`）、`lib/index.js` |
+| 19 | **0.15.6 修复不完整：边界命中但不可执行**（2026-09-16 **已归因 / 0.15.8 已修**） | 高 | 否 | `lib/agent-preset.js`（`invokeBodyEnd`）、`test/fence-nested-call.test.mjs` |
+| 20 | `doc/security-review.md` 带 BOM（2026-09-16，低优先） | 低 | 否 | `doc/security-review.md` |
 | 21 | **SET 重发吞掉流式增量**（新，0.15.7，**已修**） | 高 | — | `lib/decoder.js`（`emitFragmentDiff`） |
-| 22 | DeepSeek 只出思考不出正文（**未归因**，需真机取证） | 中 | 否 | `lib/metrics.js`、`lib/index.js` |
+| 22 | DeepSeek 只出思考不出正文（**已重新定性**，2026-09-16 复核） | 高 | 否 | `lib/metrics.js`、`lib/index.js`（`thinkingOnlyNotice`） |
+| 23 | **缺 `name` 字段的调用被静默丢弃**（0.15.9 新发现，**已修**） | 高 | 否 | `lib/agent-preset.js`（`inferToolNameFromArgs`）、`lib/index.js`、`test/nameless-call.test.mjs` |
+| 10b | 本机 `%TEMP%` 受限导致 3 个测试文件假失败（2026-09-16 实测） | 低 | 否 | `package.json`、`test/*.test.mjs`、`doc/progress.md` |
+
+> **一览表完整性（2026-09-16 修正）**：本表此前**漏登记 #19 与 #20**（正文有、表里没有）。
+> 这两条都是可机检的登记错误，而当时没有任何闸门覆盖「正文条目 ↔ 表格条目」的一致性。
+> 补登记的同时，这条缺口已写进 [`diagnosis-2026-09-16.md`](diagnosis-2026-09-16.md) §6.2 的 P1 排期。
+
 错误码视角的横向台账（已做哪些适配 / 残留风险）见 [`bridge-failure-ledger.md`](bridge-failure-ledger.md)。
 
 > **第 16 条状态更新（2026-09-15）**：**Team 面板已实现（0.15.0）**。
@@ -455,9 +464,44 @@ metrics 里对应 `sendWaitMs` / `gapTargetMs` / `sincePrevSendMs`
 
 ---
 
-## 9. 三项既有假失败：干净树上同样失败，不是回归
+## 9. 三项「既有假失败」：**归因错误**（2026-09-16 复核推翻）
 
-### 现状
+> ### 2026-09-16 复核推翻（本条的归因是错的）
+>
+> **这三项既不是「假失败」，也不该被记成「干净树上同样失败的既有欠账」。**
+>
+> 实跑（已设好 `TMPDIR`/`TEMP`/`TMP`，排除上一节 `%TEMP%` 的干扰）：
+>
+> ```
+> node test-mock/run-m2.js          → ❌ M2  harness failure: spawn EPERM   EXIT=1
+> node test-mock/run-m2b-driver.js  → ❌ M2b harness failure: spawn EPERM   EXIT=1
+> node test-mock/run-m2c-webapi.js  → ❌ M2c harness failure: spawn EPERM   EXIT=1
+> ```
+>
+> 三者**没有一个跑到自己的断言**。死在进程派生的位置：
+> `run-m2.js` 的 `spawn(process.execPath, [ …build-test-extension.js ])`、
+> `run-m2b-driver.js` 与 `run-m2c-webapi.js` 各自 `start()` 里的 `spawn(process.execPath, [ … ])`。
+>
+> 根因与本节下一段记录的**完全同源**：Node 在本机创建子进程被沙箱挡住
+> （`doc/progress.md` 的「已知环境约束」里已写「`spawnSync` 四种写法全部 EPERM」）。
+>
+> **三条推论**：
+>
+> 1. 原结论「走的是已废弃的扩展链路 / mock 响应形状脱节」**没有被任何实测支持**——
+>    因为脚本在触及那些逻辑**之前**就死了。它是从历史推测写成的，不是测得的事实。
+> 2. `run-m2c` 的真正断言（`completion via driver`）**本次根本没被执行**。
+>    说它「恒 FAIL」属于**未经执行的结论**。
+> 3. 「干净树上同样失败」这句**不可验证**：本机无法在干净树上跑到断言层。
+>
+> **改为**：这三项在本机（沙箱）**无法运行**，状态是 **UNTESTABLE**，不是 FAIL。
+> 真正的验证要么在 CI 上做（CI 里 `spawn` 可用），要么先用真的 Node 子进程能力复核。
+> 在拿到 CI 读数之前，**不得**再把它们当成「已知既有失败」来解释红色项。
+>
+> 另：上一节新增的「`%TEMP%` 受限致 3 个测试文件假失败」是**另一类**环境假阳性，
+> 特征不同（那个是 `mkdtemp` EPERM，可用 `TMPDIR` 绕过；本节这个是 `spawn` EPERM，
+> 无法用环境变量绕过）。两者都记在 #10 的收集口径下。
+
+### 现状（原文，保留以供对照）
 
 来自 `doc/review-guide.md:52-59`，原文收录：
 
@@ -519,6 +563,34 @@ node test/<file>.mjs
   它不会进入 `npm test` 的收集范围，**永远不跑**——这是静默的覆盖率漏洞。
 - 在本机沙箱下，`npm test` 会因为 `spawn EPERM` 直接失败，看起来像测试挂了，
   实际是环境限制。误判方向是「以为是回归」。
+
+> ### 2026-09-16 补充：本机还有**第二类** EPERM，特征不同，别混为一谈
+>
+> | | 触发点 | 表现 | 能否绕过 |
+> | --- | --- | --- | --- |
+> | 甲（上段，已记录） | `spawn` 子进程 | `node --test glob` / `npm test` / `run-m2*` 整体 EPERM | **不能**（需真子进程能力，只能逐文件跑或上 CI） |
+> | **乙（本次新记）** | `fs.mkdtempSync(os.tmpdir())` | **3 个测试文件假失败**，其余 36 个正常 | **能**：把 `TMPDIR`/`TEMP`/`TMP` 指到工作区 `.tmp` |
+>
+> 乙类实测：沙箱把 `%TEMP%` 设为 ACL 受限目录，`mkdtempSync` 一律
+> `EPERM: operation not permitted, mkdtemp 'C:\Users\…\Temp\dsh-XXXX\…'`。
+> 命中 `regression.test.mjs`、`tool-loop.test.mjs`、`wiring-roster.test.mjs`
+> （三者都用 `mkdtempSync(path.join(os.tmpdir(), …))` 建临时 profileDir）。
+>
+> **同一台机器、同一 Node 进程的对照实验**：
+>
+> | 目标目录 | `mkdtempSync` |
+> | --- | --- |
+> | `os.tmpdir()`（= 受限 `%TEMP%`） | **EPERM** |
+> | 工作区内 `.tmp` | **OK** |
+>
+> **反向验证**：设好三个环境变量后逐文件重跑 →
+> **`ok=39 fail=0`**。即台账「39/39 全绿」是对的，前提是绕过乙类 EPERM。
+>
+> **收尾纪律**：本机复核测试时，先设 `TMPDIR`/`TEMP`/`TMP` 指向工作区 `.tmp`，
+> 再逐文件跑。**不设而看到 3 个红色，是环境，不是回归**——
+> 这一条已写进 `doc/progress.md` 的「当前状态」段。
+> （同理：`artifacts-check.mjs` 在本机走 SKIP 分支、`ci-local.mjs` 四步都不会真跑，
+> 都属甲类，见 `doc/progress.md` 的「已知环境约束」。）
 
 ### 为什么现在不修
 
@@ -802,9 +874,101 @@ zai 的每一轮都会走 `unsupported` 分支 → 抛 `WEB_SESSION_LOST` → �
 
 ---
 
-## 19. **0.15.6 的修复不完整**：参数含围栏的调用仍会被「边界探测命中但不可执行」（2026-09-16 新发现，**未归因**）
+## 19. **0.15.6 的修复不完整**：参数含围栏的调用仍会被「边界探测命中但不可执行」（2026-09-16 **已归因 / 已在 0.15.8 修复**）
 
-### 现状
+> ### 2026-09-16 修复落地（0.15.8）
+>
+> 真根因见下节。**修法已实现并验证**：
+>
+> - `lib/agent-preset.js` 新增 `invokeBodyEnd(src, from)`——**配平感知状态机**，
+>   只在「参数外」遇到的第一个 `</invoke>` 才算体的终点。
+> - `invokeRe` 那条 lazy 正则已删除；改为「先定位开标签 → 用状态机定界体」。
+> - **同时重建 `m[0]` 为整段**（开标签+体+闭标签）：换成两次定位后若不重建，
+>   下游「畸形标签抢救」分支（扫 `m[0]` 找 `"name"/"arguments"` 片段）会失效。
+>   这是修法**自己引入过的真回归**，实测 `regression.test.mjs` 由 53/53 掉到 49/53。
+> - **降级兜底**：状态机扫到结尾仍不配平时退回第一个 `</invoke>`（畸形输入取旧行为），
+>   而不是返回 -1 把整条调用丢掉。
+>
+> **验证读数**（真机样本 `REPORT.md`，22,366 字符）：
+>
+> | | 修复前 | 修复后 |
+> | --- | --- | --- |
+> | `boundary` | `{index:67, transport:true}` | 同左（探测一直是对的） |
+> | `proseSafeEnd` | 67（扣留正确） | 67（保持） |
+> | **`calls`** | **0（静默丢调用）** | **1，`name=write`，`content=10,121` 字符** |
+>
+> **护栏**：`test/fence-nested-call.test.mjs` 新增 ⑬（正向必须救活）、
+> ⑬b（已知限制：参数值里**未被转义**的字面 `</parameter>` 仍会截断该值——诚实钉住，
+> 不是期望行为）、⑭（两调用不得吞并）、⑮（散文不得误报）、⑯（未配平不得抛异常）。
+> ⑬ 在修复前**实测为红**（`pass 17 / fail 1`），修复后该文件 **19/19 全绿**；
+> 全量 **39/39 测试文件通过**。
+
+> ### 2026-09-16 真根因已定位（本条从「未归因」改为「已归因，待修」）
+>
+> **先做排除法**：本条原来猜的形状是「表格？行内代码？嵌套引号？`edit` 双参数？」。
+> 用 8 个候选形状直接打纯函数（`.tmp/probe-issue19.mjs`），**8/8 全部健康**：
+> 都能解析出 1 个调用、`findProtocolStart` 命中、`proseSafeEnd` 正确扣留。
+> → **0.15.6 怀疑的「围栏形状」可以整体排除。**
+>
+> **再用真机样本质证**。仓库根有一份**活的泄漏现场** `REPORT.md`
+> （22,366 字符，2026-09-15 落盘，未入库；见 §4.3/§5 诊断报告）。喂给当前代码：
+>
+> ```
+> 样本长度            : 22366
+> findProtocolStart   : {"index":67,"name":"write","transport":true}
+> proseSafeEnd        : 67          ← 扣留正确：99.7% 的协议被拦下
+> 可执行调用数          : 0           ← 但调用仍不执行
+> ```
+>
+> 两条读数：**0.15.6/0.15.7 的护栏是有效的**（这份样本今天不会再泄漏协议原文，
+> 本条当初担心的「整段泄漏」已关闭）；**但该轮 `write` 依然静默不执行**。
+>
+> **真根因**：`lib/agent-preset.js` 的 `invokeRe` 用 **lazy** 的体捕获：
+>
+> ```js
+> const invokeRe = /<\s*invoke\s+name\s*=\s*"([^"]+)"\s*[^>]*>([\s\S]*?)<\s*\/\s*invoke\s*>/gi;
+> ```
+>
+> 实测（`.tmp/analyze3.mjs`，输入已 `normalizeDsml`）：
+>
+> ```
+> </invoke> 出现位置: [10230, 22268]
+> <invoke 起: 76   第一个 </invoke> 止: 10230   => lazy 体长度 10154
+> 该体内含 </parameter> 吗: false
+> ```
+>
+> 参数体是一份**审计报告正文**，里面**举例引用了协议自身的闭合标签**
+> （`` ``` `` 围栏里写着 `</invoke>`、`</function_calls>`、`</parameter>`）。
+> lazy 的 `([\s\S]*?)` 于是在**示例里的第一个 `</invoke>`（偏移 10230）**处截断，
+> 截出的体内没有配平的 `</parameter>` → `n===0` → 该调用被跳过。
+> 而真调用一直延伸到 **22268** 才闭合——**跨过了那 12,000 字符的示例文本**。
+>
+> **修法假设已用可falsify实验验证**（`.tmp/verify-fix19.mjs`）：
+>
+> | 取体方式 | 体长 | 参数 |
+> | --- | --- | --- |
+> | lazy（现状） | 10133 | **NO** |
+> | greedy（取最后 `</invoke>`） | 22171 | **YES**，`name=content`，`valLen=10125` |
+>
+> ⚠️ **greedy 只是验证假设的手段，不是最终修法**：同一轮有两个 `invoke` 调用时，
+> greedy 会把第二个吞进第一个的体里。正确修法应是**按 `<parameter>` 配平来定界**，
+> 或 greedy 取体后再按 `</parameter>` 计数做配平校验。
+>
+> **必须同时补的两条反向用例**（`doc/comment-style.md §9.3`：先红后绿）：
+> ① 一轮两个 `invoke` 调用不得互相吞并；② 体里引用闭合标签必须能被还原。
+>
+> **留痕缺口仍在**（本条自认的第一步，**尚未做**）：`lib/index.js` 的两处
+> `withheld` 只报字符数，不带形状指纹。本次之所以能定位，靠的是**运气**——
+> 现场恰好被当成 `REPORT.md` 落了盘。若没有那份样本，本条仍然查不动。
+> 因此「把 withheld 现场落盘到 `.tmp/` 一份脱敏样本」应当与上面的修法**一起**做。
+>
+> **已落护栏**：`test/fence-nested-call.test.mjs` 新增 ⓪a/⓪b 两项真机形态用例
+> （全角竖线 DSML 的边界/扣留判据 + 「不可执行的真因在体不在标记」的正面能力判据），
+> 该文件由 12 项增至 **14 项，14/14 通过**。
+>
+> 完整推导见 [`diagnosis-2026-09-16.md`](diagnosis-2026-09-16.md) §5。
+
+### 现状（原文，保留以供对照）
 
 0.15.6 针对「参数里含 ``` 的 `write`/`edit` 调用被丢弃并整段泄漏」做了一次修复，
 A/B 表（`doc/verify.md` §0.15.6）证明它修好了**被测的那一种形状**：
@@ -990,6 +1154,43 @@ d.finish()
 
 当前证据只能排除 #21（增量被吞），**不能**在 1 与 2 之间判定。
 
+> ### 2026-09-16 复核推翻（本条前提有错，且已可定性）
+>
+> **上面前提「content 只有 `[reasoning]`、没有 text 块」是错的。**
+>
+> 独立解码 `session-fcbb5bf8` 的 `session.v3.jsonl.zstd`（52 事件）后实测，
+> step 7 的 `assistant/message` 是：
+>
+> ```
+> block types: ["reasoning","text"]
+>   - reasoning len=1947  "Now I have a good picture. Let me read the local vision-README.md …"
+>   - text      len=357   "THINKING_ONLY_NO_ANSWER: 网页只产出了思考内容、正文一个字符都没有…"
+> ```
+>
+> **那个 357 字符的 text 块就是桥自己写进去的诊断文本**，来源
+> `lib/index.js` 的 `thinkingOnlyNotice()`，经 `emitText(notice, turn, nextIndex)` 落库。
+>
+> 复核命令（可复现）：解压该会话 → 取 `step===7` 的 `assistant/message` →
+> 打印 `content[].type`。判据是 `["reasoning","text"]`，不是 `["reasoning"]`。
+>
+> **两条结论**：
+>
+> 1. **可能性 2（捕获链丢正文）已被排除**：该轮 chunk 序列是
+>    `block-start#0(reasoning) → block-end#0 → block-start#1(text) → block-end#1 → usage → finish{kind:'stop'}`，
+>    `finish.reason` 是正常 `stop` 而非 WIP 兜底（`thinkingOnlyTurns` 只在
+>    `browser-driver.js` 的 stall 路径自增，故为 0，与提示文本「累计 0 次」自洽）。
+>    没有文本通道被吞的证据。→ **只剩可能性 1：模型自身在思考后停止。**
+> 2. **升级出本条真正的缺陷（原报告漏掉的那个）**：桥把**自己的诊断文本写进了助手正文并持久化**。
+>    这污染会话与后续上下文轮——用户看到的是「模型说了 THINKING_ONLY_NO_ANSWER」，
+>    而实际上模型什么都没说。**严重度由「中」上调为「高」。**
+>
+> 修法方向：`thinkingOnlyNotice` 的文本不应经 `emitText` 进正文通道，
+> 而应只进日志 + `/__webcode/status`（与 `TOOL_UNKNOWN` 的处理分离评估；
+> `TOOL_UNKNOWN` 需要模型看见，本条不需要）。
+> 护栏应断言「该提示不得出现在 `assistant/message` 的 text 块里」。
+>
+> 完整证据见 [`diagnosis-2026-09-16.md`](diagnosis-2026-09-16.md) §5.5。
+
 ### 若要归因，从哪下手
 
 1. **先补留痕**：`WEBCODE_SSE_DEBUG=<dir>` 已能落盘原始 SSE 帧
@@ -1005,6 +1206,82 @@ d.finish()
 ### 安全边界
 
 **不需要新增真机探针**（风控纪律）。`WEBCODE_SSE_DEBUG` 只在复现时临时开启。
+
+---
+
+## 23. **缺 `name` 字段的调用被静默丢弃**：网页有输出、harness 显示不了（0.15.9 新发现，**已修**）
+
+### 现象（用户原话）
+
+> **「现在返回 web 的内容会在 harness 端显示异常/显示不了？有些可以有些不行？」**
+
+「有些可以」= 同一会话里带 `name` 的调用一直正常；「有些不行」= 不带 `name` 的那些
+**整条消失**，界面上只剩散文，或干脆一条空消息，任务停在那里不动。
+用户在同一现场的另一句原话更直接：**「一道这个就停了？harness 识别不了？」**
+
+### 真机留痕（唯一一次拿到「网页实际发出的字节」）
+
+会话 `session-07907f7c`（DeepSeek 网页模型，2026-09-16 15:33）→ 网页会话
+`49ab6330-0fbd-4842-a7b7-e9ce5d57031b`。取证方式（**可复现**）：
+
+```powershell
+# 桥的只读控制面：把网页会话历史整段取回来（不改网页状态）
+Invoke-WebRequest -Uri 'http://127.0.0.1:8931/__webcode/history' -Method POST `
+  -ContentType 'application/json' -Body '{"sessionId":"49ab6330-…"}' | Out-File .tmp/hist.json utf8
+# 逐字落成夹具（脚本化，避免手抄把缺字段补齐）
+node .tmp/extract-nameless-fixtures.mjs
+```
+
+四份夹具（`package/dsh-webcode-bridge/test/fixtures/`，未经手改）：
+
+| 网页消息 | 形状 | 旧行为 |
+| --- | --- | --- |
+| `id=20` | 两个 `{"mcp_action":"call","purpose":…,"arguments":{pattern,path}/{command,description}}`，**都无 name** | `calls=0`、`diagnostics=[]`、扣留 664/664 字符 |
+| `id=24` | 「Let me verify the actual file state…」+ 同上两个无名调用 | `calls=0`、扣留 598 字符，界面上只剩那 59 字符散文 |
+| `id=26` | `{"mcp_action":"call","name":"read",…}` | `calls=1`，正常执行（对照组） |
+| `id=30` | 无名 `{"file_path","offset","limit"}` | `calls=0`、扣留 226/226 |
+
+harness 侧同一时刻的读数（`node scripts/session-read.mjs 07907f7c`）：
+`turn 4 step 1 = reasoning(739) + text(59)`，`turn 4 end reason=completed`；
+随后 4 个 turn 模型反复说 **「my tool calls didn't get results」**——它**以为**自己调了。
+
+### 根因
+
+`parseAgentReply` 的 `takeObj` 对围栏调用只认「JSON 能解析 **且** 有 `name`」：
+
+```js
+const isCall = fenceCall ? (typeof obj.name === 'string' && obj.name.trim()) : …;
+if (!isCall) return;      // ← JSON 合法、只是没写 name ⇒ 静默丢，连 diagnostics 都没有
+```
+
+诊断只在 `JSON.parse` 失败时才写（0.15.6 的「丢弃不再静默」漏了这一支）。
+丢掉调用之后：`proseSafeEnd` 把协议整段扣住 → 只有散文外发；正文全是协议时
+整轮落到 `zeroProgressDecision` 的 `thinking-only` 分支，交回一句
+**「网页只产出了思考内容、正文一个字符都没有」——与事实相反**（网页明明发了调用）。
+
+### 修法（三处，缺一不可）
+
+| 处 | 内容 |
+| --- | --- |
+| `inferToolNameFromArgs(args, tools)` | 按**本会话真实下发的工具表**反推名字。三条判据：提供的每个键都必须由该工具声明；必填必须齐（`description` 按 `FILLABLE_REQUIRED` 白名单可由 `purpose` 代填）；候选必须**唯一**，不唯一返回 `null` |
+| `parseAgentReply(text, { tools })` | 缺名/包装名（`tool_call`/`function`/`invoke`/`call`）时用上它；猜不出时**必须**写 diagnostics；还原成功的调用带 `nameInferred: true` 供日志留痕 |
+| `lib/index.js` | 两处解析都传 `tools`；流式开块也用同一份判据；新增 `TOOL_CALL_UNPARSED` 提示——「探测到协议但解析不出可执行调用」时如实说明并给出重发格式，**替代**那句与事实相反的 thinking-only 文案与空白消息 |
+
+为什么不做「按第一个键查表」：`{file_path}` 会被读成 `write` 并**覆盖文件**——
+那是执行错的事，比丢调用更坏。唯一解要求把这类误判挡在门外（护栏 ⑦）。
+
+### 护栏
+
+`test/nameless-call.test.mjs`（14 项）：①②③⑤⑦⑫⑬⑭ 修复前**实测为红**
+（夹具在旧代码上 `calls=0`，红基线存于 `.tmp/red-baseline-nameless.txt`）；
+④⑥⑧⑨⑩⑪ 是反向安全线（带名字的调用不得被改写、证据不足不许猜、
+散文里的 JSON 示例不得误判、`{file_path}` 不得被认成 `write`）。
+
+### 教训（本族第 7 个样本）
+
+`takeObj` 有**两条**出口会丢调用（JSON 解析失败、结构不合法），0.15.6 只给前者
+装了留痕。**「不留痕的早退分支」是静默丢弃的唯一来源**：给一条路加日志时，
+必须把同一个函数里所有 `return` 一起数一遍。
 
 ---
 

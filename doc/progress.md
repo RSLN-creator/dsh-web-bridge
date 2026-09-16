@@ -20,19 +20,250 @@
 
 | 项 | 值 |
 | --- | --- |
-| 工作树版本 | **0.15.7** |
-| 已装版本（web） | **0.15.6**（0.15.7 已打包待装，见下文） |
-| 运行中的进程 | **0.15.6**（2026-09-16 实测；0.15.7 需重启后生效） |
-| 上游 | `origin/main` = `ca1e855`（= 0.15.3）。**0.15.4～0.15.7 全部改动均在本地，尚未推送** |
-| 单测基线 | **39/39 测试文件全绿**（逐文件跑，2026-09-16 复核实测） |
-| 注释闸门 | **error 0 / warn 0，退出码 0**（131 个文件，2026-09-16 复核实测） |
-| 发布闸门 | `verify-pack` **28/28 逐字相同 + 接线完好**，退出 0（0.15.3 时的读数；0.15.4+ 未重跑） |
-| 下一阶段 | 真机目视验收（设置页 / 右栏 / 尺寸）——**接口侧已证在位，像素仍未有人看过** |
+| 工作树版本 | **0.15.11** |
+| 已装版本（profile） | **0.15.9**（0.15.10 / 0.15.11 尚未打包；三轮代码都在工作树里） |
+| 运行中的进程 | **0.15.9**（2026-09-16 23:56 重启后实测：`/__webcode/status` → `version=0.15.9 hash=a2e1e2349249`；relay running、driver loggedIn、transport=playwright-edge、79 条会话映射已恢复、21 个模型在册） |
+| 上游 | `origin/main` = `a956512`。**`89f7d41`(0.15.7) 与本轮 0.15.8～0.15.11 均未推送** |
+| 单测基线 | **40/40 测试文件全绿**（逐文件跑；`client-server-contract` 曾红，根因与修法见 §0.15.11） |
+| 注释闸门 | **error 0 / warn 0，退出码 0**（85 个文件，2026-09-17 实跑） |
+| 文件规范闸门 | `check-repo-hygiene.mjs` **PASS**（无 BOM + 索引无死链） |
+| 发布闸门 | `verify-pack` **29/29 逐字相同 + 接线完好**，退出 0（0.15.9 打包后实跑；0.15.10/11 尚未打包） |
+| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.15.11 / testFiles 40/40） |
+| 下一阶段 | 打包 0.15.11 → `verify-pack` → 装 profile → 重启，做 §0.15.11「等待药丸同栏」与 0.15.9「缺 `name` 调用可见」两项真机验收 |
 
-> **2026-09-16 复核修正**：上表此前逐字写着「工作树 0.15.3 / 已装 0.15.3 / 运行进程仍是旧的 /
+> **2026-09-17 三次漂移修正（第 5 次）**：上表此前写着「工作树 0.15.9 / 已装 0.15.9 /
+> 只有 0.15.7 与本轮 0.15.9 未推送」，且 `check-ledger` 实测**红**（`package.json`
+> = 0.15.11 vs 台账 0.15.9）。更严重的是：**0.15.10 与 0.15.11 两轮工作在本文件里
+> 一个字都没有**——同一毛病第 5 次出现（正文补在下面）。本轮还发现
+> `client-server-contract.test.mjs` 因多注册了一条死路由而**一直红着没人知道**，
+> 因为台账写的是「40/40 全绿」而那份读数是旧轮次的。修法与判据见 §0.15.11。
+>
+> **2026-09-16 二次复核修正（第 4 次漂移）**：上表此前写着「已装 0.15.6 / 运行 0.15.6（需重启）」
+> 与「0.15.4～0.15.7 全部未推送」，**三项均过期**——实测**已装且正在运行 0.15.7**，
+> 且**只有 0.15.7 未推送**。同一次复核还发现 `long-term-issues.md` 的 `一览表`
+> **漏登记 #19、#20**（正文有、表里没有）。完整诊断见
+> [`diagnosis-2026-09-16.md`](diagnosis-2026-09-16.md)。
+>
+> **第 3 次修订（2026-09-16）**：上表此前逐字写着「工作树 0.15.3 / 已装 0.15.3 / 运行进程仍是旧的 /
 > 35 个测试文件」，**四行全过期**，且 0.15.4、0.15.5、0.15.6 三轮工作在本文件里**没有任何段落**
 > （同一毛病第 3 次出现）。本次一并补齐，并把「版本号与测试文件数」的核对方式写进
 > `doc/review-guide.md` 的收尾清单——**靠自觉的记账已经失败三次，不能再只靠自觉**。
+>
+> **本机跑测试的前提（2026-09-16 实测，必须知道）**：沙箱下的 `%TEMP%`
+> 是 ACL 受限目录，`mkdtempSync(os.tmpdir())` 一律 **EPERM**，会让
+> `regression` / `tool-loop` / `wiring-roster` 三个文件假失败。
+> 把 `TMPDIR`/`TEMP`/`TMP` 指到工作区 `.tmp` 后 **39/39 全绿**。
+> 这是环境前提，不是回归——已记入 `long-term-issues.md` #10。
+
+## 0.15.11（已打代码 / 未打包 / 未安装）—— 等待药丸「同栏」由**结构**决定，不靠边距
+
+**补记说明**：本轮与 0.15.10 的工作此前**没有写进本文件**（第 5 次漂移）。以下依据是
+工作树源码里的留痕（`lib/client.cjs` 的注释、`lib/wait-stats.js` 的两条新导出）与实测读数，
+不是事后回忆。
+
+### 一、0.15.10 先做的（药丸化 + 面板）
+
+用户报的是输入框底下那条等待信息**与官方统计药丸分成两栏**。旧实现的根因是**长度预算**：
+它把「本会话 / 距上次发送 / 限流」三件事塞进一行，官方那个槽位放的是 13px 单行药丸，
+一行只容得下「一个数 + 一个后缀」，于是必然换行成第二栏。
+
+| 文件 | 改动 |
+| --- | --- |
+| `lib/wait-stats.js` | 新增 `composerWaitPillLabel`（单行短文案，无数据返回 `null` ⇒ 整枚不渲染）与 `waitStatDetailRows`（点击面板的明细行，对齐官方 stat-dialog 的 dl 网格） |
+| `lib/web-control.js` | `waitStatsPayload` 增发 `label` / `sessionValue` / `detailRows`；`composerWaitLine`（长文案）**保留**，供旧前端与 curl 核对 |
+| `lib/client.cjs` | 设置页的「累计等待发送」区块（`WaitStats`）删除——同一份数字不再两处重复 |
+
+### 二、0.15.11：同栏改为结构决定
+
+0.15.10 之后仍是「两条 dock 条目 ⇒ 必然换行」，因为 `conversation.composer.dock`
+的每个条目都落在 composerStack（列向 flex）里。修法是**不再自建一行**：
+
+- 新 `useOfficialStatsHost(wanted)`：用 `MutationObserver` 盯 `[data-composer-stats]`
+  （官方 `ui-chat` StatsPills 的根节点），行一出现就 `React portal` 把这个节点挂进去，
+  它于是成为该行里紧跟官方药丸之后的 **flex 子项**——居中、间距、换行全部归官方那条 CSS 管，
+  **没有任何写死的偏移量**。
+- 官方行缺席时（会话尚无任何统计：StatsPills 在 `steps===0 && !hasTokens` 时返回 null）
+  回落自建一行，样式**逐字抄** StatsPills.root / stat-dialog.module.css（28px 高、
+  border-radius 24px、`tabular-nums`、面板向上展开）。
+- 关闭语义对齐官方 `openPill` 独占：Esc 收起 + `pointerdown` 落在自己 wrap 之外就收起
+  （于是点官方任何一枚药丸时本面板随之关闭）。用 `rootRef` 而不是整行做边界，
+  点自己面板内部（含滚动条）不会误关。
+- 图标用 `IconQueueOutline14`（官方 primitives 无 gauge/clock，队列图标是同语义域最近的一个）。
+
+### 三、同轮修掉的死路由（`GET wait-stats`）
+
+`test/client-server-contract.test.mjs` 实测**红**，报 `GET wait-stats`：
+
+```
+契约：服务端每个动作至少能被一种方法触达（没有写错方法名的死路由）
+  same-name action registered but method unreachable: GET wait-stats
+```
+
+**判据本身是对的**：那条 GET 是 0.15.10 顺手加的（注释写「便于 curl 核对累计值」），
+但**没有任何真实消费方**——客户端只走 `api('wait-stats', {sessionId})` ⇒ POST。
+实测 `POST wait-stats` 带空 body 给出**逐字相同**的累计视图：
+
+```powershell
+Invoke-WebRequest -Uri 'http://127.0.0.1:8931/__webcode/wait-stats' -Method POST `
+  -ContentType 'application/json' -Body '{}'    # → 200，rows 就是累计面
+```
+
+所以修法是**删掉那条 GET**，不是改宽测试。这与 0.15.3 的立场一致（「若确属误报，请改
+本脚本的判据而不是绕过它」）——这里不是误报：多一条永不抵达的同名路由，只会让
+「哪个方法是对的」重新变成需要猜的事，而那正是 0.15.3 那次 405 的同族病根。
+
+> **为什么这条红了的测试没被台账记到**：台账那一行写的是「40/40 全绿」，但那是
+> **上一个轮次的读数**。这印证了本仓库反复踩的同一个坑——**读数会过期，而闸门不会自己
+> 重跑**。本轮把「逐文件跑一遍并核对 40/40」写进收尾清单。
+
+## 0.15.10（已打代码 / 未打包 / 未安装）—— 见 §0.15.11 第一节
+
+单行药丸 + 点击面板；设置页重复的累计区块删除。判据：`test/wait-stats.test.mjs`
+（`composerWaitPillLabel` / `waitStatDetailRows` 的纯函数护栏）与
+`test/client-render.test.mjs`（药丸渲染与面板交互）。
+
+## 0.15.9（已打包 / 已装 / 已重启生效）—— 用户报的「web 内容在 harness 显示不了」：缺 `name` 的调用被静默丢弃
+
+**用户原话**：「现在返回 web 的内容会在 harness 端显示异常/显示不了？有些可以有些不行？
+请你先优先只修复这个问题，让实际 harness 能正常长期跑！这是最近有的问题，修复过却还是存在！」
+
+### 一、先拿到「网页实际发出的字节」（这一步是全部结论的地基）
+
+历史修复反复不中，共同点都是**只有 harness 侧的读数**（「正文停了」「只有思考」），
+从来没有网页那一侧的原话。本轮用桥自己的只读控制面把头一次拿到：
+
+```powershell
+Invoke-WebRequest -Uri 'http://127.0.0.1:8931/__webcode/history' -Method POST `
+  -ContentType 'application/json' -Body '{"sessionId":"49ab6330-0fbd-4842-a7b7-e9ce5d57031b"}'
+node .tmp/extract-nameless-fixtures.mjs     # 逐字落成 test/fixtures/nameless-*.txt
+```
+
+结果一句话：**模型连着两轮把调用写成 `<tool_call>{"mcp_action":"call","purpose":…,"arguments":{…}}`——没有 `name` 字段**。
+
+### 二、根因（`lib/agent-preset.js` 的 `takeObj`）
+
+围栏调用只认「JSON 能解析 **且** 有 `name`」，缺名直接 `return`，**连 diagnostics 都不写**
+（0.15.6「丢弃不再静默」只覆盖了 JSON 解析失败那一支）。于是：调用消失 → 协议被
+`proseSafeEnd` 扣住 → 只剩散文；正文全是协议时整轮被判「只有思考」，交回一句与事实
+相反的 `THINKING_ONLY_NO_ANSWER`。真机读数：`turn 4 step 1 = reasoning(739)+text(59)`，
+`turn 4 end reason=completed`，之后 4 个 turn 模型反复说「my tool calls didn't get results」。
+
+### 三、修法
+
+| 文件 | 改动 |
+| --- | --- |
+| `lib/agent-preset.js` | 新增 `normCallArgs`（导出归一化，流式与收尾共用）与 `inferToolNameFromArgs`（按**本会话工具表**反推名字：每个键都必须被该工具声明、必填必须齐、候选必须唯一）；`parseAgentReply(text, { tools })` 用它救回缺名/包装名调用，猜不出时**必须**留 diagnostics；还原成功的调用带 `nameInferred` |
+| `lib/index.js` | 两处解析传 `tools`；流式开块也用同一份判据（界面提前显示「正在调用 read」）；新增 `TOOL_CALL_UNPARSED` 提示——协议被探测到但一条可执行调用都没有时，如实说明并给重发格式，**取代**那句反事实的 thinking-only 文案与空白消息 |
+| `lib/zero-progress.js` | **未改**。它的顺序契约（thinking-only 先于 protocol-withheld）仍然成立；新分支排在它**之前**，且提示里带上思考尾部，不吞任何内容 |
+
+**为什么不做「按第一个键查表」**：`{file_path}` 会被读成 `write` 并覆盖文件——
+执行错的事比丢调用更坏。唯一解要求把这类误判挡在门外。
+
+### 四、判据与反向验证
+
+| 项 | 读数 |
+| --- | --- |
+| 红基线（修复前） | 四份真机夹具 `calls=0 / diagnostics=[]`（`.tmp/red-baseline-nameless.txt`） |
+| 新护栏 | `test/nameless-call.test.mjs` **15 项**：①②③⑤⑦⑫⑬⑭ 修复前为红；④⑥⑧⑨⑩⑪ 是反向安全线，⑪a 覆盖另两条早退分支的留痕 |
+| 全量单测 | **40/40 文件全绿、556 项断言 0 失败**（逐文件跑；`.tmp/full-test-run-0159-final.txt`） |
+| 注释闸门 | `lint-comments` error 0 / warn 0，退出 0 |
+| 记账闸门 | `check-ledger` PASS（version 0.15.9 / testFiles 40/40） |
+| 真机口径 | 重启后对同一网页形状应看到 `tool-call` 块（修复前一个块都不开） |
+
+### 六、打包与安装（本轮收尾的实际读数）
+
+| 步骤 | 命令 | 读数 |
+| --- | --- | --- |
+| 打包 | `pnpm pack`（`package/dsh-webcode-bridge/`） | `dsh-webcode-bridge-0.15.9.tgz`（308,118 B） |
+| 发布护栏 | `node scripts/verify-pack.mjs <tgz>` | **逐字相同 29/29**，接线完好，退出 0 |
+| 安装 | `node scripts/install-profiles.mjs` | `web: v0.15.9`、`headless: v0.15.9`，退出 0 |
+| 安装核对 | `.tmp/verify-installed-0159.mjs` | 版本 0.15.9 ✔；lib **24/24 sha256 相同** ✔；用**已安装**解析器跑四份真机夹具，`["grep","pwsh"]`/`["read","pwsh"]`/`["read"]`/`["read"]` 全对 ✔ |
+| 已装包端到端 | `.tmp/verify-installed-e2e-0159.mjs` | 导入**已安装**的 `lib/index.js` 跑真机夹具 → 工具调用块 `["read","pwsh"]`、散文保留、协议未泄漏；解析不出调用时正文含 `TOOL_CALL_UNPARSED` 且不再误报「只思考」✔ |
+| 重启 | `.tmp/restart-dsh-web.ps1`（分离进程 90 秒倒计时） | 旧进程 23800 停止 → 新进程 **14648** 于 23:56:16 起来，3080/8931 同时恢复监听 |
+| 重启后核对 | `GET /__webcode/status` | **`version=0.15.9`、`hash=a2e1e2349249`**；relay running、driver loggedIn（transport=playwright-edge）、**79 条会话映射已恢复**（含 `session-07907f7c → 49ab6330`）、21 个模型在册 ✔ |
+| 真机活体冒烟 | `POST 127.0.0.1:8931/v1/chat/completions`（真实网页轮次） | **200，3.6 s 返回正文**（`"I can't read that file: the read tool isn't available in this conversation."`——符合该端点行为：`/v1` 只做纯对话转发、不教协议）。证明重启后的 **relay + driver + 网页会话整条链是活的** ✔ |
+
+**收尾诚实说明**：`/v1` 这条 OpenAI 兼容路径不经过 harness 适配器，因此它**不能**用来验证缺 `name` 的调用还原；
+那条链路的判据是「用真机字节跑适配器得到工具调用块」，已由上表两行（安装核对 + 已装包端到端）
+覆盖。缺名调用何时出现由网页模型决定，无法在真机上定向制造——夹具就是模型原话本身。
+
+### 七、这一条为什么值得单独记
+
+`takeObj` 有**两条**出口会丢调用（JSON 解析失败、结构不合法），0.15.6 只给前者装了留痕。
+**「不留痕的早退分支」是静默丢弃的唯一来源**——给一条路加日志时，要把同一个函数里
+所有 `return` 一起数一遍。台账正文见 `long-term-issues.md` #23。
+
+## 0.15.8（已打代码 / 未打包 / 未安装）—— #19 真根因修复 + 仓库结构整理
+
+### 一、#19 修复：`invoke` 体的 lazy 截断（主路径静默丢调用）
+
+**根因**（诊断定位，`diagnosis-2026-09-16.md` §5）：`lib/agent-preset.js` 的 `invoke`
+体用 **lazy** 正则 `([\s\S]*?)</invoke>` 捕获。当**参数体里举例引用了协议自身的闭合标签**
+（写文档/审计报告说明协议形状时必然出现）时，在示例里的第一个 `</invoke>` 处截断 →
+体内无配平 `</parameter>` → `n===0` → **调用被静默丢弃**。
+
+**真机证据**：仓库根那份 22,366 字符的 `REPORT.md` 泄漏样本——它本该是一次 `write`
+调用的参数体，却因调用不可执行而**变成了文件本身**，真正的交付物从未落盘。
+
+**修法**：新增 `invokeBodyEnd(src, from)`——**配平感知的状态机**，只在「参数外」遇到的
+第一个 `</invoke>` 才算体终点。
+
+| 方案 | 结果 |
+| --- | --- |
+| lazy（修复前） | 体 10,133 字符，**无配平参数 → 0 调用** |
+| **greedy（未采用）** | 能救单个调用，但会把同轮第二个调用吞进第一个的体里 |
+| **配平状态机（采用）** | 体延伸到位，`name=write`，`content=10,121` 字符 |
+
+**反向验证（`doc/comment-style.md` §9.3：先红后绿）**：新增 ⑬ 在修复前**实测为红**
+（`pass 17 / fail 1`），修复后 **19/19 全绿**。
+
+**同时修掉修法自己引入的一个回归**：换成两次定位后 `m[0]` 不再包含体，
+导致「畸形标签抢救」分支（扫 `m[0]` 找 `"name"/"arguments"` 片段）失效。
+实测 `regression.test.mjs` 由 53/53 变成 49/53；重建 `m[0]` 后回到 **53/53**。
+另外给状态机加了**降级兜底**：扫到结尾仍不配平时退回第一个 `</invoke>`（取旧行为），
+而不是返回 -1 把整条调用丢掉。
+
+### 二、仓库结构整理
+
+| 动作 | 结果 |
+| --- | --- |
+| 一次性探针归档 | `test-mock/` 顶层 **83 → 25** 项；58 个无代码引用的探针移到 `test-mock/archive/`（git 识别为 **58 个 rename**，历史保留） |
+| 死代码移出根目录 | `extension/`（9 文件，零代码引用，`relay.js:12` 明言「there is no extension」）→ `test-mock/archive/extension/`；仓库根目录不再有它 |
+| `.tmp` 清理 | **272.3 MB → 122.8 MB**（删 `.tmp/pnpm-probe/node_modules` 149.5 MB 可再生缓存 + 30 个空的 `webcode-test-*` / `webcode-wiring-*` 测试残留目录） |
+| 悬空 gitlink 清除 | `reference/` 下 4 个 mode-160000 gitlink（`webcode`、`opencode2dsh`、`deepseek-web-import`、`dsh-deepseek-chat`）**无 `.gitmodules` 却是子模块条目** → `git rm --cached`，磁盘文件保留，`.gitignore:9 reference/*/` 从此真正生效 |
+| 死链修复 | `README.md` 两处指向被 `.gitignore` 排除的 `PLAN.md` 已改为仓库内权威入口 |
+| 文档同步 | 归档路径变化同步进 `doc/review-guide.md`、`doc/ci-cd.md`、`CONTRIBUTING.md`；新增 `test-mock/archive/README.md` 写明目录约定与「归档后相对导入失效」 |
+
+**判据（下次整理照此，不要凭「看起来旧」）**：留 = 被代码引用或属稳定入口；
+归档 = 只被文档提及且那轮结论已回写。
+
+## 2026-09-16 全局诊断（本轮工作，无产品代码改动）
+
+一次完整盘点，产出单独成文：[diagnosis-2026-09-16.md](diagnosis-2026-09-16.md)。
+**三条已证结论改变了台账的原有记法**，摘要如下（细节与复现命令见该文）：
+
+| # | 结论 | 影响 |
+| --- | --- | --- |
+| **#19 已归因** | 真根因是 `lib/agent-preset.js:1186` 的 `invokeRe` 用 **lazy** 体捕获 `([\s\S]*?)</invoke>`；当**参数体里举例引用了协议自身的闭合标签**（写文档/审计报告的主路径）时，体在示例里的第一个 `</invoke>` 处截断 → 无配平 `</parameter>` → `n===0` → 调用静默消失。**与 0.15.6 猜的「围栏形状」无关**（8 种围栏形状实测全部健康） | 从「未归因」改为**「已归因，待修」**；修法方向已用 lazy/greedy 对照验证 |
+| **#22 前提推翻** | `session-fcbb5bf8` step 7 的 `assistant/message` **有** text 块（357 字符），且那**就是桥自己写的 `THINKING_ONLY_NO_ANSWER` 诊断文本**（`thinkingOnlyNotice` → `emitText` 落库）。原报告「没有 text 块」为误 | 可能性 2（捕获链丢正文）**排除**；**真正的缺陷是诊断文本被持久化进助手正文**，严重度 中 → **高** |
+| **#9 重定性** | `run-m2` / `run-m2b` / `run-m2c` 三项实跑均为 `spawn EPERM`，**从未跑到自己的断言**。原记「走废弃扩展链路 / mock 形状脱节 → 干净树同样失败」**无实测支持** | 改记 **UNTESTABLE（本机）**，须由 CI 读数定性；不得再当作「已知既有失败」解释红色项 |
+
+**同轮完成的收尾**：
+
+- `long-term-issues.md` 一览表**补登记 #19、#20**（此前正文有、表里没有）；
+  #9/#19/#22 各加复核段；#10 补记本机**第二类 EPERM**（`mkdtemp`，可用 `TMPDIR` 绕过）。
+- `README.md` 两处指向 `PLAN.md`（被 `.gitignore` 排除）的**死链已修**——
+  克隆者看不到该文件；改为指向仓库内的 `doc/` 权威入口，并加一段说明。
+- `doc/README.md` 索引加入本诊断报告。
+- **护栏**：`test/fence-nested-call.test.mjs` 新增 ⓪a/⓪b 两项真机形态用例（12 → **14 项**）。
+- **可复现证据脚本**：`.tmp/probe-diagnosis-2026-09-16.mjs`（组 A/B/C，退出码即判据）。
+- 复核读数：**测试 39/39 全绿**、`check-ledger` **exit 0**、`lint-comments` **error 0 / warn 0**。
+
+**下一步（P0）**：① #22 修 `thinkingOnlyNotice` 不得进正文通道（注意 `TOOL_UNKNOWN`
+**需要**模型看见，两类提示须分开评估）；② #19 按 `<parameter>` 配平定界修 `invokeRe`
+（**不要**直接用 greedy——会把同轮第二个调用吞进第一个）；③ 两者都要先补
+`withheld` / `n===0` 的**形状指纹留痕**。
+
 
 ## 0.15.7（已打包 / 待装 / 需重启生效）—— SET 重发吞掉流式增量
 
