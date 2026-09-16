@@ -7,7 +7,7 @@
 //   2. consent gate + CSRF/host guards
 //   3. turn 1 → preset+opening message into a FRESH web conversation
 //   4. web replies with mcp_action call fences → adapter replays native DSH
-//      tool-call chunks; the tool REALLY runs (reads PLAN.md)
+//      tool-call chunks; the tool REALLY runs (reads README.md)
 //   5. turn 2 carries ONLY the tool-result increment (no preset/history re-flatten)
 //      → final text streams back
 //   6. history shrink (rewind) → conversation restart with full re-flatten
@@ -187,15 +187,15 @@ try {
     sessionId: 'dsh-session-A',
   });
 
-  replyScript = ['先看这个：\n```json\n{"mcp_action":"call","name":"read","purpose":"查看 PLAN 标题","arguments":{"path":"PLAN.md"}}\n```'];
+  replyScript = ['先看这个：\n```json\n{"mcp_action":"call","name":"read","purpose":"查看 README 标题","arguments":{"path":"README.md"}}\n```'];
   const r1 = await collect(adapter.stream(baseOptions([
-    { role: 'user', content: [{ type: 'text', text: '请读取 PLAN.md 的标题行' }] },
+    { role: 'user', content: [{ type: 'text', text: '请读取 README.md 的标题行' }] },
   ])));
   const t1 = turns[0] || {};
   ok('turn1: fresh conversation used', t1.fresh === true && t1.key === 'dsh-session-A', JSON.stringify({ key: t1.key, fresh: t1.fresh }));
   ok('turn1: preset injected (system)', String(t1.message).includes('[系统指令]') && String(t1.message).includes('工作区在本地'));
   ok('turn1: tools+protocol injected', String(t1.message).includes('# 可用本地工具') && String(t1.message).includes('mcp_action') && String(t1.message).includes('read'));
-  ok('turn1: opening user message present', String(t1.message).includes('请读取 PLAN.md 的标题行'));
+  ok('turn1: opening user message present', String(t1.message).includes('请读取 README.md 的标题行'));
 
   const types1 = r1.map((c) => c.type).join(',');
   // 0.7.1 收紧：scriptedDriver 一次性返回全文（无 onDelta），流式提前开块
@@ -207,17 +207,17 @@ try {
   const callChunk = r1.find((c) => c.type === 'tool-call-delta');
   ok('turn1: tool name parsed (mcp_action)', callChunk?.name === 'read', callChunk?.name);
   ok('turn1: harness tool-loop finish reason', r1.at(-1)?.reason?.kind === 'tool-calls');
-  ok('turn1: args parsed', JSON.parse(callChunk?.argumentsDelta || '{}').path === 'PLAN.md', callChunk?.argumentsDelta);
+  ok('turn1: args parsed', JSON.parse(callChunk?.argumentsDelta || '{}').path === 'README.md', callChunk?.argumentsDelta);
 
-  // ---- the tool really runs: read PLAN.md from disk ----
-  const planText = await readFile(join(repo, 'PLAN.md'), 'utf8');
+  // ---- the tool really runs: read README.md from disk ----
+  const planText = await readFile(join(repo, 'README.md'), 'utf8');
   ok('tool executed for real (file read)', planText.includes('# Harness Web Bridge'));
 
   // ---- turn 2: ONLY the tool-result increment lands in the SAME conversation ----
-  replyScript = ['PLAN.md 标题是 Harness Web Bridge。任务完成。[E2E-MARKER-FROM-PLAN]'];
+  replyScript = ['README.md 标题是 Harness Web Bridge。任务完成。[E2E-MARKER-FROM-PLAN]'];
   const r2 = await collect(adapter.stream(baseOptions([
-    { role: 'user', content: [{ type: 'text', text: '请读取 PLAN.md 的标题行' }] },
-    { role: 'assistant', content: [{ type: 'tool-call', id: 'call-1', name: 'read', arguments: '{"path":"PLAN.md"}' }] },
+    { role: 'user', content: [{ type: 'text', text: '请读取 README.md 的标题行' }] },
+    { role: 'assistant', content: [{ type: 'tool-call', id: 'call-1', name: 'read', arguments: '{"path":"README.md"}' }] },
     { role: 'user', content: [{ type: 'tool-result', toolCallId: 'call-1', content: [{ type: 'text', text: planText.slice(0, 2000) }] }] },
   ])));
   const types2 = r2.map((c) => c.type).join(',');
@@ -230,7 +230,7 @@ try {
   ok('turn2: increment ONLY — mcp_action result fence', String(t2.message).includes('"mcp_action"') && String(t2.message).includes('"name"') && String(t2.message).includes('"status": "success"'), String(t2.message).slice(0, 90));
   ok('turn2: tool output carried', String(t2.message).includes('# Harness Web Bridge'));
   ok('turn2: NO preset repetition', !String(t2.message).includes('[系统指令]'));
-  ok('turn2: NO history re-flatten', !String(t2.message).includes('请读取 PLAN.md 的标题行'));
+  ok('turn2: NO history re-flatten', !String(t2.message).includes('请读取 README.md 的标题行'));
 
   // ---- rewind divergence: history shrink → fresh restart ----
   replyScript = ['重启后回答。'];
@@ -262,7 +262,7 @@ try {
   replyDeltas = [
     leakSentence + '\n\n',
     '<tool_call>\n',
-    '{"mcp_action": "call", "name": "read", "purpose": "查看 PLAN 标题", "arguments": {"path": "PLAN.md"}}',
+    '{"mcp_action": "call", "name": "read", "purpose": "查看 PLAN 标题", "arguments": {"path": "README.md"}}',
     '\n</tool_call>\n\n',
     '<tool_call>\n',
     '{"mcp_action": "call", "name": "read", "purpose": "读 settings", "arguments": {"path": "package.json"}}',
@@ -280,7 +280,7 @@ try {
   const streamArgs = streamCalls.filter((d) => d.argumentsDelta);
   ok('stream 2-call: both calls replayed in order', streamOpens.length === 2
     && streamOpens.every((d) => d.name === 'read')
-    && JSON.parse(streamArgs[0].argumentsDelta).path === 'PLAN.md'
+    && JSON.parse(streamArgs[0].argumentsDelta).path === 'README.md'
     && JSON.parse(streamArgs[1].argumentsDelta).path === 'package.json', streamCalls.map((d) => d.name + ':' + String(d.argumentsDelta).slice(0, 12)).join(' | '));
   const streamTextBlocks = rstream.filter((c) => c.type === 'block-end' && c.block?.type === 'text');
   ok('stream 2-call: text blocks carry clean prose only', streamTextBlocks.every((c) => !String(c.block.text).includes('tool_call') && !String(c.block.text).includes('mcp_action')), streamTextBlocks.map((c) => JSON.stringify(String(c.block.text).slice(0, 40))).join(' | '));
