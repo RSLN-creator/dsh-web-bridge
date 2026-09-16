@@ -21,7 +21,7 @@ import { createOpenAiFront } from './openai.js';
 import { createBrowserDriver } from './browser-driver.js';
 import { zeroProgressDecision } from './zero-progress.js';
 import { createWebControl, buildSessionEvents, mainLineOf } from './web-control.js';
-import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, proseSafeEnd, readCallAt, partialProtocolAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeDsml } from './agent-preset.js';
+import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, proseSafeEnd, readCallAt, partialProtocolAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeDsml, normCallArgs, inferToolNameFromArgs } from './agent-preset.js';
 import { createMirror } from './mirror.js';
 import { httpFetch } from './upstream.js';
 import { textOfBlocks } from './flatten.js';
@@ -862,8 +862,23 @@ export function apply(ctx, config = {}) {
           // 循环补发，不受影响。
           const completed = rest.index >= 0 ? readCallAt(acc, boundary) : null;
           let completedName = '';
+          let completedNameInferred = false;
           if (completed) {
-            try { const o = JSON.parse(completed.raw); if (o && typeof o?.name === 'string') completedName = o.name; } catch { /* 还没写完或非 JSON */ }
+            try {
+              const o = JSON.parse(completed.raw);
+              if (o && typeof o?.name === 'string') completedName = o.name;
+              // 0.15.9：模型漏写 name 时（真机两轮连发，见 test/nameless-call.test.mjs）
+              // 用与收尾解析**同一份**判据先把名字推出来，块才能在流式期间就开对名字、
+              // 用户能提前看到「正在调用 read」，而不是等整轮结束才蹦出来。
+              // 推不出就退化成「只有 mcp_action」——收尾循环仍会补发，不会丢。
+              if (!completedName && o && (o.mcp_action === 'call' || o?.arguments !== undefined)) {
+                const guess = inferToolNameFromArgs(normCallArgs(o.arguments ?? o.input ?? o.parameters), tools);
+                if (guess) { completedName = guess; completedNameInferred = true; }
+              }
+            } catch { /* 还没写完或非 JSON */ }
+          }
+          if (completedNameInferred && completedName) {
+            log(`inferred tool name from arguments shape during stream: ${completedName}`);
           }
           const isCallObj = Boolean(completed) && (completedName !== '' || /"mcp_action"\s*:\s*"call"/.test(completed.raw));
           const recognizedCall = isCallObj && openerBoundary && completedName !== ''
@@ -935,7 +950,7 @@ export function apply(ctx, config = {}) {
       const endImages = Array.isArray(end?.images) && end.images.length ? end.images : genImages;
       assertNonEmpty(finalText, thinkAcc, endImages);
 
-      const { calls, diagnostics } = parseAgentReply(finalText);
+      const { calls, diagnostics } = parseAgentReply(finalText, { tools });
       // 0.15.6：**丢调用不再静默**。旧实现的 `takeObj` 把「看起来是调用、但解析
       // 不出来」和「这段本来就不是调用」压成同一个结果，一次丢调用在会话、在 UI、
       // 在日志里都不留痕——参数含 markdown 围栏的 write 调用被丢、报告从未落盘，
@@ -944,13 +959,18 @@ export function apply(ctx, config = {}) {
       if (diagnostics?.length) {
         for (const d of diagnostics.slice(0, 3)) warn(`parse: ${d}`);
       }
+      // 缺 name 的调用按参数形状还原后**必须留痕**（0.15.9）：与「静默修复」划清界限，
+      // 也让下一次归因能从日志里直接看到网页漏写了 name 这件事发生了几次。
+      if (calls.some((c) => c.nameInferred)) {
+        log(`inferred tool name(s) for nameless call(s): ${calls.filter((c) => c.nameInferred).map((c) => c.name).join(', ')}`);
+      }
       let valid = calls.filter((c) => tools.some((t) => t?.name === c.name));
       // GLM-5.3 强制思考（reference/zai-copilot-chat 的 dialect 佐证：5.3 起思考
       // 不可关）：真机确认模型会把工具调用写进思考流而不是正文，正文解析不到时
       // 从思考全文兜底解析一次。正文已有可用调用时不看思考——思考里的可能是
       // 预演草稿，照单全收会双重执行。
       if (!valid.length && thinkAcc) {
-        const thinkCalls = parseAgentReply(thinkAcc).calls.filter((c) => tools.some((t) => t?.name === c.name));
+        const thinkCalls = parseAgentReply(thinkAcc, { tools }).calls.filter((c) => tools.some((t) => t?.name === c.name));
         if (thinkCalls.length) valid = thinkCalls;
       }
       // 网页调了本会话没有的工具（真机里模型调过未登记的 write / subagent）。
@@ -1128,6 +1148,17 @@ export function apply(ctx, config = {}) {
         // 正文为空」被判成 `empty response from web AI`，归因线索就此抹掉。
         // 处置与 TOOL_UNKNOWN 同型：**不抛错**，把带现场的提示作为本轮回复交回会话。
         const decision = zeroProgressDecision({ out, thinkAcc, withheld, imageCount: endImages.length });
+        // 0.15.9：协议被探测到、却一条可执行调用都没解析出来 —— 这不是「只有思考」。
+        // 必须放在 zeroProgressDecision **之前**：那两条分支各自都会把事实说错——
+        // thinking-only 声称「网页只产出了思考内容」（真机里网页明明发了调用），
+        // protocol-withheld 直接静默收束（界面上一片空白）。第 4 种事实是
+        // 「网页发了调用、桥没认出来」，它有自己的提示与自我改正路径。
+        if (withheld > 0 && !calls.length) {
+          const notice = unparsedCallNotice({ thinkAcc, tools, scene: idleScene(), withheld });
+          warn(notice);
+          yield* emitText(out ? `${out}\n\n${notice}` : notice, turn, nextIndex);
+          return;
+        }
         if (decision === 'thinking-only') {
           const notice = thinkingOnlyNotice(thinkAcc, idleScene());
           warn(notice);
@@ -1153,13 +1184,24 @@ export function apply(ctx, config = {}) {
       // slice(textSent.length) 一次全发了出去。textSent 由流式循环维护，它记的是
       // 「已经发到哪」，不是「最多能发到哪」——两者在断流轮里不相等。
       const proseLimit = proseSafeEnd(finalText, textSent.length);
-      const tail = finalText.slice(textSent.length, proseLimit);
-      if (tail) yield { type: 'text-delta', index: textIndex, text: tail };
+      let tail = finalText.slice(textSent.length, proseLimit);
       const withheld = finalText.length - proseLimit;
       if (withheld > 0) {
         warn(`withheld ${withheld} chars of protocol text from assistant prose tail`);
       }
+      // 正文块已经开过（textOpen）时同样不能只把散文尾巴发出去：协议被扣住、
+      // 可执行调用为 0 的那一类轮次（真机 2026-09-16，页面发的是缺 name 的调用）
+      // 在界面上长得像「模型只说了半句话就没下文」。把真实原因与重发格式接在同一
+      // 个文本块里——tail 同时用于 text-delta 与 block-end 的块内容，接在这里
+      // 两处逐字一致，不会出现「块内容比外发的 delta 多一段」的错位。
+      if (withheld > 0 && !calls.length) {
+        const notice = unparsedCallNotice({ thinkAcc, tools, scene: idleScene(), withheld });
+        warn(notice);
+        tail = tail ? `${tail}\n\n${notice}` : notice;
+      }
       // 块内容必须与外发的 delta 逐字一致，否则界面上这一块会凭空多出协议原文。
+      // 因此 delta 必须在 tail 定稿（可能接了 unparsedCallNotice）之后才发。
+      if (tail) yield { type: 'text-delta', index: textIndex, text: tail };
       const proseBlock = proseSent.slice(proseBlockStart) + tail;
       yield { type: 'block-end', index: textIndex, block: { type: 'text', text: proseBlock } };
       yield* closeThink();
@@ -1220,6 +1262,46 @@ function thinkingOnlyNotice(thinkAcc, scene) {
     + `思考末尾：${tail || '（空）'}。`
     + '如果连续出现，说明模型停在思考里没有转入正文——请重试一次；'
     + '若仍复现，请附上这段提示以便按收束原因归因。';
+}
+
+/**
+ * 「网页发出了调用但桥解析不出可执行调用」的提示文本（0.15.9）。
+ *
+ * ## 为什么必须有一条独立的提示，而不是复用 thinking-only
+ *
+ * 真机现场（`session-07907f7c`，网页会话 `49ab6330`）：模型把调用写成
+ * `<tool_call>{"mcp_action":"call","purpose":…,"arguments":{…}}`——**没有 name**。
+ * 旧代码解析出 0 个调用、`proseSafeEnd` 把协议整段扣住，于是本轮只剩散文；
+ * 正文全是协议时更糟：整轮落到 thinking-only 分支，交回一句
+ * 「网页只产出了思考内容、正文一个字符都没有」——**与事实相反**：网页明明发了调用。
+ * 用户看到的就是「harness 显示不了」，模型则在接下来几轮反复说
+ * 「my tool calls didn't get results」。
+ *
+ * 判据是 `withheld > 0`（边界探测确实命中了协议）+ `calls.length === 0`
+ * （但没有一条能变成可执行调用）。这时唯一正确的做法是把**真实原因**说出来，
+ * 并给出可行动的下一步：本会话有哪些工具、格式长什么样。
+ *
+ * 与 `TOOL_UNKNOWN` / `thinkingOnlyNotice` 同型：不抛错，把提示作为本轮回复交回
+ * 会话——抛错会让整轮作废（界面上只看到一次失败），而这条提示能让模型**自我改正**。
+ *
+ * @param {{thinkAcc?: string, tools?: Array<{name?: string}>, scene?: object|null, withheld?: number}} v 本轮现场
+ * @returns {string} 作为助手回复交回会话的提示文本
+ */
+function unparsedCallNotice({ thinkAcc = '', tools = [], scene = null, withheld = 0 } = {}) {
+  const available = (Array.isArray(tools) ? tools : []).map((t) => t?.name).filter(Boolean);
+  const list = available.length > 24 ? available.slice(0, 24).join(', ') + ' …' : available.join(', ');
+  const think = String(thinkAcc || '');
+  const tail = think.length > 200 ? '…' + think.slice(-200) : think;
+  const bits = [];
+  if (withheld > 0) bits.push(`已扣留 ${withheld} 字符协议原文`);
+  if (scene?.lastEndReason) bits.push(`本轮收束原因 ${scene.lastEndReason}`);
+  return 'TOOL_CALL_UNPARSED: 网页这一轮发出了工具调用，但桥没能把它变成可执行的调用'
+    + '（最常见原因：JSON 里漏写 name 字段，或参数 JSON 不配平/被截断）。'
+    + `本会话可用工具：${list || '（无）'}。`
+    + `请按要求重发：<tool_call>{"mcp_action":"call","name":"工具名","arguments":{…}}</tool_call>`
+    + '——name 不能省；如果任务不需要工具，请直接给出结论。'
+    + (bits.length ? `（${bits.join('，')}）` : '')
+    + (tail ? `思考末尾：${tail}。` : '');
 }
 
 /** 每轮收尾的 usage + finish 事件对（outputTokens 口径：正文+思考一起估）。 */

@@ -1,0 +1,5 @@
+<tool_call>
+{"mcp_action":"call","purpose":"Verify no undefined REF/README remain","arguments":{"pattern":"\\bREF\\b|\\bREADME\\b","path":"D:\\9_Code_Workspace\\dsh-webcode-bridge\\scripts\\gen-reference-index.mjs"}}
+<tool_call>
+{"mcp_action":"call","purpose":"Run reference index check after fix","arguments":{"command":"cd D:\\9_Code_Workspace\\dsh-webcode-bridge\nWrite-Host '=== --check ==='; node scripts/gen-reference-index.mjs --check; Write-Host \"exit=$LASTEXITCODE\"\nWrite-Host '=== --missing ==='; node scripts/gen-reference-index.mjs --missing; Write-Host \"exit=$LASTEXITCODE\"","description":"Run reference index check after fix"}}
+</｜｜DSML｜｜ calls>

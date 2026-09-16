@@ -1,0 +1,3 @@
+<tool_call>
+{"mcp_action":"call","purpose":"Read tail of reference index script","arguments":{"file_path":"D:\\9_Code_Workspace\\dsh-webcode-bridge\\scripts\\gen-reference-index.mjs","offset":176,"limit":60}}
+</｜｜DSML｜｜ calls>

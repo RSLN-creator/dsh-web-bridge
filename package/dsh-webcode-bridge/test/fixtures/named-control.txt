@@ -1,0 +1,6 @@
+Tool results aren't coming back. Let me retry the verification.
+
+<tool_call>
+{"mcp_action":"call","name":"read","purpose":"Read fixed script region","arguments":{"file_path":"D:\\9_Code_Workspace\\dsh-webcode-bridge\\scripts\\gen-reference-index.mjs","offset":104,"limit":100}}
+</tool_call>
+</｜｜DSML｜｜ calls>

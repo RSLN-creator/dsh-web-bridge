@@ -437,6 +437,84 @@ export function fillMissingRequired(args, schema, purpose) {
   return { args: out, filled };
 }
 
+/**
+ * 参数归一化：把网页常见的「转义 JSON 字符串」参数变成对象。
+ *
+ * DeepSeek 网页版与 OpenAI 一样，常把 `arguments` 写成 `"{\"command\":\"…\"}"`
+ * （转义后的 JSON 字符串）而不是对象。不归一化的话这些参数会被当成空对象丢弃，
+ * 工具拿到空参数执行失败。任何解析失败的字符串都安全回落为 `{}`
+ * （宁可空参数，也不轻率执行）。
+ *
+ * 导出它是为了让流式侧（`lib/index.js` 的开块判定）与收尾解析用**同一份**归一化——
+ * 两处形态知识一旦漂移，就会一边认出调用、另一边认不出（0.9.4/0.14.6/0.15.0 三次
+ * 泄漏事故的共同教训）。
+ *
+ * @param {unknown} value `arguments` / `input` / `parameters` 的原始值
+ * @returns {object} 参数对象；无法解析时返回 `{}`
+ */
+export function normCallArgs(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value === 'string' && value.trim()) {
+    const first = value.trim()[0];
+    if (first === '{' || first === '[') {
+      try {
+        const parsed = JSON.parse(value);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+      } catch { /* 非 JSON 字符串：按空参数处理 */ }
+    }
+  }
+  return {};
+}
+
+/**
+ * 按**参数形状**反推工具名——网页模型漏写 `name` 时的还原器。
+ *
+ * ## 为什么需要它（0.15.9 真机证据）
+ *
+ * 会话 `session-07907f7c` 的网页历史里，模型把调用写成
+ * `<tool_call>{"mcp_action":"call","purpose":"…","arguments":{pattern,path}}`
+ * ——**整整两轮都没写 name**。旧 `takeObj` 只认「有 name」的调用，于是这两个调用
+ * 被静默丢弃、诊断也空，界面上只剩散文（或一条空消息），agent loop 判定本轮
+ * 「无事完成」，模型在下几轮反复说「my tool calls didn't get results」。
+ *
+ * ## 判据（三条缺一不可，宁可返回 null 也不猜）
+ *
+ *   1. 提供的**每个键**都必须由该工具声明（`parameters.properties`）；
+ *   2. 该工具的**必填**必须齐——`description` 例外：它按 `FILLABLE_REQUIRED`
+ *      的白名单可由 `purpose` 代填（与 `fillMissingRequired` 同一份知识）；
+ *   3. 候选必须**唯一**。多个工具都收得下这组参数时返回 `null`（例如两个工具的
+ *      schema 完全同形），把决定权交回上层，绝不掷硬币。
+ *
+ * 为什么这不是「瞎猜」：判据全部来自本会话真实下发的工具表，且要求唯一解。
+ * 与之相对的错误做法是「按第一个键查表」——`{file_path}` 会被读成 `write`
+ * 并覆盖文件，那是**执行错的事**，比丢调用更坏。
+ *
+ * @param {unknown} args 归一化后的参数对象
+ * @param {Array<{name?: string, parameters?: object}>} tools 本会话下发的工具表
+ * @returns {string|null} 唯一可判定的工具名；判不出时 `null`
+ */
+export function inferToolNameFromArgs(args, tools) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return null;
+  const keys = Object.keys(args);
+  if (!keys.length) return null;
+  const cands = [];
+  for (const t of Array.isArray(tools) ? tools : []) {
+    const name = typeof t?.name === 'string' ? t.name.trim() : '';
+    const schema = t?.parameters;
+    const props = schema && typeof schema === 'object' && schema.properties && typeof schema.properties === 'object'
+      ? schema.properties
+      : null;
+    if (!name || !props) continue;
+    if (!keys.every((k) => Object.prototype.hasOwnProperty.call(props, k))) continue;
+    const required = Array.isArray(schema.required) ? schema.required : [];
+    if (required.some((r) => !keys.includes(r) && !FILLABLE_REQUIRED.test(r))) continue;
+    cands.push(name);
+  }
+  if (cands.length === 1) return cands[0];
+  // 同形 schema（少见但真实：模型侧的包装工具）不掷硬币，返回 null 由上层留痕。
+  return null;
+}
+
 /** 从 text[start]（应为 '{'）做花括号配对（跳过字符串内的括号），配平即试解析。 */
 function jsonObjectAt(text, start) {
   const src = String(text ?? '');
@@ -1048,6 +1126,45 @@ export function proseSafeEnd(text, from = 0) {
 }
 
 /**
+ * 找一个 `<invoke …>` 体的结束位置（**配平感知**，0.15.8 修 #19）。
+ *
+ * 判据：从 `from` 起扫描，维护「当前是否有参数未闭合」的状态机：
+ *   - 见到 `<parameter …>` 且当前无未闭参数 → 进入「参数内」；
+ *   - 见到 `</parameter>` 且当前在参数内 → 回到「参数外」；
+ *   - 只有在**参数外**遇到的第一个 `</invoke>` 才是体的终点。
+ *
+ * 为什么不能用 lazy 正则 `([\s\S]*?)</invoke>`：参数体里若**举例引用了协议的
+ * 闭合标签**（写文档说明协议形状时必然出现），lazy 会在示例里的第一个
+ * `</invoke>` 处截断，截出的体没有配平参数 → 调用被静默丢弃。这正是 #19 的真根因。
+ * 为什么不能用 greedy：一轮里有两个 invoke 时，会把第二个吞进第一个的体里。
+ *
+ * 兜底纪律：扫到结尾仍不配平时**降级为第一个 `</invoke>`**（畸形输入取旧行为），
+ * 而不是返回 -1 把整条调用丢掉——后者是本修复自己引入过的真回归。
+ *
+ * @returns 体的结束下标（指向 `</invoke>` 的 `<`）；完全没有闭标签时返回 -1。
+ *
+ * 纯函数、无 IO；护栏见 `test/fence-nested-call.test.mjs` ⑬⑭⑮⑯。
+ */
+function invokeBodyEnd(src, from) {
+  const TAG = /<\s*\/?\s*parameter\b[^>]*>|<\s*\/\s*invoke\s*>/gi;
+  TAG.lastIndex = from;
+  let inParam = false;
+  let firstClose = -1;
+  let m;
+  while ((m = TAG.exec(src)) !== null) {
+    const tag = m[0];
+    if (/^<\s*\/\s*invoke/i.test(tag)) {
+      if (!inParam) return m.index; // 参数外的闭标签才是体终点
+      if (firstClose < 0) firstClose = m.index;
+      continue;
+    }
+    // </parameter> 闭合当前参数（游离残片忽略）；<parameter …> 开一个新参数。
+    inParam = !/^<\s*\//.test(tag);
+  }
+  return firstClose;
+}
+
+/**
  * 把网页回复解析成工具调用列表（同时原样返回归一化后的全文）。
  *
  * 宽容地接受调用围栏周围的散文——这正是围栏协议的意义——但每个围栏必须是一个
@@ -1063,11 +1180,19 @@ export function proseSafeEnd(text, from = 0) {
  * **只看内容，不看标签名**：`<toolcall>`（无下划线）这类外壳与 `<tool_call>`
  * 同等对待——外壳叫什么不重要，里面是不是一个配平的、名字在工具表里的 JSON 才算数。
  *
+ * 0.15.9 起可传 `options.tools`：模型漏写 `name` 时按参数形状反推
+ * （`inferToolNameFromArgs`）。**不传也能用**——只是缺名调用会退化成留痕的诊断，
+ * 这正是真机 `session-07907f7c` 的现场。调用方（`lib/index.js`）必须传，
+ * 否则「网页有输出、harness 显示不了」会原样复现；接线由
+ * `test/nameless-call.test.mjs` ⑫ 钉住。
+ *
  * @param {string} text 网页累积回复全文
- * @returns {{calls: Array<{name: string, arguments: object, purpose?: string}>, text: string}}
+ * @param {{tools?: Array<{name?: string, parameters?: object}>}} [options] 本会话工具表
+ * @returns {{calls: Array<{name: string, arguments: object, purpose?: string, nameInferred?: true}>, text: string, diagnostics: string[]}}
  */
-export function parseAgentReply(text) {
+export function parseAgentReply(text, options = {}) {
   if (!text) return { calls: [], text: '', diagnostics: [] };
+  const tools = Array.isArray(options?.tools) ? options.tools : [];
   let s = String(text);
   // 网页端流式噪声：DeepSeek 网页版偶发把协议标记输出成 <…> 的变形——
   // 竖线全角化成对出现（<tool_calls>，U+FF5C）、丢开头 <。归一化与流式
@@ -1089,21 +1214,16 @@ export function parseAgentReply(text) {
   // （"{\"command\":\"...\"}"）而非对象。这里统一做一次"字符串→对象"归一化，
   // 否则这些参数会被当成空对象丢弃，工具拿到空参数执行失败。任何解析失败的
   // 字符串都安全回落为 {}（宁可空参数，也不轻率执行）。
-  const normArgs = (value) => {
-    if (value && typeof value === 'object' && !Array.isArray(value)) return value;
-    if (typeof value === 'string' && value.trim()) {
-      const first = value.trim()[0];
-      if (first === '{' || first === '[') {
-        try {
-          const parsed = JSON.parse(value);
-          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
-        } catch { /* keep fallback */ }
-      }
-    }
-    return {};
-  };
+  // 归一化与工具名反推共用 `normCallArgs` / `inferToolNameFromArgs`：流式开块侧
+  // （lib/index.js）调的是同一份函数，两处形态知识不会漂移。
+  const normArgs = normCallArgs;
   /** 只对「形态像调用」的体留痕：普通散文代码块不记，诊断才不会刷成噪音。 */
   const looksLikeCall = (t) => /"mcp_action"\s*:/.test(t) || /"arguments"\s*:/.test(t);
+  /**
+   * 包装名名单：这些名字是**外壳**不是工具（`<invoke name="tool_call">` 那种写法），
+   * 与本文件 invoke 分支的 `wrapperName` 是同一份知识。命中时按「没写 name」处理。
+   */
+  const WRAPPER_TOOL_NAME = /^(?:tool_calls?|function|invoke|mcp_action|call)$/i;
   const takeObj = (body, tagged = false) => {
     const t = String(body ?? '').trim();
     if (!t.startsWith('{') || seen.has(t)) return;
@@ -1120,21 +1240,63 @@ export function parseAgentReply(text) {
     // f3fa97fd 复盘：模型把错误结果回读后省略 mcp_action 字段直接输出该形状，
     // 导致调用被静默丢弃、任务在第二轮裸奔。宁可多认，由下方 isCall 严格把关）。
     const fenceCall = tagged || obj.mcp_action === 'call';
-    if (!fenceCall && !(!obj.mcp_action && typeof obj.name === 'string' && obj.name.trim())) return;
-    const args = normArgs(obj.arguments ?? obj.input ?? obj.parameters);
-    const isCall =
-      fenceCall
-        ? (typeof obj.name === 'string' && obj.name.trim())
-        : (typeof obj.arguments === 'object' || typeof obj.input === 'object' || (typeof obj.arguments === 'string' && obj.arguments.trim().startsWith('{')));
-    if (!isCall) return;
+    const rawName = typeof obj.name === 'string' ? obj.name.trim() : '';
+    const nameIsWrapper = rawName !== '' && WRAPPER_TOOL_NAME.test(rawName);
+    if (!fenceCall && (!rawName || nameIsWrapper)) {
+      // 0.15.9 的教训：**不留痕的早退分支就是静默丢弃的唯一来源**。这一支是
+      // 「有 arguments、却没有 mcp_action 也没有 name」的形状——旧实现同样一声不响。
+      if (looksLikeCall(t)) diagnostics.push(`call-shaped body without mcp_action/name: ${t.slice(0, 120)}`);
+      return;
+    }
+    const argsRaw = obj.arguments ?? obj.input ?? obj.parameters;
+    const args = normArgs(argsRaw);
+    // 参数写了、却归一化不出任何键（非 JSON 字符串 / 数组）：调用仍按旧语义派发
+    // （`{}`，由 DSH 报它自己的必填错），但**必须留痕**——「参数没了」过去是无声的，
+    // 而它正是 #17「missing required property」那一族的入口。
+    if (argsRaw !== undefined && argsRaw !== null
+      && !(typeof argsRaw === 'object' && !Array.isArray(argsRaw))
+      && !(typeof argsRaw === 'string' && argsRaw.trim() === '')
+      && Object.keys(args).length === 0) {
+      diagnostics.push(`call arguments could not be normalized (${Array.isArray(argsRaw) ? 'array' : typeof argsRaw}): ${String(argsRaw).slice(0, 80)}`);
+    }
+    let name = nameIsWrapper ? '' : rawName;
+    let inferred = false;
+    if (fenceCall) {
+      // 0.15.9：**没有 name 的调用不再静默丢弃**。真机证据（网页会话 49ab6330，
+      // 夹具 test/fixtures/nameless-*.txt）里模型连着两轮把调用写成
+      // <tool_call>{"mcp_action":"call","purpose":…,"arguments":{…}}——有 mcp_action、
+      // 有 parameters，就是没写 name。旧实现走到下面那条 isCall 判定直接 return，
+      // 连 diagnostics 都不进，于是调用消失、界面只剩散文、agent loop 判「无事完成」。
+      // 现在按本会话真实下发的工具表反推（唯一解才认），并在诊断里留痕。
+      if (!name) {
+        const guess = inferToolNameFromArgs(args, tools);
+        if (guess) {
+          name = guess;
+          inferred = true;
+          diagnostics.push(`nameless call resolved by arguments shape → ${guess}: ${t.slice(0, 100)}`);
+        } else {
+          diagnostics.push(`nameless call body (无 name 字段且参数形状判不出唯一工具): ${t.slice(0, 120)}`);
+          return;
+        }
+      }
+    } else {
+      // 非围栏形状保持旧判据：必须自己证明是调用（带对象型 arguments），
+      // 且必须写出名字——这条路径没有 mcp_action 兜底，猜错就是执行错的事。
+      const isCall = typeof obj.arguments === 'object' || typeof obj.input === 'object'
+        || (typeof obj.arguments === 'string' && obj.arguments.trim().startsWith('{'));
+      if (!isCall) {
+        if (looksLikeCall(t)) diagnostics.push(`non-fence body with unusable arguments: ${t.slice(0, 120)}`);
+        return;
+      }
+    }
     if (Array.isArray(args)) return;
-    const sig = obj.name.trim() + '\u0000' + JSON.stringify(args);
+    const sig = name + '\u0000' + JSON.stringify(args);
     if (seenSig.has(sig)) return;
     seenSig.add(sig);
     // purpose 是模型对「为什么调」的自述：派发侧用它补缺失的 description 类
     // 必填参数（fillMissingRequired），比从命令前缀派生更贴切。没有就不带键。
     const purpose = typeof obj.purpose === 'string' ? obj.purpose.trim() : '';
-    calls.push({ name: obj.name.trim(), arguments: args, ...(purpose ? { purpose } : {}) });
+    calls.push({ name, arguments: args, ...(purpose ? { purpose } : {}), ...(inferred ? { nameInferred: true } : {}) });
   };
   // 0.15.6 真机缺陷修复：围栏体必须用**花括号/字符串转义感知**的定位器取，
   // 不能用非贪婪的 ``` 配对。
@@ -1183,8 +1345,36 @@ export function parseAgentReply(text) {
   // 参数却是本协议的裸 JSON 对象，还带一串游离的 </parameter>：
   //   <invoke name="read" purpose="…">{"path":"…"}</parameter></invoke>
   // 只在没有 <parameter> 元素时才按裸 JSON 兜底（有 parameter 的老形状不变）。
-  const invokeRe = /<\s*invoke\s+name\s*=\s*"([^"]+)"\s*[^>]*>([\s\S]*?)<\s*\/\s*invoke\s*>/gi;
-  while ((m = invokeRe.exec(s)) !== null) {
+  //
+  // 0.15.8（#19 真根因修复）：体**不能**用 lazy 的 `([\s\S]*?)</invoke>` 取。
+  //
+  // 真机现场（REPORT.md，22,366 字符，见 doc/diagnosis-2026-09-16.md §5）：
+  // 参数体是一份**讲解协议形状的审计报告**，正文里举例出现了 `</invoke>` 与
+  // `</parameter>`。lazy 于是在示例里的**第一个** </invoke>（偏移 10230）处截断，
+  // 截出的体内没有配平的 </parameter> → n===0 → 调用被静默跳过，
+  // 而真调用一直延伸到 22268 才闭合。用户侧症状就是「文件没落盘、界面没显示」。
+  //
+  // 为什么不用 greedy：一轮里有两个 invoke 时，greedy 会把第二个整个吞进
+  // 第一个的体里，参数串到错误的块上——比丢调用更坏（护栏 ⑭ 钉住这一点）。
+  //
+  // 正确判据是**配平**：体本应在第一个 </invoke> 处收束，但只要该点之后
+  // 还存在「已开而未闭」的 <parameter>，就继续延伸到把它配平的位置。
+  // 这样示例里的孤立 </invoke>（前面没有未闭的 parameter）不会造成截断，
+  // 而真正的调用边界（parameter 已配平）依然精确。
+  const invokeOpenRe = /<\s*invoke\s+name\s*=\s*"([^"]+)"\s*[^>]*>/gi;
+  while ((m = invokeOpenRe.exec(s)) !== null) {
+    const bodyStart = m.index + m[0].length;
+    const bodyEnd = invokeBodyEnd(s, bodyStart);
+    if (bodyEnd < 0) continue; // 体未配平（流式半成品）：不算可执行调用
+    m[2] = s.slice(bodyStart, bodyEnd);
+    // **必须重建 m[0] 为「开标签 + 体 + 闭标签」整段**。
+    // 下游的畸形抢救分支会扫 m[0]（含属性区）找 `"name":"x","arguments":{…}`
+    // 片段——真机 2026-09-10 第 5 跑那种「JSON 漏进标签名」的形状，
+    // 片段正落在属性区里。旧实现用一条 invokeRe 同时拿到 m[0] 与 m[2]，
+    // 换成两次定位后若不同步重建 m[0]，抢救分支就永远扫不到东西（实测回归）。
+    const closeMatch = /<\s*\/\s*invoke\s*>/i.exec(s.slice(bodyEnd));
+    m[0] = closeMatch ? s.slice(m.index, bodyEnd + closeMatch.index + closeMatch[0].length) : m[0];
+    invokeOpenRe.lastIndex = bodyEnd; // 从体之后继续，避免把内层当外层重复扫描
     const args = {};
     let n = 0;
     // 新版 UI（2026-09-10）的 DSML 序列化会给参数带类型属性：

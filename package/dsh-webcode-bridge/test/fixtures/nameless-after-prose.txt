@@ -1,0 +1,7 @@
+Let me verify the actual file state and re-run the check.
+
+<tool_call>
+{"mcp_action":"call","purpose":"Read fixed script region","arguments":{"file_path":"D:\\9_Code_Workspace\\dsh-webcode-bridge\\scripts\\gen-reference-index.mjs","offset":104,"limit":100}}
+<tool_call>
+{"mcp_action":"call","purpose":"Run reference index check after fix","arguments":{"command":"cd D:\\9_Code_Workspace\\dsh-webcode-bridge\nnode scripts/gen-reference-index.mjs --check; Write-Host \"check_exit=$LASTEXITCODE\"\nnode scripts/gen-reference-index.mjs --missing; Write-Host \"missing_exit=$LASTEXITCODE\"","description":"Run reference index check after fix"}}
+</｜｜DSML｜｜ calls>
