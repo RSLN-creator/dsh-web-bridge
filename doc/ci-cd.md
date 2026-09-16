@@ -110,31 +110,42 @@ pnpm install --no-frozen-lockfile   # 退出码 0，且 lockfile 的 sha256 前�
 > `--frozen-lockfile`——那才是 CI 应有的严格度。在那之前用 `--no-frozen-lockfile` 是**如实描述
 > 现状**，而不是放宽标准。
 
-### 3.2 Node 20 上 `pnpm test` 会因 glob 失败
+### 3.2 CI 的 Node 矩阵必须与 `engines.node` 相容（2026-09-17 修正）
 
-`package.json` 的 test 脚本第一段是：
+**这一节此前写的是「Node 20 上 `pnpm test` 会因 glob 失败」。那个结论是错的**——
+它描述的现象存在，但它不是 CI 变红的原因。实测（run 35137367183）：Node 20 那两条腿
+**在 `pnpm install` 就退出了**，任何一条测试都没跑到：
 
 ```
-node --test "test/*.test.mjs"
+warn: This version of pnpm requires at least Node.js v22.13
+Error [ERR_UNKNOWN_BUILTIN_MODULE]: No such built-in module: node:sqlite
+Process completed with exit code 1.
 ```
 
-**引号让 shell 无法展开**，字符串原样交给 Node。而 `--test` 的 **glob 支持是 Node 21 才加入的**——
-Node.js 21 发布公告的「Support for globs in the Node.js test runner」一节
-（[来源](https://nodejs.org/en/blog/announcements/v21-release-announce)，PR
-[nodejs/node#47653](https://github.com/nodejs/node/pull/47653)）。在 Node 20 上它是**字面路径**，
-找不到文件 → 必然失败。
+根因不是 glob，而是**两处版本声明互相矛盾**：`package.json` 的 `packageManager` 钉的是
+`pnpm@11.25.0`，该版本要求 Node ≥22.13；而矩阵里放着 Node 20。于是「Node 20 专用命令」
+那段分流从未被执行过——它是一段**为错误前提写的补丁**，恰好掩盖了真因。
 
-而 `package.json` 的 `engines.node` 是 `>=20`，所以 20 必须覆盖（只测 22 会放过「在声明支持的
-最低版本上根本跑不起来」这类回归）。`ci.yml` 的分流做法：Node 20 那条腿用 **bash 展开 glob**
-的等价命令，与 `pnpm test` 逐字对应：
+修法是让三处对齐到同一个事实：
 
-```bash
-node --test test/*.test.mjs      # 不加引号 → bash 先展开成显式文件表
-node test/parse.test.mjs
-node test/run-m1.js
-node test-mock/bench-ci.mjs
-node test-mock/artifacts-check.mjs
-```
+| 位置 | 现在写的是 |
+| --- | --- |
+| `package/dsh-webcode-bridge/package.json` → `engines.node` | `>=22.13`（与 `packageManager` 相容） |
+| `.github/workflows/ci.yml` → `matrix.node` | `[22, 24]` |
+| 单测步骤 | **只有一条** `pnpm test`（两平台四条腿跑同一条命令） |
+
+矩阵仍同时覆盖**最低声明版本**（22）与开发机当前版本（24）：只测 24 会放过「在声明支持的
+最低版本上根本跑不起来」这类回归，而那正是本项目最想避免的一类「本地绿、用户红」。
+
+> **为什么删掉 glob 分流**：`node --test` 的 glob 支持是 Node 21 才加入的
+> （[Node.js 21 发布公告](https://nodejs.org/en/blog/announcements/v21-release-announce)，PR
+> [nodejs/node#47653](https://github.com/nodejs/node/pull/47653)），22 上原生可用。
+> 两条腿跑同一条命令之后，「它们跑的到底是不是同一件事」不再需要靠人对照两段命令。
+
+**这条矛盾现在有机器判据**：`scripts/check-repo-hygiene.mjs` 的判据 C 直接比对
+`ci.yml` 的 Node 矩阵与 `engines.node`——矩阵里出现低于最低声明版本的大版本、
+或矩阵没有覆盖最低声明大版本，都会红。写下它是因为本次事故的形状：改 `engines.node`
+时没人去改矩阵，两份人写的声明之间**没有任何东西保证一致**。
 
 ---
 
@@ -359,15 +370,15 @@ node ..\..\scripts\install-profiles.mjs <tgz> --profiles web
 
 | 必需检查 | 来源 |
 | --- | --- |
-| `test (ubuntu-latest, node 20)` | `ci.yml` |
 | `test (ubuntu-latest, node 22)` | `ci.yml` |
-| `test (windows-latest, node 20)` | `ci.yml` |
+| `test (ubuntu-latest, node 24)` | `ci.yml` |
 | `test (windows-latest, node 22)` | `ci.yml` |
+| `test (windows-latest, node 24)` | `ci.yml` |
 | `分析 JavaScript/TypeScript` | `codeql.yml` |
 | `打包并发布 tarball` | `release.yml`（只在 tag 上跑，可留可加） |
 
 四项 matrix 全列，不要只留 ubuntu —— `windows-latest` 那条腿是本项目的**主开发平台**
-（README：「系统需要 Node.js 20+ 和 Microsoft Edge」），历史上大量踩坑来自 Windows
+（README：「系统需要 Node.js 22.13+ 和 Microsoft Edge」），历史上大量踩坑来自 Windows
 （`lib/browser-driver.js` 的 WMI Terminate、profile 单实例锁残留、分隔符匹配）。
 
 另建议开启：**Require branches to be up to date before merging**、

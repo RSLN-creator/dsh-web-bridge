@@ -149,10 +149,13 @@ function toMarkdown(rows) {
 
 function main() {
   const argv = process.argv.slice(2);
-  // `REF` 与 `README` 在 0.15.8 之前是**从未定义过的模块级标识符**——`collect()` 一被调用
-  // 就抛 `ReferenceError: REF is not defined`，整条 `--check` 以退出码 2 结束。
-  // 它同时被 `ci.yml` 与 `ci-local.mjs` 当作**阻断闸门**调用，所以那不是「少跑一道检查」，
-  // 而是每次 CI 都红一次、且红在一个与改动无关的地方。根因是 `refDirOf()` 写了却没人调用。
+  // `--check` 分支曾经引用两个**从未定义过的**标识符（`REF` 与 `README`），一走到那里就抛
+  // `ReferenceError`、整条命令以退出码 2 结束。它同时被 `ci.yml` 与 `ci-local.mjs` 当作
+  // **阻断闸门**调用，所以那不是「少跑一道检查」，而是每次 CI 都红一次、且红在一个与改动
+  // 无关的地方——正是本项目最想避免的「假红」。根因是 `refDirOf()` 写了却没人调用，
+  // 于是 `--check` 只能去引用一个不存在的模块级常量。
+  // 正确的形状是：路径**只经由 `refDir` 这一个变量**流动（`readme` 与存在性判断都用它），
+  // 这样 `--root` 覆盖在 `--check` 路径上同样生效，测试才可能构造干净克隆的形状。
   const refDir = refDirOf(argv);
   const readme = path.join(refDir, 'README.md');
   const rows = collect(refDir);
@@ -176,11 +179,11 @@ function main() {
   const table = toMarkdown(rows);
 
   if (argv.includes('--check')) {
-    if (!fs.existsSync(README)) {
+    if (!fs.existsSync(readme)) {
       process.stderr.write('[ref-index] reference/README.md 不存在——先跑一次本脚本并写入。\n');
       return 1;
     }
-    const current = fs.readFileSync(README, 'utf8');
+    const current = fs.readFileSync(readme, 'utf8');
     // **只校验「磁盘上确实存在」的条目。**
     //
     // 这一步的设计陷阱（必须写下来，否则下一个人会「顺手修好」成整表比对）：
@@ -193,9 +196,11 @@ function main() {
     // 不存在的条目无从校验，报成 SKIP 并说明。这样：
     //   · 有克隆的机器（维护者）→ 真的在验；
     //   · 干净克隆（CI / 新协作者）→ 明确跳过，而不是假装通过或错误失败。
-    const present = rows.filter((r) => fs.existsSync(path.join(REF, r.name)));
+    const present = rows.filter((r) => fs.existsSync(path.join(refDir, r.name)));
     const absent = rows.length - present.length;
-    const tableLines = toMarkdown(rows).split('\n');
+    // 复用上面已经算好的 `table`，**不要**在这里重新调一次 `toMarkdown(rows)`：
+    // 同一份输入算两遍，将来只改一处就会让「打印的表」与「校验的表」分叉。
+    const tableLines = table.split('\n');
     const missing = [];
     for (const r of present) {
       const line = tableLines.find((l) => l.startsWith(`| \`${r.name}\` |`));

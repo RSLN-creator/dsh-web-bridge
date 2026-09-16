@@ -23,10 +23,10 @@
 | 工作树版本 | **0.15.11** |
 | 已装版本（profile） | **0.15.9**（0.15.10 / 0.15.11 尚未打包；三轮代码都在工作树里） |
 | 运行中的进程 | **0.15.9**（2026-09-16 23:56 重启后实测：`/__webcode/status` → `version=0.15.9 hash=a2e1e2349249`；relay running、driver loggedIn、transport=playwright-edge、79 条会话映射已恢复、21 个模型在册） |
-| 上游 | `origin/main` = `a956512`。**`89f7d41`(0.15.7) 与本轮 0.15.8～0.15.11 均未推送** |
+| 上游 | `origin/main` = `6bcba7c`。**工作树与上游一致（ahead 0 / behind 0）**，0.15.7～0.15.11 均已推送 |
 | 单测基线 | **40/40 测试文件全绿**（逐文件跑；`client-server-contract` 曾红，根因与修法见 §0.15.11） |
 | 注释闸门 | **error 0 / warn 0，退出码 0**（85 个文件，2026-09-17 实跑） |
-| 文件规范闸门 | `check-repo-hygiene.mjs` **PASS**（无 BOM + 索引无死链） |
+| 文件规范闸门 | `check-repo-hygiene.mjs` **PASS**（无 BOM + 索引无死链 + CI/engines Node 版本相容，判据 C 于 2026-09-17 新增） |
 | 发布闸门 | `verify-pack` **29/29 逐字相同 + 接线完好**，退出 0（0.15.9 打包后实跑；0.15.10/11 尚未打包） |
 | 记账闸门 | `check-ledger.mjs` **PASS**（version 0.15.11 / testFiles 40/40） |
 | 下一阶段 | 打包 0.15.11 → `verify-pack` → 装 profile → 重启，做 §0.15.11「等待药丸同栏」与 0.15.9「缺 `name` 调用可见」两项真机验收 |
@@ -54,6 +54,120 @@
 > `regression` / `tool-loop` / `wiring-roster` 三个文件假失败。
 > 把 `TMPDIR`/`TEMP`/`TMP` 指到工作区 `.tmp` 后 **39/39 全绿**。
 > 这是环境前提，不是回归——已记入 `long-term-issues.md` #10。
+
+## 2026-09-17 CI 全红修复（无产品代码改动）—— 三条独立红因，一条新的机器判据
+
+**用户报的是「CI 在 GitHub 上一直是红的」。** 实测 run `35137367183`（`6bcba7c`）四条腿
+**全红**，且**红在两处不同的地方**——这是先要看清的事：
+
+| 腿 | 红在哪一步 | 退出码 |
+| --- | --- | --- |
+| `ubuntu-latest, node 20` | **第 5 步「安装依赖」** | 1（测试一步都没跑） |
+| `windows-latest, node 20` | **第 5 步「安装依赖」** | 1（同上） |
+| `ubuntu-latest, node 22` | 第 9 步「reference 来源表一致」 | 1 |
+| `windows-latest, node 22` | 第 9 步「reference 来源表一致」 | 1 |
+
+即：Node 版本是**一个**变量，`gen-reference-index.mjs` 是**另一个**。三条根因：
+
+### 一、Node 20 那两条腿跑不起来（`ci.yml` + `engines.node`）
+
+日志原文（`ubuntu-latest, node 20`）：
+
+```
+warn: This version of pnpm requires at least Node.js v22.13
+Error [ERR_UNKNOWN_BUILTIN_MODULE]: No such built-in module: node:sqlite
+Process completed with exit code 1.
+```
+
+根因不是「Node 20 有回归」，而是**两处版本声明互相矛盾**：`package.json` 的
+`packageManager` 钉的是 `pnpm@11.25.0`（要求 Node ≥22.13），矩阵里却放着 Node 20。
+
+**这一条此前被一个错误的结论掩盖着**：`ci.yml`、`doc/ci-cd.md` §3.2、`CONTRIBUTING.md` ②
+三处都写着「Node 20 上 `pnpm test` 会因 glob 失败」，并据此给 Node 20 写了一段
+「用 bash 展开 glob」的专用命令。那段分流**从来没有被执行过**——失败在它之前。
+一个为错误前提写的补丁，恰好让人不去看真因。三处文字已全部改正。
+
+修法（三者对齐）：`engines.node` → `>=22.13`；矩阵 → `[22, 24]`；删掉 glob 分流，
+两平台四条腿跑**同一条** `pnpm test`。
+
+### 二、`gen-reference-index.mjs --check` 自己就是坏的（退 2，不是退 1）
+
+本机复现：
+
+```
+[ref-index] 脚本自身失败：ReferenceError: README is not defined
+    at main (scripts/gen-reference-index.mjs:179:24)
+```
+
+`--check` 分支引用了两个**从未定义过的**标识符（`REF` 与 `README`），一走到那里就抛
+`ReferenceError`、以退出码 2 结束。它被 `ci.yml` 与 `ci-local.mjs` 同时当作**阻断闸门**调用，
+所以那不是「少跑一道检查」，而是**每次 CI 都红一次、且红在一个与改动无关的地方**。
+根因是 `refDirOf()` 写了却没人调用——`--root` 这个为测试留的入口是死代码。
+
+修法：路径只经由 `refDir` 一个变量流动（`readme` 与存在性判断都用它），
+`--root` 覆盖因此在 `--check` 路径上同样生效；顺带复用已算好的 `table`，
+不再让「打印的表」与「校验的表」各算一遍。
+
+### 三、闸门修好之后，它立刻抓到一条真漂移
+
+修好 `--check` 后本机实跑，**它报出 3 条与磁盘不一致**（此前被 `ReferenceError` 掩盖着）：
+
+- `dsh-file-attachment`（1.9 MB）在磁盘上、可克隆，但**没登记进来源表**；
+- `dsh-task-board`（1.5 MB）、`dsh-archive-manager`（0.5 MB）是 2026-09-17 新解包的副本，
+  同样没进表。
+
+已重新生成 §4 的表写回 `reference/README.md`，并修正 §3 的两处过期计数
+（「6 份 md」实为 7 份、「33 个 clone」实为 34 个）。`--check` 现在 **exit 0**
+（校验 39 个本机存在的条目）。
+
+### 四、`reference/` 下四个幻影 submodule（CI 收尾时会被 git 摸到）
+
+实测 `reference/` 下有 **4 个 gitlink**（mode `160000`）：`deepseek-web-import`、
+`dsh-deepseek-chat`、`opencode2dsh`、`webcode`——它们**入库了**，被 git 当成 submodule 条目。
+而仓库**没有 `.gitmodules`**，于是任何 `git submodule foreach` 都会报：
+
+```
+fatal: No url found for submodule path 'reference/deepseek-web-import' in .gitmodules
+```
+
+这正是 `actions/checkout` 的 post 步骤在每条腿上都会打印的那条 warning。根因是某次
+`git add reference/<clone>` 绕过了 `.gitignore:9` 的 `reference/*/`（README §2 已把这条陷阱写在案）。
+
+修法：`git rm --cached` 这四个条目（**只动索引，不删磁盘上的克隆**）。
+`reference/` 现在只剩 `README.md` 与 `local-refs/` 被跟踪——与 §2 的约定一致。
+
+### 五、新增判据 C：CI 矩阵必须与 `engines.node` 相容
+
+本次事故的形状是「改了一处人写的声明，没人去改另一处」。因此在
+`scripts/check-repo-hygiene.mjs` 加了判据 C，直接比对 `ci.yml` 的 `matrix.node`
+与 `package.json` 的 `engines.node`：矩阵里出现**低于最低声明版本**的大版本会红，
+矩阵**没有覆盖**最低声明大版本也会红（只测更高版本会放过「最低版本上跑不起来」）。
+
+已做**反向验证**：把矩阵临时改回 `[20, 24]`，闸门实测 `FAIL(2)` 并逐条指出问题；
+改回 `[22, 24]` 后 `PASS`。**判据按大版本比较**，不试图复刻 semver 全套规则
+（`>=22.13` 配矩阵 `22` 是允许的，setup-node 取最新 22.x）。
+
+### 本轮验证读数
+
+| 闸门 | 读数 |
+| --- | --- |
+| `lint-comments.mjs` | error 0 / warn 0，exit 0（85 个文件） |
+| `check-ledger.mjs` | PASS（version 0.15.11 / testFiles 40/40） |
+| `check-repo-hygiene.mjs` | PASS（BOM / 索引 / **Node 版本** 三条全绿）；`--self-test` 通过 |
+| `check-commit-msg.mjs --self-test` | 10 正例 + 6 反例全部符合预期 |
+| `gen-reference-index.mjs --check` | **exit 0**（修好前是 exit 2） |
+| `ci-local.mjs --fast` | **7/7 PASS** |
+| `bench-offline` | 14/14 通过（7 题 × 2 变体） |
+| 40 个测试文件 | **40/40 全绿**。注意 `node --test` 在本机整体跑会 spawn EPERM（见「已知环境约束」），
+所以这是**逐文件**跑出来的读数：`Get-ChildItem test\*.test.mjs` 逐个 `node <file>`，失败 0 |
+
+### 本轮零产品代码改动
+
+只动了 CI、脚本与文档：`.github/workflows/ci.yml`、`scripts/gen-reference-index.mjs`、
+`scripts/check-repo-hygiene.mjs`、`scripts/ci-local.mjs`、`reference/README.md`、
+`package/dsh-webcode-bridge/package.json`（仅 `engines.node`）、`README.md`、
+`CONTRIBUTING.md`、`doc/ci-cd.md`、本文件。**插件版本号不变（仍 0.15.11）**，
+因此不需要重新打包或重启。
 
 ## 0.15.11（已打代码 / 未打包 / 未安装）—— 等待药丸「同栏」由**结构**决定，不靠边距
 

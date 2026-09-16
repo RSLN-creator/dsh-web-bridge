@@ -24,15 +24,31 @@
 #    （sha256 前后一致）。所以这里用 `--no-frozen-lockfile`，并加 `--prefer-offline` 减少抖动。
 #    这不是「绕过校验」：该 lockfile 对干净安装本就不成立，冻住它只会让 CI 恒红。
 #
-# 2. **Node 20 跑不了 `pnpm test` 里的 glob**：`package.json` 的 test 脚本是
-#      node --test "test/*.test.mjs" && ...
-#    引号让 shell 无法展开，字符串原样交给 Node。而 `--test` 的 **glob 支持是 Node 21 才加入的**
-#    （Node.js 21 发布公告「Support for globs in the Node.js test runner」，PR nodejs/node#47653）。
-#    在 Node 20 上它是字面路径 → 找不到文件 → 必然失败。因此 Node 20 那条腿改用 **bash 展开
-#    glob** 的等价命令（见 `单测（Node 20 …）` 步骤），命令内容与 `pnpm test` 逐字对应。
+# 2. **Node 20 这条腿跑不起来，而且失败与测试无关**：本工作流曾把 Node 20 放进矩阵，
+#    依据是 `engines.node` 当时写着 `>=20`。但 `package.json` 的 `packageManager` 钉的是
+#    `pnpm@11.25.0`，而这一版 pnpm **要求 Node ≥22.13**。CI 实测（run 35137367183）：
 #
-# `engines.node` 是 `>=20`，所以 20 与 22 都必须覆盖：只测 22 会放过「在声明支持的最低版本上
-# 根本跑不起来」这类回归——而那正是本项目最想避免的一类「本地绿、用户红」。
+#      warn: This version of pnpm requires at least Node.js v22.13
+#      Error [ERR_UNKNOWN_BUILTIN_MODULE]: No such built-in module: node:sqlite
+#      Process completed with exit code 1.
+#
+#    失败发生在 `pnpm install` 这一步——**任何一条测试都还没跑**。所以那不是「Node 20 上
+#    有回归」，而是两处版本声明（`engines.node` 与 `packageManager`）本身互相矛盾，
+#    而陈旧的矩阵照着错的那一半去搭。它同时解释了为什么四条腿里有两条在**第 5 步**
+#    就红了，而另外两条能一路跑到闸门脚本：唯一变量就是这个 Node 版本。
+#
+#    修法是让三者对齐到同一个事实：`engines.node` = `>=22.13`、矩阵 = `[22, 24]`、
+#    不再有「Node 20 专用命令」。矩阵仍同时覆盖**最低声明版本**（22）与开发机当前版本（24）：
+#    只测 24 会放过「在声明支持的最低版本上根本跑不起来」这类回归——而那正是本项目
+#    最想避免的一类「本地绿、用户红」。
+#
+#    顺带删掉了原来的「Node 20 用 bash 展开 glob」分流。`node --test` 的 glob 支持是
+#    Node 21 才加入的（PR nodejs/node#47653），22 上原生可用：两条腿现在跑**同一条**
+#    `pnpm test`，「两条腿跑的到底是不是同一件事」不再需要靠人对照两段命令。
+#
+#    这一类矛盾现在有机器判据：`scripts/check-repo-hygiene.mjs` 的判据 C 直接比对
+#    ci.yml 的 Node 矩阵与 `engines.node`，矩阵里出现低于最低声明版本的大版本就红。
+#    （写下这条闸门的原因就是本次事故：`engines` 从 >=20 改成 >=22 时，没人去改矩阵。）
 
 name: CI
 
@@ -65,7 +81,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        node: [20, 22]
+        # 最低声明版本 + 开发机当前版本（见文件头事实 2）。不要在这里写低于
+        # `engines.node` 的大版本：`pnpm install` 会先红，测试根本没机会跑。
+        node: [22, 24]
 
     steps:
       - name: 检出
@@ -180,26 +198,14 @@ jobs:
             git log --format="%s" -1 "${{ github.sha }}" | node scripts/check-commit-msg.mjs --stdin
           fi
 
-      # ---- 全量单测：两套等价命令，按 Node 版本分流（见文件头事实 2）----
-
+      # ---- 全量单测：两条腿跑同一条命令 ----
+      #
+      # 这里曾经按 Node 版本分流成两段（Node 20 那条腿改用 bash 展开 glob）。分流已删，
+      # 理由见文件头事实 2：Node 20 根本装不上依赖，而 22+ 原生支持 `--test` 的 glob。
+      # 保留单一入口的价值是**可对照**——失败时不需要先判断「这条腿跑的是哪一段」。
       - name: 单测（Node ${{ matrix.node }}，pnpm test）
-        if: matrix.node != '20'
         working-directory: ${{ env.PKG_DIR }}
         run: pnpm test
-
-      # Node 20 没有 `--test` glob（Node 21 才加），但 bash 的 glob 展开是可靠的：
-      # 不加引号 → shell 先把 test/*.test.mjs 展开成显式文件表 → Node 收到的是真实路径。
-      # 下面这串与 package.json 的 test 脚本**逐字对应**（只差 glob 由谁展开）。
-      - name: 单测（Node 20：--test 无 glob 支持，交给 bash 展开）
-        if: matrix.node == '20'
-        working-directory: ${{ env.PKG_DIR }}
-        shell: bash
-        run: |
-          node --test test/*.test.mjs
-          node test/parse.test.mjs
-          node test/run-m1.js
-          node test-mock/bench-ci.mjs
-          node test-mock/artifacts-check.mjs
 
       # 基准 harness 的**离线回放**：用录制的 chunk 流配对比较，不联网、不碰真机、不启动浏览器
       # （doc/comment-style.md §9.1 第 5 条）。`--offline` 是显式声明，等价于默认行为。

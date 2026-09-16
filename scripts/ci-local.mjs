@@ -20,7 +20,7 @@
 //
 //   1. `scripts/lint-comments.mjs`           注释纪律（§10 的机检部分）
 //   2. `scripts/check-ledger.mjs`            台账与事实一致（版本号 / 测试文件数）
-//   3. `scripts/check-repo-hygiene.mjs`      文件编码无 BOM + doc/README.md 索引无死链
+//   3. `scripts/check-repo-hygiene.mjs`      文件编码无 BOM + 索引无死链 + CI/engines Node 版本相容
 //   4. `scripts/check-commit-msg.mjs`        提交信息判据自检（--self-test）
 //   5. `scripts/gen-reference-index.mjs`     reference/README.md 的来源表与磁盘一致
 //   6. `test-mock/artifacts-check.mjs`       生成物卫生（跑一次就会变的文件不许被 git 看见）
@@ -104,11 +104,12 @@ const STEPS = [
   },
   {
     id: 'repo-hygiene',
-    title: '文件编码无 BOM + doc/README.md 索引无死链',
+    title: '文件编码无 BOM + doc/README.md 索引无死链 + CI/engines 的 Node 版本',
     cmd: process.execPath,
     args: [path.join('scripts', 'check-repo-hygiene.mjs')],
     cwd: repoRoot,
-    hint: '去 BOM 用「去掉前 3 字节 EF BB BF」；索引死链要么补文件、要么删掉索引那一行。',
+    hint: '去 BOM 用「去掉前 3 字节 EF BB BF」；索引死链要么补文件、要么删掉索引那一行；'
+      + 'Node 版本不一致时改 ci.yml 的 matrix.node 去覆盖 package.json 的 engines.node。',
   },
   {
     id: 'commit-msg',

@@ -68,14 +68,22 @@ pnpm install --no-frozen-lockfile
 根因是 `peerDependenciesMeta` 把该 peer 标成 optional，而 lockfile 的 importer 段仍要求满足 `*`。
 CI 里用的是同一条命令——理由写在 `.github\workflows\ci.yml` 的文件头，不是随手放宽。
 
-**② Node 20 上 `pnpm test` 会因为 glob 而失败。**
+**② 必须用 Node ≥22.13。**
 
-`package.json` 的 test 脚本里写的是 `node --test "test/*.test.mjs"`。**引号让 shell 无法展开**，
-字符串原样交给 Node；而 `--test` 的 **glob 支持是 Node 21 才加入的**
-（[Node.js 21 发布公告](https://nodejs.org/en/blog/announcements/v21-release-announce)，
-PR [nodejs/node#47653](https://github.com/nodejs/node/pull/47653)）。在 Node 20 上它是字面路径，
-找不到文件。CI 的 Node 20 那条腿因此改用 bash 展开 glob 的等价命令（`ci.yml` 里有逐字对照）。
-本机日常用 Node 22+ 不会遇到这个问题。
+`package.json` 的 `packageManager` 钉的是 `pnpm@11.25.0`，而这一版 pnpm **要求 Node ≥22.13**。
+在 Node 20 上跑 `pnpm install` 会直接退出 1：
+
+```
+warn: This version of pnpm requires at least Node.js v22.13
+Error [ERR_UNKNOWN_BUILTIN_MODULE]: No such built-in module: node:sqlite
+```
+
+`engines.node` 现在写的是 `>=22.13`，CI 矩阵是 `[22, 24]`，两者由
+`scripts/check-repo-hygiene.mjs` 的判据 C 保证相容——改了其中一个而没改另一个会直接红。
+
+> 历史：这里曾经写的是「Node 20 上 `pnpm test` 会因为 glob 而失败」。那个结论是错的，
+> 它描述的是另一个现象；真正的失败发生在 `pnpm install`，测试根本没跑。详见
+> `doc/ci-cd.md` §3.2。
 
 ### 1.3 真机探针：需要已登录的 Edge，别在 CI 里跑
 
@@ -234,7 +242,7 @@ node scripts\lint-comments.mjs --max-warnings=5   # 允许最多 5 条 warn
 
 ## 6. CI 闸门
 
-推上去之后跑的是 `.github\workflows\ci.yml`：**ubuntu-latest + windows-latest × Node 20 + 22**，
+推上去之后跑的是 `.github\workflows\ci.yml`：**ubuntu-latest + windows-latest × Node 22 + 24**，
 四组合，`fail-fast: false`。步骤：检出 → pnpm 11.25.0 → Node → `pnpm install --no-frozen-lockfile`
 → 注释纪律 → 台账一致性 → 文件规范（编码 + 文档索引）→ 提交信息 → 全量单测 → 离线基准
 → 生成物卫生；失败时上传基准产物。`timeout-minutes: 45`（本机全量 564s，冷缓存 + 两平台留余量）。

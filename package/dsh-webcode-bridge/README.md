@@ -2,7 +2,7 @@
 
 已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.14.5。
 
-安装：`npm pack` 后执行 `node scripts/install-profiles.mjs`（或 `dsh plugin --profile web add ./dsh-webcode-bridge-0.14.5.tgz`），重启 `dsh web`。需要 Node.js 20+、系统 Edge；无需浏览器扩展。
+安装：`npm pack` 后执行 `node scripts/install-profiles.mjs`（或 `dsh plugin --profile web add ./dsh-webcode-bridge-0.14.5.tgz`），重启 `dsh web`。需要 Node.js 22.13+、系统 Edge；无需浏览器扩展。
 
 > 0.14.5 起发布流程收进仓库：`scripts/verify-pack.mjs` 逐文件核对 tarball 与工作树
 > （改完代码忘了重新 pack 时直接报错），`scripts/install-profiles.mjs` 先删旧目录再解包

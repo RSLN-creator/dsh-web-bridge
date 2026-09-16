@@ -34,10 +34,10 @@
 ```
 reference/
 ├── README.md          ← 本文件（入库）
-└── local-refs/        ← 入库：本项目自己的笔记（6 份 md + 2026-09-12-review-sources/ 11 文件）
+└── local-refs/        ← 入库：本项目自己的笔记（7 份 md + 2026-09-12-review-sources/ 11 文件）
 ```
 
-其余 33 个第三方 clone **不会出现**。要拿回来，按 §4 的表执行。
+其余 34 个第三方 clone **不会出现**。要拿回来，按 §4 的表执行。
 
 ## 4. 来源与版本（**本表由脚本生成，不要手改**）
 
@@ -68,10 +68,13 @@ node scripts\gen-reference-index.mjs --missing  # 只列「不是 clone」的条
 | `deepseek-reverse-api` | https://github.com/Wu-jiyan/deepseek-reverse-api.git | `1ffacb796e545393615c4b7db0467befcf22bc42` | 1.4 MB |
 | `deepseek-web-api` | https://github.com/kittors/deepseek-web-api.git | `9b62d6a17ba502fa6aefa2dceb527d1e925aa6ce` | 0.5 MB |
 | `deepseek-web-import` | https://github.com/wpc0323/deepseek-web-import | `8780b8c80addf9f6519a02106f6a28d2ebaedb99` | 0.1 MB |
+| `dsh-archive-manager` | **不是 clone**（见 §6「约定违例」） | — | 0.5 MB |
 | `dsh-compass` | https://github.com/Happy2Git/dsh-compass.git | `2676d15afb2b9d5a4a62715ea4c83fa7619081e0` | 2.2 MB |
 | `dsh-deepseek-chat` | https://github.com/zerorigin-studio/dsh-deepseek-chat | `5ed9d07b732ac997d0c3afbc15e7b2e46bb15bee` | 0.1 MB |
+| `dsh-file-attachment` | https://ghfast.top/https://github.com/wszhoho/dsh-file-attachment.git ⚠️镜像 | `de4456a06883544fef7bc57a195c369036b02a4e` | 1.9 MB |
 | `dsh-flowglass` | https://github.com/Iwctwbh/dsh-flowglass.git | `a815bc7ee14a15008358e1c0a49aa0e6757377e4` | 3.4 MB |
 | `dsh-session-graph` | https://github.com/benz-ai-x/dsh-session-graph.git | `d999061007dc3465c997fcaddbe2ab31cb8ecb2d` | 39.5 MB |
+| `dsh-task-board` | **不是 clone**（见 §6「约定违例」） | — | 1.5 MB |
 | `dsh-task-graph` | https://github.com/KevinZhangNothing/dsh-task-graph.git | `7c230e0fe0af8103cfc2d1ee6ecf74a4f0c872aa` | 14.3 MB |
 | `eventsource-parser` | https://github.com/rexxars/eventsource-parser.git | `6519a0f70dfeb22f829e5c696da2cb4988d64c6a` | 0.7 MB |
 | `glm-free-api` | https://github.com/RapidAI/glm-free-api.git | `3237198289d8c672cbac065bec4d6dceca62deae` | 5.6 MB |
@@ -117,7 +120,7 @@ git -C reference/glm-free-api checkout 3237198289d8c672cbac065bec4d6dceca62deae
 
 - `local-refs` —— **故意**不是 clone（它是本项目自己的笔记，入库）。**不是违例**。
 - `agent-team`、`steel-browser-npm` —— 见 §5，确实需要处理。
-- `dsh-task-board`、`dsh-archive-manager` —— 与 `agent-team` 同级：**不是 clone**，
+- `dsh-task-board`、`dsh-archive-manager`（2026-09-17 新增） —— 与 `agent-team` 同级：**不是 clone**，
   而是从 npm 取源的**已发布包解包**（`npm pack` 后 `tar -xzf --strip-components=1`）。
   入库理由与 `agent-team` 相同：它们是**本机曾安装、现已卸载**的第三方 DSH 插件，
   留档是为了让后续审查能对照它们的插槽注册方式与 UI 写法。
@@ -136,6 +139,11 @@ git -C reference/glm-free-api checkout 3237198289d8c672cbac065bec4d6dceca62deae
 
   这两个包**没有上游 git 仓库可克隆**（npm 上的发布物就是唯一来源），
   因此 §4 的表里没有它们——§4 只登记可从 remote 复现的 clone。
+
+  `dsh-file-attachment` 属于第三类：它有上游 git 仓库，因此**照常登记在 §4**
+  （`https://ghfast.top/https://github.com/wszhoho/dsh-file-attachment.git`）。
+  也就是说 §6 的违例清单只有 `agent-team`、`dsh-archive-manager`、`dsh-task-board`、
+  `steel-browser-npm` 四个（`local-refs` 是故意的，不算），§4 的表 39 行里 34 个是可复现的 clone。
 
 ## 7. 权威清单在哪
 

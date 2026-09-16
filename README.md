@@ -12,7 +12,7 @@
 5. 右侧网页面板使用 **DSH 官方右侧栏**（`@deepseek-ai/dsh-client-ui-sidebar-right`）的标签页；
    与会话头右上角的 Web Bridge 按钮互为一对（点击展开/收起）。**不依赖任何第三方侧栏插件。**
 
-系统需要 Node.js 20+ 和 Microsoft Edge，无需另外加载浏览器扩展。当前本机运行入口为 http://127.0.0.1:3080。
+系统需要 Node.js 22.13+ 和 Microsoft Edge，无需另外加载浏览器扩展。当前本机运行入口为 http://127.0.0.1:3080。
 
 ## 当前能力
 
