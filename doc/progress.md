@@ -9,7 +9,10 @@
 约定：
 
 - 每完成一项即更新这里；跨会话恢复以本文件 + `PLAN.md` 为准，不依赖会话记忆。
-- 与 `session-log-review.md` 分工：那份是**归因**（为什么失败），这份是**状态**（现在在哪）。
+- 状态以本文件为准，**缺陷与「为什么不现在修」以 `long-term-issues.md` 为准**。
+  一份写「现在在哪」，一份写「还欠什么」——两边都不复制对方的结论。
+  （2026-09-16：原先这条写的是与 `session-log-review.md` 的分工，那份归因报告已按
+  用户指示删除；错误码与归因现落在 `bridge-failure-ledger.md`。）
 
 ---
 
@@ -17,12 +20,152 @@
 
 | 项 | 值 |
 | --- | --- |
-| 工作树版本 | **0.15.2**（已打包 / 已装 / 等重启生效） |
-| 已装版本（web / headless） | **0.15.2**（已装，**运行中的进程仍是旧的**——需要一次重启） |
-| 上游 | `origin/main` = `e190257`（本地领先，未推送） |
-| 单测基线 | **421 通过 / 0 失败**（`node --test "test/*.test.mjs"`，`duration_ms ≈ 567000`） |
-| 注释闸门 | **error 0 / warn 0，退出码 0**（已转**阻断**，进 CI 必需检查） |
-| 下一阶段 | 真机验证（用户重启后） |
+| 工作树版本 | **0.15.6** |
+| 已装版本（web） | **0.15.6** |
+| 运行中的进程 | **0.15.6**（2026-09-16 重启后实测 `hash=f61e9f8016a9`，三层已对齐） |
+| 上游 | `origin/main` = `ca1e855`（= 0.15.3）。**0.15.4～0.15.6 全部改动已于本日落入本地提交，尚未推送** |
+| 单测基线 | **38/38 测试文件全绿**（逐文件跑，2026-09-16 复核实测） |
+| 注释闸门 | **error 0 / warn 0，退出码 0**（129 个文件，2026-09-16 复核实测） |
+| 发布闸门 | `verify-pack` **28/28 逐字相同 + 接线完好**，退出 0（0.15.3 时的读数；0.15.4+ 未重跑） |
+| 下一阶段 | 真机目视验收（设置页 / 右栏 / 尺寸）——**接口侧已证在位，像素仍未有人看过** |
+
+> **2026-09-16 复核修正**：上表此前逐字写着「工作树 0.15.3 / 已装 0.15.3 / 运行进程仍是旧的 /
+> 35 个测试文件」，**四行全过期**，且 0.15.4、0.15.5、0.15.6 三轮工作在本文件里**没有任何段落**
+> （同一毛病第 3 次出现）。本次一并补齐，并把「版本号与测试文件数」的核对方式写进
+> `doc/review-guide.md` 的收尾清单——**靠自觉的记账已经失败三次，不能再只靠自觉**。
+
+## 0.15.6（已发布 / 已装 / 已重启生效）—— 参数含围栏的调用被丢弃并整段泄漏
+
+用户原话（逐字）：**「harness 端的 markdown 渲染整块不见（web 正常）」**。
+
+这是 0.15.5 修「普通 markdown 围栏被误判成协议」时**引入的回归**，影响面是
+**写文档/写代码的主路径**（97 个会话里参数含 ``` 的 tool-call 有 108 个）。
+
+| # | 环节 | 缺陷 |
+| --- | --- | --- |
+| ① | `parseAgentReply` | 非贪婪围栏正则 `` /```([\s\S]*?)```/ `` 在**第一个内层 ```** 处截断体 → `JSON.parse` 失败 → `takeObj` 静默 return → **调用消失，文件从未落盘** |
+| ② | `firstCallFenceAt` | 用同一个错误窗口 → `hasJson=false` → 真调用围栏被判成普通围栏 → `findProtocolStart` 返回 **-1** |
+| ③ | `proseSafeEnd` | index=-1 时返回**全文长度** → 整段原始协议被当正文外发并持久化 |
+
+**根因一句话**：「什么算围栏体」有两份知识（解析器一份、泄漏防护一份），两份都写错了同一边界。
+
+**修法**：两侧统一到 `readCallAt`（花括号 + 字符串转义感知）这一个定位器，
+并给 `proseSafeEnd` 加一道独立兜底。
+
+**A/B 实测**（`.tmp/probe-audit-regress.mjs`，同一段文本）：
+
+| 版本 | boundary | proseSafeEnd | withheld | parsedCalls | contentIntact |
+| --- | --- | --- | --- | --- | --- |
+| 0.15.3 | 53 | 53 | 313 | 0 | false |
+| **0.15.5** | **-1** | **366（全文）** | **0** | 0 | false |
+| **0.15.6** | 53 | 53 | 313 | **1** | **true** |
+
+**验证**：新增 `test/fence-nested-call.test.mjs` 12 项；反向验证（倒回修复前）
+**pass 5 / fail 7**，证明护栏真的钉住了缺陷。完整记录见 `doc/verify.md` §0.15.6。
+
+> 本文件**首次写入就是被这个缺陷吃掉的**（write 参数里含代码块 → 调用消失 + 协议泄漏），
+> 当时不得不补写一份审计报告来记录这件事——那份报告已按用户指示于 2026-09-16 删除。
+> 教训留在本文件与 `doc/verify.md` §0.15.6 里。
+> **并且 2026-09-16 又一次复现**：一次 `edit` 被 `withheld 390 chars` 且未落盘，
+> 见 `doc/long-term-issues.md` #19。这是本项目第一例「缺陷吃掉了它自己的记录」。
+
+## 0.15.5（已发布 / 已装 / 已重启生效）—— 「零进展轮」顺序纠正 + 去 BOM
+
+**真机缺陷的原始现场**（子代理会话 `ecad7b6a`）：
+
+```
+step1  usage={inputTokens:26263,outputTokens:197}   blocks=[text(66), tool-call(pwsh)]
+step2  usage={inputTokens:28555,outputTokens:0}     blocks=[reasoning(201)]
+turn/end reason=completed
+```
+
+后果：`doc/research/graph-plugins-references.md` 与 `panel-plugins-references.md` 均 MISSING，
+`reference/` 无任何新克隆——**一个工具调用发出去之后，整轮以「零产出」收场却报 completed**。
+
+**修法**：`zeroProgressDecision` 的判据顺序——`thinking-only` 判定必须先于
+`protocol-withheld` 判定，否则「正文空 + 思考非空 + 有扣留协议」这一类会被静默吞掉。
+新增纯函数模块 `lib/zero-progress.js` + `test/zero-progress.test.mjs`（11 项）。
+
+**反向验证**（`doc/verify.md` §0.15.5）：换回旧顺序 → exit 1 / fail 2；恢复 → exit 0 / pass 11。
+
+**同一轮的其他改动**：`package.json` 去 BOM（首三字节 `123,10,32`）、
+`.github/CODEOWNERS` 把 `@owner` 占位符换成真实账号 `@RSLN-creator`。
+
+## 0.15.4（已发布 / 已装 / 已重启生效）—— 真实花名册的两个语义缺陷
+
+**没有单独台账段落，从 `lib/roster.js:25-54` 的注释与 `lib/client.cjs:389` 反推**——
+两个缺陷都有**真机 + 官方源码双重证据**：
+
+| # | 缺陷 | 现场 | 修法 |
+| --- | --- | --- | --- |
+| A | 「挑第一个能通过 `listMembers` 的 agent」会读到**别人的** lead | 官方 `tryMembership`（`dsh-experimental-agent-team/lib/index.js:397-430`）对**任何没有 subagentDescriptor 的顶层 Agent** 都返回 `{role:'lead',name:'lead'}` 而**不抛错**，`list()` 还无条件先插一行 lead 伪行。于是旧实现读到的是「进程里第一个顶层 agent 自己的 lead」——与用户正在看的会话无关。**活进程实证：换两个不同 `sessionId` 查询 `/status`，`team` 段逐字相同** | 只用**当前会话自己**当凭据（`agents.get(sessionId)`）；拿不到就如实说 `caller-not-live`，绝不用别的 agent 顶替 |
+| B | 把 Team **总任务数**当成「每个成员的任务数」 | 对每个成员都调 `listTasks(agent).length`——那个数是整块任务板的条数，对每个成员都一样；还同一 agent 调了两次 | 按官方 `TeamTaskView.ownerName` 归属，且**整表只读一次** |
+
+**顺带**：Team 的「成员」与「任务板」拆成两个字段（官方 `remoteView` 返回的本来就是
+`{members, tasks}`，任务板是**团队级**的，不是某个成员的属性）。
+
+**验证**：`test/wiring-roster.test.mjs` 与 `test/roster.test.mjs`（本轮大幅扩写，+340 行）。
+
+## 0.15.3（本轮）—— 设置页整块空白 + 花名册恒读不到
+
+用户原话（逐字）：**「请你查看设置界面 窗口问题，现在空白一片」**。
+
+查下去是**三个独立缺陷叠加**，其中两个同属「引用/调用点都在、链路的另一端不存在」
+这一族（上一轮 `projectRoster` 漏 import 是同族），而且**离线全绿**。
+
+| # | 缺陷 | 现场 | 后果 | 修法 |
+| --- | --- | --- | --- | --- |
+| ① | `SiteAccounts` 的 hook 写在提前 `return` 之后 | `lib/client.cjs`：3 个 `useState` + 1 个 `useEffect` 之后是「站点表为空就返回加载中」，**这句之后**又写第 5 个 `useState`（`picked`） | 首屏跑 4 个 hook 就 return，`sites` 到达后同一次挂载走到第 5 个 → React 硬错误 → 错误冒泡到 `settings.section` 的 `SlotErrorBoundary` → **整块栏目变空占位** | `picked` 提到提前 `return` 之前 |
+| ② | `status` 只注册了 GET，客户端走 POST | `api('status', { sessionId })` 带 body ⇒ POST；`web-control.js` 只有 `'GET status'` | 真机 `POST /__webcode/status` ⇒ **405**；`subAgentsError` 报的 `no-session-id` 是**后果**不是根因 | `actions['POST status'] = actions['GET status']`（**别名**，不复制实现） |
+| ③ | `settings.section` 是 root 作用域，`inject` 拿不到 sessionId | 0.15.0 写了 `inject: (sessionId) => ({ sessionId })` | root 槽的 `inject` 只拿到 `actions` 对象，被当成会话 id 送到服务端 | 新增 `SettingsSection`，经官方 standard prop **`useSessions`** 读 `state.current` |
+
+**官方契约证据（本地权威，不是推断）**：
+`...\dsh-cordis-client-runner\lib\client.js:3873` → `settings.section` 的 `scope: "root"`；
+同处 `:3902` 的 `standardProps` 列表含 `useSessions: UseSessions`；
+官方 `dsh-client-ui-settings-general\lib\client.js` 自己就是
+`useSessions(state => …state.current…)` 读会话。
+
+### 为什么原来的护栏全绿（本轮最该记住的一条）
+
+- `client-render.test.mjs` 的 `useState` 桩是**按名字取值**的映射，结构上察觉不到
+  hook 顺序/数量违规；且切换 payload 时会清空 states ⇒「同一次挂载内 4→5 个 hook」
+  从未被复现。
+- 同一个文件的 mock fetch **不看方法**，任何 URL 都回 200 + JSON ⇒
+  「服务端没这条路由」整个不可见。
+
+护栏的建模失真，把整类缺陷盖住了。新增的三条护栏都**先证明能抓到缺陷再修**
+（反向验证记录见 `doc/verify.md`）：
+
+| 护栏 | 抓什么 | 反向验证 |
+| --- | --- | --- |
+| `test/hooks-order.test.mjs`（2 项） | 组件体顶层「hook 在提前 return 之后」 | 搬回 return 之后 → 红；搬回 → 绿 |
+| `test/client-server-contract.test.mjs`（2 项） | 客户端 `api(action, body)` 推的方法 vs 服务端动作表 | 删别名 → 红；恢复 → 绿 |
+| `client-render.test.mjs` +2 项 | root 槽不得用 inject 冒充会话来源；降级链必须完整 | 三条反向用例全部被抓到 |
+
+> 护栏自身两次失手也记录在案：`hooks-order` 第一版不跟踪花括号深度会**误报**
+> （会误报的护栏会被直接绕过）；第二版跟踪了深度却漏掉**单行守卫**
+> （`if (cond) return x;`）这一形态——正是真机缺陷的写法，反向验证因此**静默漏过**。
+> 教训：**护栏写完必须反向验证，且反向用例本身要确认「变更真的生效了」。**
+
+### 验证（全部实跑）
+
+| # | 判据 | 命令 | 结果 |
+| --- | --- | --- | --- |
+| A1 | 全量单测 | 35 个测试文件逐文件跑 | **35/35 全绿** |
+| A2 | 注释闸门 | `node scripts/lint-comments.mjs` | 退出 **0** |
+| A3 | 打包 | `pnpm pack` | `dsh-webcode-bridge-0.15.3.tgz`（285,437 字节） |
+| A4 | 发布闸门 | `node scripts/verify-pack.mjs <tgz>` | **28/28 逐字相同** + 接线完好，退出 **0** |
+| A5 | 装入真机 profile | `node scripts/install-profiles.mjs <tgz> --profiles web` | web **0.15.3**，退出 **0** |
+| A6 | 安装副本逐条核对 | `Select-String` on installed copy | `picked` 在 return 之前（504 < 579）/ `POST status` 别名在位 / `useSessions` 接线在位 / `roster` import 在位 |
+| A7 | 推送 | `git push origin main` | `1798bd5..ca1e855`，退出 **0** |
+
+### 仍需重启后确认（离线无法证明）
+
+1. `GET /__webcode/status` → `build.version` = **0.15.3**（当前进程实测仍是 0.15.2，
+   `POST` 实测仍是 **405** —— 与「装完不重启不生效」完全一致）。
+2. 设置 →「网页桥接」栏目能渲染出各卡片（缺陷 ①）。
+3. `subAgentsError` 不再含 `no-session-id`（缺陷 ②③）；空时应显示
+   「当前没有正在运行的…」而不是「读不到」。
 
 > **0.14.7 时的基线「305 通过」已过期**。本轮实测 **421**，增量来自三处：
 > `accounts`(38) + `accounts-integration`(16) 在 0.14.7 已计入 305；之后新增
@@ -229,7 +372,8 @@
 
 - **会话日志解析工具** `test-mock/parse-session-log.mjs`：按 zstd magic 切多帧
   （单帧解压只得 220 字节，这个坑上一轮踩了三次）。
-- **归因报告** `doc/session-log-review.md`：最近两次会话的失败点、归因、复现命令。
+- **归因**：错误码 × 已做适配 × 残留风险的对照表见 `doc/bridge-failure-ledger.md`
+  （原先这里指向 `session-log-review.md`，那份已按用户指示于 2026-09-16 删除）。
 - **P0 修复**：composer 分块写入 + `PROMPT_WRITE_STALLED`。真机证据是 80 万字符
   一次性 `fill` 导致 30s 超时；决策抽成纯函数 `composerWritePlan` / `stallStep`。
   护栏 `test/composer-write.test.mjs` 12 项。
@@ -357,6 +501,20 @@ turn/end reason = {\"kind\":\"error\",\"error\":{\"message\":\"locator.fill: Tim
 
 ## 已知环境约束（不要重新踩）
 
+- **`spawnSync` 从 Node 里调用任何外部程序都会 `EPERM`**（2026-09-16 实测，Node v24.18.0）。
+  实测四种写法**全部** `status=null, error.code='EPERM'`：`spawnSync('git',…)`、
+  `spawnSync('node',…)`、`spawnSync('cmd',…)`、以及**写绝对路径**的
+  `spawnSync('C:\\Program Files\\Git\\cmd\\git.exe',…)`。而同一台机器上 pwsh 直接跑
+  `git rev-parse` 正常返回 —— 即这是**Node 子进程创建被沙箱挡住**，不是 git 没装。
+  **两个真实后果，必须知道**：
+  1. `test-mock/artifacts-check.mjs` 会走它的「不在 git 工作树内 → SKIP → exit 0」分支。
+     它**打印的是 SKIP 而不是 PASS**（这一点写得对，没有假装通过），但在本机它
+     **等于一条空转护栏**——本次 `output/` 规则的修复就是靠手跑 `git check-ignore` 验证的，
+     不能指望这条闸门。CI 上 git 可用，闸门是真的。
+  2. `scripts/ci-local.mjs` 的**全部四步**都经 `spawnSync` 启动，因此在本机**四步都不会真的跑**。
+     本机复核必须逐条手跑命令（本次 38 个测试文件就是这么跑的）。
+  > 这一条与既有的「`node --test` glob 在本机 `spawn EPERM`」是**同一个根因**，
+  > 此前只被记成「glob 不支持」这一局部现象，覆盖面被低估了。
 - `pnpm install` 曾因一个**无关依赖**（走 GitHub release tarball 的包）证书校验失败
   （`UNABLE_TO_VERIFY_LEAF_SIGNATURE`）而整体失败 → 安装走手动解包
   （`scripts/install-profiles.mjs`）。**这是通用约束**：依赖树里只要还有任何一个包从

@@ -294,7 +294,7 @@ cd package\dsh-webcode-bridge
 node test-mock/parse-session-log.mjs --recent 3 --errors-only
 ```
 
-归因全文见 [session-log-review.md](session-log-review.md)。要点：
+归因要点（`session-log-review.md` 已按用户指示于 2026-09-16 删除，下表是本节的证据本体）：
 
 | 会话 | 事件 | 结局 |
 | --- | --- | --- |
@@ -830,3 +830,214 @@ Playwright 脚本 `package/dsh-webcode-bridge/test-mock/inspect-harness.mjs` 支
 此前模型只输出 `Calling:` 文本，未执行工具；增加严格实际输出格式解析后恢复。相对路径任务曾因极简预设缺少工作目录而读取失败，模型收到真实错误后纠正；正式验收使用绝对路径。
 
 模拟站点曾因缺少模型选择器失败，补充原生 select 后通过。测试结果不代表其他网站、图片上传或旧网页导入 API 已完成。模型自行提出的别名风险属于模型审查输出，不作为本项目代码缺陷的独立证据。
+---
+
+## 0.15.5 反向验证记录：零进展轮顺序纠正（本轮实跑）
+
+护栏 test/zero-progress.test.mjs 写完必须先证明能红（doc/comment-style.md 9.3）。
+
+### 反向：把 zeroProgressDecision 的两条判据换回旧顺序
+
+命令：node test/zero-progress.test.mjs
+结果：exit 1，fail 2
+  ✖ 正文空 + 思考非空 + 有扣留协议 → thinking-only（旧顺序会静默吞掉这一类）
+  ✖ 顺序契约：thinkAcc 判定必须先于 withheld 判定（旧顺序会变红）
+
+### 还原：恢复 thinking-only 优先于 protocol-withheld
+
+命令：node test/zero-progress.test.mjs
+结果：exit 0，pass 11 / fail 0
+
+### 全量回归（修复后）
+
+命令：逐文件跑 test/*.test.mjs（本机 node --test glob 仍 spawn EPERM，不用 glob）
+结果：FILES PASS=36 FAIL=0
+额外入口：test/parse.test.mjs、test/run-m1.js、test-mock/bench-ci.mjs、test-mock/artifacts-check.mjs 均 exit 0
+
+### 真机缺陷的原始现场（子代理会话 ecad7b6a）
+
+  step1  usage={inputTokens:26263,outputTokens:197}   blocks=[text(66), tool-call(pwsh)]
+  step2  usage={inputTokens:28555,outputTokens:0}     blocks=[reasoning(201)]
+  turn/end reason=completed
+
+后果：doc/research/graph-plugins-references.md 与 panel-plugins-references.md 均 MISSING，
+      reference/ 无任何新克隆。
+
+> 注：本条修复尚未经过真机复验（需重启 DSH 后由新的子代理会话确认 outputTokens > 0 且产出文件）。
+  在重启验证之前，不得宣称真机已修好。
+
+---
+
+## 0.15.6 反向验证记录：参数含围栏的调用被丢弃并整段泄漏（本轮实跑）
+
+护栏 `test/fence-nested-call.test.mjs` 写完必须先证明能红（doc/comment-style.md §9.3）。
+
+### 缺陷现场（0.15.5 引入的回归）
+
+用户报的症状：**「harness 端的 markdown 渲染整块不见（web 正常）」**。
+
+`write` 一份含代码块的 markdown 文档时（写报告/README/代码的主路径）：
+
+1. `parseAgentReply` 的非贪婪围栏正则 `/```([\s\S]*?)```/` 在**第一个内层 ```** 处
+   截断体 → `JSON.parse` 失败 → `takeObj` 静默 return → **调用消失，文件从未落盘**；
+2. `firstCallFenceAt` 用同一个错误窗口 → `hasJson=false` → 真调用围栏被判成普通围栏
+   → `findProtocolStart` 返回 **-1**；
+3. `proseSafeEnd` 在 index=-1 时返回全文长度 → **整段原始协议被当正文外发并持久化**。
+
+### A/B 实测（`.tmp/probe-audit-regress.mjs`，同一段文本）
+
+| 版本 | boundary | proseSafeEnd | withheld | parsedCalls | contentIntact |
+| --- | --- | --- | --- | --- | --- |
+| 0.15.3 | 53 | 53 | 313 | 0 | false |
+| **0.15.5** | **-1** | **366（全文）** | **0** | 0 | false |
+| **0.15.6** | 53 | 53 | 313 | **1** | **true** |
+
+即：0.15.3 好歹扣住了协议（只是丢调用），**0.15.5 把「扣住」变成了「全泄漏」**。
+控制组（参数里没有围栏）两版都正确解析出 1 个调用 ⇒ 缺陷只由参数内的围栏触发。
+
+### 为什么是「莫名其妙」而不是「必然」（本轮新查明的间歇性）
+
+丢调用取决于**尾部形状**：旧代码里 `bareObjRe` 的 `(?=<|$)` 用非多行串尾收尾。
+
+| 尾部形状 | 旧：调用 | 旧：bareObjRe 命中 | 新：调用 |
+| --- | --- | --- | --- |
+| 闭合围栏 + 换行 | **0（丢）** | 0 | 1 |
+| 闭合围栏（无换行） | **0（丢）** | 0 | 1 |
+| 无闭合围栏（截断） | 1（侥幸救回） | 1 | 1 |
+| 闭合围栏 + 后续正文 | **0（丢）** | 0 | 1 |
+
+这解释了用户的「**总是莫名其妙**」：同一种写法，尾部差几个字符，结果就不一样。
+（`.tmp/probe-why-intermittent.mjs`）
+
+### 反向：把本次三处改动逐字倒回修复前
+
+0.15.5 的修复前源码**未入库**（那次改动至今未提交），故由当前文件反推：
+反向 1 = `firstCallFenceAt` 窗口倒回「下一个 ```」；反向 2 = 围栏扫描倒回非贪婪 regex；
+反向 3 = 移除 `proseSafeEnd` 的兜底。（`.tmp/rev-0155/agent-preset.js`）
+
+命令：`node .tmp/rev-check.test.mjs`（新测试指向修复前副本）
+结果：**exit 1，pass 5 / fail 7**
+
+```
+✖ ① write 调用、content 含一组 json 围栏 → 解析出 1 个调用，content 逐字完整
+✖ ② 同上 → 边界探测停在围栏起点、transport=true（不得退化成 -1）
+✖ ③ 同上 → proseSafeEnd 停在围栏起点，协议被扣住而不是全文外发
+✖ ④ content 含三组不同类型围栏 → 仍解析出 1 个调用且内容完整
+✖ ⑧ 流式半成品（JSON 未配平、参数里刚出现内层围栏）→ 仍是协议边界
+✖ ⑨ arguments 是「转义 JSON 字符串」且内含围栏 → 仍解析出调用
+✖ ⑩ edit 调用、new_string 含围栏 → 解析出调用且内容完整
+```
+
+⑤⑥⑦⑪⑫ 在修复前后**都是绿的**——它们正是反向安全线：修 ②③ 不得削弱 0.15.5 的
+原始修复（⑤⑥）、不得动摇标签族 transport（⑪）、不得放过普通散文（⑤）。
+
+### 还原：恢复花括号感知的围栏定位
+
+命令：`node test/fence-nested-call.test.mjs`
+结果：**exit 0，pass 12 / fail 0**
+
+### 全量回归（修复后）
+
+命令：逐文件跑 `test/*.test.mjs`（本机 `node --test` glob 仍 `spawn EPERM`，不用 glob）
+结果：**FILES PASS=37 FAIL=0**（含新增的 fence-nested-call，共 37 个文件）
+另：`control-routes.test.mjs` 偶发 `bad port`（`server.listen(0)` 取临时端口后连接失败），
+    重跑 4/4 通过，属**既有的测试侧 flake**，与本次改动无关。
+
+注释闸门：`node scripts/lint-comments.mjs` → 129 个文件，error 0 / warn 0，exit 0。
+
+### 行为等价性核对（改解析器必须有这一步）
+
+把修复前/后的 parser 对同一批**边角形状**对比，确认除目标缺陷外行为逐字不变：
+
+```
+bareFragment      old=1 new=1 SAME     fragPlusEmpty     old=0 new=0 SAME
+tagTruncated      old=0 new=0 SAME     callingTruncated  old=0 new=0 SAME
+plainProse        old=0 new=0 SAME     benignCalling     old=0 new=0 SAME
+```
+
+孤立残片 `<call>` / `</call>` / `<call_call>` / `</call_call>` / `</tool_call>` 的
+`transport` 全为 false，与 0.15.3 逐字相同。
+
+### 影响面量化（`.tmp/scan-fence-calls.mjs`，97 个会话）
+
+参数里含 ``` 的 tool-call 共 **108 个**：
+
+```
+by tool: { write: 43, edit: 43, pwsh: 9, exit_plan_mode: 9, send_message: 3, subagent: 1 }
+最大: write argLen=31730 ticks=22
+```
+
+⇒ 这是写文档/写代码的**主路径**，不是边角情形。
+
+### 真机取证（`.tmp/find-leaked-report.mjs`）
+
+审计报告（`doc/status-audit-2026-09-16.md`，已于 2026-09-16 按用户指示删除；
+下面这两行是**证据本体**，不依赖该文件存在）：
+
+```
+作为真实 tool-call 投递:  (none)                      ← 文件从未落盘
+作为助手正文泄漏:        session-604f072a seq=156/164  ← 协议原文进了正文
+```
+
+全域搜索（`D:\9_Code_Workspace`、`~\.dsh`、Desktop、Documents）该文件**均不存在**。
+
+> 注：打包与安装已完成（0.15.6 已装进 `~\.dsh\profiles\web`），但**运行中的进程仍是
+> 0.15.5**（`GET /__webcode/status` → `version: 0.15.5`）。在重启 DSH 之前，
+> **不得宣称真机已修好**。重启后需复核：`version: 0.15.6`，且再写一份含代码块的
+> markdown 报告时正文渲染完整、不含 `mcp_action`。
+
+---
+
+## 0.15.6 重启后复核：**修复未完全生效**（2026-09-16，本轮实跑）
+
+DSH 已重启，运行进程已是 0.15.6，但**同一族缺陷又复现了两次**，其中一次吃掉了本轮的改动。
+
+### 实测读数
+
+```
+GET  http://127.0.0.1:3080/__webcode/status
+  => 200  {"hash":"f61e9f8016a9","version":"0.15.6"}     ← 三层已对齐
+POST http://127.0.0.1:3080/__webcode/status   {"sessionId":"session-0f644e25-…"}
+  => 200  team=1 members=1 subAgents=0 tasks=0
+          subAgentsError=(空) teamError=(空) tasksError=(空)   ← 三个 *Error 全空
+```
+
+即 0.15.3 那三条真机缺陷**确认在线生效**，此前那份集成审计的「三层版本错位」
+结论**正式失效**（该报告已于 2026-09-16 按用户指示删除；它唯一的长期教训
+——「装完不重启 = 等于没修」——已回写进 `doc/review-guide.md` 的收尾清单第 5 条）。
+
+### 但 0.15.6 的修复**不完整** —— 复现记录
+
+| 次 | 触发 | 结果 |
+| --- | --- | --- |
+| 1 | 一次 `edit`（把 §7.1.1 写进 `doc/ci-cd.md`，新文本里含 markdown 表格与行内代码） | 命中 `withheld 390 chars`，**边界探测命中但没有可执行的完整调用** → 按断流处理，**该次 edit 未落盘** |
+| 2 | 同一编辑改成不含围栏的小文本重试 | 落盘成功 |
+
+**判读**：0.15.6 把「参数含 ``` 的 write/edit 调用被丢弃并整段泄漏」**收窄**了，
+但**没有根除**——还存在一类形状会让定位器判成「边界探测命中、无可执行完整调用」，
+于是既不执行、也不如实报错，只把协议原文扣下。**用户侧的观感是「harness 端一点显示都没有」**，
+这恰好是最初那份 bug 报告的原话。
+
+**这是本轮最该记住的一条**：0.15.6 的 A/B 表（`boundary=53 / parsedCalls=1`）证明它修好了
+**被测的那一种**形状，而**修复的覆盖面被那一张表高估了**。护栏 `fence-nested-call.test.mjs`
+的 12 项同样只覆盖那一种形状。**下一轮必须先把这条复现路径写成反向用例**，
+再谈「修好了」。
+
+### 本轮的独立环境事实（已写进 `doc/progress.md`「已知环境约束」）
+
+`spawnSync` 从 Node 里调用**任何**外部程序都 `EPERM`（实测四种写法全中，含绝对路径），
+而 pwsh 直接调用同一程序正常。两个后果：`artifacts-check.mjs` 走 SKIP 分支（它打印 SKIP
+而不假装 PASS，写法是对的，但本机等于空转）；`ci-local.mjs` 四步**全都不会真的跑**。
+
+### 本轮新增护栏的反向验证（scripts/check-ledger.mjs）
+
+| 步 | 命令 | 结果 |
+| --- | --- | --- |
+| 正向 | `node scripts/check-ledger.mjs` | exit **0**（版本 0.15.6 / 38 个测试文件） |
+| 反向① | 台账「工作树版本」改回 0.15.5 | exit **1**，指名 `package.json = 0.15.6，台账 = 0.15.5` |
+| 反向② | 再把「单测基线」写成 35/35 | exit **1**，**两项同时变红** |
+| 还原 | 两格改回事实值 | exit **0** |
+
+反向用例是在**真实的 `doc/progress.md`** 上做的，不是造一份假文件——这样验的才是
+「这条规则在真文件上抓不抓得住」。还原后的正向读数记在上面。
+

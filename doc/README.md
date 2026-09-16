@@ -37,8 +37,25 @@
 | 文档 | 用途 |
 | --- | --- |
 | [deepseek-longrun.md](deepseek-longrun.md) | 长跑可靠性专题：无外部干扰连续跑真实任务的判据与踩坑 |
-| [incident-2026-09-11.md](incident-2026-09-11.md) | 事故复盘（含根因、时间线、改进项） |
-| [session-log-review.md](session-log-review.md) | 会话日志归因：最近两次会话的失败点、归因、复现命令 |
+
+### 2026-09-16 清理：哪些文档被删了、知识去哪了
+
+按用户指示删除**一次性与已过期**的文档，避免「过期结论被下一个会话当成现状引用」。
+下表是删除清单与**知识的落点**——凡是仍有效的结论都已回写进常读文档，不是直接丢掉：
+
+| 已删除 | 原用途 | 知识现在的落点 |
+| --- | --- | --- |
+| `integration-audit.md` | 独立审计（只读调查） | 「装完不重启 = 等于没修」这条教训 → [review-guide.md](review-guide.md) 收尾清单第 5 条 |
+| `status-audit-2026-09-16.md` | 项目状态审计 | 当前状态 → [progress.md](progress.md)；同族缺陷 → [long-term-issues.md](long-term-issues.md) |
+| `subagent-vs-team.md` | 子代理 vs Team 官方契约核对 | 结论（两者是不同层级概念）→ [long-term-issues.md](long-term-issues.md) 与 [tutorial-agent-teams.md](tutorial-agent-teams.md) |
+| `subagent-spawn-diagnosis.md` | 成员无法开工的归因 | → [long-term-issues.md](long-term-issues.md) #17 |
+| `diagnosis-fresh-chat-per-turn.md`、`diagnosis-new-conversation-per-turn.md` | 一次性诊断 | 结论已进代码注释与 [long-term-issues.md](long-term-issues.md) |
+| `incident-2026-09-11.md` | 事故复盘 | 根因与改进项 → [bridge-failure-ledger.md](bridge-failure-ledger.md) |
+| `session-log-review.md` | 会话日志归因 | 错误码与归因 → [bridge-failure-ledger.md](bridge-failure-ledger.md) |
+
+**判据**（下次再要删文档时照这条判，不要凭「看起来旧」）：
+留 = 改代码时应当一并改的（规范/契约/台账/教程）；删 = 某一次调查的快照
+（它的结论应已回写进上面那几份，没回写的先回写再删）。
 
 ## 调研（doc/research/）
 
@@ -65,4 +82,4 @@
 | `package/dsh-webcode-bridge/test-mock/prompt-bench.mjs` | [prompt-engineering-evidence-2026-09-14.md](research/prompt-engineering-evidence-2026-09-14.md)（变体的文献依据）+ [comment-style.md](comment-style.md) **§9**（实验与取证纪律、报告模板）+ `test/prompt-bench-harness.test.mjs` |
 | `package/dsh-webcode-bridge/lib/bench.js` | [comment-style.md](comment-style.md) **§9.3**（判据先于实现）+ `test/bench.test.mjs` |
 | 全部源码注释与文档 | [comment-style.md](comment-style.md) **§10**（注释与文档是能力放大器） |
-| `.github/workflows/`、`scripts/lint-comments.mjs`、`scripts/ci-local.mjs` | [ci-cd.md](ci-cd.md)（流水线分工、刻意不跑的东西、本地复现）、[CONTRIBUTING.md](../CONTRIBUTING.md) |
+| `.github/workflows/`、`scripts/lint-comments.mjs`、`scripts/check-ledger.mjs`、`scripts/ci-local.mjs` | [ci-cd.md](ci-cd.md)（流水线分工、刻意不跑的东西、本地复现、台账闸门 §7.1.1）、[CONTRIBUTING.md](../CONTRIBUTING.md) |

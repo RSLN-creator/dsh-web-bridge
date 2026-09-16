@@ -317,16 +317,38 @@ git push origin main --tags
 
 ### 6.2 安装与回滚
 
-```powershell
-dsh plugin --profile web add .\package\dsh-webcode-bridge\dsh-webcode-bridge-0.14.8.tgz
-# 重启 DSH 后才生效（当前进程里仍是旧代码）
+> **2026-09-16 变更：历史 tgz 已全部删除，本节旧的回滚步骤作废。**
+>
+> 旧步骤写的是「回滚：装回上一个版本的 tgz（`package\` 下存着历史版本）」。
+> 用户于 2026-09-16 决定**不再在仓库里囤积历史 tgz**（56 个 / 5.55 MB），
+> 它们已从索引与磁盘一并删除，因此**那条路径不再存在**——照着旧步骤做会直接失败。
+>
+> 这条变更必须与 `.gitignore` 同步（那是 `*.tgz` 规则注释里自己写下的要求：
+> 「`git rm --cached` 并同步改写 doc/ci-cd.md §6.2，两者必须一起做」）。
+> 现在两者都做了。
 
-# 回滚：装回上一个版本的 tgz（package\ 下存着历史版本）
-dsh plugin --profile web add .\package\dsh-webcode-bridge\dsh-webcode-bridge-0.14.7.tgz
+**安装当前版本：**
+
+```powershell
+# 1) 打包（产物落在包目录，已是 gitignore 的 *.tgz）
+cd package\dsh-webcode-bridge ; pnpm pack
+# 2) 装进 profile（先删旧目录再解包，打掉 pnpm 的「同版本号判 up to date」）
+node ..\..\scripts\install-profiles.mjs <tgz> --profiles web
+# 3) 重启 DSH 后才生效（当前进程里仍是旧代码）
 ```
 
-`scripts/install-profiles.mjs` 可以一次装进 `web` 与 `headless` 两个 profile，它**先删旧目录再解包**
-——这一步就是用来打掉 pnpm「同版本号判 Already up to date、连解包都不做」那个行为的。
+**回滚怎么做了（不再依赖仓库里的历史 tgz）：**
+
+| 方式 | 做法 | 适用 |
+| --- | --- | --- |
+| **git 回滚**（推荐） | `git checkout <上一个已知good的tag或commit> -- package/dsh-webcode-bridge` 后重新 `pnpm pack` + 安装 | 本地有 git 历史，这是**唯一不依赖囤积产物**的方式 |
+| **GitHub Release** | 从 Release 页面下载对应版本的 `.tgz`（`release.yml` 在 tag 上发布） | 需要一个已发布的旧版本 |
+| **本地缓存** | 若你个人保留了 tgz，放在 `package\` 下即可（该目录已被 `*.tgz` 忽略，不会污染提交） | 仅个人使用 |
+
+**为什么不再囤积**：tgz 是 `pnpm pack` 的**产物**，每次打包字节都可能不同
+（时间戳、规范化）。继续入库等于把「同名不同内容」的混淆搬进历史——而本项目已经因为
+「同版本号换内容」踩过坑（见 `scripts/verify-pack.mjs` 的文件头）。
+回滚应当基于 **git 历史**（可复现），而不是基于**碰巧留在磁盘上的二进制**。
 
 ---
 
@@ -359,6 +381,30 @@ dsh plugin --profile web add .\package\dsh-webcode-bridge\dsh-webcode-bridge-0.1
 一个 step，不是独立 job——所以它不能被单独列为必需检查，它红就是 `test (os, node)` 这个
 job 红。这是**有意的**设计（它只跑几百毫秒，单开一个 job 要多付一次 checkout + setup-node
 的时间），但也意味着：看到 `test` 失败时，**先看是哪一步红的**，不要假定一定是单测。
+
+### 7.1.1 台账闸门（scripts/check-ledger.mjs，2026-09-16 新增）
+
+与注释闸门同属 test job 的一个 step（同样是秒级，不值得单开 job）。
+
+**它存在的理由是「同一条约定失败了三次」。** doc/progress.md 开头写着「每完成一项即更新
+这里」，而 doc/long-term-issues.md §2.3 与 2026-09-16 的状态复核各抓到一次记账
+未收口；后者那次更彻底——「当前状态」表四行全过期，且 0.15.4/0.15.5 两轮工作整段没有台账。
+
+**边界（必须写清，否则会被误当成「台账已完整」的证明）：**
+
+- **判**：package.json 的 version 对上台账「工作树版本」一格里的版本号。
+- **判**：test/ 下 *.test.mjs 的**实际个数**对上台账「单测基线」一格里的 N/N。
+- **不判**：「上游」「注释闸门」「下一阶段」等其余各格。
+- **不判**：**每一轮工作是否写了段落**——机器判不了，仍需人写。
+
+即**闸门全绿 ≠ 台账完整**，它只保证「版本号与测试数不会再抄错」这一族不再复发。
+
+**为什么用纯 fs 而不 spawnSync 问 git**：本机实测 Node 里 spawnSync 调用任何外部程序都
+EPERM（doc/progress.md「已知环境约束」），那会让闸门在本机变成**空转**——空转的闸门比没有
+闸门更坏，它给的是「检查过了」的错觉。纯 fs 在本机与 CI 上行为一致。
+
+**反向验证**（doc/verify.md §0.15.7）：台账版本改回 0.15.5 → exit 1；再把单测基线写成
+35/35 → 两项同时变红，exit 1；还原 → exit 0。
 
 ### 7.2 真机层刻意排除在必需检查之外
 

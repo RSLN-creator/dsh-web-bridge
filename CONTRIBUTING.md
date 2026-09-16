@@ -12,8 +12,8 @@
 | [doc/comment-style.md](doc/comment-style.md) | 写新模块或重构前。注释纪律、错误码规范、**§9 实验与取证纪律**、§10 能力放大器 |
 | [doc/verify.md](doc/verify.md) | 发版前。真机验收矩阵 |
 
-`reference/`（逆向参考仓库）、`extension/`（旧扩展）、`package/backup-installed-*` 与 `doc/`
-**不是运行链路**，改代码时可以直接跳过。
+`reference/`（逆向参考仓库）、`extension/`（旧扩展）与 `doc/` **不是运行链路**，
+改代码时可以直接跳过。（`package/backup-installed-*` 与历史 tgz 已于 2026-09-16 删除。）
 
 ---
 
@@ -103,12 +103,15 @@ pnpm pack
 
 # 2) 校验 tarball 与工作树逐字节一致
 cd D:\9_Code_Workspace\dsh-webcode-bridge
-node scripts\verify-pack.mjs package\dsh-webcode-bridge\dsh-webcode-bridge-0.14.7.tgz
+node scripts\verify-pack.mjs package\dsh-webcode-bridge\dsh-webcode-bridge-<版本>.tgz
 
 # 3) 装进 profile（README 的官方路径）
-dsh plugin --profile web add .\package\dsh-webcode-bridge\dsh-webcode-bridge-0.14.7.tgz
+dsh plugin --profile web add .\package\dsh-webcode-bridge\dsh-webcode-bridge-<版本>.tgz
 # 重启 DSH 后才生效
 ```
+
+> `<版本>` 请用当前 `package.json` 的 version。此前这里写死 `0.14.7`，
+> 而那个 tgz 已于 2026-09-16 随历史 tarball 一起删除（见 `doc/ci-cd.md` §6.2）。
 
 也可以直接装进两个 profile（`web` / `headless`），这个脚本会**先删旧目录再解包**：
 

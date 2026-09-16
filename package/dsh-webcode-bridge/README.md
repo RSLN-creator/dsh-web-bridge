@@ -54,7 +54,7 @@ block 11 text len=200  </tool_result>\n{"mcp_action":"result","name":"write",…
 
 `test-mock/parse-session-log.mjs`：DSH 的会话落盘是**多帧拼接**的 zstd，`zstdDecompressSync`
 只解第一帧（1.3 MB 的文件解出 220 字节），这个坑上一轮会话连踩三次。工具按 zstd magic 切帧逐帧解压，
-输出事件直方图、轮次结局、失败项、工具调用与用户输入。归因报告见 `doc/session-log-review.md`。
+输出事件直方图、轮次结局、失败项、工具调用与用户输入。错误码与归因见 `doc/bridge-failure-ledger.md`。
 
 ## 0.14.4
 
@@ -317,7 +317,8 @@ number`、`"questions" must be an array`、缺 `description`），并新增 `TOO
 **新增站点 z.ai**（`https://chat.z.ai`，OpenAI 兼容 SSE，静态域 `z-cdn.chatglm.cn`，
 别名 `zai`/`z-ai`/`chat.z.ai`），实测镜像 200。
 
-取证全文见仓库 `doc/incident-2026-09-11.md`（本机 13 份真实会话转录的逐事件统计）。
+取证结论见 `doc/bridge-failure-ledger.md`（本机 13 份真实会话转录的逐事件统计；
+原先指向的 `doc/incident-2026-09-11.md` 已于 2026-09-16 删除）。
 
 ## 0.9.4
 
