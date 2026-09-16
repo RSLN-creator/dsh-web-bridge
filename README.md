@@ -73,7 +73,7 @@
 - `node test-mock/real-mirror-matrix.mjs --port 8931`：**右栏真机验收矩阵**——CDP 附着到桥已开的 Edge（沙箱下 spawn 浏览器必 EPERM），逐站点加载真实站点镜像，采集渲染/探活/跳站/乱码证据并截图；输出 `test-mock/out/real-mirror-matrix-<ts>.json` + `.tmp/shots/matrix-*.png`。0.12.9 实测 10/10。
 - 设置页「账户与登录管理」每站点有 **导入本机登录态**（把本机真实 Edge 的 cookies 采纳进该站点的桥 profile）。**实测边界**：Edge 128+ 用 app-bound 加密（cookie 的 `encrypted_value` 前缀为 `v20`，密钥绑定到 Edge 应用身份而非仅用户），复制 profile 后一枚都解不开（本机 372 枚全部 v20，`storageState` 返回 0）。因此该按钮在当前 Edge 上会**如实报错**并指向「登录」按钮，而不是假装成功。实现只复制读取所需的最小文件集到临时 profile，且绝不打开你正在用的 Edge User Data。cookie 仍为 v10（DPAPI）的旧 Edge 或其它 Chromium 上该通路可用。
 - `node test/glm-session-replay.test.mjs`：用真机会话形状回放 glm 站点工具调用链路——网页存活形状解析、缺失必填补齐、站点差异化教学立场。
-- `node test-mock/run-real-longrun.mjs`：长期真实调用验证——真实 Edge + 真实网页会话跑多轮工具闭环（未登录自动开有头窗口等人工登录），断言同一网页会话连续、回复完整、无协议泄漏；说明见 [路线](PLAN.md) 0.9.8 一节。
+- `node test-mock/run-real-longrun.mjs`：长期真实调用验证——真实 Edge + 真实网页会话跑多轮工具闭环（未登录自动开有头窗口等人工登录），断言同一网页会话连续、回复完整、无协议泄漏；设计说明见 [长期问题台账](doc/long-term-issues.md)。
 - `node test-mock/run-m2b-driver.js`：真实 Edge 加模拟站点 JSON/SSE。
 - `node test-mock/run-m2c-webapi.js`：控制面、预览和跨站拒绝。
 - 已真实跑通本地 `providers.js` 读取、审查、工具结果回注、刷新续聊；详见 [验收](doc/verify.md)。
@@ -83,4 +83,9 @@
 - 网页会话被删/过期时不再静默降级：桥会用整段首轮提示词重建（见 [长跑审查](doc/deepseek-longrun.md)）；网页输入框截断超长提示词会报 `PROMPT_TRUNCATED` 而不是发出半截。
 - 2026-09-10 新版 UI（无模型 pill、只剩深度思考开关）已适配：驱动按 UI 代际自动选择操作路径，`pnpm doctor` 在新版真机 8/8 通过；取证见 [新版 UI 取证](doc/research/deepseek-newui-2026-09-10.md)。
 
-[路线](PLAN.md)记录多站点适配与 DeepSeek 更新策略；[安全审查](doc/security-review.md)记录实际防护及剩余限制；[审查入口](doc/review-guide.md)给出「只看这 15 个文件」的代码地图与探针清单。
+[进度台账](doc/progress.md)记录当前走到哪与下一步；[长期问题](doc/long-term-issues.md)记录已知缺陷与「为什么不现在修」；[全局诊断](doc/diagnosis-2026-09-16.md)给出一次完整的进度/缺陷/质量/框架评估；[安全审查](doc/security-review.md)记录实际防护及剩余限制；[审查入口](doc/review-guide.md)给出代码地图与探针清单。
+
+> **注**：根目录 `PLAN*.md`、`REPORT.md` 是**本地私有留痕**（`.gitignore` 已排除），
+> 不在仓库里，因此上面的链接**不指向它们**——克隆本仓库看不到那几个文件。
+> 仓库内的权威入口是 `doc/README.md` 的文档索引。
+

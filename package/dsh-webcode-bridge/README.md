@@ -81,12 +81,44 @@ block 11 text len=200  </tool_result>\n{"mcp_action":"result","name":"write",…
 3. **镜像转发时 profile 的 cookie 被 iframe 的旧值挤掉**。旧实现「请求带 cookie 就只用请求里的」，
    于是驱动 profile 里真正登录的那份**永远不再发给上游**。现在按 profile 优先、请求补缺合并。
 
-### 等待时长（输入框底下 + 设置页累计）
+### 等待时长（输入框底下的统计药丸）
 
-新增 `lib/wait-stats.js` 纯计算层，**输入框底下的「本次会话等待发送」与设置页的「累计等待发送」
-同口径**（都来自 relay 的 `sendWaitMs`），文案由服务端一次算清，避免两处各写一份格式化后漂移。
-展示走官方 `conversation.composer.dock` 槽位（与 ui-chat 的 StatsPills、ui-goal 的 GoalDock 同一入口）。
-账本落盘 `webcode-wait-stats.json`，重启不清零。
+`lib/wait-stats.js` 是纯计算层：本会话与累计**同口径**（都来自 relay 的 `sendWaitMs`），
+文案由服务端一次算清（`/__webcode/wait-stats` 的 `label` / `detailRows`），
+避免两处各写一份格式化后漂移。账本落盘 `webcode-wait-stats.json`，重启不清零。
+
+**与官方统计同一栏（0.15.11 改为结构性方案）**：展示走官方
+`conversation.composer.dock` 槽位，取官方 ui-chat `StatsPills` 的尺寸
+（28px 高、24px 圆角、14px 线框图标、13px tabular-nums）。
+
+同栏**不靠几何偏移**。`conversation.composer.dock` 的每个条目都落在
+composerStack（列向 flex）里，而官方 `StatsPills` 根节点带 `data-composer-stats`
+标记、**本身就是一行**（`display:flex; justify-content:center; gap:12px`）。
+找到那一行后用 React portal 把本节点挂进去，它就成为该行里紧随官方药丸的
+flex 子项——居中、间距、换行全部由官方那条 CSS 决定。
+
+> 0.15.10 曾用负上边距把本行「拽」进官方那一行，那是几何猜测：官方行一旦
+> 换行（右侧栏把输入区挤窄）或字体档位变化，两块内容就会叠在一起。0.15.11
+> 起源码里不允许再出现给等待 wrap 算偏移量的代码，由测试钉住。
+
+官方行缺席时（会话尚无任何统计：`StatsPills` 在 `steps===0 && !hasTokens` 时
+返回 null）回落到自建一行，CSS 逐字抄 `StatsPills.root`，两处视觉一致。
+首次渲染时官方行可能尚未挂载，用 MutationObserver 等它出现后重算，
+避免「必须刷新才同栏」。
+
+交互照官方 `stat-dialog` 契约：**默认只给一个短读数**（如「等待发送 12.0 s」），
+点击才展开浮层，内含本会话与累计的完整明细（轮次、平均、限流、发送间隔目标、
+距上次发送）。浮层尺寸/圆角/阴影/`dl` 网格逐项对齐官方 `stat-dialog.module.css`，
+锚在药丸上右对齐展开。
+
+关闭语义同样对齐官方 `StatsPills`（它由 `useStatDialog` + `useDismissOnOutsidePointer`
+驱动，同一时刻只有一枚药丸开着）：**Esc 收起**，且**pointerdown 落在本组件之外
+即收起**——于是点官方任何一枚药丸时本面板随之关闭。关闭边界取本组件自身而非
+整行，点自己面板内部（含滚动条）不会误关。
+
+**设置页不再重复统计等待时长**：原先那里另有一块「累计等待发送」网格，读的是
+同一份账本、同一个数字，属于重复展示（0.15.10 已删除）。设置页「速度与等待」
+只保留实测速度指标。
 
 ### 右栏
 

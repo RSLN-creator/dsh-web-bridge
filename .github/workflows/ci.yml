@@ -123,6 +123,63 @@ jobs:
       - name: 台账一致性（scripts/check-ledger.mjs，阻断）
         run: node scripts/check-ledger.mjs
 
+      # ---- 文件规范：编码（无 BOM）+ doc/README.md 索引无死链（阻断）----
+      #
+      # 这两条都是**已经写在文档里、但此前没有任何机器检查**的规范，于是都发生过
+      # 「文档说做完了、磁盘上只做了一半」：
+      #   · 去 BOM：0.15.5 只改了 package.json，`doc/security-review.md` 一直带 BOM
+      #     直到 2026-09-16 才发现（doc/long-term-issues.md #20 原话「只剩这一个」）。
+      #   · 文档索引：CONTRIBUTING §5.2 与 PR 模板都要求「链接 Test-Path 通过」，
+      #     却从来没人跑过它——而索引正是「文档在哪」的唯一入口，死链等于把文档摘掉。
+      # 判据与反例见 scripts/check-repo-hygiene.mjs 文件头。
+      - name: 文件规范（scripts/check-repo-hygiene.mjs，阻断）
+        run: node scripts/check-repo-hygiene.mjs
+
+      # ---- reference/ 的来源表与磁盘一致（阻断）----
+      #
+      # `reference/` 的约定是「第三方克隆不入库，只把来源与版本入库」
+      # （reference/README.md）。既然内容不入库，**「怎么拿回来」就必须入库**——
+      # 而这正是此前缺的那一半：实测 35 个克隆里只有 1 个 remote URL 被记录过、
+      # HEAD SHA 一个都没记，等于这个目录一旦丢失就不可复现。
+      #
+      # 本步校验 reference/README.md 的那张表仍与磁盘一致（脚本纯 fs 读各克隆的
+      # `.git/config` 与 HEAD，不 spawn git——理由同下一条）。
+      # `reference/` 不在本机时（全新克隆）脚本会因读不到目录而报错退 2，这是**正确**的：
+      # 它提醒你 reference/README.md 已经无法被验证，而不是假装通过。
+      - name: reference 来源表一致（scripts/gen-reference-index.mjs --check，阻断）
+        run: node scripts/gen-reference-index.mjs --check
+
+      # ---- 提交信息规范（阻断）----
+      #
+      # 本仓库事实上一直按 Conventional Commits 写（实测最近 200 条全部合规），
+      # 但这条约定**此前既没写进 CONTRIBUTING，也没有闸门**——健康的历史一旦掺进
+      # 一条 `update stuff`，要么被无声接受、要么在评审里争论一次。现已写进
+      # CONTRIBUTING §9，并由这一步阻断。
+      #
+      # 为什么由 shell 把 `git log` 管道进来、而不是让脚本自己 spawn git：
+      # 本机实测 Node 里 spawnSync 调外部程序一律 EPERM（见文件头与 doc/progress.md），
+      # 脚本自己调 git 会让它在开发者本机**空转**——而空转的闸门比没有闸门更坏。
+      # 这里只跑 push 范围（push 用 before..after，PR 用 base..head），避免每次
+      # 都把全历史重扫一遍；`--stdin` 是**一行一条主题**的模式（见该脚本 checkMany）。
+      - name: 提交信息规范（scripts/check-commit-msg.mjs，阻断）
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            RANGE="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+          elif [ -n "${{ github.event.before }}" ] && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+            RANGE="${{ github.event.before }}..${{ github.sha }}"
+          else
+            RANGE=""
+          fi
+          if [ -n "$RANGE" ] && git rev-parse --quiet --verify "$RANGE" >/dev/null 2>&1; then
+            echo "检查范围：$RANGE"
+            git log --format="%s" "$RANGE" | node scripts/check-commit-msg.mjs --stdin
+          else
+            echo "无可用范围（首次推送或 range 不可解析），回退为检查最近 1 条：${{ github.sha }}"
+            git log --format="%s" -1 "${{ github.sha }}" | node scripts/check-commit-msg.mjs --stdin
+          fi
+
       # ---- 全量单测：两套等价命令，按 Node 版本分流（见文件头事实 2）----
 
       - name: 单测（Node ${{ matrix.node }}，pnpm test）

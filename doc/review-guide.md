@@ -24,9 +24,11 @@
 | `lib/client.cjs` | 前端注入（设置页/侧栏入口） | 中 |
 | `cordis.patch.yml` | 插件在 DSH 里的挂载点 | 低 |
 
-`extension/`（旧浏览器扩展）、`reference/`（逆向参考仓库）、
+`reference/`（逆向参考仓库）、
 `doc/` 都不是运行链路，**审查时可以直接跳过**。
-（`package/backup-installed-*` 与历史 tgz 已于 2026-09-16 一并删除，不再占位。）
+（`extension/`（旧浏览器扩展，死代码）已于 2026-09-16 移到
+`package/dsh-webcode-bridge/test-mock/archive/extension/`；`package/backup-installed-*`
+与历史 tgz 也已于同日一并删除，不再占位。）
 
 ## 一条命令替代通读
 

@@ -20,12 +20,19 @@
 //
 //   1. `scripts/lint-comments.mjs`           注释纪律（§10 的机检部分）
 //   2. `scripts/check-ledger.mjs`            台账与事实一致（版本号 / 测试文件数）
-//   3. `test-mock/artifacts-check.mjs`       生成物卫生（跑一次就会变的文件不许被 git 看见）
-//   4. `test-mock/prompt-bench.mjs --offline` 基准 harness 离线回放（不联网、不碰真机）
-//   5. `pnpm test`                           全量单测（`--fast` 跳过）
+//   3. `scripts/check-repo-hygiene.mjs`      文件编码无 BOM + doc/README.md 索引无死链
+//   4. `scripts/check-commit-msg.mjs`        提交信息判据自检（--self-test）
+//   5. `scripts/gen-reference-index.mjs`     reference/README.md 的来源表与磁盘一致
+//   6. `test-mock/artifacts-check.mjs`       生成物卫生（跑一次就会变的文件不许被 git 看见）
+//   7. `test-mock/prompt-bench.mjs --offline` 基准 harness 离线回放（不联网、不碰真机）
+//   8. `pnpm test`                           全量单测（`--fast` 跳过）
 //
-// 前四步是秒级的，第五步约 10 分钟。因此 `--fast` 只砍第五步——**砍掉的必须是慢的那一步**，
-// 而不是「顺手也砍掉检查」的那一步。
+// 前六步是秒级的，第七步十余秒，第八步约 10 分钟。因此 `--fast` 只砍第八步——**砍掉的必须是
+// 慢的那一步**，而不是「顺手也砍掉检查」的那一步。
+//
+// **第 3~5 步是纯 `fs`、不用 `spawnSync`**，因此它们在开发者本机（含沙箱）也能真正跑起来；
+// 第 6 步依赖 `git check-ignore`，在 spawn 被挡的环境里会**跳过并说明**（不假装通过）。
+// 这条区别很重要：本机跑一遍能发现的欠账，不该拖到 CI 才被发现。
 //
 // ## 用法（Windows / PowerShell）
 //
@@ -94,6 +101,30 @@ const STEPS = [
     args: [path.join('scripts', 'check-ledger.mjs')],
     cwd: repoRoot,
     hint: '改 doc/progress.md 的「当前状态」表让它与事实一致；不要改脚本去迁就台账。',
+  },
+  {
+    id: 'repo-hygiene',
+    title: '文件编码无 BOM + doc/README.md 索引无死链',
+    cmd: process.execPath,
+    args: [path.join('scripts', 'check-repo-hygiene.mjs')],
+    cwd: repoRoot,
+    hint: '去 BOM 用「去掉前 3 字节 EF BB BF」；索引死链要么补文件、要么删掉索引那一行。',
+  },
+  {
+    id: 'commit-msg',
+    title: '提交信息判据自检（正反例都必须对）',
+    cmd: process.execPath,
+    args: [path.join('scripts', 'check-commit-msg.mjs'), '--self-test'],
+    cwd: repoRoot,
+    hint: '改了 scripts/check-commit-msg.mjs 的判据就必须同步改自检的正反例。规范见 CONTRIBUTING.md §9。',
+  },
+  {
+    id: 'ref-index',
+    title: 'reference/README.md 的来源表与磁盘一致',
+    cmd: process.execPath,
+    args: [path.join('scripts', 'gen-reference-index.mjs'), '--check'],
+    cwd: repoRoot,
+    hint: '跑 `node scripts\\gen-reference-index.mjs` 重新生成，把表格段覆盖回 reference/README.md。',
   },
   {
     id: 'artifacts-check',

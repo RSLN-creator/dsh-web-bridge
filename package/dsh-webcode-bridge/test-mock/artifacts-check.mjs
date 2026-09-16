@@ -52,6 +52,18 @@ const GENERATED = [
   // 它引用会话 id 与用户原话，与 PLAN*.md、REPORT.md 同一条口径：本地私有留痕，不入库。
   // 它此前**没有任何规则**，`git status` 直接列着 `.agent-teams/`。
   '.agent-teams/webcode-bridge-0-16/team.json',
+  // 2026-09-16 新增：`reference/*/` 的第三方克隆必须继续被忽略。
+  //
+  // 这是 `reference/` 的**全部约定**：316 MB 第三方代码不入库，只把「来源与版本」
+  // 入库（`reference/README.md`）。约定此前**只写在 .gitignore 的注释里、没有任何脚本守着**
+  // ——实测 `git grep -n reference -- scripts package/dsh-webcode-bridge/test-mock/artifacts-check.mjs`
+  // 是 **0 命中**，而本文件自己的文件头（第 14-22 行）与 `.gitignore` 的注释都声称
+  // 「新增产物目录时必须在这里登记」。这条补上，正是把该声称变成事实。
+  //
+  // 用不存在的路径来验**规则**而不是验某个具体克隆：`git check-ignore` 是纯模式匹配，
+  // 不要求文件存在。这样既避开 CJK 文件名的跨平台差异，也不会因为某人删掉某个克隆而假红。
+  'reference/example-clone/some-file.js',
+  'reference/example.pdf',
 ];
 
 /** 同区域的源文件：它们**必须**仍可被 git 跟踪（防止忽略规则写宽了）。 */
@@ -63,6 +75,12 @@ const SOURCES = [
   // 与上面那条探针产物同目录的**源码**：它是产物目录里唯一必须留在库里的东西，
   // 因此正好用来守住「忽略规则没写宽到把 output/ 整个吞掉」这一侧。
   'package/dsh-webcode-bridge/test-mock/inspect-harness.mjs',
+  // 2026-09-16 新增：`reference/` 里**必须仍然可跟踪**的两类东西。
+  // 它们是上一条「克隆必须被忽略」的反向安全线——`.gitignore:9` 的 `reference/*/`
+  // 一旦被写宽（例如改成 `reference/`），这两个文件会被静默漏掉，
+  // 而 `reference/README.md` 恰恰是让「故意不入库」这件事**可被克隆者理解**的唯一入口。
+  'reference/README.md',
+  'reference/local-refs/agent-teams-reference-notes.md',
 ];
 
 /** git check-ignore 的判定；返回 true=被忽略。用 -q 只取退出码。 */

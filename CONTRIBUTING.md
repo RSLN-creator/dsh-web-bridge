@@ -12,7 +12,7 @@
 | [doc/comment-style.md](doc/comment-style.md) | 写新模块或重构前。注释纪律、错误码规范、**§9 实验与取证纪律**、§10 能力放大器 |
 | [doc/verify.md](doc/verify.md) | 发版前。真机验收矩阵 |
 
-`reference/`（逆向参考仓库）、`extension/`（旧扩展）与 `doc/` **不是运行链路**，
+`reference/`（逆向参考仓库）与 `doc/` **不是运行链路**，
 改代码时可以直接跳过。（`package/backup-installed-*` 与历史 tgz 已于 2026-09-16 删除。）
 
 ---
@@ -236,8 +236,8 @@ node scripts\lint-comments.mjs --max-warnings=5   # 允许最多 5 条 warn
 
 推上去之后跑的是 `.github\workflows\ci.yml`：**ubuntu-latest + windows-latest × Node 20 + 22**，
 四组合，`fail-fast: false`。步骤：检出 → pnpm 11.25.0 → Node → `pnpm install --no-frozen-lockfile`
-→ 注释纪律 → 全量单测 → 离线基准 → 生成物卫生；失败时上传基准产物。`timeout-minutes: 45`
-（本机全量 564s，冷缓存 + 两平台留余量）。
+→ 注释纪律 → 台账一致性 → 文件规范（编码 + 文档索引）→ 提交信息 → 全量单测 → 离线基准
+→ 生成物卫生；失败时上传基准产物。`timeout-minutes: 45`（本机全量 564s，冷缓存 + 两平台留余量）。
 
 另外两个工作流：`release.yml`（tag `v*` 触发，打包 + verify-pack + 挂 Release，**不发 registry**）、
 `codeql.yml`（JS/TS 静态分析，push/PR + 每周定时）。
@@ -246,6 +246,24 @@ node scripts\lint-comments.mjs --max-warnings=5   # 允许最多 5 条 warn
 发版前的真机验收由人按 `doc/verify.md` 的矩阵跑。
 
 完整说明、必需检查列表、以及「CI 在本地怎么复现」见 [doc/ci-cd.md](doc/ci-cd.md)。
+
+### 6.1 四个本机也能跑的闸门脚本
+
+闸门的价值取决于**能不能在本机先跑一遍**——跑到 CI 才发现，等于花一轮往返买同一句话。
+
+| 脚本 | 管什么 | 本机命令 |
+| --- | --- | --- |
+| `scripts\lint-comments.mjs` | 注释纪律（错误码、§引用、TODO 形态） | `node scripts\lint-comments.mjs` |
+| `scripts\check-ledger.mjs` | 台账数字与事实一致（版本号、测试文件数） | `node scripts\check-ledger.mjs` |
+| `scripts\check-repo-hygiene.mjs` | 文件编码不得带 BOM + `doc/README.md` 索引无死链 | `node scripts\check-repo-hygiene.mjs` |
+| `scripts\check-commit-msg.mjs` | 提交信息形状（见 §9） | `node scripts\check-commit-msg.mjs --self-test` |
+
+四个脚本都是**独立可跑、不引第三方依赖、不用 `spawnSync`** 的纯 Node 工具——这不是风格偏好：
+本机实测 Node 里 `spawnSync` 调任何外部程序都 `EPERM`（`doc\progress.md`「已知环境约束」），
+凡是靠它去问 git 的闸门在本机都会**空转**，而空转的闸门比没有闸门更坏（它给的是「检查过了」的错觉）。
+
+每个脚本都带 `--self-test`（或等价的正反例自检），用来证明**它的判据本身是活的**——
+一个只会在构造输入上返回「通过」的闸门等于没有。改动闸门判据时必须同步改自检的正反例。
 
 ---
 
@@ -269,3 +287,68 @@ node scripts\lint-comments.mjs --max-warnings=5   # 允许最多 5 条 warn
 
 用 `.github\pull_request_template.md` 的五个小节：**变更动机 / 证据（真机 or 离线，必须区分）/
 护栏 / 文档同步 / 回滚方式**。模板顶部解释了每一节对应本仓库的哪次踩坑。
+
+---
+
+## 9. 提交信息规范（Conventional Commits）
+
+**这条规范以前只存在于实际做法里，没有写下来、也没有闸门。** 实测最近 200 条提交全部
+写成下面的形状，但新来的会话/协作者没有任何地方能读到它——一旦掺进一条 `update stuff`，
+要么被无声接受，要么在评审里争论一次。所以现在把它写下来，并由
+`scripts\check-commit-msg.mjs` 在 CI 上阻断。
+
+### 9.1 形状
+
+```
+type(scope): 主题
+type(scope)!: 主题            # ! 表示破坏性变更
+type+type(scope): 主题        # 复合：一次提交横跨两类改动
+type(scope+scope): 主题       # 复合作用域
+```
+
+真实例子（全部来自本仓库历史）：
+
+```
+fix(decoder): SET 重发吞掉流式增量 —— 网页有输出、harness 收不到（0.15.7）
+chore(hygiene)+feat(gate): 清历史 tgz / 废弃备份 + 两条死规则 + 台账闸门
+test+ci: 注释闸门转阻断，CI/CD 与审查补强（0.15.2）
+feat(bench+roster): 提示词基准层与真实花名册
+security: 导入登录态目录白名单 + 两个状态文件统一 0o600
+```
+
+### 9.2 类型白名单
+
+`feat` / `fix` / `docs` / `test` / `chore` / `refactor` / `perf` / `ci` / `build` / `revert` / `security`
+
+前八类来自实测；`security` 亦来自实测（安全专项改动）。**新增类型要先改
+`scripts\check-commit-msg.mjs` 的 `TYPES` 并在注释里写下理由**——白名单的意义就是它不会
+自己长大。
+
+### 9.3 判据（每条都有对应的真实反例）
+
+| 判据 | 为什么 |
+| --- | --- |
+| 形状必须是 `type(scope)?: 主题` | 让 `git log --oneline` 可被机械化扫描（筛 fix、找某模块） |
+| 主题非空 | `feat(ui):` 后面什么都没有不是提交信息 |
+| **不得含 BOM** | BOM 会让 `git log \| grep ^fix` 静默漏掉这条，排查时表现为「这条提交好像不存在」 |
+| **主题里不得有字面 `\n`** | 真机反例 `6b95cf2`：整段正文被塞进主题行（实测 1031 字符）。正确做法是空一行后写正文 |
+| 长度 ≤ 100 字符（只 warn） | 中文信息密度高，硬卡 50/72 会把正常中文写成半句。提醒而不拦 |
+
+`Merge …` / `Revert "…"` / `fixup!` / `squash!` 放行——这些由 git 或交互式 rebase 生成，
+不是作者手写的主题。
+
+### 9.4 本机怎么用
+
+```powershell
+# 自检判据（改闸门判据后必跑）
+node scripts\check-commit-msg.mjs --self-test
+
+# 检查最近一次提交的信息
+node scripts\check-commit-msg.mjs
+
+# 检查一批（一行一条主题）
+git log --format="%s" -20 | node scripts\check-commit-msg.mjs --stdin
+```
+
+**不要用 `--no-verify` 绕过。** 判据本身错了就改判据，并同步补 `--self-test` 的正反例——
+这与 `lint-comments.mjs` 的处理立场一致（「若确属误报，请改本脚本的判据而不是绕过它」）。

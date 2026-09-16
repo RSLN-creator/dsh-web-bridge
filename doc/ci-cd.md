@@ -65,7 +65,8 @@ CI 既没有登录态，也不该替用户去敲站点——这两条任意一�
 
 `doc/review-guide.md` 已经点名三项**在改动前的干净树上同样失败**的既有欠账，属既有欠账不是回归：
 
-- `test-mock/run-m2.js` — 走的是已废弃的浏览器扩展链路（`extension/`），M2 恒 FAIL
+- `test-mock/run-m2.js` — 已随旧扩展链路一起归档到 `test-mock/archive/`（2026-09-16）。
+  **注意**：它在本机是 `spawn EPERM`（未跑到断言），不是「恒 FAIL」——见 `long-term-issues.md` #9 的复核段
 - `run-m2b-driver.js` / `run-m2c-webapi.js` — mock 站点响应形状已与驱动期望脱节
 
 它们**不在** `pnpm test` 的链里，因此不会让 CI 红。不要为了「覆盖率好看」把它们加进去。
