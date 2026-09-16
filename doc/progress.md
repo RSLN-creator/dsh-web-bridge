@@ -161,6 +161,76 @@ fatal: No url found for submodule path 'reference/deepseek-web-import' in .gitmo
 | 40 个测试文件 | **40/40 全绿**。注意 `node --test` 在本机整体跑会 spawn EPERM（见「已知环境约束」），
 所以这是**逐文件**跑出来的读数：`Get-ChildItem test\*.test.mjs` 逐个 `node <file>`，失败 0 |
 
+## 2026-09-17 CI 全红修复（第二轮）—— 修完之后，**真问题才浮出来**
+
+上一条修完后 CI 立刻跑出新结果：四条腿**仍红**，但**红的位置全变了**——这本身就是进展：
+Node 20 的两条腿不再死在 `pnpm install`，`ref-index` 也不再 ReferenceError。
+
+| 腿 | 现在红在哪 |
+| --- | --- |
+| `ubuntu-latest, node 22` / `node 24` | `pnpm test`：**2 条测试失败**（首次真正跑到测试！） |
+| `windows-latest, node 22` / `node 24` | `ref-index`：仍报 1 条不一致 |
+
+### 六、`ref-index` 为什么修完还红：**大小列不该参与比对**
+
+Windows runner 报 `local-refs` 与 README 不一致，两边**只有「大小」一格不同**
+（本机 1.4 MB / CI 1.5 MB）。根因是大小**不是磁盘内容的属性，而是 checkout 方式的属性**：
+`local-refs/` 是唯一入库的 `reference/` 条目，里面是文本，而 `core.autocrlf` 会让同一份
+文件在不同平台上落成不同字节数。于是这一格对「来源能否复现」**零信息量**，
+却让闸门在干净克隆（= 只有 `local-refs` 存在）上**永远不可能通过**。
+
+这正是文件头自己警告的那类假红。修法：`comparableLine()` 只比对**可复现的两列**
+（remote 与 HEAD），大小保留在表里供人阅读但不参与判定。
+
+已做两次验证：
+
+- **正向**（复现 CI 条件）：只放 `local-refs` + 仓库里真实的 README → `--check` **exit 0**；
+- **反向**（确认没被改瞎）：把 README 里 `local-refs` 的 remote 改成别的地址 →
+  仍然 **exit 1** 并逐字打印两边差异；只改大小 → **exit 0**（正是想要的语义）。
+
+### 七、两条 Linux 专属测试失败：**都是测试的跨平台 bug，不是产品缺陷**
+
+这是本条最值得记的事：这两条测试**从来没有在 Linux 上跑过**（此前 CI 死在更早的步骤），
+所以它们一直是「只在 Windows 上被验证过」。CI 第一次真正跑到测试，就把它们照出来了。
+
+**① `prompt-variants.test.mjs`：零位移基线把宿主 OS 名写死了。**
+
+断言是「模板逐字零位移」，但基线是从 Windows 抄的，里面含
+`运行环境：Windows（Node v24.18.0）`。Linux 上 `platformNote()` 正确地输出 `Linux`，
+断言于是报「文本发生了位移」——差异行却只有那一个词。**模板根本没变**，
+变的是宿主。测试原本只归一化了 Node 版本号，漏了 OS 名。
+
+修法：归一化**两项**（OS 名 + Node 版本）。OS 名映射在测试里**独立重写一份**，
+不去调 `lib` 的 `platformNote()`——否则断言会退化成「函数等于它自己」，模板被改坏也不红。
+
+**② `site-mount.test.mjs`：白名单测试用了 Windows 专属路径。**
+
+它拿 `Z:\definitely\not\here` 当「白名单之外」的样本。在 Windows 上那是另一个盘符，
+必然在白名单外；但在 Linux/macOS 上 `Z:\...` 只是**一个普通相对文件名**，
+`path.resolve` 会把它拼到 cwd 下——**恰好落在本包树里**（= 白名单根之一），
+于是先撞上「不存在」分支，报的是 `源 profile 目录不存在` 而不是 `允许范围`。
+
+**产品行为是对的**（白名单判定本身没坏），坏的是测试选的样本路径。
+修法：改用 `path.parse(os.homedir()).root` 下的同级目录，任何平台上都在 home 之外；
+并加一条前提断言，防止将来有人把样本挪回 home 之内而让这条测试悄悄失去意义。
+
+### 八、为什么这两条「测试 bug」值得单列
+
+它们不是「CI 环境不好」，而是**跨平台承诺没有被真的验证过**：
+README 说支持 Windows 与 macOS/Linux（`platformNote` 专门按平台改写指令），
+但守护这份承诺的测试只在 Windows 上跑过。`doc/ci-cd.md` §7 早就写明
+「两平台失败的**原因通常不同**」——这一轮正好是那句话的实例：
+Windows 腿红在 `ref-index`，Linux 腿红在测试，两组原因毫无关系。
+
+### 本轮第二轮验证读数
+
+| 项 | 读数 |
+| --- | --- |
+| 40 个测试文件（本机 Windows 逐文件） | **40/40 全绿** |
+| `gen-reference-index.mjs --check` | exit 0；干净克隆条件下 **exit 0**；构造漂移 **exit 1** |
+| `lint-comments` / `check-ledger` / `check-repo-hygiene` / `check-commit-msg --self-test` | 全部 exit 0 |
+| `ci-local.mjs --fast` | **7/7 PASS** |
+
 ### 本轮零产品代码改动
 
 只动了 CI、脚本与文档：`.github/workflows/ci.yml`、`scripts/gen-reference-index.mjs`、

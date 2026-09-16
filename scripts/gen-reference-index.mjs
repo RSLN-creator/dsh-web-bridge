@@ -147,6 +147,40 @@ function toMarkdown(rows) {
   return out.join('\n');
 }
 
+/**
+ * 取某个条目在给定 markdown 里的**可比较**那一行——**去掉大小列**。
+ *
+ * ## 为什么大小列不能参与比对（2026-09-17，CI 实测）
+ *
+ * 一条 `--check` 在 Windows runner 上恒红，报 `local-refs` 与 README 不一致，
+ * 两边只有「大小」一格不同（本机 1.4 MB / CI 1.5 MB）。根因是**大小根本不是
+ * 磁盘内容的属性，而是 checkout 方式的属性**：`local-refs/` 是本仓库唯一入库的
+ * `reference/` 条目，它里面是文本，而 `core.autocrlf` 会让同一份文件在不同平台
+ * （乃至同一平台的不同 git 配置下）落成不同字节数。于是「大小」这个格子对
+ * 「来源是否可复现」**零信息量**，却让闸门在干净克隆上永远不可能通过。
+ *
+ * 这正是本文件头「已知边界」警告的那类假红：**假红的闸门比没有闸门更坏**。
+ * 真正要锁的是**可复现的两列**——remote（从哪来）与 HEAD（哪一版）：
+ * 它们才回答「reference/ 丢了能不能拿回来」。大小保留在表里供人阅读，
+ * 但不再参与判定。
+ *
+ * 返回 `null` 表示该名字在文本里没有对应的表格行。
+ *
+ * @param {string} text markdown 文本（生成的表或 README）
+ * @param {string} name 目录名
+ * @returns {string|null}
+ */
+function comparableLine(text, name) {
+  const line = text.split('\n').find((l) => l.startsWith(`| \`${name}\` |`));
+  if (!line) return null;
+  const cells = line.split('|');
+  // 形状：['', ' `name` ', ' remote ', ' HEAD ', ' 大小 ', '']
+  // 去掉最后一个内容格（大小），其余原样保留并 trim。
+  if (cells.length < 6) return line.trim();
+  const kept = cells.slice(1, -2).map((c) => c.trim());
+  return '| ' + kept.join(' | ') + ' |';
+}
+
 function main() {
   const argv = process.argv.slice(2);
   // `--check` 分支曾经引用两个**从未定义过的**标识符（`REF` 与 `README`），一走到那里就抛
@@ -198,18 +232,20 @@ function main() {
     //   · 干净克隆（CI / 新协作者）→ 明确跳过，而不是假装通过或错误失败。
     const present = rows.filter((r) => fs.existsSync(path.join(refDir, r.name)));
     const absent = rows.length - present.length;
-    // 复用上面已经算好的 `table`，**不要**在这里重新调一次 `toMarkdown(rows)`：
-    // 同一份输入算两遍，将来只改一处就会让「打印的表」与「校验的表」分叉。
-    const tableLines = table.split('\n');
     const missing = [];
     for (const r of present) {
-      const line = tableLines.find((l) => l.startsWith(`| \`${r.name}\` |`));
-      if (line && !current.includes(line)) missing.push(line);
+      const expected = comparableLine(table, r.name);
+      const actual = comparableLine(current, r.name);
+      if (expected === null) continue;                  // 本机行没生成出来，跳过（不外报）
+      if (actual === null) { missing.push({ name: r.name, expected, actual: '(README 里没有这一行)' }); continue; }
+      if (actual !== expected) missing.push({ name: r.name, expected, actual });
     }
     if (missing.length) {
       process.stderr.write(`[ref-index] reference/README.md 过期：`
         + `${missing.length}/${present.length} 个**本机存在的**条目与磁盘不一致。\n`);
-      for (const l of missing.slice(0, 8)) process.stderr.write('  ' + l + '\n');
+      for (const m of missing.slice(0, 8)) {
+        process.stderr.write(`  · ${m.name}\n     磁盘: ${m.expected}\n     README: ${m.actual}\n`);
+      }
       process.stderr.write('[ref-index] 重新生成并写入 README（本脚本的表格段）。\n');
       return 1;
     }

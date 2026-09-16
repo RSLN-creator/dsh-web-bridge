@@ -160,22 +160,49 @@ const ZERO_DRIFT_BASELINE = '[系统指令]\nBASE-SYS\n\n[全局指令]\nBASE-EX
   + '[会话开始]\n\n（用户未提供文字）\n\n\n[本地工具传输协议]\n'
   + '必须使用 <tool_call>{"mcp_action":"call","name":"实际工具名","arguments":{}}</tool_call> 发起工具调用。工具名和参数必须严格匹配上面的 schema。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。';
 
-// 基线的 Node 版本号是快照的一部分（见上）。换 Node 大版本时这一项会变——
-// 那时更新它，但**先确认变的是版本号而不是模板**：下面另有一条「去掉版本号后必须
-// 逐字相同」的断言，专门用来把「宿主 Node 换了」与「模板被改了」分开。
+// 基线里**随宿主而变**的字段有两项，不是一项（见上）：
+//   · platformNote 的 **OS 名**（agent-preset.js:70 按 process.platform 取 Windows/macOS/Linux）；
+//   · platformNote 的 **Node 版本号**（agent-preset.js:71 用 process.version）。
+//
+// 这两项都不是模板契约，而是**同一份模板在不同宿主上的取值**。基线抄自 Windows/Node v24，
+// 因此在 Linux/macOS 的 runner 上必须先把它们换成当前宿主的实际值，否则断言会在一个
+// 与模板无关的地方红——这正是 2026-09-17 CI 上真实发生的事（Linux 腿报「文本发生了位移」，
+// 差异行只有 `运行环境：Linux` vs `运行环境：Windows`）。
+//
+// **OS 名映射必须在这里独立写一份**，不能去调 lib 里的 platformNote()：那会让断言变成
+// 「函数等于它自己」，模板被改坏也不会红。这是刻意的重复。
 const BASELINE_INPUT = { extraPrompt: 'BASE-EXTRA', system: 'BASE-SYS' };
 
-const currentNode = `Node ${process.version}`;
-const baselineForThisHost = ZERO_DRIFT_BASELINE.replace(`Node ${ZERO_DRIFT_BASELINE.match(/Node (v[\d.]+)/)[1]}`, currentNode);
+const hostOsName = process.platform === 'win32' ? 'Windows'
+  : process.platform === 'darwin' ? 'macOS' : 'Linux';
+
+/**
+ * 把基线里随宿主变的两项换成当前宿主的实际值。
+ * 只替换 `运行环境：<OS>（Node <ver>）` 这一处——其余每一个字符仍逐字比对。
+ */
+function baselineForThisHost() {
+  const pattern = /运行环境：[^（]+（Node v[\d.]+）/;
+  // 先确认模式**命中**：模式若因文案改动而失配，这里立刻报出来，
+  // 而不是让下面那条断言在一个「根本没被归一化」的基线上给出难以理解的差异。
+  //
+  // 注意断言的是「命中了」，**不是**「替换后变了」——在 Windows + Node v24.18.0 上
+  // 归一化结果与基线逐字相同（基线本来就是在这个宿主上抄的），那正是预期情形。
+  assert.match(ZERO_DRIFT_BASELINE, pattern,
+    '基线里的 platformNote 形状变了，本条测试的归一化模式已失配——先修模式，再谈模板位移');
+  return ZERO_DRIFT_BASELINE.replace(pattern, `运行环境：${hostOsName}（Node ${process.version}）`);
+}
+
+/** 去掉随宿主变的两项，只留模板本身：用来把「宿主环境换了」与「模板被改了」分开。 */
+const stripHost = (s) => s.replace(/运行环境：[^（]+（Node v[\d.]+）/, '运行环境：<OS>（Node vX）');
 
 test('默认路径零位移：不传 experiments 时 default 变体文本与 0.14.7 逐字相同', () => {
   const { variants } = buildPromptVariants({ tools: TOOLS, ...BASELINE_INPUT });
   const dflt = variants.find((v) => v.id === 'default');
   // 逐字断言（整段）。失败时 assert.equal 会把差异直接摊在输出里。
-  assert.equal(dflt.text, baselineForThisHost, '默认变体文本发生了位移——这与 agent-preset.js:30/96-98 的声明冲突');
-  // 去掉宿主 Node 版本号后再断言一次：这条把「宿主环境换了」与「模板被改了」分开。
-  const stripVersion = (s) => s.replace(/Node v[\d.]+/, 'Node vX');
-  assert.equal(stripVersion(dflt.text), stripVersion(ZERO_DRIFT_BASELINE));
+  assert.equal(dflt.text, baselineForThisHost(), '默认变体文本发生了位移——这与 agent-preset.js:30/96-98 的声明冲突');
+  // 去掉宿主相关的两项（OS 名 + Node 版本号）后再断言一次：
+  // 这条把「宿主环境换了」与「模板被改了」分开——前者是预期的，后者才是回归。
+  assert.equal(stripHost(dflt.text), stripHost(ZERO_DRIFT_BASELINE));
 });
 
 test('默认路径变体集合零位移：只有 default 与 glm，且都不带 experimental 标记', () => {

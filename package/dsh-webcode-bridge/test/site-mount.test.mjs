@@ -197,7 +197,17 @@ test('web-control：session-import 按站点路由，失败原因是可读错误
   assert.equal(calls.length, 0, '源目录不存在时不得调用导入');
 
   // 白名单之外：无论存在与否都必须拒绝（0.14.4 新增；旧实现只查「存在」）。
-  const outside = await post({ siteId: 'glm', sourceProfileDir: 'Z:\\definitely\\not\\here' });
+  //
+  // 路径必须**跨平台**：这里曾写死 `Z:\definitely\not\here`。在 Windows 上它是
+  // 「另一个盘符 ⇒ 必然在白名单外」，但在 Linux/macOS 上 `Z:\...` 只是**一个普通相对
+  // 文件名**，`path.resolve` 会把它拼到 cwd 下——恰好落在本包树（= 白名单根之一）里面，
+  // 于是先撞上「不存在」那条分支，报的是 `源 profile 目录不存在`，而不是 `允许范围`。
+  // 结果是这条断言在 Windows 上通过、在 Linux 上红。改用 path.parse(os.homedir()).root
+  // 的**同级**目录：任何平台上它都在 home 之外，因而必然在所有白名单根之外。
+  const outsideRoot = path.join(path.parse(os.homedir()).root, 'dsh-not-permitted-' + Date.now());
+  assert.ok(!path.resolve(outsideRoot).startsWith(path.resolve(os.homedir()) + path.sep),
+    '本条测试的前提是「该路径在 home 之外」——前提不成立时先修测试，不要放宽断言');
+  const outside = await post({ siteId: 'glm', sourceProfileDir: outsideRoot });
   assert.equal(outside.body.ok, false);
   assert.match(String(outside.body.error), /允许范围/);
   assert.equal(calls.length, 0, '白名单外目录不得调用导入');
