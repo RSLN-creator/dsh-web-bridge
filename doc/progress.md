@@ -20,16 +20,500 @@
 
 | 项 | 值 |
 | --- | --- |
-| 工作树版本 | **0.15.12** |
-| 已装版本（profile） | **0.15.9**（0.15.10 ～ 0.15.12 尚未打包；四轮代码都在工作树里） |
-| 运行中的进程 | **0.15.9**（2026-09-16 23:56 重启后实测：`/__webcode/status` → `version=0.15.9 hash=a2e1e2349249`；relay running、driver loggedIn、transport=playwright-edge、79 条会话映射已恢复、21 个模型在册） |
-| 上游 | `origin/main` = `dea4048`（0.15.12 待推送）。CI 四条腿自 `dea4048` 起**全绿** |
-| 单测基线 | **41/41 测试文件全绿**（逐文件跑；0.15.12 新增 `task-graph.test.mjs`，`client-render` 增 9 条面板用例） |
-| 注释闸门 | **error 0 / warn 0，退出码 0**（85 个文件，2026-09-17 实跑） |
-| 文件规范闸门 | `check-repo-hygiene.mjs` **PASS**（无 BOM + 索引无死链 + CI/engines Node 版本相容，判据 C 于 2026-09-17 新增） |
-| 发布闸门 | `verify-pack` **29/29 逐字相同 + 接线完好**，退出 0（0.15.9 打包后实跑；0.15.10/11 尚未打包） |
-| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.15.12 / testFiles 41/41） |
-| 下一阶段 | 打包 0.15.12 → `verify-pack` → 装 profile → 重启，做 §0.15.12「Team / 任务板两个面板」与 §0.15.11「等待药丸同栏」真机验收 |
+| 工作树版本 | **0.16.4** |
+| 已装版本（profile） | **0.16.4**（web + headless 均已装；`verify-pack` 36/36 逐字相同、8 个改动文件 sha256 与工作树逐一相同。已在 web profile 摘掉第三方 `@nanmicoder/dsh-agent-teams`。**待重启生效**） |
+| 运行中的进程 | **0.16.3**（2026-09-17 重启后实测：`/__webcode/status` → `version=0.16.3 hash=412c7c099919`；0.16.4 已装机，**重启后**才加载） |
+| 上游 | `origin/main` = `6b836d2`；**0.16.x 五轮改动全部未提交、未推送**（59 项：19 改 + 40 新，2026-09-17 实测） |
+| 单测基线 | **57/57 测试文件**（本轮新增 5 个：`session-continuity` 11 项、`marker-typo` 10 项、`markdown-block-integrity` 5 项、`attach-probe-contract` 5 项、`settings-transport` 6 项；本轮读数为「逐文件跑」的结果，见下节「本轮验证读数」） |
+| 注释闸门 | **error 0 / warn 0，退出码 0**（109 个文件，2026-09-17 实跑） |
+| 文件规范闸门 | `check-repo-hygiene.mjs` **PASS**（无 BOM + 索引无死链 + CI/engines Node 版本相容；本轮新增 5 份文档索引行后实跑） |
+| 发布闸门 | `verify-pack` **35/35 逐字相同 + 接线完好**，退出 0（0.16.2 打包后实跑；**0.16.4 尚未打包**） |
+| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.4 / testFiles 57/57，2026-09-17 实跑） |
+| 已装包核对 | **已装的是 0.16.3**：4 个改动文件 sha256 与当时工作树**逐一相同**（0.16.2 打包后的读数）。工作树现在已是 0.16.4（T1–T3 三条根因修复 + 本轮护栏/文档），**必须重新打包**后再核对一次 |
+| 下一阶段 | 按 [`ROADMAP.md`](ROADMAP.md) **P0**：打包 0.16.4 → `verify-pack` → 装两个 profile → 重启 → 重新读 `/__webcode/status` 的版本；然后 P1 把三条根因的真机读数取回来。本轮两条**未修完**的判据见下节「仍未修完」 |
+
+## 未提交改动与运行进程（2026-09-17 文档/结构整理轮）
+
+**本轮没有改产品代码**，只做文档归类与台账收口。三条读数全部实测：
+
+| 项 | 读数 | 取法 |
+| --- | --- | --- |
+| 运行中的进程 | `version=0.16.3 hash=412c7c099919` | `GET http://127.0.0.1:3080/__webcode/status` |
+| 已装（web / headless） | 均 `0.16.3` | `profiles/*/node_modules/dsh-webcode-bridge/package.json` |
+| 工作树 | `0.16.3`；**0 个未推送提交**；**44 项未提交改动** | `git log origin/main..HEAD`（空）、`git status --porcelain` |
+
+**未提交改动清单（44 项 = 13 改 + 31 新）——当前最大的结构性欠账。**
+0.16.0–0.16.3 四轮的产品代码、护栏与真机夹具**全部只在工作树里**，
+`origin/main` 仍停在 `6b836d2`（0.15.12）。工作树一旦被误删或误覆盖，
+四轮修复与 14 份真机夹具会同时消失——而它们正是「真实调用被丢」那一族缺陷的唯一离线防线。
+
+| 类别 | 数量 | 代表文件 |
+| --- | --- | --- |
+| 已跟踪文件被修改 | 13 | `lib/agent-preset.js`、`lib/browser-driver.js`、`lib/index.js`、`lib/client.cjs`、`lib/roster.js`、`lib/web-control.js`、`package.json` + 5 个 test |
+| 新增未跟踪（产品代码） | 6 | `lib/dsml-repair.js`、`lib/idle-window.js`、`lib/task-ledger.js`、`lib/task-plan.js`、`lib/task-split.js`、`lib/team-state.js` |
+| 新增未跟踪（护栏） | 9 | `dsml-native-close`、`dsml-real-reply-regression`、`idle-window`、`prompt-transport`、`prompt-transport-attach`、`timeout-order`、`upload-attachment-structure`、`watchdog-first-byte`、`attach-callsite` |
+| 新增未跟踪（真机夹具） | 14 | `test/fixtures/dsml-real-1.txt` … `dsml-real-14-step5-grep-pwsh.txt` |
+
+**建议下一步（不在本轮改动范围）**：按 `doc/ROADMAP.md` §3 的三刀把 0.16.x 提交进 git，
+每刀提交前跑三个闸门 + 逐文件单测。
+
+> **2026-09-17 晚（0.16.4 轮）补充读数**：上表的「44 项未提交」已是**上一轮的读数**；
+> 本轮结束后实测为 **59 项（19 改 + 40 新）**，`origin/main` 仍停在 `6b836d2`。
+> 上游那一行与 `git status` 的口径不变，只是数字长大了——**这不是漂移，是同一笔欠账在变厚**。
+
+## 0.16.4（只打代码 / 未打包 / 未安装）—— 四条根因：会话槽、标记畸变、附件未确认、块内容不一致
+
+**用户原话**（沿用本轮开头那条，逐字见 0.16.3 段）：症状是「**一直新开对话** + 每轮四十万字符」
+「**调用工具的源文本出现在会话中**」「**有些 markdown 渲染有些不渲染**」「附件投递一开头就很长 token 窗口」。
+
+本轮与以往最大的差别是：**四条根因都在动手之前拿到了字节级读数**，因此修法是定位而不是猜测。
+四条读数逐条给出取法，任何人可重跑。
+
+### 一、四条根因读数（**取证**：取法 + 数字）
+
+| # | 根因 | 读数 | 取法 |
+| --- | --- | --- | --- |
+| 1 | **会话槽在失败轮里丢掉** | 真机会话 `session-063b0a99` 的 navTrace 三轮同形：`resume(187fdbbd) → fresh(caller-requested-fresh) → fresh(2471a679)`；每轮 `messageChars` 四十万级（407,064 / 415,001）。落盘文件 `webcode-edge-profile/webcode-sessions-deepseek.json` 里**没有**这个会话键 | `GET /__webcode/status` 的 `driver.navTrace`；直接读那份 json。根因位置：`rememberConversation` 只在 `runTurn` **成功返回之后**执行（旧 `lib/browser-driver.js` 的 sendTurn 收尾）⇒ 首轮导航已落到 `187fdbbd`、该轮随后失败（`WEB_NO_PROGRESS`）⇒ 映射从未落盘 ⇒ 下一轮 `conversationFor` 为空 ⇒ 判 `unsupported/no-stored-session` ⇒ 上层整段重建 + `fresh:true` |
+| 2 | **标记词形漂移（DSH 而不是 DSML）** | 同一会话逐帧 dump 里 `｜｜DSH`（`U+FF5C U+FF5C D S H`）出现 **457 次**，正确形态 `｜｜DSML｜｜` 只有 **8 次**；而桥的 `GET /__webcode/preset` 教的是**正确**形态（码点含 `44 53 4D 4C`）⇒ 这是**模型漂移**，不是桥的字符串 bug | 用 `String.fromCharCode(0xFF5C)` 现造标记，在 `.tmp/063b-full.jsonl` 上逐次 `indexOf` 计数（不用正则，避免转义踩坑）。**口径说明**：同一会话换一种切片（只数 text 块、或按 `.zstd` 帧）会给出别的绝对值——`lib/agent-preset.js` 常量区记的是 **155** 次；判据是**同一份输入上「畸形 : 正确 ≈ 457 : 8」这个比例**，不是某个绝对值。后果链：`normalizeDsml` 只剥 DSML 族 ⇒ 畸形标记原样留下（用户看到的「源文本出现在会话中」），`findProtocolStart` 也认不出 ⇒ 整段协议被当散文外发 |
+| 3 | **附件上传后未被确认** | `/status.driver.attachTransport = { at, fallback:true, code:'ATTACH_NOT_CONFIRMED', total:417276 }`；同时 `GET /__webcode/attach-entry` 明确说入口是好的：`available:true`、`inputs:1`、`accept` 含 `.md,.txt,.json,.log`、`multiple:true`，但 **`previewHits: []`** | 两个只读端点各读一次。结论：「入口在」与「上传后网页会不会渲染出可见附件」是**两件事**——后者只能真的传一次才知道，于是本轮加了只上传不发送的 `POST attach-probe` |
+| 4 | **文本块内容与增量通道不一致** | 用户报「有些 markdown 渲染有些不渲染」。本轮护栏用脚本驱动构造「权威全文 ⊃ 增量通道」并断言 `block-end.text` 与 Σ `text-delta` 逐字一致；实测在「调用块**之后**还有散文、而那段散文只在权威全文里」时，块内容少一段 | `node --test test/markdown-block-integrity.test.mjs`；根因：收尾的 `stripProtocolText(finalText)` 在协议起点**截断**，拿不到调用块之后的散文，紧邻的补发判据于是恒为空 |
+
+**另有一条同族根因（本轮由护栏实测抓到，已修）**：`lib/index.js` 的
+`relay.submit(...).catch((err) => { turn.invalidate?.(); … })` —— 旧写法**无条件**作废上层
+发送游标：**任何**一轮失败（含 `WEB_NO_PROGRESS` 这种「内容已经发出去、只是网页没吐完」
+的失败）都会让下一轮 `fresh = true`，把整段首轮提示词重发一次，并且**再开一个新网页对话**。
+护栏实测（脚本驱动、同一 `apply` 实例三轮）：`fresh` 序列 `[true,false,true]`，第三轮
+`messageChars = 150,072`（真机同级读数是四十万级）。修法与驱动侧那条**同因不同层**：
+根因 1 修的是「失败之后的下一轮还能不能续上」，这条修的是「失败本身就让游标归零」——
+现在按错误码白名单决定是否作废（见修复清单 #10）。
+
+### 二、本轮修复清单（每条都有对应护栏）
+
+| # | 修复 | 位置 | 护栏 |
+| --- | --- | --- | --- |
+| 1 | **落地即落盘**：导航一落到网页会话就 `rememberConversation`，**不等整轮成功**；轮次成功后 id 变了再覆盖并计 `conversationReplacedCount` | `lib/browser-driver.js` 的 `noteLanded()`（runTurn 内两处调用点） | `test/session-continuity.test.mjs` **①c**（行为级：本轮失败也必须已在磁盘上）+ **⑨**（结构判据） |
+| 2 | **URL 自愈**：槽为空但页面此刻停在某个网页会话上 ⇒ 补齐并落盘，`source:'url-heal'` | 同上 | `test/session-continuity.test.mjs` **①b**（`sessionSlot` 三态） |
+| 3 | **重建节流**：同一会话键连续 `WEB_SESSION_LOST` 时，第二次在**发送之前**就抛 `WEB_SESSION_REBUILD_THROTTLED`（避免「重建→失败→再重建」雪崩，每次四十万字符） | `lib/index.js` 的 executor `WEB_SESSION_LOST` 分支 | `test/session-continuity.test.mjs` **⑥**（断言第二次这一轮只发 1 次，重放被挡在发送之前） |
+| 4 | **只读读数 `sessionSlot` + 控制面动作**：`status().sessionSlot = { webSessionId, at, source:'store'\|'url-heal'\|'none' }`；`GET /__webcode/session-slot` 可随时核对 | `lib/browser-driver.js`、`lib/web-control.js` | `test/session-continuity.test.mjs` **①b / ⑦** |
+| 5 | **标记词形宽容**：`DSML\|DSH\|DS`（大小写不敏感）+ 允许标记与标签名之间无空格；**保守判据**：只对「标记 + 已知标签名」动手，散文里的裸 `<calls>` / `<invoke name="x">` 一律不动 | `lib/agent-preset.js` 的 `normalizeDsml` / `findProtocolStart` / `partialProtocolAt` | `test/marker-typo.test.mjs` **10 项**（三种词形正向 + 4 条反向安全线） |
+| 6 | **教学补一句禁令**：标记必须完整写成 `｜｜DSML｜｜`，不要写成 DSH 或其它缩写（源码里该字符用码位现造） | `lib/agent-preset.js` 的 `TRAIN_NOTE_DSML` / deepseek 教学 | 同上的夹具形态断言（`test/dsml-real-reply-regression.test.mjs` 的首 12 码点） |
+| 7 | **附件探针**：`POST /__webcode/attach-probe {text}` **只上传、绝不发送**，返回 `{ ok, evidence, selector, domSnippet, cleaned, chars }`；`cleaned:false` 如实报（附件可能仍留在输入框里） | `lib/browser-driver.js` 的 `probeAttachment` + `lib/web-control.js` 的动作 | `test/attach-probe-contract.test.mjs` **5 项**（含「全程 0 次发送」与「未确认不粉饰」） |
+| 8 | **投递形态开关**：`promptTransport: 'attach' \| 'inline'`（默认 `attach`；`inline` = **永远纯文本**，逐字回到旧行为）；设置页新增单选，面板显示**当前生效值**与最近一次实际投递结果 | `lib/index.js` DEFAULTS + 两个构造点的读取函数、`lib/browser-driver.js` 的 `promptTransportNow`、`lib/settings-page.js`、`lib/client.cjs`、`lib/web-control.js` 的 `attach-status` | `test/settings-transport.test.mjs` **6 项**（判据层 / 配置层 / 接线层 / 控制面层） |
+| 9 | **文档归位**：根目录 `PLAN*.md`（4 份）与 `REPORT.md` 移入 `.local-plans/` 并加 `.gitignore` 规则；`doc/` 里对 `PLAN-0.14.0-HANDOFF.md` 的 12 处引用改指新路径；新建 `ROADMAP.md` / `REQUIREMENTS-TASKBOARD.md` / `PROMPT-ENGINEERING.md` 并补进索引 | `.local-plans/`、`.gitignore`、`doc/README.md`、`doc/*.md` | `check-repo-hygiene.mjs`（索引死链）+ `grep` 自查「还有没有指向旧路径的行」（0 条） |
+| 10 | **按错误码决定是否作废发送游标**：新增 `CURSOR_INVALIDATING_CODES` 白名单，未列出的码（含空 code）**保留游标**、下一轮继续发增量，不再整段重建 | `lib/index.js` 的 `relay.submit(...).catch(...)` | `test/session-continuity.test.mjs` **④**（失败一轮后第三轮仍 `fresh=false` 且字符数 < 5,000） |
+
+### 三、本轮验证读数
+
+| 闸门 | 读数 |
+| --- | --- |
+| 本轮新增 5 个护栏文件 | `session-continuity` **11/11**、`marker-typo` **10/10**、`markdown-block-integrity` **5/5**、`attach-probe-contract` **5/5**、`settings-transport` **6/6** —— 合计 **37/37 全绿**（逐文件跑，2026-09-17 实跑） |
+| **全量单测（逐文件跑，lead 亲跑）** | **57 个文件 / 715 项通过 / 0 项失败 / 0 个失败文件**（`Get-ChildItem test/*.test.mjs` 逐个 `node --test --test-timeout=180000 <file>`，2026-09-17 22:1x 实跑） |
+| **打包与装机（lead 亲跑）** | `pnpm pack` → `dsh-webcode-bridge-0.16.4.tgz`（410,808 字节）；`verify-pack` **36/36 逐字相同 + 接线完好**；`install-profiles` 装入 `profiles/web` 与 `profiles/headless` **均为 v0.16.4**；8 个改动文件 `sha256` 前 12 位与工作树**逐一相同**（index/browser-driver/agent-preset/idle-window/web-control/settings-page/client/dsml-repair）。**运行中的进程仍是 0.16.3——重启后才加载** |
+| `lint-comments.mjs` | **error 0 / warn 0**，exit 0（**109 个文件**，2026-09-17 实跑） |
+| `check-repo-hygiene.mjs` | **PASS**（BOM / 索引死链 / Node 版本三条全绿） |
+| `check-ledger.mjs` | **PASS**（version 0.16.4 / testFiles 57/57） |
+| 反向验证（**%TEMP% 等价拷贝**，工作区 lib/ 不留任何改动） | ① `session-continuity`：把 `noteLanded` 里落盘那一行等价去掉 → **①c 与 ⑨ 变红**（「失败的一轮之后会话槽是空的」）；② `settings-transport`：删掉 `if (o.transport === 'inline') …` 那一支 → **①变红**（mode 变回 attach）；③ `marker-typo`：词形宽容回滚成只认 DSML（`(?:DSML\|DSH\|DS)` → `(?:DSML)`，2 处）→ **②③⑨ 变红**（「解出 2 条调用（应为 3）」）；④ `markdown-block-integrity`：收尾不再把末段补发成 `text-delta` → **①②③⑤ 变红**（「下标 0 的块内容与 Σ text-delta 不逐字一致」）；⑤ `session-continuity`：把重建节流条件改成恒不成立 → **⑥ 变红**（「没有拿到 WEB_SESSION_REBUILD_THROTTLED，实际 WEB_SESSION_LOST」）。五条原始输出见本轮实施报告 |
+| 一条**环境**读数（不是产品缺陷） | 「真 HTTP + 真 `apply()`」的护栏在 `--test-force-exit` 下会被判**文件级红**：两条断言都 ✔，进程收尾却报 libuv 的 `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\win\async.c line 94`。实测：`wiring-roster` 带该开关 **3/3 复现**、**不带则 2/2 全绿且进程自然退出**；把收尾改成 `await` + `closeAllConnections()`、或让响应带 `connection: close`、或加一个收尾 `setTimeout` 都**不能**消除 ⇒ 触发条件是这个开关本身（Windows + Node 24 的退出路径竞态）。因此 `wiring-roster` / `session-continuity` / `attach-probe-contract` / `settings-transport` 请用 `node --test <file>` 跑，不加 `--test-force-exit` |
+
+### 四、取证 vs 推断（分开写）
+
+**取证**（第一节四条 + 本节读数）：457 / 8 次的标记计数、navTrace 三次同形、
+`attachTransport` 与 `attach-entry` 的两组字段、脚本驱动下 `fresh` 序列 `[true,false,true]`。
+
+**推断**（尚无直接读数）：
+
+1. 「块内容不一致」与用户那句「有些 markdown 渲染有些不渲染」是**同一件事**——本轮只证明了
+   两条通道的字节会不一致（护栏可复现），**没有**真机截图或 DOM 读数把二者对上；
+2. 会话槽丢失在别的站点（GLM/z.ai）是否同形，**没有读数**：本轮只看了一个 deepseek 会话；
+3. 根因 2 的「457 次」来自**一个**会话的 dump，不能外推成「模型整体漂移率」。
+
+### 五、仍未修完（不假装通过）
+
+1. **0.16.4 未打包、未装机、未重启**：因此本轮全部读数都是**离线**读数；
+   三条根因的真机验收（`ROADMAP.md` P1）必须在装机重启之后做。
+2. `README.md:88` 仍写着「根目录 `PLAN*.md`、`REPORT.md` 是本地私有留痕」——
+   它们本轮已移入 `.local-plans/`；该文件不在本轮的写范围内，留给下一轮同步。
+3. **`--test-force-exit` 的环境噪声**（见 §三最后一行）：它不是产品缺陷，但会让
+   「真 HTTP + 真 `apply()`」的护栏在全量跑里多出文件级红。跑这些文件时**不要**加该开关。
+
+**已修完的两条（本轮内闭环，读数在上面）**：
+`session-continuity` ④（上层游标归零 ⇒ 现在按 `CURSOR_INVALIDATING_CODES` 白名单判定）与
+`markdown-block-integrity` ③（调用块之后的散文只在权威全文里时被丢掉 ⇒ 收尾已补发）——
+两条判据都**没有放宽期望值**，是实现在它们上面改绿的。
+
+## 0.16.3（已打包 / 已装 / 已重启生效）—— 三条真机读数：网页原话解得出、看门狗分相位、超长文本有上限
+
+**用户原话**：「用 bridegege 怎么总是现在返回真实工具调用说正文没有返回？之前让你看了你说是
+没有返回，但是我看 web 是真实有的啊！你可以去看网页端真实对话回复……另外请你解决一个问题，
+现在提示词有误参考的最佳工程实践？deepseek？然后是发送的纯文本太长了！」
+
+本轮报错（用户逐字贴出）：
+
+```
+本轮运行失败 WEB_NO_PROGRESS: 网页侧超过 120s 没有任何新内容（页面在，本轮收束原因 finished） — 本轮已中止，可重试
+```
+
+### 一、三条真机读数（**取证**：每条都写清取法与数字）
+
+| 读数 | 取法 | 数字 |
+| --- | --- | --- |
+| 网页原话能解出几条调用 | `POST /__webcode/history {"sessionId":"971db3e8-7ea6-4f63-ad41-c14bb44a6d27"}` 取 assistant 消息 → 逐字落成 `test/fixtures/dsml-real-14-step5-grep-pwsh.txt` → `parseAgentReply(text, {tools})` | **1204 字符 → calls=3（grep / pwsh / pwsh）、diagnostics=[]** |
+| 失败会话那一步的跨度 | 解 `.dsh/sessions/…session-dff3edf7…/session.v3.jsonl.zstd`（29 帧） | turn1 **step5：18:41:59 → 18:43:51，112s 零事件**；同行 step1-4 **每步都有事件**（工具调用 2-4 条） |
+| 发进网页的纯文本 | `POST /__webcode/history` 的 user 消息 | **127,888 字符**（工具教学 38,279 + 会话 transcript 89,609） |
+| 首轮提示词总量 | `GET /__webcode/preset` | **409,555 字符** |
+
+结论：**问题 1「真实工具调用被丢」在这一条物证上已经修好**（前 13 份夹具另见 §0.16.2）；
+本轮报错与它**不是同一件事**——`WEB_NO_PROGRESS` 是看门狗开火，把「网页还在 prefill、
+还没开口」当成了「网页不说了」。
+
+### 二、本轮修复清单（每条都有护栏）
+
+| # | 修复 | 位置 | 护栏 |
+| --- | --- | --- | --- |
+| 1 | 看门狗窗口**分相位**：首个事件之前 + 驱动在忙 → 常规 × 倍数；已开流 / 链路没跑起来 → 照旧快报 | `lib/idle-window.js`（`idleWindowDecision`）、接线 `lib/index.js` 的 `nextWithIdle()` | `test/idle-window.test.mjs` 17 项 + `test/watchdog-first-byte.test.mjs` 9 项 |
+| 1b | 相位窗口给**驱动整轮预算**留余量：`totalBudgetMs` ⇒ 窗口 ≤ 预算 − max(1s, 10%)，被压过置 `capped:true`（否则 240s 与整轮 240s 同值赛跑，报错会退化成没有页面现场的 `web turn timed out`） | `lib/idle-window.js` | `test/idle-window.test.mjs` ⑧/⑧b/⑧c/⑧d/⑧e |
+| 1c | 三层超时的**源码级顺序**判据（中继外层 > 驱动整轮 > 看门狗窗口） | `lib/index.js`、`lib/relay.js` | `test/timeout-order.test.mjs` 5 项 |
+| 2 | 驱动现场读数进 `/status`：`lastActivityAt`、`domReplyChars`、`attachTransport`；超时报错带出前两者 | `lib/browser-driver.js` 的 `status()`、`lib/index.js` 的看门狗文案 | `test/watchdog-first-byte.test.mjs` ⑤ |
+| 3 | 附件上传函数的**结构修复**：`uploadTextAttachment` 从 `uploadImages` 的 `if` 块体内移出（0.16.2 的形状靠函数声明提升侥幸能跑，相邻重构会变成静默回落 inline） | `lib/browser-driver.js` | `test/upload-attachment-structure.test.mjs` 4 项（含扫描器自检，防「框空 body」式假绿） |
+| 4 | 附件**尺寸上限**：`attachMaxChars` 默认 1_500_000；超上限保**尾部**截断并写明「已省略前 N 字符」，绝不静默丢内容 | `promptTransportPlan` + `runTurn` | `test/prompt-transport-attach.test.mjs` 9 项 + `test/attach-callsite.test.mjs` 6 项（调用点真的调到、`attachTransport` 成败都留痕） |
+| 5 | 真机回复**回归夹具 14**（网页原话 1204 字符 → 3 条调用、参数逐字相等、diagnostics 空） | `test/fixtures/dsml-real-14-step5-grep-pwsh.txt` | `test/dsml-real-reply-regression.test.mjs` 11 项 |
+| 6 | `DSML_BAR` 注释纠错：该常量是 `String.fromCharCode(0xFF5C) × 2`，注释按真机码点读数改写 | `lib/agent-preset.js` | 夹具 14 的首 12 码点断言（源码里用码位现造，不粘贴该字符） |
+
+### 三、取证 vs 推断（**分开写**，别混）
+
+**取证**（§一 的四条读数都属于这一栏，取法逐条写在表里）：网页原话 1204 字符、calls=3、
+diagnostics 空；失败会话 step5 跨度 112s 零事件、step1-4 每步有事件；发进网页的纯文本
+127,888 字符；首轮提示词 409,555 字符。驱动新增的三个字段可直接在 `GET /__webcode/status`
+核对。
+
+**推断**（尚无直接读数，缺哪一条写在里面）：
+
+1. 「12.8 万字符输入 ⇒ prefill 超过 120s」是**推断**：直接量到的只有「112s 零事件 + 页面
+   `busy` + 同一轮其它步骤事件正常」。**首字节第几秒到达，没有任何读数记录过**——新报错文本
+   带 `最近驱动活动` / `页面已有 N 字回复未回传`，就是为了让**下一次**能量到它。
+2. 「网页那侧在 18:43 之后是否真的产出了完整答复」**未被证实**：只有那一刻的**页面 DOM
+   读数**（`domReplyChars` / 截图 / 网页会话里的 assistant 条目）能证实，这次没有落盘。
+   桥侧「零事件」只证明**捕获链没收到东西**，不能证明网页没生成。
+3. 「走附件更快/更稳」**未被证实**：0.16.3 起 `attachInlineLimitChars` 默认 **60,000**
+   （超阈值即走附件），但本轮**没有真机配对数据**——「真的上传成功」「模型真的读了附件」
+   两条都只能在重启后由真机读数验证（见下）。
+
+### 四、本轮验证读数
+
+| 闸门 | 读数 |
+| --- | --- |
+| 新增 4 个测试文件（逐文件跑） | `dsml-real-reply-regression` **11/11**、`idle-window` **17/17**、`prompt-transport-attach` **9/9**、`upload-attachment-structure` **4/4**（四个一起跑：**36/36**，退出 0） |
+| 全部测试文件（逐文件跑） | **52/52 全绿，0 个失败文件**（`node --test --test-timeout=90000 test/<每个文件>`；一轮循环跑完 51 个共 **671 项通过**，`attach-callsite` 随后单独跑 6/6；2026-09-17 实跑） |
+| 反向验证（**%TEMP% 等价拷贝**，工作区不留任何 lib/ 改动） | 结构护栏：拿**已安装 0.16.2** 的原文件跑 → ①② 变红（信息含「结构被破坏」）；DSML 回归：把 `normalizeDsml` 回滚成恒等 → ②③⑤⑦⑧b 变红（`calls=0`，即用户看到的那件事）；`idle-window`：四种错误改法（mid-stream 也乘倍数 / 真值判断 firstEventAt / 驱动不忙也宽限 / baseMs 不回落）分别让 ②②b③b④⑥ / ②b③b④ / ③ / ④④b⑥⑦ 变红，另三种（忽略预算 / 去掉小预算保护 / 余量置 0 造成同值赛跑）分别让 ⑧⑧d / ⑧d / ⑧⑧e 变红；`prompt-transport-attach`：三种改法（上限参与 mode 判定 / 取消默认上限 / 非法上限当默认）分别让 ①④⑤ / ①② / ③ 变红 |
+| `lint-comments.mjs` | error 0 / warn 0（104 个文件，2026-09-17 实跑） |
+| `check-ledger.mjs` | **PASS**（version 0.16.3 / testFiles 52/52，2026-09-17 实跑） |
+| `check-repo-hygiene.mjs` | **PASS**（无 BOM / 索引无死链 / Node 版本相容，2026-09-17 实跑） |
+
+### 五、用户需要知道的配置项（0.16.3 新增）
+
+- **`idleFirstByteMultiplier`（默认 2）**：首个 token 之前的看门狗窗口 = 常规窗口 × 该值
+  （默认 120s → 240s）。**这不是「把超时调大」**，而是把「网页还没开口」与「网页不说了」
+  分成两个相位——只有「本轮还没有任何事件」**且**「驱动报告本轮仍在忙」这一格才乘倍数。
+  **设 1 即逐字恢复旧行为**；按自己网页的启动速度调即可。
+- **`attachInlineLimitChars`（默认 60,000）**：超过这个字符数就把提示词改走**附件**投递
+  （真机依据：127,888 字符纯文本的一轮，step5 有 112s 零事件——网页在 prefill，被 120s
+  看门狗判死）。普通单轮增量（几十~几千字符）仍然逐字走 inline，行为不变。
+  **写 0 = 关闭**，逐字恢复 0.16.2 行为。附件投递途中任何一步失败（没有上传入口 /
+  页面没出现附件）都会**回落 inline**，并把结果记进 `/status` 的 `attachTransport`。
+- **`attachMaxChars`（默认 1_500_000）**：附件投递的尺寸上限；超过就保留**尾部**再上传，
+  并在文件开头写明「已省略前 N 字符」。真机最大一轮 409,555 字符，离上限还很远。
+- **相位窗口与整轮超时的关系（无需配置，但要知道）**：宽限后的相位窗口原本是
+  `120s × 2 = 240s`，与驱动整轮预算 `requestTimeoutMs`（默认 240s）**同值**——谁先开火由
+  事件循环决定，而整轮超时的报错**没有相位、没有页面现场**。现在相位窗口被压到整轮预算的
+  90%（默认 240s → **216s**），保证先开火的是信息更全的那个报错；`capped:true` 就是
+  「这个窗口被预算压过」的标记。
+
+## 0.16.2（已打包 / 已装 / 待重启）—— 三个真机问题：调用被丢、提示词教错、纯文本 40 万字符
+
+**用户原话**：「用 bridegege 怎么总是现在返回真实工具调用说正文没有返回？之前让你看了
+你说是没有返回，但是我看 web 是真实有的啊！你可以去看网页端真实对话回复……另外请你
+解决一个问题，现在提示词有误参考的最佳工程实践？deepseek？然后是发送的纯文本太长了！」
+
+---
+
+### 一、取证方法：第一次拿到「网页实际发出的字节」
+
+本轮与以往所有修复的根本区别是**取证方向**。历史修复反复不中的共同点，是只有 harness
+侧的读数（「正文停了」「只有思考」）。这轮用桥自己的**只读控制面**取网页那一侧的原话：
+
+```powershell
+POST http://127.0.0.1:8931/__webcode/history  body: sessionId
+node .tmp/capture-dsml-fixtures.mjs      # 逐字落成 test/fixtures/dsml-real-*.txt
+```
+
+13 份真机夹具，网页实际发出的是 **DeepSeek 原生 DSML**（标记字符是全角竖线）。
+
+### 二、问题 1：真实工具调用被丢（红基线可复现）
+
+| 夹具 | 形态 | 修复前 | 修复后 |
+| --- | --- | --- | --- |
+| dsml-real-13 | 闭合标签**连名字都省掉** | calls=0 | calls=2 |
+| dsml-real-7 | **漏写 invoke 开标签**，直接 parameter 起写 | calls=0 | calls=2 |
+| 其余 11 份 | 正常 | 正常 | 正常 |
+
+**这正是「说有工具调用、又说没有正文」**：探测命中、解析为 0 条 → 协议被 proseSafeEnd
+整段扣住 → 只剩散文或空 → 交回 TOOL_CALL_UNPARSED。
+
+修法：新增 `lib/dsml-repair.js` 的 `resolveNamelessClosers`，在 `normalizeDsml` **之前**
+跑栈式还原（无名闭合补名、缺外壳补空名壳），并让 invokeOpenRe 接受空名字。
+**保守判据**：只对带 DSML 标记的标签动手；散文里的裸 parameter 一律不动。
+
+护栏：`test/dsml-native-close.test.mjs` **22 项**（13 份夹具逐份 + 9 条判据，含 6 条反向安全线）。
+
+### 三、问题 2：提示词在对抗模型的既有先验
+
+旧提示词教「标签包裹 + 裸 JSON」。**13/13 份真机夹具里模型一次都没用过它**
+——它用的是本网页原生的 DSML。即提示词让模型做一次格式翻译，翻译中途的形态漂移正是
+问题 1 那两族的来源。
+
+修法：deepseek 站点改教**原生 DSML 骨架**，三处同源（首轮教学 / 首轮传输协议 / 增量轮
+再教学），由 DSML_ONE_LINE 与 dsmlSkeleton() 单点定义。**其它站点逐字不变**。
+
+### 四、问题 3：纯文本 409,555 字符
+
+实测（`GET /__webcode/preset`）：
+
+```
+TOTAL 409,555
+  工具教学（preset）        38,241  ( 9.3%)
+  会话 transcript         370,985  (90.6%)   ← 其中 DSH 系统指令 279,223
+  传输协议                     329
+```
+
+修法：纯函数 promptTransportPlan 决定 inline / attach；超阈值且有附件能力时把长文本作为
+.md 附件上传，composer 只发**短指令**；任何一步不成立（无上传入口 / 附件未确认）
+→ 回落 inline。**默认 0 = 关闭**，即不配时行为与 0.16.1 逐字相同。
+
+风险已写进代码注释：上传是有副作用的动作（可能撞风控）、模型未必读附件（因此正文里明确
+要求它先读）、附件确认依赖可见预览节点（站点改版即失效，走既有 ATTACH_NOT_CONFIRMED）。
+
+护栏：`test/prompt-transport.test.mjs` **8 项**（3 正向 + 5 反向安全线）。
+
+### 五、本轮验证读数
+
+| 闸门 | 读数 |
+| --- | --- |
+| 全部 45 个测试文件（逐文件跑） | **45/45 全绿，0 失败** |
+| `test/dsml-native-close.test.mjs` | **22/22**（13 份真机夹具全解析、无泄漏） |
+| `test/prompt-transport.test.mjs` | **8/8** |
+| `lint-comments.mjs` | error 0 / warn 0（96 个文件） |
+| `check-ledger.mjs` | PASS（version 0.16.2 / testFiles 45/45） |
+
+### 六、一次被自己的护栏抓住的漂移（记下来）
+
+改提示词时顺手把一句**所有站点共用**的话从「多个工具调用代码块」改成「多个工具调用」，
+`prompt-variants.test.mjs` 的「默认路径零位移」断言立刻变红——它逐字比对 0.14.7 基线。
+**已回退**。这正是那条护栏存在的意义：默认路径的任何位移都必须是有意的、有据的。
+
+## 0.16.1（已打包 / 已装 / 未重启）—— 桥自有 Team/任务数据层：磁盘回落让「卸载 AgentTeams」成立
+
+**用户原话的第三件事**：「将 agent team 卸载」。0.16.0 只做完了左栏入口，这一轮做的是
+**卸载的前提**——没有它，卸载等于连面板一起卸掉。
+
+### 一、为什么「读官方服务」这一条链本身就挡住了卸载
+
+桥的 Team / 任务板两个面板从 0.15.0 起只读官方 `agentTeams` 服务
+（`lib/roster.js` 的 `projectTeam` / `projectTasks`）。这条链有一个结构性后果：
+**那个包一旦不在，面板永远是空的**。于是「取代 AgentTeams」在实现上无从落地——
+用户看到的是「卸载之后面板也没了」，读起来像桥坏了。
+
+### 二、第二个来源不是「绕开官方读私有格式」
+
+AgentTeams 自己就把磁盘当真相来源。第三方实现（`@nanmicoder/dsh-agent-teams`）的
+`lib/snapshot.js` 开头逐字写着：
+
+> read the durable team files (**the truth source**) and enrich with live subagent
+> activity, so the panel always reflects the on-disk state even when a model skipped
+> a tool "ritual"
+
+即：**运行时 activity 是叠加在磁盘事实之上的**，磁盘才是底。桥读的是这份公开约定的
+落盘格式（`.agent-teams/<teamId>/team.json`），与官方服务读的是同一份文件，
+不存在第二套格式、也没有私有字段。
+
+### 三、优先级与错误口径（刻意如此）
+
+新增 `lib/team-state.js`（纯函数 + 只读 fs），`lib/roster.js` 改为**双来源分派**：
+
+| | 行为 |
+| --- | --- |
+| 官方服务可用 | 用服务（它多给实时 `activity` 与官方算好的 `ready`），`source: 'service'` |
+| 服务不可用、磁盘有本会话的团队 | 用磁盘行，`source: 'disk'`，另带 `serviceError` 说明服务为何不可用 |
+| 两边都读不到 | 报**服务那一侧**的原因（主来源），`source: null`，磁盘原因放 `diskError` |
+
+**为什么错误口径要这样**：既有的错误字符串（`caller-not-live` /
+`agentTeams-service-has-no-listMembers` / `no-session-id` …）逐字不变，因此既有护栏与
+用户读到的解释都不受影响；磁盘那一侧的细节另开字段，不覆盖主来源的结论。
+
+### 四、三条「不造假」的具体落点
+
+1. **不跨会话张冠李戴**。只认 `captainSessionId` 与当前会话**逐字相同**的团队；磁盘上
+   有别人的团队时如实报 `no-team-for-this-session: N-other-team(s)-on-disk`，绝不拿它
+   顶替——这正是 0.15.3 那个「读到别人的 lead」缺陷的同族病根。
+2. **不算 `ready`**。磁盘行**不带 `ready` 键**，交给 `task-graph.js` 按官方判据现算并标
+   `readySource: 'computed'`。官方给了就不重算这条判据已经在那一层，在这里再算一遍
+   就是第二份真相。
+3. **不猜工作区根**。`cwd` 只从 `sessions.get(sessionId).header.cwd` 取；拿不到就返回
+   `no-session-cwd`，而不是 `path.join(undefined, …)` 拼出一个**看起来正常但永远读不到**
+   的路径。
+
+另外：`archive/` 被排除（那是已删除团队的归档，否则删掉的团队会重新出现在面板上）；
+`inScope`/`dependencies`/`attempt`/`assignee` 分别映射成面板已有的
+`writeScopes`/`blockedBy`/`revision`/`ownerName`，同一份 UI 消费两边。
+
+### 五、界面上必须能看出「数据从哪来」（新增 `teamSource` / `tasksSource`）
+
+磁盘回落时成员**没有实时 activity**，于是「空闲」会被读成「真的空闲」，而不是
+「这里没有实时数据」。因此 `projectRoster` 新增 `teamSource` / `tasksSource` 两个标注，
+两个面板各渲染一行来源说明（`来源：AgentTeams 服务` / `来源：磁盘状态（AgentTeams 未提供实时数据）`）。
+来源本身也是一条状态——这是本仓库「不造假状态」纪律的直接延伸。
+
+### 六、实际卸载动作（profile 层）
+
+`~/.dsh/profiles/web/package.json` **两处**同时摘掉第三方 `@nanmicoder/dsh-agent-teams`
+（`dependencies` + `dsh.profile.bundles`），并顺手修掉一个真隐患：
+`dsh-webcode-bridge` 的依赖路径还钉在 **0.15.11 的 tgz** 上，而工作树早已 0.16.x——
+那是「改了没生效」纪律下最容易复发的一处。改前已备份
+（`package.json.bak-20260917-115436`）。
+
+**保留官方三个包**（`dsh-experimental-agent-team{,-profile,-tool-agent-team}`）：
+桥的回落链只在服务不可用时接手，官方服务在时仍是首选；摘掉它等于主动放弃实时
+activity。用户要卸载的是**重复实现**，不是官方那一套。
+
+### 七、本轮验证读数
+
+| 闸门 | 读数 |
+| --- | --- |
+| `node --check`（`team-state.js` / `roster.js` / `client.cjs`） | 三个都 exit 0 |
+| 全部 41 个测试文件（逐文件跑） | **41/41 全绿，0 失败** |
+| `test/roster.test.mjs` | 27/27（含新增键集断言与来源为 null 的断言） |
+| `test/client-render.test.mjs` | 33/33 |
+| `check-ledger.mjs` | PASS（version 0.16.1 / testFiles 41/41） |
+| `lint-comments.mjs` | error 0 / warn 0（88 个文件） |
+| `check-repo-hygiene.mjs` | PASS（BOM / 索引 / Node 版本） |
+| `verify-pack` | **31/31 逐字相同** + 接线完好（新增 `team-state.js` 后从 30 涨到 31） |
+| 安装 | web profile **v0.16.1**，`team-state.js` 在位，`nanmicoder` 已从 deps 与 bundles 消失 |
+
+### 八、一次自己踩到的坑（记下来）
+
+第一次 pack 0.16.1 之后**又改了 `client.cjs`**（加来源标注），tarball 于是落后于工作树——
+正是 `doc/verify.md` 里 0.14.4 记过的那个陷阱。`verify-pack` 一跑就照出来（当时若跳过这一步
+就会装上一份半旧代码）。已删除重打，第二次 31/31 通过。**结论不变：pack 之后任何改动都必须
+重打 + 重验，不能只看命令退出码。**
+
+### 九、仍未做真机验收（不假装通过）
+
+**重启 DSH 之前，以下四件事都只是静态证据**：
+
+1. 左栏「新开对话」下方是否真的出现任务板入口（0.16.0 的 `sidebar.panellist`）；
+2. 点它是否切到中央列任务板（`main` 座位 key 与 id 同名）；
+3. 卸载第三方包之后，Team / 任务板是否由磁盘回落显示出来（`来源：磁盘状态` 那一行）；
+4. 官方 `agentTeams` 服务是否照旧工作（来源应显示 `AgentTeams 服务`）。
+
+当前进程里跑的是旧代码（0.15.9），所以第 3、4 条**必须**重启后才能看到。
+
+## 0.16.0（已打包 / 已装 / 未重启）—— 任务板进左栏：走官方 `sidebar.panellist`，不走 DOM 注入
+
+**用户原话**：「把任务板入口放在左栏那里固定，新开对话下方，参加 task board，然后你想办法将
+team 的面板保持原地，但是做到可以取代 agent team 完好设计逻辑理念，将 agent team 卸载」。
+
+本轮先做**能做完的那一半**（左栏固定入口），并把另一半的真实阻塞点查清（见文末）。
+
+### 一、先说清「参考实现为什么走 DOM 注入，而这里不必」
+
+`reference/dsh-task-board` 的 `src/client/sidebar-entry-core.ts` 开头逐字写着：
+
+> dsh's sidebar shell exposes no slot an external plugin can register into
+> (`sidebar.workspaces` / `sidebar.settings` are single-occupant and already taken),
+> so the entry row is injected between the shell's New Session button and the
+> workspace browser.
+
+**那个前提在官方这一版已经变了。** 实测 slots 目录（`cordis_inspect_query` →
+`client/Slots/listSubTree`）里 `sidebar.panellist` 是存在的，契约原文是：
+
+> Global panel icons. **Each list id addresses the matching main panel**; the sidebar
+> owns the button and resolves its label from list metadata.
+
+对比两条路线：
+
+| | DOM 注入（参考实现） | `sidebar.panellist`（本轮） |
+| --- | --- | --- |
+| 按钮本体 | 自己 `createElement('button')` | **shell 画**（`PanelRow`：Tooltip、`aria-current`、选中高亮） |
+| 位置 | `insertBefore` 抢，靠 `[class*="newSession"]` 模糊匹配 | shell 渲染顺序即 `logoRow → New Session → panelList → workspace`，**结构保证** |
+| 重渲染 | `MutationObserver` 自愈 | React 自己管 |
+| 折叠态 | 自己复刻 56px 轨道样式 | shell 给 `size: wide ? 16 : 18` |
+| 键盘可达 | 要自己补 | 天生正确 |
+| 官方改 class 名 | 静默插错位置 | 不受影响 |
+
+所以本轮**不引入那条路线**。「取代 agent-team 的设计理念」要保留的是「左栏固定入口 +
+中央列面板」这个**交互结构**，而它现在能用官方一等公民的槽实现——比 DOM 注入更强。
+
+### 二、两半必须成对（这是本轮唯一的真陷阱）
+
+契约后半句是关键：「Each list id **addresses the matching main panel**」。侧栏行只是一个
+指向 `main` 座位的按钮，点击走 shell 的 `selectPanel(id)`，而 layout service 会**校验该 key
+是否已注册**：
+
+```
+layout.selectPanel: main panel "X" is not registered
+```
+
+只注册侧栏那一半 = 界面看起来正常、**点一下就报错**。因此两半的 id 与 key 必须逐字相同，
+护栏也按「成对且同名」写（`★ 左栏入口：sidebar.panellist 与同名 main 座位必须成对注册`）。
+
+### 三、改了什么
+
+| 位置 | 内容 |
+| --- | --- |
+| `lib/client.cjs` 顶部注释 | 「三块界面」→「四块」，补第 4 条（左栏入口 + 同名 main 页面） |
+| `lib/client.cjs` `TaskBoardPanelIcon` | 内联 SVG（16 viewBox / stroke-width 1.3 / currentColor）。**不引官方 primitives**：里面没有依赖图语义的图标，队列图标表达的是「排队等待」，会读成发送队列。**不自绘 button、不挂 onClick**——按钮与可访问名归 shell |
+| `lib/client.cjs` `TaskBoardMain` | 主列页面容器（`.hwb-main` 滚动 + `h1` 页内标题），内部**复用同一个 `TaskBoardPanel`**——同一语义只画一次，否则「右栏说被阻塞 2、主列说被阻塞 3」迟早出现 |
+| `lib/client.cjs` 注册处 | `sidebar.panellist`（`id=webcode-tasks-panel`、`order=40`、`label` 为 thunk）+ `main`（`key` 与 id 逐字相同） |
+| `lib/client.cjs` 样式 | `.hwb-main` / `.hwb-main-head`；`box-sizing` 显式写，少它 padding 会把容器撑出可视区、底部永远滚不到 |
+| `test/client-render.test.mjs` | 桩新增收 `sidebar.panellist` 与 `main` 两类登记并回传；新增 2 条用例（成对注册 / 图标不得自绘 button） |
+
+### 四、本轮验证读数
+
+| 闸门 | 读数 |
+| --- | --- |
+| `node --check lib/client.cjs` | exit 0 |
+| `test/client-render.test.mjs` | **33/33 通过**（新增 2 条） |
+| `check-ledger.mjs` | PASS（version 0.16.0 / testFiles 41/41） |
+| `lint-comments.mjs` | error 0 / warn 0（87 个文件） |
+| `check-repo-hygiene.mjs` | PASS（BOM / 索引 / Node 版本） |
+| `test/regression.test.mjs` | 53/53 通过（547 s，本机慢是已知的） |
+| `test/mirror.test.mjs` | 7/7 通过（首轮批次里那次失败是 fetch 到本地端口的瞬时错，`git stash` 后在**干净树**上重跑仍 7/7，已排除本轮改动） |
+
+### 五、没做完的那一半，以及它卡在哪（不假装通过）
+
+**「将 agent team 卸载」本轮没有执行。** 查清了事实，但它不是一个「改一行配置」的动作：
+
+1. **桥的两个面板依赖官方 `agentTeams` 服务**，不是依赖第三方包。`lib/roster.js` 的
+   `projectTeam` / `projectTasks` 读的是 `ctx.agentTeams` 的 `listMembers` / `listTasks`。
+   该服务的注册点是 `@deepseek-ai/dsh-experimental-agent-team/lib/index.js:96` 与 `:1680`
+   的 `super(ctx, "agentTeams")`。
+2. **当前 profile 里同时装了两套重叠实现**（`profiles/web/package.json`）：
+   `@deepseek-ai/dsh-experimental-agent-team*`（官方，0.1.5-alpha.2）与
+   `@nanmicoder/dsh-agent-teams`（第三方，0.1.18）。两边注册的工具名**故意重叠**——
+   官方 profile 层的 `cordis.patch.yml` 注释原文就是「remove the global continuable-child
+   controls before the scoped Team tools register the overlapping `list_agents`、
+   `send_message`、`interrupt_agent` names」。本会话的工具表里两套名字同时在场。
+3. 因此**卸载第三方包之前必须先确认桥不依赖它的任何东西**。已知第三方包提供的是
+   `agent_teams_*` 工具（`lib/tool-names.js`）与一个 `shell.overlay` 悬浮面板
+   （`lib/client.js:3684`），**不提供 `agentTeams` 服务**；但「工具名从哪来」这条链
+   在真机上还需一次核对（会话工具表里 `agent_teams_*` 与官方的 `spawn_teammate` /
+   `team_task_*` 并存，两套都在）。
+4. 卸载本身要改 profile 的 `dependencies` + `dsh.profile.bundles` 并重装——那是**环境
+   变更**，按仓库纪律（`doc/verify.md`）应在重启后做真机验收，且要先确认左栏入口在真机
+   真的渲染出来（本轮只到单测与源码闸门，**未做真机目视**）。
+
+**下一步（下一轮该做的）**：打包 0.16.0 → `verify-pack` → 装 profile → 重启 → 目视
+左栏「新开对话」下方是否出现任务板入口且点击能切到中央列 → 再据实决定卸载第三方包的
+改动清单。
 
 > **2026-09-17 三次漂移修正（第 5 次）**：上表此前写着「工作树 0.15.9 / 已装 0.15.9 /
 > 只有 0.15.7 与本轮 0.15.9 未推送」，且 `check-ledger` 实测**红**（`package.json`
@@ -789,8 +1273,6 @@ turn/end reason=completed
 现状是**有意为之**，理由已写进 `.gitignore` 注释——包括「若将来清理，必须
 `git rm --cached` 与改写回滚文档一起做」。
 
-## 0.14.7（已发布 / 已装）—— 同站多账户
-
 ## 0.14.6（已发布 / 已装 / 已验证）
 
 **0.14.6 = 0.14.5 的全部内容 + `<call>` / `</call_call>` 残片修复。**
@@ -1008,3 +1490,89 @@ turn/end reason = {\"kind\":\"error\",\"error\":{\"message\":\"locator.fill: Tim
 - composer 分块写入在真机上不再出现 30s `locator.fill` 超时（或失败时给出
   `PROMPT_WRITE_STALLED` 与已写进度）。
 - 右栏新布局在重启 DSH 后目视核对官方尺寸。
+
+---
+
+## 0.16.3 附录：超长纯文本改走附件的取证、命令与连带发现
+
+> 本节是上文 `## 0.16.3` 的**同一版本补充取证**（不另开版本号）。
+> 计划原文见根目录 `PLAN-2026-09-17-0.16.3.md`（本地私有留痕，不入库）。
+
+本次报错（逐字）：
+
+```
+本轮运行失败 WEB_NO_PROGRESS: 网页侧超过 120s 没有任何新内容（页面在，本轮收束原因 finished） — 本轮已中止，可重试
+```
+
+### 一、取证（三条读数，全部来自桥自己的只读面，可复核）
+
+| # | 读数 | 取法 | 原始值 |
+| --- | --- | --- | --- |
+| 1 | 网页真实回复**确实存在且可解析** | `POST /__webcode/history {"sessionId":"971db3e8-…"}` → 再喂给 0.16.2 的解析器 | assistant 消息 **1204 字符**，解出 **calls=3**（grep / pwsh / pwsh），`diagnostics` 空 |
+| 2 | 失败会话 turn1 **step5 跨度 112s 且全程零事件** | 解 `.dsh/sessions/…session-dff3edf7…/session.v3.jsonl.zstd`（29 帧） | step5 在 **18:41:59 → 18:43:51 无任何事件** → 看门狗开火 |
+| 3 | 发进网页的纯文本 **127,888 字符** | `POST /__webcode/history` 的 user 消息 | 工具教学 **38,279** + 会话 transcript **89,609** |
+
+### 二、取证能推出什么、不能推出什么（这两段必须分开读）
+
+**取证**：
+
+- 读数 1 证明「网页没返回正文」的旧结论**是错的**——网页有回复，是桥没解析出来
+  （0.16.2 已修，本轮只补回归：真机夹具 14 + `test/dsml-real-reply-regression.test.mjs`）。
+- 读数 3 是读数 2 的输入端：12.8 万字符一次性贴进输入框，DeepSeek 网页要**重新 prefill
+  整个上下文**才吐第一个 token；而看门狗自「上一次事件」起 120s 内看不到任何新事件
+  （连思考增量都没有）就把这一轮判死。
+- 读数 2 里 step1-4 每步都有事件（工具调用 2-4 个），说明**捕获链是活的**，「链路坏」不成立。
+
+**推断（标注清楚，不要当成取证）**：prefill 12.8 万字符是 step5 那 112s 无事件的**唯一可信
+解释**——依据是读数 2（零事件）+ 读数 3（输入量）+「捕获链活着」三项；但我们**没有**同时抓到
+「网页侧 prefill 起止时刻」与「桥侧事件流」的配对时间线，因此这是**归因推断**，不是直接观测。
+
+> 一个与步调无关的坑：失败那一刻 `lastEndReason=finished` 是**上一轮**的收束原因（它是
+> 「最近一次收束」而不是「本轮状态」），当时的复盘把它当成本轮线索用过一次。看门狗分相位
+> （0.16.3）正是为了不再需要这种猜测。
+
+### 三、修了什么（对应 `PLAN-2026-09-17-0.16.3.md` §3.1/§3.2）
+
+- **接线缺陷（真缺陷，先修）**：`lib/browser-driver.js` 里 `uploadTextAttachment` 的定义被插在
+  `uploadImages` 的 `if (!hit) { … throw err;` **之后、闭括号之前**——函数声明提升让它侥幸能跑，
+  但 `if` 块被提前关掉、文件里剩下两个孤立闭括号。后果链：相邻重构 → 只在 `catch` 作用域可见 →
+  调用点 `ReferenceError` → 被 runTurn 的 `catch` 吞掉 → **静默回落 inline**（界面上一切正常，
+  长文本从来没走成附件）。已整体移到 `uploadImages` **完整结束之后**，`if` 块结构复原；
+  护栏 `test/upload-attachment-structure.test.mjs`（源码结构断言 + 扫描器自检）钉住它不许挪回去。
+- **附件上限**：`promptTransportPlan` 新增 `maxChars`（默认 1_500_000）/`payloadChars`/`truncate`/`kept`。
+  **上限只影响「上传多少」，绝不影响「走不走附件」**（`mode`/`reason`/`limit`/`total` 逐字未变）；
+  非法 `maxChars`（`<=0`/`NaN`/非数字/`null`）视为不设上限——配置写错只许退化成旧行为，
+  不许把这一轮的消息悄悄砍成半截。护栏 `test/prompt-transport-attach.test.mjs`。
+- **截断保尾部 + 留痕**：超上限时保留**尾部**（尾部才是当下要执行的那一步），文件开头写
+  「已省略前 N 字符」，文件名带出 `tail<保留数>of<原文数>`，`onThink` 同步报出
+  `原始 / 实际上传 / 省略` 三个数——**绝不静默丢上下文**。1_500_000 不是网页的实测上限，
+  而是「真机已知最大 **409,555** 字符（`GET /__webcode/preset` 的 `promptChars`）的约 3.7 倍」
+  这个余量的落点；真机两个读数（409,555 与 127,888）都远在它之下，正常轮次不会被截断（护栏 ⑥ 钉住）。
+- **可核对读数**：驱动新增实例状态 `attachTransport` 并进 `status()`（`/__webcode/status`）——
+  成功 `{ at, name, chars, payloadChars, truncated, evidence, total }`，回落
+  `{ at, fallback: true, code, total }`。为什么必须有：附件投递的失败被 `catch` 吞掉后只留一行
+  `warn`，用户侧看到的是「照样发出去了」，于是「到底有没有真的走附件」无从判断
+  （这正是用户抱怨过好几次的「说做了、其实没做」）。
+
+### 四、本轮实跑的命令（本机必须逐文件跑，`node --test <glob>` 会 `spawn EPERM`）
+
+```
+node --check lib/browser-driver.js                      → exit 0
+node .tmp/probe-transport-plan.mjs                      → exit 0（4 条分支 + maxChars 非法/缺失/截断边界）
+node --test test/prompt-transport.test.mjs              → 8/8 pass（0.16.2 既有判据逐字未变）
+node --test test/prompt-transport-attach.test.mjs       → 9/9 pass
+node --test test/upload-attachment-structure.test.mjs   → 4/4 pass
+```
+
+### 五、连带发现（同一次取证，代码不在本轮改动范围内）
+
+- **`cfg.attachInlineLimitChars` 在 0.16.2 默认是 0（附件投递关闭）**，因此上面整条路径当时
+  **从未在真机上跑过一次**——结构缺陷与「默认关」叠加，等于这条能力一直只停在纸面上。
+  **0.16.3 起默认改为 60,000**（`0` = 关闭），依据是那轮 127,888 字符纯文本被看门狗判死的
+  真机读数；配置面与理由见 `lib/index.js` 的 DEFAULTS 注释。
+- `promptTransportPlan` 在 `mode:'inline'` 时的 `payloadChars` 口径歧义（0.16.3 已修）：
+  修前 inline + 超上限会返回 `truncate:true / payloadChars:maxChars`，而 inline 路径
+  **一个字符都不截**——字段名说的是「会发多少」，读数却是「假如走附件会上传多少」。
+  现在 inline 一律 `truncate:false`、`payloadChars = total`、`kept:null`；「若走附件会上传
+  多少」只在 `mode:'attach'` 时表达。护栏：`test/attach-callsite.test.mjs` ⑦。
+

@@ -34,7 +34,8 @@
 | 21 | **SET 重发吞掉流式增量**（新，0.15.7，**已修**） | 高 | — | `lib/decoder.js`（`emitFragmentDiff`） |
 | 22 | DeepSeek 只出思考不出正文（**已重新定性**，2026-09-16 复核） | 高 | 否 | `lib/metrics.js`、`lib/index.js`（`thinkingOnlyNotice`） |
 | 23 | **缺 `name` 字段的调用被静默丢弃**（0.15.9 新发现，**已修**） | 高 | 否 | `lib/agent-preset.js`（`inferToolNameFromArgs`）、`lib/index.js`、`test/nameless-call.test.mjs` |
-| 10b | 本机 `%TEMP%` 受限导致 3 个测试文件假失败（2026-09-16 实测） | 低 | 否 | `package.json`、`test/*.test.mjs`、`doc/progress.md` |
+| 10b | 本机 `%TEMP%` 受限导致 3 个测试文件假失败（2026-09-16 实测）——**#10 的子条目**，正文见 §10 的「10b」小节 | 低 | 否 | `package.json`、`test/*.test.mjs`、`doc/progress.md` |
+| 24 | **网页侧回复被时间窗判死 / 超长纯文本投递**（0.16.3 部分解决：首字节相位已分） | 高 | 否 | `lib/idle-window.js`、`lib/index.js`、`lib/browser-driver.js`、`test/watchdog-first-byte.test.mjs` |
 
 > **一览表完整性（2026-09-16 修正）**：本表此前**漏登记 #19 与 #20**（正文有、表里没有）。
 > 这两条都是可机检的登记错误，而当时没有任何闸门覆盖「正文条目 ↔ 表格条目」的一致性。
@@ -51,7 +52,7 @@
 > **并带上原因**（`teamError` / `subAgentsError`），面板据此把「确实没有」
 > 与「读不到」分开说。负向断言见 `test/roster.test.mjs`。
 
-> **第 18 条（0.15.0 新增，已修）——协议原文被持久化进助手正文**
+## 18. 协议原文被持久化进助手正文（0.15.0 新增，**已修**）
 >
 > **现象**：assistant/message 的 **text 块**里带着整段 DSML 协议原文被写进会话。
 > 真机逐码点取证（不是肉眼）：
@@ -421,7 +422,7 @@ profile 里的 `DevToolsActivePort` 连上调试端口后 `browser.close()`，�
 
 - **基准从「上一轮结束」改为「上一轮发出」**（send-to-send）。旧实现在长回复下会把等待
   吃掉——真机实测一轮跑 20918ms 时，10000ms 的间隔只剩 7609ms 可见
-  （`lib/index.js:68-71`，现场记录见 `PLAN-0.14.0-HANDOFF.md:28-29`）。
+  （`lib/index.js:68-71`，现场记录见 `.local-plans/PLAN-0.14.0-HANDOFF.md:28-29`）。
 - **基准落盘**：`<profileDir>/webcode-send-state.json`，原子写 + `0o600`，启动读回时丢弃
   24h 以上的陈旧条目并拒绝未来时间戳（时钟回拨）（`lib/index.js:1031-1063`，
   判定函数 `lib/metrics.js:68-80`）。旧实现只在进程内存里，DSH 每次重启就清空，
@@ -433,7 +434,7 @@ metrics 里对应 `sendWaitMs` / `gapTargetMs` / `sincePrevSendMs`
 
 ### 待定项：基准是否应该做成可切换项
 
-`PLAN-0.14.0-HANDOFF.md:181` 把 `sendGapBasis` 的**切换项**列为待办，
+`.local-plans/PLAN-0.14.0-HANDOFF.md:181` 把 `sendGapBasis` 的**切换项**列为待办，
 而 0.14.0 只实现了单一语义（send-to-send）。两种语义各有适用场景：
 
 - **send-to-send**（当前实现）：防止**发送频率**过高触发站点滑窗限流。
@@ -452,7 +453,7 @@ metrics 里对应 `sendWaitMs` / `gapTargetMs` / `sincePrevSendMs`
 ### 为什么现在不修
 
 两种语义都需要真机数据才能判断哪家站点适用哪种，而 0.14.0 已经有更紧急的
-「卡住」问题要收尾（见 `PLAN-0.14.0-HANDOFF.md` 的 P1-3）。先在单一语义上把
+「卡住」问题要收尾（见 `.local-plans/PLAN-0.14.0-HANDOFF.md` 的 P1-3）。先在单一语义上把
 **可见性**做对（设置值与实际间隔都透出，没等待时也有数字可核对），
 比再加一个开关更重要。
 
@@ -551,7 +552,7 @@ node --test "test/*.test.mjs" && node test/parse.test.mjs && node test/run-m1.js
 `doc/review-guide.md:38-39` 的告诫：「glob 收全 `test/*.test.mjs`，别再把新测试文件漏在脚本外」。
 
 **环境限制（本机沙箱）**：`node --test "test/*.test.mjs"` 可能以 `spawn EPERM` 失败
-（`PLAN-0.14.0-HANDOFF.md:35-36`）。规避方式是**逐文件**跑：
+（`.local-plans/PLAN-0.14.0-HANDOFF.md:35-36`）。规避方式是**逐文件**跑：
 
 ```
 node test/<file>.mjs
@@ -564,7 +565,9 @@ node test/<file>.mjs
 - 在本机沙箱下，`npm test` 会因为 `spawn EPERM` 直接失败，看起来像测试挂了，
   实际是环境限制。误判方向是「以为是回归」。
 
-> ### 2026-09-16 补充：本机还有**第二类** EPERM，特征不同，别混为一谈
+### 10b. 本机 `%TEMP%` 受限导致 3 个测试文件假失败（2026-09-16 实测）
+
+> 2026-09-16 补充：本机还有**第二类** EPERM，特征不同，别混为一谈
 >
 > | | 触发点 | 表现 | 能否绕过 |
 > | --- | --- | --- | --- |
@@ -600,7 +603,7 @@ node test/<file>.mjs
 
 ### 若要修，从哪下手
 
-- 在 CI 或文档里固化「逐文件跑」的清单（`PLAN-0.14.0-HANDOFF.md:150-164` 已有一份）。
+- 在 CI 或文档里固化「逐文件跑」的清单（`.local-plans/PLAN-0.14.0-HANDOFF.md:150-164` 已有一份）。
 - 加一条护栏测试：断言 `test/` 下所有 `*.test.mjs` 都能被 `package.json` 的 test 脚本匹配到。
   这能结构性地消灭「新测试漏在脚本外」。
 
@@ -710,7 +713,7 @@ durable 图片块的读取按优先级降级，每一档失败都**记名不静�
 ### 若要修，从哪下手
 
 不需要修。需要的是**可观测**：右栏在 `recoveredTurns > 0` 时显示一行说明
-（`PLAN-0.14.0-HANDOFF.md:128-129` 已列为待做项），让用户知道「这一轮的结束是桥救回来的」，
+（`.local-plans/PLAN-0.14.0-HANDOFF.md:128-129` 已列为待做项），让用户知道「这一轮的结束是桥救回来的」，
 而不是以为模型自己停了。
 
 ---
@@ -1282,6 +1285,84 @@ if (!isCall) return;      // ← JSON 合法、只是没写 name ⇒ 静默丢�
 `takeObj` 有**两条**出口会丢调用（JSON 解析失败、结构不合法），0.15.6 只给前者
 装了留痕。**「不留痕的早退分支」是静默丢弃的唯一来源**：给一条路加日志时，
 必须把同一个函数里所有 `return` 一起数一遍。
+
+---
+
+## 24. **网页侧回复被时间窗判死 / 超长纯文本投递**（0.16.3 新登记，**部分解决**）
+
+### 现象（用户原话）
+
+> 「用 bridegege 怎么总是现在返回真实工具调用说正文没有返回？之前让你看了你说是没有返回，
+> 但是我看 web 是真实有的啊！你可以去看网页端真实对话回复」……「然后是发送的纯文本太长了！」
+
+本轮报错（用户逐字贴出）：
+
+```
+本轮运行失败 WEB_NO_PROGRESS: 网页侧超过 120s 没有任何新内容（页面在，本轮收束原因 finished） — 本轮已中止，可重试
+```
+
+### 真机证据（2026-09-17，全部是读数）
+
+| 读数 | 取法 | 数字 |
+| --- | --- | --- |
+| 网页原话能不能解出调用 | `POST /__webcode/history {"sessionId":"971db3e8-7ea6-4f63-ad41-c14bb44a6d27"}` 取 assistant 消息 → 逐字落成 `test/fixtures/dsml-real-14-step5-grep-pwsh.txt` → `parseAgentReply(text, {tools})` | **1204 字符 → calls=3（grep / pwsh / pwsh）、diagnostics=[]** |
+| 失败那一步等了多久 | 解 `.dsh/sessions/…session-dff3edf7…/session.v3.jsonl.zstd`（29 帧） | turn1 **step5：18:41:59 → 18:43:51，跨度 112s，零事件** |
+| 同一轮其它步骤 | 同一份会话 | step1-4 **每一步都有事件**（工具调用 2-4 条）⇒ 捕获链是活的，不是链路坏 |
+| 发进网页的纯文本 | `POST /__webcode/history` 的 user 消息 | **127,888 字符**（工具教学 38,279 + 会话 transcript 89,609） |
+| 首轮提示词总量 | `GET /__webcode/preset` | **409,555 字符**（其中 transcript 370,985，含 DSH 系统指令 279,223） |
+
+两件事是**同一个根因的两端**：输入端一次贴进 12.8 万字符，网页要 prefill 完整个上下文才吐
+第一个 token；而看门狗从「上一次事件」起算 120s，**把「网页还没开口」与「网页不说了」
+量成了同一件事**——于是正常的慢启动被当成卡死。
+
+### 当前对策（0.16.3）
+
+| 对策 | 位置 | 护栏 |
+| --- | --- | --- |
+| 看门狗窗口**按相位**选 | `lib/idle-window.js`（`idleWindowDecision`）；接线 `lib/index.js` 的 `nextWithIdle()` | `test/idle-window.test.mjs`（纯函数 17 项）+ `test/watchdog-first-byte.test.mjs`（接线级 9 项） |
+| 相位窗口给**整轮预算**留余量 | `idleWindowDecision({…, totalBudgetMs})`：窗口 ≤ `budget − max(1s, 10%)`，被压过置 `capped:true`（否则宽限后的 240s 与驱动整轮 240s 同值赛跑，报错退化成没有页面现场的 `web turn timed out`） | `test/idle-window.test.mjs` ⑧ 系列 + `test/timeout-order.test.mjs`（三层超时顺序） |
+| 首字节相位的倍数可配 | 配置 `idleFirstByteMultiplier`，默认 **2**（120s → 240s）；设 **1** 即逐字恢复旧行为 | 非法值由纯函数回落成 1，不重复 clamp |
+| 超时报错带现场 | 驱动 `status()` 的 `lastActivityAt`、`domReplyChars`；报错文本追加「最近驱动活动」「页面已有 N 字回复未回传」 | `test/watchdog-first-byte.test.mjs` ⑤ |
+| 超长文本改走附件（**0.16.3 起默认开，阈值 60,000**） | `promptTransportPlan`（`attachInlineLimitChars` 默认 **60,000**，`0` = 关闭）、`uploadTextAttachment`、上限 `attachMaxChars` 默认 **1_500_000** | `test/prompt-transport.test.mjs`、`test/prompt-transport-attach.test.mjs`、`test/upload-attachment-structure.test.mjs`、`test/attach-callsite.test.mjs` |
+| 真机回复回归 | 夹具 14（网页原话 1204 字符） | `test/dsml-real-reply-regression.test.mjs`（11 项） |
+
+### 仍未被证实的部分（写清楚，别让下一个人以为已经量过）
+
+1. **「12.8 万字符输入 ⇒ prefill 超过 120s」是推断，不是直接读数。** 直接量到的只有「该步
+   112s 零事件 + 页面 `busy` + 同一轮 step1-4 事件正常」。**首字节到底第几秒到达，没有任何
+   读数记录过**——报错文本新带的 `最近驱动活动` / `页面已有 N 字回复未回传` 就是为了让
+   *下一次*事故能直接量到它。
+2. **「网页那侧在 18:43 之后是否真的产出了完整答复」未被证实。** 能证实它的只有那一刻的
+   **页面 DOM 读数**（`driver.status().domReplyChars`、页面截图、或网页会话里那条 assistant
+   消息），而这次事故没有把这些落盘。桥侧「零事件」只证明**捕获链没收到东西**，不能证明
+   网页没生成——这正是用户那句「web 是真实有的」在这条链路上仍然成立的原因。
+3. **「走附件会更快/更稳」未被证实。** 0.16.3 起 `attachInlineLimitChars` 默认 **60,000**
+   （超阈值即走附件，`0` = 关闭），这是**基于读数做的取舍**，不是已验证的结论：要证明它有效，
+   需要同一站点、同一会话、同一 prompt 的 inline / attach 两次配对读数（首字节耗时、
+   `attachTransport`、模型是否读到附件）。在这之前，附件投递失败一律**回落 inline**。
+4. **附件计划在 inline 分支的读数歧义——0.16.3 已修。** 修前：inline 且 `chars > maxChars` 时
+   `promptTransportPlan` 给出 `truncate:true` / `payloadChars=maxChars`，而调用点在 inline
+   分支**并不截断**文本（2,000,000 字符原样写进输入框）。现在 inline 一律
+   `truncate:false` / `payloadChars = total` / `kept:null`，「若走附件会上传多少」只在
+   `mode:'attach'` 时表达；护栏 `test/attach-callsite.test.mjs` ⑦。
+
+### 若要继续，从哪下手
+
+1. **先补读数再改判据**：下一次 `WEB_NO_PROGRESS` 的报错文本应带 `最近驱动活动`（距今秒数）
+   与 `页面已有 N 字回复未回传`。若出现 `domReplyChars > 0` 而事件仍为 0，就同时证实了
+   「网页在产出、链路没接住」——那才是真的链路缺陷，与相位无关，届时该查解码器/捕获链而
+   不是继续放宽窗口。
+2. **拿配对数据验证（而不是「决定是否默认开」——0.16.3 已默认开）**：同一站点、同一会话、
+   同一 prompt，attach 一次 / inline 一次，比首字节耗时与 `attachTransport` 读数
+   （字段在 `/__webcode/status`）。若真机发现附件路径更差，把 `attachInlineLimitChars` 写 0
+   即逐字回到旧行为（这条退路必须保留）。
+3. **夹具 14 的红色基线是 `normalizeDsml` 的 DSML 标记剥除，不是 `dsml-repair.js`**：
+   回滚 `dsml-repair.js` 时 `dsml-real-reply-regression.test.mjs` 仍全绿，
+   `dsml-native-close.test.mjs` 才会红（13 份夹具里的无名闭合/缺外壳两族）。
+   两条防线各管一族形态，别把它们的红色基线搞混。
+4. **别把窗口继续调大当修法**：`idleFirstByteMultiplier` 的作用域只有「首个事件之前 + 驱动
+   仍在忙」这一格（`test/idle-window.test.mjs` ②③ 就是为此设的反向安全线：已经开流的静默、
+   驱动不忙的静默都必须照旧快报）。
 
 ---
 

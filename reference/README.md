@@ -91,6 +91,7 @@ node scripts\gen-reference-index.mjs --missing  # 只列「不是 clone」的条
 | `wabac.js` | https://github.com/webrecorder/wabac.js.git | `281e9bc7affba4ce520301b10723b01f661aa7e5` | 2.8 MB |
 | `WebBridge` | https://github.com/kxdds/WebBridge.git | `0256c4590846e4e5d67bbe50283df8c2f18dd229` | 0.4 MB |
 | `WebChat2Api` | https://github.com/MOSSVENC/WebChat2Api.git | `57fc2c2e6840c1f68d3e81adb8fc00250feca279` | 0.3 MB |
+| `web-login` | **不是 clone**（npm 包解包，见 `local-refs/web-login-notes.md`）：`dsh-login@0.1.1` / `@islibaodong/dsh-login@0.2.1` / `dsh-auth-gate@0.13.0` | — | 0.4 MB |
 | `webcode` | https://github.com/three-water666/webcode.git | `2f32151bc021204575e726578813f83a4c1e117c` | 6.5 MB |
 | `zai-copilot-chat` | https://github.com/ltmoerdani/zai-copilot-chat.git | `d56b81ef2911b864677b476e2bc5b27f041133f1` | 1.2 MB |
 

@@ -531,7 +531,7 @@ probe-26 第二次重跑在 fresh 分支就 `NEED_LOGIN`。probe-28 诊断：
 ## 待做
 
 重启后按 0.14.3 再核对一次 `build.version === '0.14.3'`，并按
-`PLAN-0.14.0-HANDOFF.md` §0.0 的短清单收尾（GLM 连发两轮、`:8931` 间隔、A-4b）。
+`.local-plans/PLAN-0.14.0-HANDOFF.md` §0.0 的短清单收尾（GLM 连发两轮、`:8931` 间隔、A-4b）。
 
 ---
 
@@ -600,7 +600,7 @@ GLM 原始 SSE 帧：`.tmp/sse-glm-probe/sse-glm-*.log`（2177 B，`conversation
 
 ## 待做（重启后）
 
-按 `PLAN-0.14.0-HANDOFF.md` §4 的 P2-2 矩阵逐项验收，本轮重点：
+按 `.local-plans/PLAN-0.14.0-HANDOFF.md` §4 的 P2-2 矩阵逐项验收，本轮重点：
 
 1. `build.version === '0.14.2'` 且 `build.hash` 变化（旧 `ab0fdf766a5d`）。
 2. **A-4b：重启后第一轮发送间隔**（放最后做）——杀进程重启后立刻发一轮，
@@ -664,7 +664,7 @@ GLM 原始 SSE 帧：`.tmp/sse-glm-probe/sse-glm-*.log`（2177 B，`conversation
 
 ## 待做（重启后）
 
-按 `PLAN-0.14.0-HANDOFF.md` §4 的 P2-2 矩阵逐项验收，重点是：`build.version === '0.14.1'`
+按 `.local-plans/PLAN-0.14.0-HANDOFF.md` §4 的 P2-2 矩阵逐项验收，重点是：`build.version === '0.14.1'`
 且 `build.hash` 变化；工具协议分叉修复的真机复验（此前高频暴露的是「流式已开块 / 解析
 结果无」与「回复夹杂 `</</`」两种症状）。
 

@@ -348,7 +348,7 @@ export const inject = ['llm', 'webServer'];
    *  只有在本次进程确认没有活着的 ctx 时才清理（有 ctx 说明锁是真被持有的）。 */
 ```
 
-正例六 —— 沙箱导致的运行方式差异（`PLAN-0.14.0-HANDOFF.md:35-36`）：
+正例六 —— 沙箱导致的运行方式差异（`.local-plans/PLAN-0.14.0-HANDOFF.md:35-36`）：
 
 ```md
 - `npm test`（`node --test "test/*.test.mjs"`）在本会话沙箱下 `spawn EPERM`
@@ -515,7 +515,7 @@ return a && b && c > 10 ? d : e;
    `（`GET /__webcode/settings` 返回）`。
 2. 不同口径的数字不要混在一句话里（例如「耗时」与「等待」必须分清，
    参见 `lib/metrics.js:54-56` 把 20.9s 与 7609ms 分成两项写）。
-3. 引用**行号**要谨慎：`PLAN-0.14.0-HANDOFF.md:70-72` 里写的 `lib/index.js:968`
+3. 引用**行号**要谨慎：`.local-plans/PLAN-0.14.0-HANDOFF.md:70-72` 里写的 `lib/index.js:968`
    与 `lib/index.js:1052-1055` 在当前文件里已经对不上（现为 `lib/index.js:1037` 与
    `lib/index.js:1121-1125`）。行号只在同一次改动内可靠，跨版本请改用**函数名/常量名**定位
    （`rememberSend`、`computeSendGap`、`webcode-send-state.json`）。
@@ -541,7 +541,7 @@ return a && b && c > 10 ? d : e;
    `lib/providers.js` 的 `MODEL_ALIAS_IDS`、`lib/web-control.js` 的 `routeIndex`、
    `lib/index.js` 的 `inject` 声明。这几处的注释就是修改边界本身。
 6. **跑测试的方式也写进注释/文档**：`npm test` 在本机沙箱下会 `spawn EPERM`，
-   需逐文件 `node test/<file>.mjs`（见 `PLAN-0.14.0-HANDOFF.md:35-36`）。
+   需逐文件 `node test/<file>.mjs`（见 `.local-plans/PLAN-0.14.0-HANDOFF.md:35-36`）。
    会话之间传递这类环境事实，比传递「我试过了」有用得多。
 
 ---

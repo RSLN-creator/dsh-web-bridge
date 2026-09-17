@@ -3,8 +3,12 @@
 本目录是**长期可维护知识**的唯一去处。约定（2026-09-14 规范化）：
 
 - `doc/` 下只放**入库**文档：改代码时应当一并改的那些。
-- 根目录的 `PLAN*.md` 是**本地私有留痕**（`.gitignore` 已排除），不属于文档体系——
+- 根目录的 `PLAN*.md` 与 `REPORT.md` 是**本地私有留痕**（`.gitignore` 已排除），不属于文档体系——
   它们是「当前这一轮怎么走」的工作底稿，不进仓库、不对外。
+  **2026-09-17 起它们移到 `.local-plans/`**（`PLAN-0.14.0-HANDOFF.md`、`PLAN.md`、
+  `PLAN-2026-09-17-0.16.3.md`、`REPORT.md` 等）：堆在仓库根会让 `git status` 长期挂着未跟踪记录，
+  也容易让人误以为它们是入库文档。本文档体系里对旧根的引用（写作 `PLAN.md` / `REPORT.md` 的那些
+  **历史记录**）指的就是 `.local-plans/` 下的同名文件——历史叙述不改写，落点在这里写清一次。
 - 调研资料一律进 `doc/research/`，包括外部逆向证据、真机 dump、HTML/SSE 样本。
 - 一个事实只写一处。若某条结论同时属于「验收」和「长期问题」，写在验收里、
   在台账里给一条带链接的索引，不要复制粘贴两份（副本必然漂移）。
@@ -13,12 +17,20 @@
 
 | 文档 | 用途 | 什么时候读 |
 | --- | --- | --- |
+| [PROJECT-INTENT.md](PROJECT-INTENT.md) | **项目意图**：要做什么、不要做什么，每条附用户原话与出处 | 判断「这算不算这个项目该做的事」时 |
+| [CODE-STRUCTURE.md](CODE-STRUCTURE.md) | **代码结构归类**：`lib/` 30 个模块的分层、依赖方向、God file 清单、测试分布 | 改动跨模块、决定新模块放哪一层时 |
+| [ROADMAP.md](ROADMAP.md) | **未来框架**：阶段划分、每阶段判据与退出条件、与官方 AgentTeams / 外部调度插件的关系 | 决定下一轮做什么、按什么顺序做时 |
+| [REQUIREMENTS-TASKBOARD.md](REQUIREMENTS-TASKBOARD.md) | **任务面板需求**（用户原话逐条）：项目化、graph、审批闸门、参考实现对照 | 动任务面板 / 任务数据层之前 |
+| [PROMPT-ENGINEERING.md](PROMPT-ENGINEERING.md) | **提示词工程立场**：教原生协议、标记词形逐字教学、默认路径零位移；含真机对照读数与「不宣称最优」的元纪律 | 改提示词 / 改协议教学 / 改解析宽容度之前 |
 | [verify.md](verify.md) | 真机验收矩阵：每个版本要核对的项、取证命令、已知结论 | 发版前；改动驱动/解码/镜像之后 |
 | [long-term-issues.md](long-term-issues.md) | 长期问题台账：已知缺陷、为什么不现在修、若要修从哪下手 | 决定「这个要不要一起修」时 |
 | [security-review.md](security-review.md) | 安全审查：攻击面清单、已做的防护、待办 | 动控制面、cookie、镜像转发时 |
 | [comment-style.md](comment-style.md) | 注释风格：为什么这么写、避免什么；错误码与交付规范 | 写新模块或重构前 |
 | [review-guide.md](review-guide.md) | 评审指南：怎么审这份代码、常见陷阱 | 接手评审时 |
 | [progress.md](progress.md) | **进度台账**：当前走到哪、下一步是什么、已知环境约束 | 会话开始 / 中断恢复时 |
+| [UNDERSTANDING.md](UNDERSTANDING.md) | **用户意图理解文档**：逐条写「用户原话 + 我的理解 + 核实 + 结论」，未定项集中在一节 | 动手前；对需求有疑问时 |
+| [PLAN-8H-2026-09-18.md](PLAN-8H-2026-09-18.md) | **本轮 8 小时执行计划**：阶段、动作、判据、硬约束 | 每轮开工时 |
+| [user-voice-log.md](user-voice-log.md) | **用户原话记录**（脚本自动汇总）：用户本人发出的每一条消息，按时间去重排列；判断意图时的第一手依据 | 判断「这算不算本项目的意图」时；接手本项目前 |
 | [diagnosis-2026-09-16.md](diagnosis-2026-09-16.md) | **全局诊断报告**：进度核对、文档卫生、#19 真根因、#22 前提推翻、#9 重定性、代码质量量化、未来框架与排期 | 想一次掌握「当前状态 + 下一步 + 已证结论」时 |
 | [tutorial-agent-teams.md](tutorial-agent-teams.md) | 官方 Agent Teams 插件教程：身份、版本锁定理由、安装、9 个工具用法、边界 | 想用/升级/排查 agent team 时 |
 | [tutorial-phone-access.md](tutorial-phone-access.md) | 手机连接 DSH 教程：选型对比、`dsh-local-link` 安装、配对、安全边界、**二维码位置（§3.5）** | 想从手机/平板访问 DSH 时 |
