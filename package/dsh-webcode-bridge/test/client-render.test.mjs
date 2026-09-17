@@ -45,6 +45,10 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null 
   const PaneComponents = new Map();
   /** 已注册的标签页定义（kind → definition），用于断言三个 kind 各自成立。 */
   const TabDefinitions = new Map();
+  // 0.16.0：左栏入口（sidebar.panellist）与中央列 main 座位。前者是 list 座位，
+  // 后者的 key 必须与前者 id 逐字相同——两半各收一处，便于断言「成对」。
+  const PanelEntries = [];
+  const MainKeys = [];
   let SettingsComponent = null;
   // 0.15.11：输入框底下的等待药丸也必须被真的渲染到。此前没有任何用例捕获
   // `conversation.composer.dock` 的组件，于是「药丸长什么样、点了会怎样」
@@ -208,6 +212,10 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null 
           if (def?.name === 'settings.section') SettingsComponent = Comp;
           if (def?.name === 'sidebar.right.tab.menu.item') MenuItems.push(Comp);
           if (def?.name === 'conversation.composer.dock') DockComponent = Comp;
+          // 0.15.12/0.16.0：左栏入口与中央列 main 座位。list 座位带 id（= main key）；
+          // main 是 keyed 座位，按 key 派发。两者分别收下，用于断言成对且同名。
+          if (def?.name === 'sidebar.panellist') PanelEntries.push({ id: def.id, order: def.order, label: def.label, Comp });
+          if (def?.name === 'main') MainKeys.push(def.key);
           return () => {};
         },
       },
@@ -274,7 +282,13 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null 
         await flush(); await flush(); await flush(); await flush();   // ← 异步 setState 必须在这里落地
       }
     }
-    return { errors, windowHits, tree, menuItems: MenuItems, effectDisposers, tabDefinitions: TabDefinitions, paneKeys: [...PaneComponents.keys()] };
+    return {
+      errors, windowHits, tree, menuItems: MenuItems, effectDisposers,
+      tabDefinitions: TabDefinitions, paneKeys: [...PaneComponents.keys()],
+      // 0.16.0：左栏入口与中央列 main 座位的登记结果。两个都返回，用例才能断言
+      // 「成对且同名」——只看一半会放过「侧栏行存在但点了报未注册」那类缺陷。
+      panelEntries: PanelEntries, mainKeys: MainKeys,
+    };
   } finally {
     global.window = saved.window; global.document = saved.document;
     global.fetch = saved.fetch; global.setInterval = saved.setInterval; global.clearInterval = saved.clearInterval;
@@ -973,6 +987,48 @@ test('★ 新面板：不得在客户端重算就绪/关键路径（图诊断只
   assert.ok(!/\.depth\s*=/.test(body) && !/topolog/i.test(body),
     'TaskBoardPanel 里出现了图算法 —— 图诊断只能来自服务端 graph 字段');
   assert.ok(/data\.graph|graph\b/.test(body), 'TaskBoardPanel 没有消费服务端的 graph 字段');
+});
+
+// ---------------------------------------------------------------- 0.16.0 左栏入口
+
+/**
+ * 左栏入口必须**成对**注册：`sidebar.panellist` 的行 + 同名 key 的 `main` 座位。
+ *
+ * 为什么这条要单独钉住：官方契约原文是「Each list id addresses the matching main
+ * panel; the sidebar owns the button」——侧栏行只是指向 main 座位的按钮，点它走
+ * shell 的 `selectPanel(id)`，而 layout service 会**校验该 key 是否已注册**
+ *（`layout.selectPanel: main panel \"X\" is not registered` 直接抛）。
+ * 只注册一半的话，界面看起来正常、点一下就报错——这类「有一半是死的」最难发现。
+ * 因此这里同时断言两半都存在，且 id 与 key **逐字相同**（不同名等于没注册 main）。
+ */
+test('★ 左栏入口：sidebar.panellist 与同名 main 座位必须成对注册', async () => {
+  const { errors, panelEntries, mainKeys } = await renderPane({ payloads: [emptyWindows] });
+  assert.deepEqual(errors, [], '注册阶段抛错：' + errors.map(e => e.message).join('; '));
+  assert.ok(panelEntries.length > 0, 'sidebar.panellist 从未注册（左栏入口不存在）');
+  const entry = panelEntries[0];
+  assert.ok(entry.id, 'panel 行缺少 id —— 契约要求 list id 即 main 面板 key');
+  assert.equal(typeof entry.label, 'function', 'panel 行 label 必须是 thunk（语言切换要能重读）');
+  assert.equal(entry.label(), '任务板', 'panel 行的标签不是「任务板」');
+  assert.ok(mainKeys.includes(entry.id),
+    'main 座位未注册同名 key：' + entry.id + '（已注册：' + mainKeys.join(', ') + '）');
+});
+
+/**
+ * 左栏入口的图标：只画图标，不得自绘按钮。
+ *
+ * 官方契约把按钮（含 Tooltip、aria-current、折叠态的 18px 图标、选中高亮）归 shell，
+ * 我们只供图标 + 标签。若这里出现 <button> 或 onClick，就是**把 DOM 注入那套
+ * 搬回来了**：那会与 shell 的渲染打架（点一下触发两次），且丢掉键盘可达性。
+ */
+test('★ 左栏入口图标：不得自绘 button（按钮与可访问名归 shell）', async () => {
+  const src = bridgeSrcFrom('client.cjs');
+  const at = src.indexOf('function TaskBoardPanelIcon');
+  assert.ok(at > 0, '找不到 TaskBoardPanelIcon');
+  const end = src.indexOf('\n    function ', at + 10);
+  const body = src.slice(at, end === -1 ? at + 2000 : end);
+  assert.ok(!/'button'/.test(body), 'TaskBoardPanelIcon 自绘了 button —— 按钮必须归 shell');
+  assert.ok(!/onClick/.test(body), 'TaskBoardPanelIcon 挂了点击处理 —— 选中动作必须归 shell');
+  assert.ok(/props\?\.size|props\.size/.test(body), '图标没有消费 shell 给的 size（折叠态尺寸会错）');
 });
 
 test('设置页：useSessions 缺席时优雅降级为 null，不得整块崩掉', async () => {

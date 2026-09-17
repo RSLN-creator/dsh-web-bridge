@@ -8,10 +8,11 @@
 // 这条约束解释了很多看着「绕」的地方：例如等待时长的文案在服务端算（wait-stats.js），
 // 而不是在这里再写一份 formatDuration——两份实现迟早会长得不一样。
 //
-// 本文件承载三块界面：
+// 本文件承载四块界面：
 //   1. 官方右侧栏的网页镜像面板（sidebar.right.pane.tab）与标签动作菜单；
 //   2. 原生设置页「网页桥接」分区（settings.section）：账户/登录、花名册、模型、提示词；
-//   3. 输入框底下的等待速览（conversation.composer.dock）与会话头右上角开关。
+//   3. 输入框底下的等待速览（conversation.composer.dock）与会话头右上角开关；
+//   4. 左栏全局面板入口（sidebar.panellist）与同名中央列页面（main）：任务板。
 //
 // 纪律：**只读、不造假状态**。任何拿不到的真实值都如实显示「未知 / 读不到」，
 // 绝不回落成一个看起来正常的默认值（详见各组件上方注释）。
@@ -111,6 +112,26 @@ window.__ModuleLoader__.load({
         if (s && !seen.includes(s)) seen.push(s);
       }
       return seen.length ? seen.join(' / ') : null;
+    }
+
+    /**
+     * 数据来源标注的人话翻译（0.16.1）。
+     *
+     * 0.16.1 起 Team 与任务板各有**两个**来源：官方 `agentTeams` 服务，以及磁盘上的
+     * `.agent-teams/<teamId>/team.json`。卸载 AgentTeams 之后用户看到的应当是「磁盘」，
+     * 而这句话必须出现在界面上——否则用户无法判断「面板空了」是因为真的没有团队，
+     * 还是因为数据源没接上。这是本文件一贯的「不造假状态」：来源本身也是一条状态。
+     *
+     * `null` 时不渲染（两个来源都没读到的情况已经由 `*Error` 那条说明覆盖了，
+     * 再叠一句来源标注只会让同一件事说两遍）。
+     *
+     * @param {string|null|undefined} src 服务端给的 teamSource / tasksSource
+     * @returns {string|null} 要显示的文案，或 null（不渲染）
+     */
+    function sourceText(src) {
+      if (src === 'service') return '来源：AgentTeams 服务';
+      if (src === 'disk') return '来源：磁盘状态（AgentTeams 未提供实时数据）';
+      return null;
     }
 
     /**
@@ -748,6 +769,9 @@ window.__ModuleLoader__.load({
           ? h('p', { className: 'hwb-hint' }, '当前只有本会话自己（lead），没有派生出的 teammate。')
           : null,
         team.length > 0 && h('div', { className: 'hwb-panel-group' }, team.map(memberRow)),
+        // 来源标注：磁盘回落时成员**没有实时 activity**，用户必须知道
+        //（否则「空闲」会被读成「真的空闲」，而不是「这里没有实时数据」）。
+        sourceText(data.teamSource) && h('p', { className: 'hwb-hint' }, sourceText(data.teamSource)),
         teammates.length > 0 && h('p', { className: 'hwb-hint' },
           '成员状态为「未加载（可唤醒）」时不必重建：给它发一条消息就会唤醒并继续原来的上下文。'),
         h('p', { className: 'hwb-hint' },
@@ -788,7 +812,15 @@ window.__ModuleLoader__.load({
       const tasks = Array.isArray(data.tasks) ? data.tasks : [];
       const taskErr = uniqReasons([data.tasksError]);
       const g = data.graph && typeof data.graph === 'object' ? data.graph : null;
+      // 执行语义（0.16.2）：与 graph 同一性质——是 tasks 的**补充视角**，
+      // 算不出来时为 null 并带 planError，不连坐 tasks 与 graph。
+      const plan = data.plan && typeof data.plan === 'object' ? data.plan : null;
+      const planErr = data.planError || null;
       const byId = new Map(tasks.map(t => [String(t.id), t]));
+      // 判定表：id → admission。面板按它分组，而不是自己重算 ready——
+      // 「能不能开工」的两个轴（依赖 / 资源）判据只在服务端一份。
+      const admissionById = new Map(
+        (Array.isArray(plan?.admissions) ? plan.admissions : []).map(a => [String(a.id), a]));
       /** 一条任务行：状态点 + 标题 + 归属 + 状态 + 阻塞明细。 */
       const taskRow = (t, i, extra) => {
         const st = taskStatusOf(t?.status);
@@ -869,9 +901,134 @@ window.__ModuleLoader__.load({
         group('被阻塞', blockedRows, '没有被阻塞的任务。'),
         group('进行中', running),
         group('已完成', done),
+        // ---- 执行语义（0.16.2）：graph 回答「结构长什么样」，这一层回答「现在允许开工吗」----
+        //
+        // 为什么必须**分开列出**「等依赖」与「等资源」：它们是两种完全不同的卡法，
+        // 动作也不同（前者去催上游，后者去腾一个成员）。旧实现把两者合成一个
+        // 「能不能开工」，于是「依赖全满足但没人空闲」看起来像卡死——而它其实
+        // 只要派个人；「有人空闲但依赖没满足」则是最难查的一类提前开工。
+        plan && plan.waitingDeps?.length
+          ? h('div', { className: 'hwb-panel-group' },
+            h('p', { className: 'hwb-panel-head' }, '等依赖（' + plan.waitingDeps.length + '）'),
+            plan.waitingDeps.slice(0, 8).map((w, i) => h('div', { key: 'wd' + i, className: 'hwb-panel-row' },
+              h('span', { className: 'hwb-dot', 'aria-hidden': 'true' }),
+              h('span', { className: 'hwb-panel-title' }, String(byId.get(String(w.id))?.subject || w.id)),
+              h('span', { className: 'hwb-panel-meta' },
+                '等在 ' + (w.edges || []).map(e => String(byId.get(String(e.id))?.subject || e.id)
+                  + '（' + taskStatusOf(e.status).t + '·' + e.kind + '）').join('、')))),
+            h('p', { className: 'hwb-hint' }, '这些在等上游。上游若是 failed 且边语义是 after-success，它**永远不会**就绪——要人去改边或重开上游。'))
+          : null,
+        plan && plan.waitingResource?.length
+          ? h('div', { className: 'hwb-panel-group' },
+            h('p', { className: 'hwb-panel-head' }, '等资源（' + plan.waitingResource.length + '）'),
+            plan.waitingResource.slice(0, 8).map((w, i) => h('div', { key: 'wr' + i, className: 'hwb-panel-row' },
+              h('span', { className: 'hwb-dot idle', 'aria-hidden': 'true' }),
+              h('span', { className: 'hwb-panel-title' }, String(byId.get(String(w.id))?.subject || w.id)),
+              w.ownerName && h('span', { className: 'hwb-chip' }, String(w.ownerName)),
+              h('span', { className: 'hwb-panel-state' }, '成员忙')))        ,
+            h('p', { className: 'hwb-hint' }, '依赖已满足，但归属的成员正在跑别的活。给它发消息或把任务移回共享池即可开工——这不是卡死。'))
+          : null,
+        plan && plan.retryable?.length
+          ? h('div', { className: 'hwb-panel-group' },
+            h('p', { className: 'hwb-panel-head' }, '可重试（' + plan.retryable.length + '）'),
+            plan.retryable.slice(0, 6).map((r, i) => h('div', { key: 'rt' + i, className: 'hwb-panel-row' },
+              h('span', { className: 'hwb-dot bad', 'aria-hidden': 'true' }),
+              h('span', { className: 'hwb-panel-title' }, String(byId.get(String(r.id))?.subject || r.id)),
+              h('span', { className: 'hwb-chip' }, '已试 ' + r.retry.used + '/' + r.retry.max))),
+            h('p', { className: 'hwb-hint' }, '这些失败过但还有额度。超时/取消/环境不可用**不占**重试次数——它们不是这个节点做错了。'))
+          : null,
+        plan?.validation && plan.validation.errors?.length
+          ? h('div', { className: 'hwb-panel-group' },
+            h('p', { className: 'hwb-panel-head bad' }, '计划结构错误（' + plan.validation.errors.length + '）'),
+            h('p', { className: 'hwb-hint bad' },
+              plan.validation.errors.slice(0, 6).map(e => e.code === 'cycle'
+                ? '环：' + (e.ring || []).join(' → ')
+                : (e.code === 'self-loop' ? '自环：' + e.taskId
+                  : e.code + '：' + (e.taskId || '') + ' → ' + (e.edge || ''))).join('；')),
+            h('p', { className: 'hwb-hint' }, '自环与环都会让环内任务**永远不会就绪**。自环改一行即可；真环要先看清成员再断一条边。'))
+          : null,
+        plan?.validation && plan.validation.warnings?.length
+          ? h('p', { className: 'hwb-hint' },
+            '计划警告：' + plan.validation.warnings.map(w => w.code === 'quorum-clamped'
+              ? '任务 ' + w.taskId + ' 的 quorum n=' + w.requested + ' 超出边数 ' + w.edges + '，已夹到上限'
+              : w.code).join('；'))
+          : null,
+        plan?.writeScopeConflicts?.length
+          ? h('div', { className: 'hwb-panel-group' },
+            h('p', { className: 'hwb-panel-head' }, '写范围冲突（' + plan.writeScopeConflicts.length + ' 对）'),
+            h('p', { className: 'hwb-hint' },
+              plan.writeScopeConflicts.slice(0, 5).map(c => c.a + ' × ' + c.b + '（' + c.paths.join('、') + '）').join('；')),
+            h('p', { className: 'hwb-hint' }, '两个都还没结束的任务会写同一批文件。这不是锁，只是提醒：官方明文没有 worktree，成员共享同一个 checkout。'))
+          : null,
+        plan?.termination
+          ? h('p', { className: 'hwb-hint' },
+            '终止性：还剩 ' + plan.termination.remaining + ' / ' + plan.termination.total + ' 个未终态'
+            + (plan.termination.deleted > 0 ? '（另有 ' + plan.termination.deleted + ' 条已删除，不计入图）' : '')
+            + '。' + (plan.termination.allSettled
+              ? (plan.termination.hasTerminalFailure ? '整批已结束，但**有终态失败**——那是另一种结局，不是成功。' : '整批已结束。')
+              : '整批还没跑完。'))
+          : null,
+        planErr && h('p', { className: 'hwb-hint bad' }, '执行语义读不到（' + planErr + '）——任务与图诊断不受影响。'),
+        // 来源标注 + 就绪判据的来源必须分开说：磁盘路径上**官方没给 ready**，
+        // 由 task-graph.js 按官方判据现算（readySource: 'computed'）。把这两件事
+        // 混成一句会让「就绪是谁算的」重新变成需要读代码才知道的事。
+        sourceText(data.tasksSource) && h('p', { className: 'hwb-hint' }, sourceText(data.tasksSource)),
         h('p', { className: 'hwb-hint' },
           '就绪（ready）取官方算好的判据，桥不重算；阻塞明细、关键路径与结构检查由桥补算。'
           + '写范围重叠只是提醒而不是锁：官方明文没有 worktree，成员共享同一个 checkout。'));
+    }
+
+    /**
+     * **左栏全局面板图标：任务板**（0.16.0）。
+     *
+     * 官方 `sidebar.panellist` 的契约是「每个 list id 对应一个同名 main 面板；
+     * **侧栏自己画按钮**，并从 list 元数据解析标签」。所以这个组件**只画图标**：
+     * 不画标签、不加点击处理——按钮、可访问名、折叠态与选中高亮全归 shell。
+     *
+     * 为什么用内联 SVG 而不是官方 primitives：primitives 里没有任务板/依赖图
+     * 语义的图标（现有的是代码、队列、新对话、面板）。队列图标表达的是「排队等待」，
+     * 与「依赖图 + 就绪/阻塞」是两回事，用它会让入口读起来像「发送队列」。
+     * 这里按官方同款几何画（16 viewBox、stroke-width 1.3、currentColor、
+     * round linecap），于是明暗主题与选中态都由 shell 的颜色继承自动成立——
+     * 这正是**不写死颜色**的收益，也是与 dsh-task-board 的 DOM 注入路线的分界：
+     * 那条路线必须自己复刻外壳样式，这条路线的样式来自外壳本身。
+     *
+     * @param {{size?: number, active?: boolean}} props 官方 panel 行给的图标呈现
+     */
+    function TaskBoardPanelIcon(props) {
+      const size = Number(props?.size) || 16;
+      return h('svg', {
+        viewBox: '0 0 16 16', width: size, height: size, fill: 'none',
+        stroke: 'currentColor', strokeWidth: 1.3, strokeLinecap: 'round',
+        strokeLinejoin: 'round', 'aria-hidden': 'true', focusable: 'false',
+      },
+        h('rect', { x: 2, y: 2.5, width: 12, height: 11, rx: 1.5 }),
+        h('path', { d: 'M2 6.5h12M6.5 6.5v7' }));
+    }
+
+    /**
+     * **任务板主列页面**（0.16.0）：左栏 `sidebar.panellist` 入口切过来的那一列。
+     *
+     * ## 与右栏那个任务板标签页的分工
+     *
+     * 差别不在**内容**而在**容器契约**。右栏那个是窄条常驻视图：它旁边永远还有
+     * 对话，宽度只有几百像素，所以它按「一行一件事 + 省略号」排版。这里是**整列
+     * 页面**：用户专门切过来看依赖图，宽度是整个中央列。因此本组件提供页面级的
+     * 滚动容器与标题，内部仍然复用 `TaskBoardPanel` 的**同一套**呈现——
+     * 同一个语义只画一次，否则「右栏说被阻塞 2、主列说被阻塞 3」这类漂移迟早发生。
+     *
+     * ## 为什么标题是写死的 h1
+     *
+     * 官方没有给 main 座位任何「页面标题」契约（它只给 key），而左栏行已经写了
+     * 「任务板」。这里再写一次是**页面内的标题**，与侧栏按钮的可访问名各司其职：
+     * 侧栏那个由 `label()` 提供，折叠成轨道时只留图标，此时页内标题是唯一的文字说明。
+     *
+     * @param {{useSessions?: Function, sessionId?: string}} props main 座位的标准 props
+     */
+    function TaskBoardMain(props) {
+      return h('section', { className: 'hwb-main' },
+        h('h1', { className: 'hwb-main-head' }, '任务板'),
+        h(TaskBoardPanel, props));
     }
 
     function SiteAccounts({ sites, onRefresh, onlySiteId, subHint }) {
@@ -1192,10 +1349,26 @@ window.__ModuleLoader__.load({
       const [sendGapMs, setSendGapMs] = React.useState(0);
       const [sendGapSaved, setSendGapSaved] = React.useState(0);
       const [sendGapNotice, setSendGapNotice] = React.useState('');
+      // 提示词投递形态（0.16.3）：'attach'（默认）| 'inline'。与 sendGapMs 同一套
+      // 「草稿 / 已保存 / 提示」三件套——交互形态相同（改一下、点保存）。
+      const [promptTransport, setPromptTransport] = React.useState('attach');
+      const [promptTransportSaved, setPromptTransportSaved] = React.useState('attach');
+      const [promptTransportNotice, setPromptTransportNotice] = React.useState('');
+      // 服务端算好的投递读数（当前生效值 / 最近一次实际投递 / 探针），见
+      // web-control 的 GET attach-status：文案只在服务端算一份，bundle 里不写第二份
+      // （本文件是单文件 bundle，import 不到 lib/，两份格式化必然漂移）。
+      const [attachStatus, setAttachStatus] = React.useState(null);
+      const [probeBusy, setProbeBusy] = React.useState(false);
+      const [probeResult, setProbeResult] = React.useState('');
       const refresh = () => api('status').then(s => setStatus(s)).catch(() => {});
       React.useEffect(() => {
         let alive = true;
-        const poll = () => api('status').then(s => { if (alive) setStatus(s); }).catch(e => { if (alive) setError(e.message); });
+        const poll = () => {
+          api('status').then(s => { if (alive) setStatus(s); }).catch(e => { if (alive) setError(e.message); });
+          // 投递读数与状态同频刷新（4s）：真机出问题时用户往往就停在这一页，
+          // 读数必须自己更新——旧版本这一页对附件投递完全沉默。
+          api('attach-status').then(s => { if (alive) setAttachStatus(s); }).catch(() => {});
+        };
         poll();
         api('models').then(m => { if (alive) setModels(m.models || []); }).catch(() => {});
         api('settings').then(s => {
@@ -1209,6 +1382,10 @@ window.__ModuleLoader__.load({
           setSubAgentSite(subSite); setSubAgentSiteSaved(subSite);
           const gap = Math.min(600000, Math.max(0, Math.round(Number(s.sendGapMs) || 0)));
           setSendGapMs(gap); setSendGapSaved(gap);
+          // 投递形态：只有逐字 'inline' 算纯文本（与 browser-driver 的
+          // promptTransportNow、web-control 的 POST settings 同一判据）。
+          const pt = s.promptTransport === 'inline' ? 'inline' : 'attach';
+          setPromptTransport(pt); setPromptTransportSaved(pt);
         }).catch(() => {});
         const timer = setInterval(poll, 4000);
         return () => { alive = false; clearInterval(timer); };
@@ -1226,6 +1403,36 @@ window.__ModuleLoader__.load({
           onDone(r);
         } catch (e) { setError(e.message); }
         finally { setPending(false); }
+      }
+      /**
+       * 附件探针：只上传、**绝不发送**（0.16.3）。
+       *
+       * 为什么需要一个按钮：「附件到底行不行」此前只能靠发一条真消息（看模型有没有
+       * 读到附件）来回答——那是拿一次真实会话与一次站点风控换一个读数。真机失败读数
+       * `attachTransport = {fallback:true, code:'ATTACH_NOT_CONFIRMED', total:417276}`
+       * 正是卡在这上面：入口在（GET attach-entry: available:true、accept 含 .md），
+       * 上传后却拿不到任何可见证据，于是 41.7 万字符整段回落纯文本。
+       *
+       * `apiSoft` 而不是 `api`：探针「未确认附件」时服务端回 `{ ok:false, code, … }`
+       * 但 HTTP 是 200，`api` 会把 ok:false 当异常抛——那个失败现场（候选选择器 ×
+       * 命中数 × DOM 片段）恰恰是最要紧的读数，不能被显示层吞掉。
+       */
+      async function runAttachProbe() {
+        setProbeBusy(true); setError('');
+        try {
+          const r = await apiSoft('attach-probe', { text: '# webcode attach probe\n' + new Date().toISOString() + '\n' }, 45000);
+          const d = r.data || {};
+          const clean = '；清理 ' + (d.cleaned ? '成功（' + (d.cleanedBy || '') + '）'
+            : '未完成（' + (d.cleanupNote || d.cleanedBy || '') + '）');
+          setProbeResult(d.code
+            ? '探针未确认：' + d.code + '（' + (d.chars || 0) + ' 字符' + clean + '）'
+              + (d.domSnippet ? ' 现场 ' + d.domSnippet : '')
+            : '探针已确认：证据 ' + (d.evidence || '(无)') + '（' + (d.chars || 0) + ' 字符' + clean + '）');
+          if (!r.data) setProbeResult('探针失败：' + (r.error || '无响应'));
+          const s2 = await apiSoft('attach-status');
+          if (s2.ok) setAttachStatus(s2.data);
+        } catch (e) { setError(String(e?.message || e)); }
+        finally { setProbeBusy(false); }
       }
       const relay = status?.relay;
       const driver = status?.driver;
@@ -1293,6 +1500,44 @@ window.__ModuleLoader__.load({
               sendGapNotice && h('span', { className: 'hwb-hint' }, sendGapNotice)),
             ),
           h('p', { className: 'hwb-hint indent' }, '两次向同一网站**发送**之间的最小间隔（send-to-send）：距上一次发出不足这个值就等满，已满足则不等待。网站有「消息发送过于频繁」的滑窗限流，长任务工具循环节奏密时容易触发，设为 2–10 秒可主动避开。被限流时桥按 max(发送间隔, 10 秒) 自动退避重试最多 2 次。实际等待、目标值与「距上次发送」都在下方统计的「发送前等待」里逐项显示；该设置会落盘，**重启后第一轮同样生效**。')),
+
+        // 提示词投递形态（0.16.3）。用户原话：「没有做到能够把提示词放入文本
+        //（设置界面也改为打开文本）导致输出对话一开头就很长 token 窗口」——
+        // 附件投递此前既没有开关、也没有读数，用户改不了也看不见。
+        h('div', { className: 'hwb-card' },
+          h('h3', { className: 'hwb-group first' }, '提示词投递'),
+          h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '投递形态'),
+            h('div', { className: 'hwb-row-main' },
+              h('label', { className: 'hwb-consent', key: 'pt-attach' },
+                h('input', {
+                  type: 'radio', name: 'hwb-prompt-transport', checked: promptTransport === 'attach', disabled: pending,
+                  onChange: () => setPromptTransport('attach'),
+                }),
+                h('span', null, '附件投递（默认）')),
+              h('label', { className: 'hwb-consent', key: 'pt-inline' },
+                h('input', {
+                  type: 'radio', name: 'hwb-prompt-transport', checked: promptTransport === 'inline', disabled: pending,
+                  onChange: () => setPromptTransport('inline'),
+                }),
+                h('span', null, '纯文本（永远写进输入框）')),
+              h('button', {
+                disabled: pending || promptTransport === promptTransportSaved,
+                onClick: () => saveSetting('promptTransport', promptTransport, r => {
+                  const v = r.promptTransport === 'inline' ? 'inline' : 'attach';
+                  setPromptTransport(v); setPromptTransportSaved(v);
+                  setPromptTransportNotice('已保存。下一轮起生效（当前生效值见下方读数）。');
+                }),
+              }, '保存'),
+              promptTransportNotice && h('span', { className: 'hwb-hint' }, promptTransportNotice))),
+          h('p', { className: 'hwb-hint indent' }, '「附件投递」把超过阈值的正文改为附件上传，绕开网页输入框的写入卡死与截断（真机事故：41.7 万字符纯文本灌进输入框，整轮 112 秒零事件）；任何一步失败都会自动回落纯文本，消息不会发不出去。「纯文本」= 逐字回到旧行为。'),
+          h('p', { className: 'hwb-hint indent' }, '当前生效：' + (attachStatus?.transportLine || '读数加载中…')),
+          h('p', { className: 'hwb-hint indent' }, '最近一次实际投递：' + (attachStatus?.lastLine || '读数加载中…')),
+          h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '附件探针'),
+            h('div', { className: 'hwb-row-main' },
+              h('button', { disabled: pending || probeBusy, onClick: runAttachProbe },
+                probeBusy ? '探针运行中…（只上传·不发送）' : '只上传·不发送'),
+              h('span', { className: 'hwb-hint' }, probeResult || ('探针 ' + (attachStatus?.probeLine || '尚未运行。'))))),
+          h('p', { className: 'hwb-hint indent' }, '探针会向当前网页会话上传一个 webcode-probe.md，上传后立即尝试清理，并如实报回证据节点、命中数与清理结果——这是「附件到底行不行」唯一不消耗真实会话的读数。')),
 
         h('div', { className: 'hwb-card' },
           h('h3', { className: 'hwb-group first' }, '连接'),
@@ -1913,6 +2158,12 @@ window.__ModuleLoader__.load({
         // 空态/加载态：与官方 guide 卡片同一套措辞位置（顶部对齐、不要垂直居中——
         // 面板常常是窄条，垂直居中的空态会飘在中间显得像加载失败）。
         ".hwb-panel>p.hwb-hint{margin:0}",
+        // 左栏入口切过来的主列页面（0.16.0）。滚动与页面内边距归**容器**，
+        // 面板内部继续用 .hwb-panel 那一套——同一个语义只有一份排版。
+        // box-sizing 必须显式写：中央列的高度由 frame 的 grid 给定，
+        // 少这一句 padding 会把容器撑出可视区，底部一行永远滚不到。
+        ".hwb-main{height:100%;box-sizing:border-box;overflow:auto;padding:16px 20px}",
+        ".hwb-main-head{margin:0 0 12px;font-size:15px;line-height:24px;color:var(--dsw-alias-label-primary,inherit)}",
       ].join('');
       document.head.appendChild(style);
       const disposers = [() => style.remove()];
@@ -1974,6 +2225,11 @@ window.__ModuleLoader__.load({
       const TEAM_KIND = 'webcode-team';
       const TASKS_ID = 'dsh-webcode-bridge/tasks';
       const TASKS_KIND = 'webcode-tasks';
+      // 左栏全局面板（`sidebar.panellist` + `main`）的 id。与上面两个是**不同域**：
+      // 那两个是右侧栏的标签页类型/实例 id，这个既是侧栏行的 list id、也是中央列
+      // main 座位的 key——官方契约要求这两者**逐字相同**（「Each list id addresses
+      // the matching main panel」）。因此只注册侧栏那一半是不成立的，见下方注册处。
+      const TASKS_PANEL_ID = 'webcode-tasks-panel';
       /**
        * 多开不同网页（0.14.4）。
        *
@@ -2076,6 +2332,63 @@ window.__ModuleLoader__.load({
             name: 'sidebar.right.pane.tab', key: TASKS_ID,
           }, TaskBoardPanel));
         } catch (e) { warn('pane.tab body (tasks)', e); }
+      });
+
+      // ---- 左栏全局面板入口：任务板（0.16.0）-----------------------------
+      //
+      // ## 为什么走官方槽而不是注入 DOM
+      //
+      // 参考实现（reference/dsh-task-board 的 sidebar-entry-core.ts）走的是
+      // **DOM 注入**：它自己 new 一个 button、插在 New Session 按钮后面，再用
+      // MutationObserver 自愈。那份代码的注释把原因写得很直白——「dsh 的侧栏
+      // shell 没有暴露任何外部插件可注册的槽」。
+      //
+      // **那个前提在官方这一版已经不成立**。实测 slots 目录里存在
+      // `sidebar.panellist`（list、scope root），它的契约原文是：
+      //
+      //   > Global panel icons. Each list id addresses the matching main panel;
+      //   > the sidebar owns the button and resolves its label from list metadata.
+      //
+      // 也就是说：**按钮由 shell 自己画**（`PanelRow`，含 Tooltip、aria-current、
+      // 折叠成 56px 轨道时的 18px 图标、选中高亮），我们只提供图标 + 标签。
+      // 位置也天然正确：shell 的渲染顺序就是 logoRow → New Session → panelList →
+      // workspace 浏览器，所以「新开对话下方」是**结构保证**，不是靠 insertBefore
+      // 抢位置。相比之下 DOM 注入要自己复刻外壳样式、自己盯重渲染，
+      // 且一旦官方换 class 名（`[class*="newSession"]` 这种模糊匹配）就会静默插错位置。
+      //
+      // 因此本轮**不引入那条路线**。这不违背「取代 agent-team 的设计理念」：
+      // 要保留的是「左栏固定入口 + 中央列面板」这个**交互结构**，而它现在能用
+      // 官方一等公民的槽实现——比 DOM 注入更强，因为它连键盘导航与折叠态都自动正确。
+      //
+      // ## 两半必须成对
+      //
+      // 契约后半句是关键：「Each list id **addresses the matching main panel**」。
+      // 侧栏行只是一个指向 main 座位的按钮——点它走的是 shell 的 `selectPanel(id)`，
+      // 而那个动作会**校验 main 座位是否已注册**（layout service：
+      // `layout.selectPanel: main panel "X" is not registered` 会抛）。
+      // 所以只注册侧栏那一半 = 用户点一下就报错。两半的 key/id 必须逐字相同。
+      own(() => {
+        try {
+          return ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
+            name: 'sidebar.panellist',
+            id: TASKS_PANEL_ID,
+            // order 40：排在官方既有的全局面板行之后（它们用默认 0），
+            // 不与任何内置行抢位置；同 order 时按注册顺序，桥是最后挂载的。
+            order: 40,
+            label: () => '任务板',
+          }, TaskBoardPanelIcon));
+        } catch (e) { warn('sidebar.panellist entry', e); }
+      });
+
+      // 中央列页面本体：key 与上面的 id 逐字相同。
+      // `main` 是 **keyed** 座位（scope root），官方默认已占用 key `conversation`；
+      // 我们用自有 key，因此不会遮蔽对话——两者由 shell 按 activePanelId 二选一渲染。
+      own(() => {
+        try {
+          return ctx.slots.inject('main', () => ctx.slots.register({
+            name: 'main', key: TASKS_PANEL_ID,
+          }, TaskBoardMain));
+        } catch (e) { warn('main panel body (tasks)', e); }
       });
 
       // ---- 标签动作菜单项：刷新 / 独立窗口（DSH 规范入口） --------------

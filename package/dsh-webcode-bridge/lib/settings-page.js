@@ -103,6 +103,28 @@ button.mini { width: auto; margin-top: 0; padding: 6px 12px; font-size: 13px; }
       <div class="hint">子代理站点的账户与登录管理：与主线站点同一套逻辑（真实 Edge 窗口一次性登录），登录态按站点各自持久化；与主线同站点时两者天然共享登录。</div>
     </div>
 
+    <label>提示词投递形态</label>
+    <div style="display:flex; gap:16px; align-items:center; flex-wrap:wrap; margin-top:6px;">
+      <label style="display:flex; gap:6px; align-items:center; font-weight:400; margin:0;">
+        <input type="radio" name="promptTransport" value="attach" style="width:auto;"> 附件投递（默认）
+      </label>
+      <label style="display:flex; gap:6px; align-items:center; font-weight:400; margin:0;">
+        <input type="radio" name="promptTransport" value="inline" style="width:auto;"> 纯文本（永远写进输入框）
+      </label>
+      <button type="button" id="attachProbeBtn" class="mini">附件探针（只上传·不发送）</button>
+    </div>
+    <div class="hint">
+      超过阈值的正文改走<b>附件上传</b>：绕开网页输入框的写入卡死与截断（真机事故：
+      一次 41.7 万字符纯文本灌进输入框，整轮 112 秒零事件）。任何一步失败都会
+      <b>自动回落纯文本</b>，消息不会发不出去。选「纯文本」= 逐字回到旧行为。
+      <br>「附件探针」会向当前网页会话上传一个 webcode-probe.md（只上传、绝不发送），
+      上传后立即尝试清理，并把证据节点与清理结果如实报回来——这是「附件到底行不行」
+      唯一不消耗真实会话的读数。
+    </div>
+    <div id="transportLine" class="hint">投递状态加载中…</div>
+    <div id="transportLastLine" class="hint"></div>
+    <div id="transportProbeLine" class="hint"></div>
+
     <label for="sendGapPreset">发送间隔（限流防护）</label>
     <div style="display:flex; gap:8px;">
       <select id="sendGapPreset" style="flex:0 0 150px;">
@@ -151,6 +173,12 @@ button.mini { width: auto; margin-top: 0; padding: 6px 12px; font-size: 13px; }
       document.getElementById('sendGapMs').value = gapMs;
       const presetEl = document.getElementById('sendGapPreset');
       presetEl.value = ['0', '2000', '5000', '10000', '30000', '60000'].includes(String(gapMs)) ? String(gapMs) : 'custom';
+      // 投递形态：后端（GET /settings）已经带默认值回来（未保存过时是 'attach'），
+      // 因此这里只需按值选中；前端不自己造默认值——否则「面板选中项」与「驱动真实
+      // 行为」会各有一份默认，而这两者分叉时用户没有任何办法发现。
+      const transport = data.promptTransport === 'inline' ? 'inline' : 'attach';
+      const radio = document.querySelector('input[name="promptTransport"][value="' + transport + '"]');
+      if (radio) radio.checked = true;
     } catch (e) {
       statusEl.textContent = '加载设置失败: ' + e.message;
       statusEl.className = 'error';
@@ -218,6 +246,54 @@ button.mini { width: auto; margin-top: 0; padding: 6px 12px; font-size: 13px; }
 
   document.getElementById('sendGapPreset').addEventListener('change', (e) => {
     if (e.target.value !== 'custom') document.getElementById('sendGapMs').value = e.target.value;
+  });
+
+  // ---- 投递形态的「生效值 + 最近一次实际结果」（0.16.3） ----------------------
+  // 三行文案全部由服务端算好（GET /attach-status）：这条读数的口径与驱动内的判据
+  // 同源，浏览器侧再写一份格式化就会出现「面板说成功了、驱动其实回落了」。
+  // 记录成因（用户原话）：「没有做到能够把提示词放入文本（设置界面也改为打开文本）
+  // 导致输出对话一开头就很长 token 窗口」——真机读数是 attachTransport
+  // {fallback:true, code:'ATTACH_NOT_CONFIRMED', total:417276}，而当时面板上
+  // 一个字都没有，用户只能看到「对话一开头很长」。
+  async function loadTransportStatus() {
+    const line = document.getElementById('transportLine');
+    try {
+      const d = await fetch(API_BASE + '/attach-status').then((r) => r.json());
+      if (!d || !d.ok) throw new Error((d && d.error) || 'HTTP');
+      line.textContent = '当前生效：' + d.transportLine;
+      document.getElementById('transportLastLine').textContent = '最近一次实际投递：' + d.lastLine;
+      document.getElementById('transportProbeLine').textContent = '附件探针：' + d.probeLine;
+    } catch (e) {
+      line.textContent = '投递状态读取失败：' + (e && e.message ? e.message : e);
+    }
+  }
+
+  document.getElementById('attachProbeBtn').addEventListener('click', async () => {
+    // 探针有副作用（一次真实上传），因此先显式征得同意再跑——上传是外部动作，
+    // 不该由一个「看看」的点击悄悄触发。清理路径在服务端（probeAttachment 的
+    // cleanupAttachment），无论成功失败都会被走到。
+    if (!window.confirm('附件探针会向当前网页会话上传一个 webcode-probe.md（只上传、绝不发送），上传后立即尝试清理。继续？')) return;
+    const btn = document.getElementById('attachProbeBtn');
+    const out = document.getElementById('transportProbeLine');
+    btn.disabled = true;
+    out.textContent = '附件探针运行中（最多 20 秒）…';
+    try {
+      // 这里**不用** apiPost：探针「未确认附件」时回的是 { ok:false, ... } 但
+      // HTTP 仍是 200，而 apiPost 会把 ok:false 当异常抛掉——那样最要紧的那次
+      // 读数（失败现场）就正好被显示层吞了。
+      const res = await fetch(API_BASE + '/attach-probe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: '# webcode attach probe\n' + new Date().toISOString() + '\n' }),
+      });
+      const text = await res.text().catch(() => '');
+      out.textContent = '附件探针返回：' + (text || '(空响应)').slice(0, 600);
+    } catch (e) {
+      out.textContent = '附件探针请求失败：' + (e && e.message ? e.message : e);
+    } finally {
+      btn.disabled = false;
+      loadTransportStatus();
+    }
   });
 
   // ---- 子代理账户与登录管理（与原生面板同一套端点：login / verify-login / window） ----
@@ -356,6 +432,9 @@ button.mini { width: auto; margin-top: 0; padding: 6px 12px; font-size: 13px; }
   document.getElementById('subWindow').addEventListener('click', () => subAction('window'));
   document.getElementById('subAgentSite').addEventListener('change', refreshSubAccount);
   setInterval(refreshSubAccount, 20000);
+  // 投递读数轮询（15s）：真机出问题时用户往往就停在这一页上，读数必须自己更新，
+  // 不能要求他手动刷新（旧版本这一页对附件投递完全沉默）。
+  setInterval(loadTransportStatus, 15000);
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -367,6 +446,9 @@ button.mini { width: auto; margin-top: 0; padding: 6px 12px; font-size: 13px; }
       subAgentMode: document.getElementById('subAgentMode').value,
       subAgentSite: document.getElementById('subAgentSite').value || 'follow',
       sendGapMs: Math.max(0, parseInt(document.getElementById('sendGapMs').value, 10) || 0),
+      // 投递形态（0.16.3）：只有逐字 'inline' 才是「永远纯文本」；服务端在写入侧
+      // 还会再归一化一次（见 web-control 的 POST settings），两处判据同源。
+      promptTransport: (document.querySelector('input[name="promptTransport"]:checked') || {}).value === 'inline' ? 'inline' : 'attach',
     };
     try {
       const res = await fetch(API_BASE + '/settings', {
@@ -386,7 +468,7 @@ button.mini { width: auto; margin-top: 0; padding: 6px 12px; font-size: 13px; }
     }
   });
 
-  loadSettings().then(refreshSubAccount).catch(() => {});
+  loadSettings().then(refreshSubAccount).then(loadTransportStatus).catch(() => {});
 </script>
 </body>
 </html>`;;
