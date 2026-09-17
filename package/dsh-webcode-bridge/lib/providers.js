@@ -136,6 +136,10 @@ export const DEEPSEEK = site({
   sendButton: "div[role='button']:has(path[d^='M8.3125'])",
   stopButton: "div[role='button']:has(path[d^='M2 4.88'])",
   attachSelector: "input[type='file']",
+  // 附件上传后的可见证据（2026-09-18 补充）。DeepSeek 用构建期哈希类名，
+  // 通用类名列表必然零命中。改为宽松选择器：含 webcode/context/markdown 的节点。
+  // 主证据仍是文件名本身（filenameEvidence），这只是提速副证据。
+  attachPreview: "[class*='file'], [class*='attachment'], [data-file], [data-attachment]",
   decoder: 'deepseek', stream: true,
   // 单一模型入口：桥只暴露一个 DeepSeek（深度思考）。
   // 旧版三 pill（快速/专家/识图）已随 2026-09-10 新版 UI 取消——真机实测
@@ -155,6 +159,7 @@ export const GLM = site({
   completionPaths: ['/chatglm/backend-api/assistant/stream'],
   input: 'textarea#chat-input, textarea[placeholder], textarea',
   attachSelector: "input[type='file']",
+  attachPreview: "[class*='file'], [class*='attachment'], [data-file]",
   decoder: 'glm', stream: true,
   // 未登录特征（2026-09-13 真机）：GLM 游客页**自带完整输入框**，旧判定必然把
   // 未登录记成已登录（空 profile 上实测 verify-login 回 true）。它的登录入口
@@ -231,6 +236,7 @@ export const KIMI = site({
   // 「未登录」，点「检测」也没用（检测走的就是同一个输入框判定）。
   input: 'div.chat-input-editor, div[contenteditable="true"], textarea.chat-input, textarea[placeholder], textarea',
   attachSelector: "input[type='file']",
+  attachPreview: "[class*='file'], [class*='attachment'], [data-file]",
   decoder: 'kimi', stream: true,
   // 未登录特征：游客页有可见的「登录」入口（真机实测未登录镜像页文案为
   // 「登录以同步历史会话」+「登录」）。已登录页这两个入口都消失。
@@ -280,6 +286,7 @@ export const QWEN = site({
   // 发送按钮是稳定特征 class .send-button（aria=发送）——与 z.ai 同类问题。
   sendButton: '.send-button',
   attachSelector: "input[type='file']",
+  attachPreview: "[class*='file'], [class*='attachment'], [data-file]",
   decoder: 'openai-sse', stream: true, experimental: true,
   // 未登录特征（2026-09-13 真机）：qwen 游客页**自带完整输入框**
   // （textarea.message-input-textarea 可见），旧判定「有输入框=已登录」于是把
@@ -301,6 +308,7 @@ export const DOUBAO = site({
   // 定位输入框必然失败。
   input: 'div.tiptap.ProseMirror, div[contenteditable="true"], textarea[data-testid="chat_input_input"], textarea',
   attachSelector: "input[type='file']",
+  attachPreview: "[class*='file'], [class*='attachment'], [data-file]",
   decoder: 'doubao', stream: true, experimental: true,
   // 未登录特征：游客页有可见的「登录」按钮；登录后该按钮消失。
   loginProbe: {
