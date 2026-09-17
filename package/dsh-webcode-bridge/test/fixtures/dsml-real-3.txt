@@ -1,0 +1,13 @@
+Let me look at the relevant source files.
+
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="pwsh">
+<｜｜DSML｜｜ parameter name="command">Get-ChildItem package/dsh-webcode-bridge/lib,package/dsh-webcode-bridge/bin,package/dsh-webcode-bridge/test -File | Select-Object @{n='P';e={$_.FullName.Replace((Get-Location).Path+'\','')}},Length | Format-Table -AutoSize | Out-String -Width 200</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="description" string="true">List lib/bin/test files</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ invoke name="grep">
+<｜｜DSML｜｜ parameter name="pattern" string="true">等待|胶囊|pill|等待时间|waited|waitMs|wait</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="path" string="true">package/dsh-webcode-bridge/lib</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="include" string="true">*.cjs</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>

@@ -12,6 +12,7 @@
 //     them locally and loops results back — exactly like a real API.
 
 import { textOfBlocks } from './flatten.js';
+import { repairNamelessClosers } from './dsml-repair.js';
 
 /** Cap one tool output inside a result block (web-side input sanity). */
 const MAX_OUTPUT_CHARS = 16_000;
@@ -23,10 +24,208 @@ const TRAIN_NOTE = '[系统提示] 请保持工具调用格式：以 <tool_call>
  *  只有 ```json 代码块能活到桥。与 buildPreset/serializeFirstTurn 的 glm 分支
  *  同一立场（2026-09-13 两份真机会话 cacaba8c/ab4c6dc8 实锤）。 */
 const TRAIN_NOTE_GLM = '[系统提示] 请保持工具调用格式：先写一行 ```json，其内为单个 JSON 对象 {"mcp_action":"call","name":"工具名","purpose":"原因","arguments":{…}}，再以一行 ``` 结束；不要用 <tool_call> 等标签包裹（会被本网页拦截丢失）。';
+/** DSML 标记的构成字符 ×2，码点 **U+FF5C**（Unicode 名 FULLWIDTH VERTICAL LINE，
+ *  全角竖线，字形 ｜）。**不是** U+FF3C（＼，FULLWIDTH REVERSE SOLIDUS / 全角反斜线）：
+ *  这两个码点在等宽字体下几乎不可分，而 PLAN-2026-09-17-0.16.3 的行文里恰好把 U+FF5C
+ *  写成了「全角反斜线」——所以这里按**码点**写死，别按外形认。
+ *
+ *  真机逐码点读数（test/fixtures/dsml-real-14-step5-grep-pwsh.txt，1204 字符，
+ *  2026-09-17 取自 `POST /__webcode/history` 的网页原话；本机 node 逐码点统计）：
+ *    U+003C U+FF5C U+FF5C U+0044 U+0053 U+004D U+004C U+FF5C U+FF5C U+0020 …
+ *  即 `<` + 该字符 ×2 + `DSML` + 该字符 ×2 + 空格 …；该夹具里 U+FF5C 出现 **88** 次、
+ *  U+FF3C 出现 **0** 次 ⇒ 码点只能是 0xFF5C，改成 0xFF3C 会让归一化（normalizeDsml）、
+ *  边界探测与真机夹具同时失配。
+ *
+ *  常量本身用 charCode 现造、不手写该字符：它与半角 `|`、U+FF3C 在外形上难以区分，
+ *  手写进标记（DSML_OPEN/DSML_CLOSE 拼接的那两处）等于把「改错一个字符」变成一次
+ *  肉眼看不出的 diff。上面两处字形只为对照「哪个码点才是 U+FF5C」，不参与判定。 */
+const DSML_BAR = String.fromCharCode(0xFF5C) + String.fromCharCode(0xFF5C);
+const DSML_OPEN = (name) => '<' + DSML_BAR + 'DSML' + DSML_BAR + ' ' + name + '>';
+const DSML_CLOSE = (name) => '</' + DSML_BAR + 'DSML' + DSML_BAR + ' ' + name + '>';
+/** 一行版骨架：增量轮再教学用它，篇幅小且不打断既有节奏。 */
+const DSML_ONE_LINE = DSML_OPEN('calls') + ' ' + DSML_OPEN('invoke name="工具名"') + ' '
+  + DSML_OPEN('parameter name="参数名"') + '值' + DSML_CLOSE('parameter') + ' '
+  + DSML_CLOSE('invoke') + ' ' + DSML_CLOSE('calls');
+/**
+ * 解析侧的**词形宽容**（0.16.5）——与上面的教学常量刻意分开。
+ *
+ * 教学必须只认**唯一一种**规范写法（模型照抄一份骨架才不会漂移）；解析必须尽量
+ * 认全模型的漂移。两者的目标相反，混成一份就会为了教学而收紧解析——而「收紧解析」
+ * 正是本项目 0.9.2 / 0.14.6 / 0.15.0 三次泄漏事故的共同形状。
+ *
+ * ## 证据（真机会话 063b0a99 的 assistant text 块，逐码点读数，不是推测）
+ *
+ * `.tmp/063b-full.jsonl`（163 帧里有 32 个 text 块）逐块统计：
+ *   畸形标记 `｜｜DSH`（码点 U+FF5C U+FF5C U+0044 U+0053 U+0048）出现 **155** 次，
+ *   正确的 `｜｜DSML`（含 U+004D U+004C）**0** 次。
+ * 桥 `GET /__webcode/preset` 教的**是对的**（返回的骨架里那几个字母是 44 53 4D 4C），
+ * 所以这是**模型漂移**，不是桥的字符串 bug。
+ *
+ * 用 `.tmp/probe-marker-variants.mjs` 枚举出的实际词形（次数=该形状在 text 块里的出现数）：
+ *
+ *   <｜｜DSH calls>                     ×13  开 calls：字母后**没有**竖线，只有一个空格
+ *   <｜｜DSH｜｜ invoke name="read">     ×41  开 invoke：两侧各两个竖线
+ *   /｜｜DSH｜ calls>                    ×9   闭 calls：**丢开头 `<`**，字母后一个竖线
+ *   /｜｜DSH｜invoke>                   ×18  闭 invoke：丢 `<`，字母后一个竖线
+ *   …mjs/｜｜DSH｜｜ parameter>          ×21  闭 parameter：丢 `<`，且**紧贴参数值**
+ *   …parameter｜DSH｜invoke>            ×3   闭 invoke：连 `/` 也丢了
+ *
+ * ## 保守判据（这就是反向安全线，改这里之前先读）
+ *
+ * 1) **竖线必须出现**：`DSML_MARK_SRC` 的两条分支都要求标记区域里有 1–3 个
+ *    全角/半角竖线。真机 155 处畸形**全部**带 `｜`；去掉这条，`<DSH calls>` 这种
+ *    纯字母写法也会被改写，而它在散文里是可想像的（HTML/伪代码里就有 DS 开头的词）。
+ * 2) **后面必须跟已知标记名**（同一份 `DSML_KNOWN_TAG_SRC` 名单）。裸 `<calls>`、
+ *    散文里讲解用的 `<invoke name="x">`（无竖线）**一个字符都不改**——
+ *    test/protocol-leak.test.mjs 的六形态护栏与「普通 HTML 不是边界」两处钉住它。
+ * 3) 字母词形放宽到 `DSML|DSH|DS`（大小写不敏感）、竖线 1–3 个且两侧独立。
+ *    真机全部是 `DSH`；`DS` / `DSML` 只是同一族的下一次漂移，一并认。
+ * 4) 「丢开头 `<`」的**闭**标签额外要求它紧跟在**非空白**字符之后（真机形态都是
+ *    `值/｜｜DSH｜invoke>` 这种「值直接顶着闭标签」）。这条把「行首的裸开标签」
+ *    排除在外：否则 `｜｜DSML｜｜ invoke>`（开标签）会被改写成 `</invoke>`，
+ *    两条调用的参数被并成一条——比不救更坏。
+ */
+/** 标记的构成字符类：全角竖线（U+FF5C）或半角竖线。全角那个用 charCode 现造。 */
+const DSML_BAR_CLS = '[' + String.fromCharCode(0xFF5C) + '|]';
+const DSML_MARK_SRC = '(?:'
+  + DSML_BAR_CLS + '{1,3}\\s*(?:DSML|DSH|DS)\\s*' + DSML_BAR_CLS + '{0,3}'
+  + '|(?:DSML|DSH)\\s*' + DSML_BAR_CLS + '{1,3})';
+/** 标记名白名单：与 0.15.0 那条 lookahead 同一份名单（外加 function/stories）。 */
+const DSML_KNOWN_TAG_SRC = '(?:tool_calls?|toolcall|toolcalls|tool_call|calls|invoke|parameter|call|function|stories)';
+/**
+ * 同一份名单的**数组形态**，给 partialProtocolAt 的「这个写了一半的词是不是
+ * 某个已知标记名的前缀」用。两份必须同时改——`test/parse.test.mjs` 的
+ * 「前缀表宽度由实际候选集决定」那条纪律在这里再次生效。
+ */
+const KNOWN_MARKER_NAMES = Object.freeze([
+  'tool_call', 'tool_calls', 'toolcall', 'toolcalls', 'call_call', 'calls', 'invoke', 'parameter', 'call', 'function', 'stories',
+  // 0.16.4：**标记词自身的前缀**也要在这张表里（`dsml` / `dsh` / `ds`）。
+  //
+  // 为什么（一次真红换来的读数）：dsmlHead 分支要求尾部那个词「确实是某个已知
+  // 标记名的前缀」。而标记名写到一半就断流的真机形态是 `...<｜｜D`（`DSH` 只写了
+  // 一个字母），`D` **不是**任何**标签**名的前缀（标签名是 tool_call/calls/invoke/
+  // parameter…），于是这一格判不出来，`test/protocol-leak.test.mjs` 的
+  // 「withholds a stream cut in the MIDDLE of a marker」当场变红（断言原文：
+  // half marker must be withheld: "｜｜D"）。它在真机上的后果就是**半截标记被当
+  // 正文发出去**——正是用户报的「源文本出现在会话中」的一个子形态。
+  //
+  // 加上这三个前缀后：`D` / `DS` / `DSH` 都算「标记写到一半」，按半成品扣留；
+  // `<｜｜D hello` 这类「字母后面还跟着别的词」仍不算（尾部那个词是 `hello`，
+  // 不在表里），普通散文/HTML 照旧不扣。
+  'dsml', 'dsh', 'ds',
+]);
+/** 与标签名同一条纪律：这两份清单必须同时改（上面是正则源，这里是数组）。 */
+/**
+ * `findProtocolStart` 用的两条锚点源。**逐字包含老锚点的形态**，再并上宽容族：
+ *   • 带 `<`：老锚点是 `<[竖线]*\s*DSML\s*[竖线]*`（竖线两侧都可缺）；
+ *   • 丢 `<`：老锚点是 `[竖线]+\s*DSML\s*[竖线]+`（两侧都要有）。
+ * 老形态进宽容族后仍被覆盖，但这里把老的写法原样留在 `|` 左边，是为了让
+ * 「锚点集合只扩不收」这件事**用眼睛就能核**——收窄锚点会直接放大泄漏量
+ * （0.15.5 的围栏窗口取错就是这么从「扣住几百字符」变成「整段持久化」的）。
+ */
+const DSML_ANGLE_ANCHOR_SRC = '<' + DSML_BAR_CLS + '*\\s*DSML\\s*' + DSML_BAR_CLS + '*'
+  + '|<\\s*' + DSML_MARK_SRC;
+const DSML_BAR_ANCHOR_SRC = DSML_BAR_CLS + '+\\s*DSML\\s*' + DSML_BAR_CLS + '+'
+  + '|' + DSML_MARK_SRC;
+/** `<` + 标记 + 已知标记名 → `<`（开标签；原来那条只认 DSML 字面量）。 */
+const RE_DSML_OPEN = new RegExp('<\\s*' + DSML_MARK_SRC + '\\s*(?=' + DSML_KNOWN_TAG_SRC + '\\b)', 'gi');
+/**
+ * 兜底：仍是标记、后面却不是已知标记名——只剥标记、保留其后的空白与字母。
+ * **两侧竖线都必须有**（比 DSML_MARK_SRC 更严）：少了这条，`<｜｜DSH hello`
+ * 会被接成假标签 `<hello`——0.15.0 的注释专门记过这个坑，这里逐字保留。
+ */
+const DSML_MARK_STRICT_SRC = DSML_BAR_CLS + '{1,3}\\s*(?:DSML|DSH|DS)\\s*' + DSML_BAR_CLS + '{1,3}';
+const RE_DSML_OPEN_BARE = new RegExp('<\\s*' + DSML_MARK_STRICT_SRC, 'gi');
+/** `<` + `/` + 标记 → `</`（闭标签）。 */
+const RE_DSML_CLOSE = new RegExp('<\\/\\s*' + DSML_MARK_SRC, 'gi');
+/**
+ * 丢开头 `<` 的闭标签 → `</`（`/` 分支还会补回被吞掉的 `>`）。三条分支各自对应
+ * 一族真机形态（063b 逐形状枚举，见 `.tmp/probe-marker-variants.mjs`）：
+ *   • `/` 分支        —— `/｜｜DSH｜invoke>`、`/｜｜DSH｜ calls>`、`…mjs/｜｜DSH｜｜ parameter>`
+ *   • `/` 连写分支    —— `/｜DSH｜｜ parameter｜DSH｜invoke>`（前一个闭标签的 `>` 被
+ *                        下一个标记吃掉；063b 里 4 处，靠 `(\\s*>)?` 捕获为 undefined
+ *                        时**补一个 `>`** 修回来——漏了这步会留下 `</parameter</invoke>`，
+ *                        parameter 永远合不上，整条调用被丢）
+ *   • 无斜杠分支      —— `…parameter｜DSH｜invoke>`（连 `/` 也丢了）
+ *
+ * 保守判据（这是反向安全线）：
+ *   • `/` 分支不要求后面是 `>`（斜杠本身就是强信号），但**必须不是属性**
+ *     （`(?!\s+[\w-]+\s*=)`）——否则 `值/｜｜DSML｜｜ invoke name="x">` 这种
+ *     **开**标签会被改成 `</invoke name="x">`，开闭反了会把两条调用的参数并成一条。
+ *   • 无斜杠分支没有斜杠这个信号，判据收紧成「标记名后面只能是 `>` / `<` / 行尾」
+ *     （`(?=\s*$|\s*[<>])`）。开标签写成 `<invoke name="x">` 时括号后跟的是
+ *     `name=`，三个都不匹配 ⇒ 不会把开标签误读成闭标签。
+ */
+const RE_DSML_BARE_CLOSE = new RegExp(
+  '(?:\\/\\s*' + DSML_MARK_SRC + '\\s*(' + DSML_KNOWN_TAG_SRC + ')(?![\\w-])(?!\\s+[A-Za-z_][\\w-]*\\s*=)(\\s*>)?'
+  + '|(?<![\\s<>\\/])' + DSML_MARK_SRC + '\\s*(?=' + DSML_KNOWN_TAG_SRC + '(?![\\w-])(?=\\s*$|\\s*[<>])))', 'gi');
+/** `RE_DSML_BARE_CLOSE` 的替换：`/` 分支把标记名吃进匹配了，所以要自己补回来。
+ *  没有 `>` 时补一个（连写形态）——见上面的注释。 */
+const bareCloseReplacer = (m, name, gt) => (name ? '</' + name + (gt || '>') : '</');
+/**
+ * 丢开头 `<` 的**开**标签：后跟已知标记名时补 `<`。
+ *
+ * lookahead **只要求标记名**、不要求属性——这是 0.15.0 那条规则的原样语义，不能收紧：
+ * `test/parse.test.mjs` 的「normalizeDsml 与 findProtocolStart 形态一致」用
+ * `正文｜DSML｜tool_calls～`（无属性、无 `>`）钉住这一点，收紧成「必须有 `name=`」
+ * 会让它变红（本轮实测红过一次）。
+ *
+ * 与闭标签分支的分工：`RE_DSML_BARE_CLOSE` **先执行**，所以真机里那些
+ * `…parameter｜DSH｜invoke>`、`/｜｜DSH｜invoke>` 在到这里之前就已经变成 `</invoke>`，
+ * 本规则不会把它们改回开标签。
+ */
+const RE_DSML_BARE_OPEN = new RegExp(
+  '(^|[^\\w<])' + DSML_MARK_SRC + '\\s*(?=' + DSML_KNOWN_TAG_SRC + '\\b)', 'gi');
+/**
+ * 多行版 DSML 骨架（DeepSeek 网页**原生**格式）：首轮教学直接抄这一份。
+ *
+ * ## 为什么 deepseek 站点改教 DSML（0.16.2，真机取证，不是推测）
+ *
+ * 桥此前教的是 <tool_call> 标签 + 裸 JSON。但 13/13 份真机夹具
+ * （test/fixtures/dsml-real-*.txt，取自 POST /__webcode/history 的**网页原话**）
+ * 里，模型一次都没用过那个格式——它用的是本网页原生的 DSML。
+ *
+ * 即：旧提示词在**对抗模型的既有先验**。代价是形态漂移，而漂移正是
+ * 「网页明明发了调用、桥却报 TOOL_CALL_UNPARSED」两族的来源：
+ *   · dsml-real-13 —— 闭合标签连名字都省掉（省略写法的闭标签）；
+ *   · dsml-real-7  —— 漏写 invoke 开标签，直接从参数标签起写。
+ * 给出一份**可照抄的规范骨架**，是让模型少漂移的最直接手段。
+ *
+ * ## 为什么抽成常量
+ *
+ * 首轮教学（buildPreset）、首轮传输协议（serializeFirstTurn）与增量轮再教学
+ * （trainNoteFor）三处必须教**同一个**骨架。项目已有纪律「两处各写一份协议必然
+ * 漂移」（见 prompt-variants.js 顶部），这里是它的又一次应用。
+ */
+export function dsmlSkeleton() {
+  return [
+    DSML_OPEN('calls'),
+    DSML_OPEN('invoke name="工具名"'),
+    DSML_OPEN('parameter name="参数名"') + '参数值' + DSML_CLOSE('parameter'),
+    DSML_CLOSE('invoke'),
+    DSML_CLOSE('calls'),
+  ].join('\n');
+}
+/**
+ * deepseek 站点的再教学提示（0.16.2）。四件事必须说破，各对应一族真机漂移：
+ *   1) 开标签写了 name，闭合标签也要写同名（挡省略名字的闭合写法）；
+ *   2) 每个 invoke 都要有开标签（挡「直接从参数标签起写」）；
+ *   3) 参数值直接写、不要加引号；
+ *   4) 标记的四个字母必须写全 `DSML`（0.16.5 加：真机会话 063b0a99 里模型把它
+ *      缩写成 `DSH`，155 处畸形标记全是这一族，协议原文因此整段漏进助手正文）。
+ */
+const TRAIN_NOTE_DSML = '[系统提示] 请保持工具调用格式（本网页原生的 DSML）：'
+  + DSML_ONE_LINE
+  + '。标记必须完整写成 ' + DSML_BAR + 'DSML' + DSML_BAR + '（四个字母 DSML，不要缩写成 DSH / DS 或任何别的写法，'
+  + '缩写的标记不会被识别、整段调用会以源码形式漏进回复）；'
+  + '每个参数一个 parameter 标签；开标签写了 name，闭合标签也必须写同一个 name（不要用省略名字的闭合写法）；'
+  + '每个 invoke 都要有开标签与闭标签；参数值直接写，不要加引号。';
+/** 站点 → 再教学提示。未列出的站点保持 0.14.7 措辞逐字不变。 */
+const TRAIN_NOTES = Object.freeze({ glm: TRAIN_NOTE_GLM, deepseek: TRAIN_NOTE_DSML });
 /** 按站点取再教学提示——增量轮的 resultBlock 与首轮教学必须同一立场，否则
- *  模型刚被纠回代码块形状，第 5 个工具结果又把它教回标签形状。 */
+ *  模型刚被纠回一种形状，第 5 个工具结果又把它教回另一种。 */
 export function trainNoteFor(siteId, extra = '') {
-  const base = siteId === 'glm' ? TRAIN_NOTE_GLM : TRAIN_NOTE;
+  const base = TRAIN_NOTES[String(siteId || '').trim()] || TRAIN_NOTE;
   // extra 只在实验变体里非空；默认路径（'' ）返回值与 0.14.7 逐字相同。
   return extra ? base + extra : base;
 }
@@ -130,6 +329,15 @@ export function buildPreset(options = {}) {
         '{"mcp_action": "call", "name": "工具名", "purpose": "执行此操作的简要原因", "arguments": {"参数名": "值"}}',
         '```',
         '警告：不要使用 <tool_call>…</tool_call> 或任何 XML/标签包裹调用——本网页会把这类标签当成它自己的内置工具抢走执行并报 unknown tool call，调用会静默丢失；只有 ```json 代码块能到达本地工具网关。',
+      ] : options.siteId === 'deepseek' ? [
+        // 0.16.2：教**本网页原生**的 DSML。真机 13/13 份夹具里模型用的都是它，
+        // 旧提示词教标签 + 裸 JSON 等于让模型做一次格式翻译，翻译中途的形态漂移
+        // 正是「调用被丢」的来源（见 dsmlSkeleton 的注释）。
+        '需要调用工具时，用**本网页原生的 DSML** 格式输出（这是你在本网页里最自然的写法，不要改写成别的形状）：',
+        dsmlSkeleton(),
+        '标记必须完整写成 ' + DSML_BAR + 'DSML' + DSML_BAR + '（四个字母 DSML）——**不要**缩写成 DSH、DS 或别的写法：缩写的标记桥认不出来，整段调用会以源码形式出现在回复里。',
+        '每个参数一个 parameter 标签；开标签写了 name，闭合标签也必须写同一个 name——**不要用省略名字的闭合写法**（那会让调用无法解析）。',
+        '每个 invoke 都要有开标签与闭标签；参数值直接写，不要加引号。一次回复可以写多个 invoke。',
       ] : [
         '需要调用工具时，任选下面一种格式输出（两种都能被识别，推荐格式 A）：',
         '格式 A（推荐，以标签包裹）：',
@@ -196,6 +404,11 @@ export function serializeFirstTurn(options = {}) {
   // 维持既有文字逐字不动。
   const transport = !options.tools?.length ? '' : options.siteId === 'glm'
     ? '\n[本地工具传输协议]\n必须使用 ```json 代码块发起工具调用：先写一行 ```json，下一行是单个 JSON 对象 {"mcp_action":"call","name":"实际工具名","purpose":"原因","arguments":{…}}，再以一行 ``` 结束。不要使用 <tool_call> 等标签包裹——本网页会把这些标签当成它自己的内置工具抢走执行并报 unknown tool call，调用会静默丢失。工具名和参数必须严格匹配上面的 schema（arguments 必须包含 required 里的每个字段，如 pwsh 的 description）。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。' + presentTransportNote(options.tools)
+    : options.siteId === 'deepseek'
+      // 0.16.2：与首轮教学、增量轮再教学同源（DSML_ONE_LINE 是唯一骨架）。
+      // 「省略名字的闭合写法」这一句必须在传输协议里也出现一次——它是夹具 13
+      // 那一族漂移的直接对策，而模型在收尾那一刻最容易忘。
+      ? "\n[本地工具传输协议]\n用本网页原生的 DSML 发起工具调用，形状：" + DSML_ONE_LINE + "。标记必须完整写成 " + DSML_BAR + "DSML" + DSML_BAR + "（四个字母，不要缩写成 DSH）。开标签写了 name，闭合标签必须写同一个 name，不要用省略名字的闭合写法。" + "工具名和参数必须严格匹配上面的 schema。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。" + presentTransportNote(options.tools)
     : '\n[本地工具传输协议]\n必须使用 <tool_call>{"mcp_action":"call","name":"实际工具名","arguments":{}}</tool_call> 发起工具调用。工具名和参数必须严格匹配上面的 schema。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。' + presentTransportNote(options.tools);
   return [preset, '[会话开始]', text || '（用户未提供文字）', transport].filter(Boolean).join('\n\n');
 }
@@ -593,15 +806,34 @@ function jsonObjectIn(text) {
  * 换行也吃掉，凭空把散文接成 `<hello` 这种假标签。
  */
 export function normalizeDsml(text) {
-  return String(text ?? '')
-    // 带开头 `<`，且后面确实是已知标记名：连标记后的空格一起吃掉。
+  // 先做无名闭合标签的栈式还原（0.16.2）：它必须在下面几条规则**之前**跑，
+  // 因为那些规则会把标记剥掉、之后就再也认不出原本该闭合的是 parameter 还是
+  // invoke。两个真机形态（夹具 13 的匿名闭合、夹具 7 的缺 invoke 开标签）
+  // 都靠这一步救回。纯函数，见 lib/dsml-repair.js。
+  //
+  // ⚠ 0.16.5 词形宽容的**已知缺口**（照实写下，别当它不存在）：上面这步
+  //   （lib/dsml-repair.js）的标记正则里 `DSML` 是字面量，所以 `｜｜DSH` 族的
+  //   **无名闭合**（`/｜｜DSH｜>` 这种）救不回来。真机 063b 的 155 处畸形里
+  //   无名闭合 **0** 处，缺口不落在已观测路径上；补它要把 dsml-repair 的正则
+  //   也参数化，那是另一个改动单元，不在本次范围。
+  return repairNamelessClosers(String(text ?? ''))
+    // 带开头 `<`，且后面确实是已知标记名：连标记与标记后的空格一起吃掉。
     // 先写这条、再写不吃空格的兜底——正则按书写顺序执行，前者命中后后者不再有机会。
-    .replace(/<\s*[\uFF5C|]+\s*DSML\s*[\uFF5C|]+\s*(?=(?:tool_calls?|toolcall|toolcalls|tool_call|calls|invoke|parameter|call)\b)/gi, '<')
+    // 0.16.5：词形放宽到 DSML|DSH|DS（真机 155/155 用的是 DSH，见常量区注释）。
+    .replace(RE_DSML_OPEN, '<')
     // 兜底：仍是标记，但后面不是已知标记名——只剥标记，保留其后的空白
-    .replace(/<\s*[\uFF5C|]+\s*DSML\s*[\uFF5C|]+/gi, '<')
-    .replace(/<\/\s*[\uFF5C|]+\s*DSML\s*[\uFF5C|]+\s*/gi, '</')
-    // 丢开头 < 的裸标记（<invoke …）：只在后跟已知标记名时补 <，避免误伤正文
-    .replace(/(^|[^\w<])[\uFF5C|]+\s*DSML\s*[\uFF5C|]+\s*(?=(?:tool_calls?|calls|invoke|parameter)\b)/gi, '$1<');
+    .replace(RE_DSML_OPEN_BARE, '<')
+    // 带 `<` 的闭标签（`</｜｜DSH｜｜ invoke>`、`</｜｜DSH｜ calls>`）
+    .replace(RE_DSML_CLOSE, '</')
+    // 丢开头 < 的裸标记：闭标签（`/｜｜DSH｜invoke>`、紧贴参数值的
+    // `…值｜DSH｜invoke>`、两个闭标签连写的 `…parameter｜DSH｜invoke>`）补 `</`；
+    // 开标签（后跟带属性的已知标记名）补 `<`。
+    // 闭标签那条**必须**用 bareCloseReplacer 而不是字符串 `'</'`：`/` 分支把标记名
+    // 吃进了匹配（要吃它才能补回被吞掉的 `>`），用字符串替换会把标记名一起删掉，
+    // 结果 `｜｜DSH｜ calls>` 变成孤零零的 `</`——实测把 13 个真机块的 16 条调用
+    // 全部打回 0 条。
+    .replace(RE_DSML_BARE_CLOSE, bareCloseReplacer)
+    .replace(RE_DSML_BARE_OPEN, '$1<');
 }
 
 /** 协议文本起点的锚点。命中最早的一个即为边界。 */
@@ -641,8 +873,13 @@ const PROTOCOL_ANCHORS = [
   //
   // 安全性：`\b` 让 `<calling>` 不命中（`call` 后跟 `i` 都是词字符，词边界不成立）。
   /<\s*\/?\s*(?:tool_call|tool_calls|toolcall|toolcalls|tool_result|tool_results|call_call|calls|call|function|stories|invoke)\b/i, // 半角标签
-  /<[\uFF5C|]*\s*DSML\s*[\uFF5C|]*/i,                              // <（真机主形态）
-  /[\uFF5C|]+\s*DSML\s*[\uFF5C|]+/i,                               // 丢开头 < 的 ｜DSML｜
+  // `<`（真机主形态）。0.16.5：老形态（DSML，两侧竖线都可缺）**逐字保留**，
+  // 后面并上宽容族 —— 见上方 DSML_MARK_SRC 的证据与保守判据。
+  // 注意它和下面那条都**不要求**后面跟已知标记名：锚点的职责只是「协议从这里开始」，
+  // 断流轮里标记后面什么都可能是（真机 seq=812 那条 29,650 字符就是成串噪声）。
+  new RegExp(DSML_ANGLE_ANCHOR_SRC, 'i'),
+  // 丢开头 `<` 的形态：老形态（两侧竖线都有）+ 宽容族（`｜｜DSH calls>` 字母后没有竖线）。
+  new RegExp(DSML_BAR_ANCHOR_SRC, 'i'),
   /```/,                                                           // ```json 围栏
   /\*\*Calling:/i,                                                 // 网页 Calling 渲染
   /(?:^|\n)[ \t]*\{/,                                              // 裸 JSON 对象行
@@ -1010,6 +1247,11 @@ export function partialProtocolAt(text, scope = 24) {
   // 少了这里，`<toolcal` 这种流式半成品会被当散文发出去，紧接着 `l>` + 调用 JSON 也漏出
   // ——正是 0.9.2 记下的那个形态，只是换了一个标签名。前缀表的宽度由
   // findProtocolStart 里归一化后的实际候选集决定，两者漂移就是泄漏。
+  //
+  // 0.16.5：畸形标记（`｜｜DSH` 族）**不需要**在这里单列——normalizeDsml 已经把
+  // 「标记 + 完整已知标记名」折叠成这里的标准前缀，所以 `<｜｜DSH invoke` 进到
+  // 这张表时已经是 `<invoke`。标记名也写了一半的（`<｜｜DSH inv`）归一化不动它，
+  // 由下面的 dsmlHead 判据兜住。
   const prefixes = ['<tool_call', '<tool_calls', '<toolcall', '<toolcalls', '<call_call', '<call', '<invoke', '<parameter', '<function', '<stories', '**Calling:'];
   // 半成品标记的起点下标（归一化串上算出来的，再映射回原串）。
   const locate = (n) => {
@@ -1023,20 +1265,38 @@ export function partialProtocolAt(text, scope = 24) {
     if (prefixes.some(p => p.startsWith(tail))) return locate(n);
   }
   // DSML 标记写到一半（0.15.0 真机实锤）：流被掐断时尾部可能是 `...<｜` 或
-  // `...<｜｜DSM`。**归一化救不了这一段**——normalizeDsml 的两条规则都要求
-  // `DSML` 四个字母齐全，`DSM` 不匹配任何一条，于是 s 里它原样还在，
-  // 上面按 `<` 开头的 prefix 比较也一个都不命中，半成品就这样被当散文发出去。
+  // `...<｜｜DSM`。**归一化救不了这一段**——normalizeDsml 的规则都要求标记完整
+  // （或至少后面跟一个完整的已知标记名），`DSM` 不匹配任何一条，于是 s 里它原样
+  // 还在，上面按 `<` 开头的 prefix 比较也一个都不命中，半成品就这样被当散文发出去。
   // 真机证据：会话 session-a6835ca1 seq=812 那条 29,650 字符的消息，正文里同时
   // 有完整调用 JSON 和成串的闭合标签噪声——断流轮次的尾部形态本来就不可控。
-  // 判据：尾部以 `<` 开头、且其后只由全角/半角竖线、DSML 的字母前缀组成。
-  // 用 lookahead 逐字判，`<｜x` 这种（x 既不是竖线也不是 D/S/M/L）不算半成品，
-  // 普通散文不会被误扣。
-  const dsmlHead = /<[｜|\uFF5C]*(?:D(?:S(?:M(?:L)?)?)?)?$/.exec(s.slice(-scope));
+  // 判据：尾部以 `<` 开头、且其后只由全角/半角竖线、DS 族的字母前缀组成。
+  //
+  // 0.16.5 两处扩：字母族加上 `H`（真机 155 处写的都是 `DSH`），并允许标记后面
+  // 再跟一个**写到一半的标记名**（`<｜｜DSH inv`）——那种尾部归一化同样不动它
+  // （lookahead 要求完整标记名），只靠上面那张精确前缀表也拦不住。
+  // 误扣的防线不是「别扣」而是「扣得准」：末尾那个词必须确实是某个已知标记名的
+  // 前缀（`<｜｜DSH ello` 不算，普通散文/HTML 照旧不扣），且整段必须含竖线或字母族。
+  const dsmlHead = new RegExp(
+    '<[\\uFF5C|]*\\s*(?:D(?:S(?:M(?:L)?|H)?)?)?[\\uFF5C|]*\\s*(?:[A-Za-z_][\\w-]*)?$').exec(s.slice(-scope));
   if (dsmlHead) {
-    // 至少要有「一个竖线」或「D/S/M/L 里至少一个字母」，否则 `<` 单个字符
+    const namePart = (/[A-Za-z_][\w-]*$/.exec(dsmlHead[0]) || [''])[0];
+    const nameIsPartialTag = !namePart || KNOWN_MARKER_NAMES.some((n) => n.startsWith(namePart.toLowerCase()));
+    // 至少要有「一个竖线」或「D/S/M/H 里至少一个字母」，否则 `<` 单个字符
     // 交给下面那条通用规则处理，避免把普通的 `<` 结尾也判成 DSML 半成品。
-    if (/[｜|\uFF5C]|[DSML]/.test(dsmlHead[0])) {
-      const at = raw.lastIndexOf(dsmlHead[0]);
+    if (nameIsPartialTag && (/[\uFF5C|]|[DSMH]/.test(dsmlHead[0]))) {
+      // **位置必须定位到那个 `<`，不能用 lastIndexOf(匹配到的 head)**（0.16.4 修正）。
+      //
+      // 真机与护栏同时钉住的反例：尾部是 `<｜｜D`（标记名只写了一个字母就断流）。
+      // 旧写法 `raw.lastIndexOf('｜｜D')` 找到的是**竖线**的位置，把前面的 `<` 留在
+      // 外发区间里 —— 于是「半截标记不外发」这条判据在 `｜｜D` 这一格失效，
+      // `test/protocol-leak.test.mjs`「withholds a stream cut in the MIDDLE of a
+      // marker」因此变红（断言原文：half marker must be withheld）。
+      //
+      // 判据的更一般形态：这条分支匹配的 head **一定以 `<` 开头**（正则第一个字符
+      // 就是 `<`），所以「这一段从哪里开始」= 「尾部里那个 `<` 在哪」。取不到 `<`
+      // 就放弃这条分支，交给下面那条通用规则。
+      const at = raw.lastIndexOf('<', raw.length - dsmlHead[0].length + 1);
       if (at >= 0) return at;
     }
   }
@@ -1062,6 +1322,86 @@ export function stripProtocolText(text) {
   const raw = String(text ?? '');
   const { index } = findProtocolStart(raw);
   return index < 0 ? raw : raw.slice(0, index).trimEnd();
+}
+
+/**
+ * 一个协议区间的**终点**（排他下标）；-1 = 不能可信定位。
+ *
+ * ## 为什么需要它（T2-D 的用户症状：「话说到一半就没了」）
+ *
+ * `stripProtocolText` 在**第一个协议起点处截断**，于是「调用之后的那段正文」永远
+ * 拿不回来。真实一轮里模型写的是「散文 → 调用 → 又一段散文」，而增量通道可能只送
+ * 到调用前那段散文（权威全文与增量通道不必等量），块内容于是只剩前半句。
+ * 护栏 `test/markdown-block-integrity.test.mjs` ③ 钉的就是这个判据
+ * （权威全文 = PROSE1 + CALL + PROSE2 ⇒ 块内容必须等于 PROSE1 + PROSE2）。
+ *
+ * ## 判据（**宁可少救，不可错救**）
+ *
+ * 只在能可信定位区间闭合时返回终点：
+ *   · 容器族 `<calls>` / `<tool_call>` / `<function>` / `<stories>` → 它自己的闭合标签；
+ *   · `<invoke …>` → 第一个 `</invoke>`（一个 invoke 里的 parameter 不嵌套 invoke）；
+ *   · ``` 围栏 → 之后的下一个 ```；
+ *   · 其它（裸 JSON 对象行 / `**Calling:` / 孤立闭合残片）→ **-1**。
+ * 裸 JSON 也返回 -1 的理由：它的终点要靠花括号配平（readCallAt）算，而「配平失败」
+ * 与「JSON 还没写完」在断流轮里无法区分——那种情况下少救（把后续正文一起丢掉）比
+ * 错救（把协议 JSON 当正文发出去）安全，这正是 0.9.2 / 0.14.6 / 0.15.0 三次泄漏
+ * 事故的共同教训。
+ *
+ * @param {string} src **已归一化**的文本（索引才与 findProtocolStart 对齐）
+ * @param {number} start 协议起点下标
+ * @returns {number}
+ */
+function protocolRegionEnd(src, start) {
+  const s = src.slice(start);
+  if (/^\s*```/.test(s)) {
+    const open = s.indexOf('```');
+    const close = s.indexOf('```', open + 3);
+    return close < 0 ? -1 : start + close + 3;
+  }
+  const container = /^\s*<\s*(calls|tool_calls?|toolcall|toolcalls|function|stories)\b[^>]*>/i.exec(s);
+  if (container) {
+    const closeRe = new RegExp('<\\s*\\/\\s*' + container[1] + '\\s*>', 'i');
+    const m = closeRe.exec(s.slice(container[0].length));
+    return m ? start + container[0].length + m.index + m[0].length : -1;
+  }
+  if (/^\s*<\s*invoke\b/i.test(s)) {
+    const m = /<\s*\/\s*invoke\s*>/i.exec(s);
+    return m ? start + m.index + m[0].length : -1;
+  }
+  return -1;
+}
+
+/**
+ * 权威全文 → 权威**散文**：逐个剔除协议区间，把两侧的散文拼起来。
+ *
+ * 与 `stripProtocolText` 的分工：那个是「从第一个协议起点截断」的保守版（用于不
+ * 关心「调用之后还有正文」的场景）；这个是「把协议区间挖掉、两侧都留下」的版本，
+ * 用于**块内容必须逐字等于权威散文**的收口（lib/index.js 的文本块收口）。
+ *
+ * 不可信定位时**立刻返回已收集的部分**（剩下的按旧行为当协议丢掉）——因此它相对
+ * `stripProtocolText` 只多救「闭合标签齐全」的那些区间，不会放宽任何一条非协议判据。
+ *
+ * 返回的是**归一化后**的坐标。normalizeDsml 只在协议区间内部缩短文本，区间**之前**
+ * 的散文逐字不变，所以调用方拿它与原始流的切片做 `startsWith` 比对是成立的。
+ *
+ * @param {string} text 权威全文
+ * @returns {string}
+ */
+export function stripProtocolRegions(text) {
+  const s = normalizeDsml(String(text ?? ''));
+  let out = '';
+  let cursor = 0;
+  // 上限刻意很小：一轮里的协议区间就是「几条调用」，64 足够；到上限即停并返回已
+  // 收集的部分（同样退化成旧行为，绝不因此外发协议原文）。
+  for (let guard = 0; guard < 64; guard += 1) {
+    const { index } = findProtocolStart(s, cursor);
+    if (index < 0) return out + s.slice(cursor);
+    out += s.slice(cursor, index);
+    const end = protocolRegionEnd(s, index);
+    if (end < 0) return out;
+    cursor = Math.max(end, index + 1);
+  }
+  return out;
 }
 
 /**
@@ -1361,7 +1701,7 @@ export function parseAgentReply(text, options = {}) {
   // 还存在「已开而未闭」的 <parameter>，就继续延伸到把它配平的位置。
   // 这样示例里的孤立 </invoke>（前面没有未闭的 parameter）不会造成截断，
   // 而真正的调用边界（parameter 已配平）依然精确。
-  const invokeOpenRe = /<\s*invoke\s+name\s*=\s*"([^"]+)"\s*[^>]*>/gi;
+  const invokeOpenRe = /<\s*invoke\s+name\s*=\s*"([^"]*)"\s*[^>]*>/gi;
   while ((m = invokeOpenRe.exec(s)) !== null) {
     const bodyStart = m.index + m[0].length;
     const bodyEnd = invokeBodyEnd(s, bodyStart);

@@ -1,0 +1,12 @@
+Let me explore the package and recent progress docs.
+
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="pwsh">
+<｜｜DSML｜｜ parameter name="command" string="true">Get-ChildItem -Recurse package/dsh-webcode-bridge -File | Where-Object { $_.FullName -notmatch 'node_modules' } | Select-Object @{n='Path';e={$_.FullName.Replace((Get-Location).Path + '\','')}},Length | Sort-Object Path | Format-Table -AutoSize | Out-String -Width 200</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="description" string="true">List bridge package files</｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ invoke name="pwsh">
+<｜｜DSML｜｜ parameter name="command" string="true">git diff --stat; Write-Output "=== package.json ==="; Get-Content package/dsh-webcode-bridge/package.json</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="description" string="true">Show diff stat and package.json</｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>

@@ -1,0 +1,10 @@
+Let me dig into the wait mechanism and settings UI.
+
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="pwsh">
+<｜｜DSML｜｜ parameter name="command">Get-Content package/dsh-webcode-bridge/lib/client.cjs | Select-Object -Skip 1255 -First 250 | ForEach-Object -Begin {$i=1256} -Process { "{0,5}: {1}" -f $i,$_; $i++ }</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="description" string="true">Read settings section of client.cjs</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ parameter name="command">grep -n "sendGapMs\|sendWaitMs\|sincePrevSendMs\|gapTargetMs" package/dsh-webcode-bridge/lib/relay.js package/dsh-webcode-bridge/lib/index.js package/dsh-webcode-bridge/lib/providers.js | Select-Object -First 60</｜｜DSML｜｜ parameter name="description" string="true">Grep wait fields in relay/index</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>

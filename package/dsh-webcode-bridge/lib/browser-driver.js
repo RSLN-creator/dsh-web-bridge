@@ -185,6 +185,104 @@ export function composerWritePlan({ length = 0, chunkChars = 20_000, kind = 'fie
 }
 
 /**
+ * 提示词投递计划（纯函数）：超长正文走**附件**还是继续 inline（0.16.2）。
+ *
+ * ## 为什么需要它
+ *
+ * 真机实测：`GET /__webcode/preset` 读到 `promptChars: 409555`。这 40 万字符里
+ * 90% 是会话 transcript，全部作为**纯文本**灌进网页输入框。纯文本投递有两个
+ * 已经发生过的真机事故：`PROMPT_WRITE_STALLED`（写入期间长度不再增长）与
+ * `PROMPT_TRUNCATED`（网页只收了半截）。把长正文改为附件投递，是绕开输入框
+ * 长度与写入性能问题的直接手段。
+ *
+ * ## 为什么抽成纯函数
+ *
+ * 与 `composerWritePlan` 同一条纪律：「多少算太长」是一个会随站点与网页改版
+ * 变化的阈值，写成可断言的数据比埋在两个 async 分支里可靠。
+ *
+ * ## 默认必须保守（三个条件缺一不可）
+ *
+ *   · `attachEnabled`  —— 配置开关，**默认关**。没开就永远 inline，
+ *                         即默认行为与 0.16.1 逐字相同。
+ *   · `attachSupported`—— 页面真的有可用的文件上传入口（探测结果）。
+ *   · `inlineLimit > 0`—— 阈值本身要有效。
+ *
+ * 任一不成立就回落 `inline`。这条「宁可 inline，不要发不出去」的取向与
+ * `uploadImages` 的「附件未确认就报错」是一致的：投递方式是实现细节，
+ * 而「消息必须发出去」是用户可见的契约。
+ *
+ * ## 附件也有自己的上限（0.16.3 新增 maxChars）
+ *
+ * 判定「改走附件」只解决了输入框，附件本身仍要过网页的上传与模型读取：把整份
+ * 40 万级字符塞进去，是拿上传/风控换输入框，不是解决问题。因此 `chars > maxChars`
+ * 时 **mode 不变**（仍是 attach），只多出 `truncate:true` 与 `kept`——**截断是投递
+ * 层的事，不是判定层的事**。保留哪个方向由调用点决定（见 runTurn：保尾部，因为
+ * 尾部才是当下要执行的内容），且必须把「已省略前 N 字符」写出来，绝不静默丢内容。
+ *
+ * `payloadChars` = **真正会上传的字符数**（截断时 = kept，否则 = total），
+ * 一次性回答「这一轮到底有多少字符进了网页」，让日志/`onThink` 读数有唯一口径。
+ *
+ * 缺失（`undefined`）才取默认 `1_500_000`；**显式传非法值（`<=0` / `NaN` / 非数字 /
+ * `null`）一律视为不设上限**（truncate:false、payloadChars=total）。这样「配置写错」
+ * 只会退化成 0.16.2 的旧行为，而不是把这一轮的消息悄悄砍成半截。调用点若拿不到
+ * 宿主配置（`cfg.attachMaxChars` 未透传 = `undefined`），必须显式传 `null`——
+ * 缺配置时的正确行为是「不砍消息」，不是「按默认值砍」。
+ *
+ * ## 设置面的「投递形态」开关（0.16.3 新增 transport）
+ *
+ * `transport: 'inline'` 是**用户显式要求纯文本**（设置页单选「纯文本」），它是
+ * 判定层的第一优先级：命中就返回 `inline` / `reason:'transport-inline'`，不再看
+ * 阈值与入口。这条**不改变任何既有判据的语义**——旧入参（不传 transport）走的分支
+ * 与 0.16.2 逐字相同，默认值也是 `'attach'`（即「不由这一层强制」）。
+ *
+ * 为什么不让调用点直接 `if (transport === 'inline') skip`：那样「走没走附件」的
+ * 判据就有两处（调用点的 if 与这里的阈值），而真机出过的正是这类漂移——同一个
+ * 判断写两份，一份改了另一份没改。reason 也必须是**新的**一个值，不能借用
+ * `attach-disabled`：那句话在面板上会被读成「附件功能被关掉了」，而用户只是选了纯文本。
+ *
+ * @param {{chars?: number, inlineLimit?: number, attachSupported?: boolean, attachEnabled?: boolean,
+ *   maxChars?: number, transport?: 'attach'|'inline'}} o
+ * @returns {{mode: 'inline'|'attach', reason: string, total: number, limit: number,
+ *   payloadChars: number, truncate: boolean, kept: number|null, maxChars: number|null}}
+ */
+export function promptTransportPlan(o = {}) {
+  const total = Math.max(0, Math.floor(Number(o.chars) || 0));
+  const limit = Number(o.inlineLimit) > 0 ? Math.floor(Number(o.inlineLimit)) : 0;
+  // 1_500_000 不是网页的实测上限，是「真机已知最大 409555 字符（GET /__webcode/preset
+  // 的 promptChars，见本函数上方注释）的约 3.7 倍」这个余量的落点：真机正常轮次离它
+  // 很远，触到它的输入本就该怀疑是不是上下文失控了。
+  const rawMax = o.maxChars === undefined ? 1_500_000 : Number(o.maxChars);
+  const maxChars = Number.isFinite(rawMax) && rawMax > 0 ? Math.floor(rawMax) : null;
+  const cap = (mode, reason) => {
+    // 截断字段**只在真的要走附件时**才有意义（0.16.3 修正，实测发现的口径歧义）。
+    //
+    // 修前的读数是：`attachEnabled:true, attachSupported:false`（页面没有上传入口）
+    // 且 chars 超上限时，plan 给 `mode:'inline', truncate:true, payloadChars:1500000`——
+    // 而 inline 路径**一个字符都不会截**，2,000,000 字符原样写进输入框。
+    // 字段名写的是「会发多少」，读数却是「假如走附件会上传多少」，两句话不是一件事。
+    // 它今天没有造成故障（调用点只在 attach 分支读这两个字段），但它是**下一次**
+    // 「按读数做决策」的陷阱，也是这种「读数与事实不符」在项目里已经出过多次的形态。
+    //
+    // 因此这里把它归零：inline ⇒ 不截断、payloadChars = 真正外发的 total。
+    // 「若走附件会上传多少」这个信息在 mode 变成 attach 时会自己回来，不丢。
+    const truncate = mode === 'attach' && maxChars !== null && total > maxChars;
+    return {
+      mode, reason, total, limit,
+      payloadChars: truncate ? maxChars : total,
+      truncate,
+      kept: truncate ? maxChars : null,
+      maxChars,
+    };
+  };
+  if (o.transport === 'inline') return cap('inline', 'transport-inline');
+  if (!o.attachEnabled) return cap('inline', 'attach-disabled');
+  if (!o.attachSupported) return cap('inline', 'no-attach-input');
+  if (limit <= 0) return cap('inline', 'no-limit');
+  if (total <= limit) return cap('inline', 'under-limit');
+  return cap('attach', 'over-limit');
+}
+
+/**
  * 停滞判定（纯函数）：块间回读长度不增长即计入停滞，连续两块即判死。
  *
  * 为什么是「连续两块」而不是「一块」：富文本编辑器（tiptap/ProseMirror）在
@@ -244,12 +342,25 @@ export function createBrowserDriver(options = {}) {
     // 长度——一次性写 80 万字符会让 Playwright 的 fill 整段卡死（真机证据见
     // fillComposer 的注释）。0 或非法值走默认 20_000。
     composerChunkChars: Number(options.composerChunkChars) > 0 ? Number(options.composerChunkChars) : 20_000,
+    // 超过这个字符数就改走**附件**投递（0.16.2）。**默认 0 = 关闭**：没有真机
+    // 配对数据之前不改变默认行为。见 promptTransportPlan 的注释。
+    attachInlineLimitChars: Number(options.attachInlineLimitChars) > 0 ? Number(options.attachInlineLimitChars) : 0,
     // 「只出思维链、永远不出正文」的绝对上限（0.15.2）。与 requestTimeoutMs 的分工：
     // 那个是**整轮**（含正常的长思考 + 长正文）的总兜底，240s 到点时用户已经干等
     // 四分钟且报错是通用 timeout；这个从**最后一次正文/图片**起算，专抓「思考完
     // 就没下文」这一形态。0 / 非有限值 = 关闭该判据（见 metrics.shouldSettleStalledThinking）。
     answerTimeoutMs: Number(options.answerTimeoutMs) >= 0 ? Number(options.answerTimeoutMs) : 180_000,
     decoderPath: options.decoderPath ?? null,
+    // 注入式页面（**离线护栏专用**，`options.page`）：给了它，`ensure()` 就把它
+    // 当成已就绪的页面，一个浏览器都不启动，runTurn 的全部页面交互打在这个脚本
+    // 页上（护栏须提供 url/goto/locator/evaluate 等最小方法，见 test/ 的用例）。
+    //
+    // 为什么需要一个注入口：「落地即落盘」（sessionSlot / navTrace）这条安全线的
+    // 反向验证必须能离线跑——真机事故的形态是「导航落地成功、这一轮随后失败」，
+    // 只有把页面脚本化才造得出这个相位；而真机 Edge 不能在 CI 里跑。
+    // 它与 `rateLimitBackoffMinMs`（仅供离线测试调小）同一条纪律：**只为测试存在**，
+    // 生产路径不构造，缺省 null 时行为与旧版本逐字相同。
+    injectedPage: options.page ?? null,
     logger: options.logger ?? console,
   };
   const SEL = {
@@ -295,6 +406,36 @@ export function createBrowserDriver(options = {}) {
   // 本轮收束原因，供 /status 与右栏显示：finished | partial-wip-settled |
   // partial-wip-settled(dom-unavailable) | timeout。null = 尚未跑过轮次。
   let lastEndReason = null;
+  // 0.16.3：上面那条收束原因**是什么时候**写的（epoch ms）。
+  //
+  // 为什么必须有它：真机事故 2026-09-17 18:43 的报错文本是
+  // 「WEB_NO_PROGRESS: …（页面在，本轮收束原因 finished）」——而那一轮**根本没跑完**，
+  // `finished` 是**上一轮**的收束原因。它被无标注地借用，把「网页那侧还在生成」
+  // 读成了「网页已经收束过、所以桥该收到东西」，排查方向当场被带偏。
+  // 记住写入时刻，报错里就能把「刚刚这一轮」与「很久以前那一轮」分开。
+  let lastEndReasonAt = null;
+  /** 收束原因与它的写入时刻必须**同时**更新——分两处写迟早会漂移成
+   *  「时间是新的、原因是旧的」这种最难查的读数。 */
+  function noteEndReason(reason) {
+    lastEndReason = reason;
+    lastEndReasonAt = Date.now();
+  }
+  // 0.16.3：适配器侧 WEB_NO_PROGRESS 报错要带的两段现场（真机事故「web 明明有回复、
+  // 桥说没内容」的判据点）。与 lastEndReason 同寿命：本轮结束后**不**清空，超时那一刻
+  // 取到的才是刚刚这一轮的读数。
+  //   lastActivityAt — 本轮最后一次**观察到活动**的 epoch ms：流增量（delta/think/image）
+  //     或 WIP 巡检成功采到页面。它比「上一次事件」宽一层——页面被读到也算活动，
+  //     于是「它很新 + 适配器侧零事件」正好把「网页在生成但没回传」与「捕获链死了」
+  //     分开。用 Date.now() 而不是驱动内部惯用的 performance.now()：适配器要算的是
+  //     「距今几秒」这句墙钟话，不必再对齐两个时间原点。
+  //   domReplyChars — WIP 巡检器最近一次 metrics.answerDomLength(domText) 的读数
+  //     （剥掉「思考中 / Thought for Ns」计时文案后的真实回复长度）。dom 类站点不跑
+  //     巡检（startWipWatch 直接返回）⇒ 恒为 null。
+  let lastActivityAt = null;
+  let domReplyChars = null;
+  /** 记一次「本轮观察到活动」。流增量与 WIP 采样共用同一个读数——两份分别刷新的话，
+   *  迟早有一份被漏掉，读数就退化成误导后人的旧值。 */
+  function noteActivity() { lastActivityAt = Date.now(); }
   // 最近一次超时时的页面现场（captureAlive / replyChars）。旧实现只 warn 到
   // 宿主控制台，用户与后续会话都看不到——「网页没生成」和「捕获链死了」修法
   // 完全不同，这份现场必须能事后取到。
@@ -311,6 +452,18 @@ export function createBrowserDriver(options = {}) {
   let thinkingOnlyTurns = 0;
   let lastStalledSettle = null;  // { at, reason, thinkingChars, answerChars, waitedMs }
   let wipWatch = null;       // { timer } 当前轮次的稳态巡检器
+  // 0.16.3：最近一轮**超长提示词**的投递方式读数（成功与回落都记）。
+  // 为什么必须做成可读字段：附件投递的失败被 runTurn 的 catch 吞掉后回落 inline，
+  // 只留一行 warn——用户侧看到的是「照样发出去了」，于是「到底有没有真的走附件」
+  // 无从判断（用户为此抱怨过好几次「说做了、其实没做」）。这里把它变成 /status 上
+  // 可核对的字段：成功 `{ at, name, chars, payloadChars, truncated, evidence, total }`，
+  // 回落 `{ at, fallback: true, code, total }`。null = 本轮次没触发过附件投递。
+  let attachTransport = null;
+  // 0.16.3：`POST /__webcode/attach-probe`（只上传、绝不发送）最近一次的读数。
+  // 与 attachTransport **分列**而不是合并：那个记的是「真实轮次实际走了哪条路」，
+  // 这个记的是「探针此时此刻的观测」。合成一个字段的话，跑一次探针就会覆盖掉
+  // 「上一轮真消息到底有没有走附件」——那正是这一整轮要回答的问题。
+  let attachProbe = null;
   // 注册表必须在驱动创建时就加载（0.12.2）：启动时的自动登录核验先于 ensure()
   // 直接 launch 出活页，首个轮次的 ensure() 见 ctx/page 存活便提前返回，注册表
   // 再无加载机会——onPageCapture 只剩「no decoder for kind」警告，整轮静默挂到
@@ -496,9 +649,34 @@ export function createBrowserDriver(options = {}) {
     } catch (e) { warn('session store save failed:', e?.message); }
   }
   function conversationFor(key) { loadStore(); return conversations.get(String(key || 'main')) || null; }
-  function rememberConversation(key, webSessionId) {
+  /**
+   * 写下「这个 DSH 会话 ⇄ 哪个网页会话」这条映射（落盘，跨轮次/跨进程存活）。
+   *
+   * 为什么这里多一个 `source`：同一行可能来自两种完全不同的来历，排障时
+   * 「它是怎么来的」决定下一步查哪里——`'store'` 是本进程**亲眼看到落地**
+   * 之后写下的（含导航落地那一刻），`'url-heal'` 是槽为空、从地址栏反推补齐的
+   *（见 sendTurn 的自愈分支）。
+   *
+   * 为什么「什么时候调用它」是本文件最要命的一件事：**真机事故 2026-09-17
+   * 20:52**（DSH 会话 `session-063b0a99`，网页会话 `187fdbbd-…`）。旧实现的
+   * 唯一调用点在 `sendTurn` 里 `runTurn` **成功返回之后**，于是这一轮——
+   * 导航已经落到 `187fdbbd`、407,064 字符已经发出去、只是流后来失败
+   *（WEB_NO_PROGRESS）——的映射**从未写下**：`webcode-sessions-deepseek.json`
+   * 里没有该 key，`/status` 的 `conversations` 也没有。下一轮 conversationFor
+   * 为空 ⇒ conversationNav 回 `unsupported/no-stored-session` ⇒ 上层整段重建
+   * 再开一个**新**网页会话。用户看到的就是「明明上下文没到，却一直没有在同一
+   * 对话里」。会话身份只要**落地**就已经确定，与轮次成败无关——所以调用点前移
+   * 到导航落地那一刻（runTurn 里的 noteLanded），失败路径同样算数。
+   *
+   * @param {string} key 会话键（DSH 的 `<sessionId>::<agentId>`）
+   * @param {string} webSessionId 网页侧会话 id
+   * @param {'store'|'url-heal'} [source] 这条记录的来历（默认 'store'）
+   */
+  function rememberConversation(key, webSessionId, source = 'store') {
     loadStore();
-    conversations.set(String(key || 'main'), { webSessionId, at: Date.now() });
+    conversations.set(String(key || 'main'), { webSessionId, at: Date.now(), source });
+    // 一个 id 能被重新写下，就证明它是活的：清掉它的「不可达」标记（见 deadSessions）。
+    deadSessions.delete(String(webSessionId));
     if (conversations.size > 128) {
       let oldestKey = null; let oldestAt = Infinity;
       for (const [k, v] of conversations) if (v && v.at < oldestAt) { oldestAt = v.at; oldestKey = k; }
@@ -507,6 +685,47 @@ export function createBrowserDriver(options = {}) {
     saveStore();
   }
   function forgetConversation(key) { loadStore(); conversations.delete(String(key || 'main')); saveStore(); }
+  // 最近一次 sendTurn 的 key —— `status().sessionSlot` 报的就是它的槽。
+  let lastSessionKey = 'main';
+  // 被判「不可达」的网页会话 id → 时刻（见 sendTurn 的 WEB_SESSION_LOST 分支）。
+  // 自愈补槽必须跳开它们：否则「深链导航失败 → forgetConversation → 下一轮又从
+  // 地址栏把同一个死会话补回来」会变成永不退出重建的循环——而地址栏在导航失败
+  // 之后**可能仍停在那条深链上**，这正是自愈要防的第二种误伤。
+  const deadSessions = new Map();
+  function markSessionDead(id, at = Date.now()) {
+    if (!id) return;
+    deadSessions.set(String(id), at);
+    while (deadSessions.size > 64) deadSessions.delete(deadSessions.keys().next().value);
+  }
+
+  /**
+   * 会话槽的只读投影（冻结契约 `{ webSessionId, at, source }`）。
+   *
+   * 三态来历缺一不可：
+   *   'store'    — 槽里记着（本进程刚写下或历史落盘值）；
+   *   'url-heal' — 槽为空，但页面**此刻就停在**某个网页会话上。这是「落地了但
+   *                槽没写下来」的现场（2026-09-17 那次事故正是这个形状），
+   *                如实报出来，而不是显示成「没有会话」；
+   *   'none'     — 两者都没有。
+   *
+   * 纯读：**不落盘、不导航、不改状态**（`/status` 与 `session-slot` 动作都调它）。
+   *
+   * @param {string} [key] 省略 = 最近一次 sendTurn 的 key（与 status() 同口径）
+   */
+  function sessionSlotFor(key) {
+    const rec = conversationFor(key ? String(key) : lastSessionKey);
+    if (rec?.webSessionId) {
+      return {
+        webSessionId: rec.webSessionId,
+        at: rec.at ?? null,
+        // 旧版本落盘的记录没有 source 字段：按 'store' 报（它确实是槽里的值）。
+        source: rec.source === 'url-heal' ? 'url-heal' : 'store',
+      };
+    }
+    const fromUrl = sessionIdFromUrl(page?.url?.() || '');
+    if (fromUrl) return { webSessionId: fromUrl, at: Date.now(), source: 'url-heal' };
+    return { webSessionId: null, at: null, source: 'none' };
+  }
 
   function status() {
     loadStore();
@@ -552,6 +771,17 @@ export function createBrowserDriver(options = {}) {
       // partial-wip-settled / timeout / dom-capture），以及超时那一刻的页面现场
       //（captureAlive + replyChars）。旧实现只把现场 warn 到宿主控制台。
       lastEndReason,
+      // 0.16.3：上面那条收束原因是**什么时候**写的。真机事故里报错文本借用了
+      // 上一轮的 `finished`（本轮根本没跑完），把排查方向带偏——有了这个时间戳，
+      // 报错就能写出「（上一轮收束原因 finished，30s 前）」，无从混淆。
+      lastEndReasonAt,
+      // 0.16.3：适配器侧看门狗报错要用的两段现场（判据见 lib/idle-window.js）。
+      // lastActivityAt = 本轮最后一次观察到活动的 epoch ms（流增量或 WIP 采样到页面），
+      // domReplyChars = 巡检器最近一次剥掉计时文案后的页面回复长度（dom 站点恒 null）。
+      // 放在 status 上而不是只写进日志：看门狗开火那一刻只能**同步**读到这个（没有
+      // 页面往返），而「最近活动很新 + 页面已有 N 字未回传」正是这次事故的一句话定位。
+      lastActivityAt,
+      domReplyChars,
       lastTimeoutScene,
       // C-3：会话槽丢失的可核对数字（原先完全静默——用户只看到「每轮新开对话」）
       sessionLostCount,
@@ -563,7 +793,22 @@ export function createBrowserDriver(options = {}) {
       navTrace: navTrace.slice(-12),
       conversationReplacedCount,
       lastRate: deriveLastRate(lastFinished, selectedModel),
+      // 0.16.3：「超长提示词到底走没走附件」的可核对读数（成功与回落都记，见变量声明处）。
+      attachTransport,
+      // 0.16.3：**当前生效**的投递形态（每次读都现算，见 promptTransportNow）。
+      // 放在 status 上，是因为设置面要显示「生效值」——只显示用户选了什么，
+      // 会出现「设置页写纯文本、实际走附件」这种无从发现的偏差。
+      promptTransport: promptTransportNow(),
+      // 0.16.3：探针最近一次读数（见 attachProbe 声明处）。
+      attachProbe,
       conversations: Object.fromEntries(conversations),
+      // T1 会话槽只读读数（判据见 sessionSlotFor）：把「这个会话到底有没有落到
+      // 同一个网页会话上、这条记录是什么来历」变成面板与排障可核对的一行。
+      //
+      // 为什么 conversations 那张原始映射不够：槽为空时它只能回 `{}`，看不出
+      // 「页面其实还停在那会话上」——而 2026-09-17 那次「一直新开对话」的事故
+      // 现场恰恰就是「槽为空 + 页面正停在该会话上」，两者必须能分开读。
+      sessionSlot: sessionSlotFor(lastSessionKey),
       transport: 'playwright-edge',
       preview: Boolean(page && !page.isClosed?.()),
       window: windowState(),
@@ -636,6 +881,8 @@ export function createBrowserDriver(options = {}) {
             if (active.firstResponseAt == null) active.firstResponseAt = performance.now();
             // WIP 稳态的「流还在动」证据：任何一帧增量都推迟收束判定。
             active.lastProgressAt = performance.now();
+            // 0.16.3：驱动侧现场读数（适配器看门狗据此区分「网页没回传」与「链路死了」）。
+            noteActivity();
             // 0.15.2：「正文真的来了」的独立时刻。它与 lastProgressAt 刻意分开——
             // 思考增量刷新前者、**不**刷新这个。混成一个的话，「一直思考」与
             // 「思考完给出正文」在判据上无法区分，硬上限就永远判不出来。
@@ -646,12 +893,14 @@ export function createBrowserDriver(options = {}) {
           onThink: (t) => {
             if (active.firstThinkAt == null) active.firstThinkAt = performance.now();
             active.lastProgressAt = performance.now();
+            noteActivity();
             active.thinking += t;
             try { active.onThink?.(t); } catch {}
           },
           onImage: (img) => {
             if (img) active.images.push(img);
             active.lastProgressAt = performance.now();
+            noteActivity();
             // 图片是交付物，与正文同等对待：只出图不出字是合法形态（识图轮），
             // 不能被「只出思维链」的硬上限误判成卡死。
             active.lastAnswerAt = performance.now();
@@ -774,6 +1023,11 @@ export function createBrowserDriver(options = {}) {
       const domLen = typeof domText === 'string' ? answerDomLength(domText) : null;
       if (typeof domLen === 'number') {
         a.domAvailable = true;
+        // 0.16.3：采样成功既算「页面还活着」（noteActivity），也留下最新读数
+        // （domReplyChars）。只在**真的读到页面**时刷新：取不到页面是「读不到」，
+        // 把它记成一次活动会让看门狗报出「最近驱动活动 0s 前」这种假活的读数。
+        noteActivity();
+        domReplyChars = domLen;
         if (a.lastDomLen == null || domLen > a.lastDomLen) a.lastDomGrowthAt = performance.now();
         // 记下「页面节点确实有字、但剥掉计时文案后等于没内容」——这是本故障的
         // 现场特征，写进 settled_by 让人一眼认出，而不是笼统的 partial-wip-settled。
@@ -813,7 +1067,7 @@ export function createBrowserDriver(options = {}) {
       const patched = result.complete ? result
         : { ...result, complete: false, partial: true, reason: result.reason || reason };
       a.settled_by = reason;
-      lastEndReason = reason;
+      noteEndReason(reason);
       // 只出思维链的轮次单独计数并留现场：这是「没有报错、没有下一步」的唯一
       // 事后线索，混进 recoveredTurns 会让「内容保住了」与「内容根本没来」不可分。
       if (stalled) {
@@ -962,6 +1216,15 @@ export function createBrowserDriver(options = {}) {
 
   async function ensure() {
     if (launching) return launching;
+    // 注入式页面（**离线护栏专用**，见 cfg.injectedPage）：直接当作已就绪的页，
+    // 绝不启动浏览器。生产路径永远不传它（index.js 不构造该字段），
+    // 缺省 null 时这一支不进入，行为与旧版本逐字相同。
+    if (cfg.injectedPage && page !== cfg.injectedPage) {
+      page = cfg.injectedPage;
+      ctx = typeof page.context === 'function'
+        ? page.context()
+        : { on() {}, newPage: async () => page, close: async () => {} };
+    }
     if (ctx && page && !page.isClosed()) return;
     // 展示窗口被用户关闭（page=null）或浏览器整个退出（ctx 已死）：
     // 无头转有头窗口保留在当前形态重开一页；无头会话则回到无头。
@@ -1191,7 +1454,28 @@ export function createBrowserDriver(options = {}) {
    *
    * 站点没声明时退回一组通用探针（blob 缩略图 / attachment|file-card|upload
    * 类名 / 输入框附近的 <img>）。探针命中即算确认——它不需要精确，只需要
-   * 「网页里确实多了一个附件类节点」这个事实。 */
+   * 「网页里确实多了一个附件类节点」这个事实。
+   *
+   * ## 真机 2026-09-17 反证：这张清单在 DeepSeek 上**零命中**（而入口是好的）
+   *
+   * 同一台机器的 `/__webcode/status` 读到
+   * `attachTransport = {fallback:true, code:'ATTACH_NOT_CONFIRMED', total:417276}`
+   * ——文件已经 `setInputFiles` 塞进隐藏 input，20s 后下列选择器一个都没命中，
+   * 于是 41.7 万字符整段回落 inline 灌进输入框（用户报的「一开头就很长 token
+   * 窗口」）。同时 `GET /__webcode/attach-entry` 读到 `available:true`、
+   * `inputs:1`、`accept` 含 `.md/.txt/.json/.log`、`multiple:true`——入口与格式
+   * 都没问题，坏的只是「确认」这一步。
+   *
+   * 根因形状：这里猜的是**类名**，而 DeepSeek 的预览节点用构建期哈希类名
+   * （`_xxxxxx` 形态，随站点发版变化），任何字面量清单都只可能偶尔命中。
+   * 因此 0.16.3 的主证据换成**刚上传的那个文件名出现在页面上**（文件名是我们
+   * 自己传给 setInputFiles 的，命中即证明网页真的收到了这个附件，且完全不需要
+   * 猜类名，见下方 filenameEvidence）。这张清单**继续保留**：它在别的站点与将来
+   * 的 DeepSeek 发版上仍可能先命中，两种证据取先到者。
+   *
+   * **不新增任何类名字面量**：本机至今没有拿到「DeepSeek 附件已就位」时的 DOM
+   * 读数（那正是 `/__webcode/attach-probe` 要产出、而它需要宿主重启才有路由），
+   * 凭想象补类名等于把下一个会话的排障方向带偏。 */
   const ATTACH_PREVIEW_FALLBACK = [
     "img[src^='blob:']",
     "[class*='attachment']",
@@ -1204,10 +1488,58 @@ export function createBrowserDriver(options = {}) {
     "[data-testid*='file']",
   ];
 
-  /** 轮询等待附件在页面上出现。返回命中的选择器，或 null（超时）。 */
-  async function waitForAttachment(timeoutMs = 15_000) {
+  /** 候选证据选择器清单（站点声明的排在通用探针之前）。三个调用点共用一份，
+   *  否则「探针说有证据、投递说没有」会各写各的清单。 */
+  function attachCandidates() {
     const declared = contract.attachPreviewSelector;
-    const candidates = declared ? [declared, ...ATTACH_PREVIEW_FALLBACK] : ATTACH_PREVIEW_FALLBACK;
+    return declared ? [declared, ...ATTACH_PREVIEW_FALLBACK] : ATTACH_PREVIEW_FALLBACK;
+  }
+
+  /**
+   * 「刚上传的文件名出现在页面上」这条证据——**不猜类名**的确认判据。
+   *
+   * 为什么它不是「凭想象加的判据」：文件名是调用方自己交给 `setInputFiles` 的
+   * （探针用 `webcode-probe.md`，投递用 `webcode-context*.md`），它出现在页面上
+   * 只有一种解释——网页收到了这个文件并渲染了它。而类名清单在 DeepSeek 上
+   * 真机零命中（见 ATTACH_PREVIEW_FALLBACK 的 2026-09-17 反证）。
+   *
+   * 两条收紧条件都有可核对的口径，避免把**别处偶然出现的同名文本**当证据：
+   *   · 只认**文本长度 ≤ 文件名 + 80 字符**的节点——附件 chip 的量级就是
+   *     「文件名 + 几个图标/字数说明」；放宽到整页会把侧栏历史标题一起算进来；
+   *   · 取**最深**的命中节点（祖先链上含同一段文本）——否则 200 字符的
+   *     domSnippet 会被外层容器的壳占满，看不到文件名本身。
+   *
+   * @returns {Promise<{tag:string, cls:string, id:string, snippet:string}|null>}
+   */
+  async function filenameEvidence(name) {
+    const target = String(name || '');
+    if (!target) return null;
+    return page.evaluate(({ NAME, MAX }) => {
+      const hit = [...document.querySelectorAll('body *')].filter((el) => {
+        const tag = el.tagName;
+        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'INPUT' || tag === 'TEXTAREA') return false;
+        const t = (el.textContent || '').trim();
+        return t.includes(NAME) && t.length <= MAX;
+      });
+      if (!hit.length) return null;
+      // 最深命中：没有任何其它命中节点在它里面
+      const deep = hit.filter((el) => !hit.some((o) => o !== el && el.contains(o)));
+      const node = deep[0] || hit[0];
+      return {
+        tag: node.tagName.toLowerCase(),
+        cls: String(node.getAttribute('class') || '').slice(0, 120),
+        id: node.id || null,
+        snippet: node.outerHTML.replace(/\s+/g, ' ').trim().slice(0, 200),
+      };
+    }, { NAME: target, MAX: target.length + 80 }).catch(() => null);
+  }
+
+  /** 轮询等待附件在页面上出现。返回命中的选择器（文件名证据返回 `text:<name>`），或 null（超时）。
+   *
+   * `name` 是**本轮真正上传的文件名**：传了它才会启用文件名证据（见 filenameEvidence）。
+   * 不传（图片轮）时行为与 0.16.2 逐字相同——只认类名清单，不动图片轮已确认过的路径。 */
+  async function waitForAttachment(timeoutMs = 15_000, { name = null } = {}) {
+    const candidates = attachCandidates();
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       for (const sel of candidates) {
@@ -1216,9 +1548,58 @@ export function createBrowserDriver(options = {}) {
           if (await loc.count() && await loc.isVisible().catch(() => false)) return sel;
         } catch { /* 选择器语法或页面转场：试下一个 */ }
       }
+      if (name) {
+        const hit = await filenameEvidence(name);
+        if (hit) return 'text:' + name;
+      }
       if (Date.now() >= deadline) return null;
       await page.waitForTimeout(250);
     }
+  }
+
+  /**
+   * 上传失败时的**现场**：候选选择器 × 命中数（含可见数）+ 文件名证据命中情况 +
+   * 一段 DOM 片段。失败读数必须能回答「是没上传成功，还是页面上有节点而我们没认出来」。
+   *
+   * 一次 evaluate 取全，不做 N 次往返：失败路径本身已经等了 20s，再逐个选择器
+   * 往返会把现场拖到与页面状态不同步（页面转场后读到的是另一个界面）。
+   */
+  async function attachEvidenceDiag(name) {
+    return page.evaluate(({ NAME, sels, inputSel, MAX }) => {
+      const pick = (sel) => { try { return [...document.querySelectorAll(sel)]; } catch { return []; } };
+      const visible = (el) => Boolean(el.offsetWidth || el.offsetHeight || el.getClientRects?.().length);
+      const candidates = (sels || []).map((sel) => {
+        const els = pick(sel);
+        return { sel, count: els.length, visible: els.filter(visible).length };
+      });
+      const hits = [...document.querySelectorAll('body *')].filter((el) => {
+        const tag = el.tagName;
+        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'INPUT' || tag === 'TEXTAREA') return false;
+        const t = (el.textContent || '').trim();
+        return NAME && t.includes(NAME) && t.length <= MAX;
+      });
+      const deep = hits.filter((el) => !hits.some((o) => o !== el && el.contains(o)));
+      const node = deep[0] || hits[0] || null;
+      // 兜底现场：把上传入口往上的两级容器抄下来。没有它，失败读数只剩
+      // 「一张清单 × 一堆 0」，看不出页面究竟变成了什么样。
+      let near = null;
+      const input = pick(inputSel)[0] || null;
+      let box = input;
+      for (let i = 0; i < 2 && box?.parentElement; i += 1) box = box.parentElement;
+      if (box) near = box.outerHTML.replace(/\s+/g, ' ').trim().slice(0, MAX);
+      return {
+        candidates,
+        nameHit: node ? {
+          tag: node.tagName.toLowerCase(),
+          cls: String(node.getAttribute('class') || '').slice(0, 120),
+          snippet: node.outerHTML.replace(/\s+/g, ' ').trim().slice(0, MAX),
+        } : null,
+        domSnippet: node
+          ? node.outerHTML.replace(/\s+/g, ' ').trim().slice(0, MAX)
+          : near,
+      };
+    }, { NAME: String(name || ''), sels: attachCandidates(), inputSel: contract.attachSelector || "input[type='file']", MAX: 200 })
+      .catch((e) => ({ error: String(e?.message || e).slice(0, 120), candidates: [], nameHit: null, domSnippet: null }));
   }
 
   async function uploadImages(files, { timeoutMs = 15_000 } = {}) {
@@ -1255,7 +1636,221 @@ export function createBrowserDriver(options = {}) {
     return { attached: payloads.length, evidence: hit };
   }
 
-  async function runTurn(message, { navigate, signal, onDelta, onThink, onImage, model, images, thinkMode } = {}) {
+  /**
+   * 把一段长文本作为**附件**上传（0.16.2）。
+   *
+   * **定义位置是契约的一部分（0.16.3 修正）**：本函数必须在 `uploadImages`
+   * **完整结束之后**。0.16.2 把它插进了 `uploadImages` 的 `if (!hit) { … }` 内部
+   * （闭括号之前），靠函数声明提升仍然能跑，但 `if` 块被提前关掉、只剩两个孤立
+   * 闭括号。这种结构下任何一次相邻重构都可能让它真的只在 `catch` 作用域里可见 →
+   * 调用点 `ReferenceError` → 被 runTurn 的 catch 吞掉 → **静默回落 inline**，
+   * 表现正是用户抱怨的「说做了、其实没做」。改动本区域时**不要**再把它挪进任何分支。
+   *
+   * 为什么不落临时文件：setInputFiles 直接接受内存载荷（name/mimeType/buffer），
+   * uploadImages 对图片就是这么做的。少一个临时目录就少一类权限与清理问题
+   * （本机 %TEMP% 受限已经让 3 个测试文件假失败过）。
+   *
+   * 与 uploadImages 同一条纪律：**看到可见附件证据才放行**。看不到就抛
+   * ATTACH_NOT_CONFIRMED，由调用方回落 inline——绝不发一条「说附件在、其实不在」
+   * 的消息。
+   *
+   * `chars` 是**上传内容**的字符数（可能已被 runTurn 尾部截断），不是原始提示词长度。
+   */
+  async function uploadTextAttachment(text, { timeoutMs = 20_000, name = 'webcode-context.md' } = {}) {
+    const fi = page.locator(contract.attachSelector || "input[type='file']").first();
+    if (!await fi.count()) {
+      const err = new Error('ATTACH_UNAVAILABLE: 页面没有可用的文件上传入口');
+      err.code = 'ATTACH_UNAVAILABLE';
+      throw err;
+    }
+    const body = String(text ?? '');
+    await fi.setInputFiles([{ name, mimeType: 'text/markdown', buffer: Buffer.from(body, 'utf8') }]);
+    const hit = await waitForAttachment(timeoutMs, { name });
+    if (!hit) {
+      // 失败必须带现场：真机 0.16.3 的那次失败只留下 `ATTACH_NOT_CONFIRMED` 一个码，
+      // 事后既看不出「网页压根没收」还是「收了而选择器没认出来」，也就无法判断该
+      // 改证据判据还是该改上传方式。现场同时挂到 err.attachDiag 上，由 runTurn
+      // 原样写进 attachTransport（进 /__webcode/status，面板可读）。
+      const diag = await attachEvidenceDiag(name);
+      const err = new Error('ATTACH_NOT_CONFIRMED: 已选择附件 ' + name + '，但 '
+        + Math.round(timeoutMs / 1000) + 's 内页面上没有出现附件'
+        + (diag?.domSnippet ? ' — 现场 DOM：' + diag.domSnippet : ''));
+      err.code = 'ATTACH_NOT_CONFIRMED';
+      err.attachDiag = diag;
+      throw err;
+    }
+    return { evidence: hit, chars: body.length, name };
+  }
+
+  /**
+   * 当前生效的投递形态（`'attach' | 'inline'`）——**每次投递前现读，不取构造期快照**。
+   *
+   * 为什么必须现读：设置页写的是 webcode **设置命名空间**（`POST /__webcode/settings`
+   * → `configManager`），而驱动构造期拿到的是插件 config（cordis.yml 的 config
+   * 段）+ DEFAULTS。只把值快照进 cfg 的话，「设置页选了纯文本、实际仍走附件」
+   * 会原样出现——本项目已经有过一次同类缺陷（`answerTimeoutMs` 只在 driver 侧
+   * 有默认值、index.js 没声明也没透传，于是那个配置项完全够不着，见
+   * lib/index.js 的 DEFAULTS 注释）。因此 index.js 两个构造点传的是**读取函数**
+   * `getPromptTransport`，这里每次调用它。
+   *
+   * 非法值一律当 `'attach'`：投递形态只有两个合法取值，写错的配置必须退化成
+   * 默认行为，而不是让投递直接失败（同 promptTransportPlan 里 attachEnabled
+   * 的取向）。读取函数抛错也一样退化——设置服务不可用不该拦住一轮消息。
+   */
+  function promptTransportNow() {
+    let raw;
+    try {
+      raw = typeof options.getPromptTransport === 'function' ? options.getPromptTransport() : options.promptTransport;
+    } catch { raw = options.promptTransport; }
+    return raw === 'inline' ? 'inline' : 'attach';
+  }
+
+  /**
+   * 清理探针上传的附件（`POST /__webcode/attach-probe` 的收尾）。
+   *
+   * 为什么探针必须有清理：上传是有副作用的动作——附件留在输入框里，用户下一条
+   * 消息就会莫名其妙带上一份 `webcode-probe.md`。因此探针在**上传之前**就必须
+   * 想好退路（本函数），并在返回里如实报告 `cleaned`；清理不掉的必须报
+   * `cleaned:false` 而不是假装干净。
+   *
+   * 两条退路，按「不依赖站点选择器」优先：
+   *   ① `setInputFiles([])`——Playwright 的「清空已选文件」原语，零站点知识。
+   *      但它能否连带清掉网页自己渲染的 chip 取决于站点的 change 处理，
+   *      所以**必须回读确认**（`filenameEvidence` 里那个文件名还在不在），
+   *      不能把「调用没抛错」当成清理成功。
+   *   ② 附件 chip 自己容器内的删除控件。容器边界是**可测量的**：从最深命中节点
+   *      向上走，只要容器的文本长度仍 ≤ 文件名 + 200 字符就还在 chip 量级；
+   *      一旦越过就停（再往上就是 composer / 页面级容器，在那里点按钮可能点到
+   *      发送或导航）。候选控件也必须命中 删除|移除|remove|close|clear|取消|×
+   *      这类语义，且排除 `type=submit`。
+   *
+   * @returns {Promise<{cleaned:boolean, cleanedBy:string, note?:string}>}
+   */
+  async function cleanupAttachment(name) {
+    const fi = page.locator(contract.attachSelector || "input[type='file']").first();
+    const gone = async () => !(await filenameEvidence(name));
+    try {
+      if (await fi.count()) await fi.setInputFiles([]);
+    } catch { /* 清空失败照样走下面的回读与 ② */ }
+    if (await gone()) return { cleaned: true, cleanedBy: 'input-cleared' };
+    const clicked = await page.evaluate(({ NAME, MAX }) => {
+      const hits = [...document.querySelectorAll('body *')].filter((el) => {
+        const tag = el.tagName;
+        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'INPUT' || tag === 'TEXTAREA') return false;
+        const t = (el.textContent || '').trim();
+        return t.includes(NAME) && t.length <= NAME.length + 80;
+      });
+      if (!hits.length) return null;
+      const deep = hits.filter((el) => !hits.some((o) => o !== el && el.contains(o)));
+      let box = deep[0] || hits[0];
+      for (let i = 0; i < 3 && box.parentElement; i += 1) {
+        const p = box.parentElement;
+        if ((p.textContent || '').trim().length > NAME.length + MAX) break;
+        box = p;
+      }
+      const RE = /删除|移除|remove|close|clear|取消|×|✕|✖/i;
+      const ctl = [...box.querySelectorAll('[aria-label],[title],button,[role="button"],svg')].find((el) => {
+        if (el.tagName === 'BUTTON' && el.getAttribute('type') === 'submit') return false;
+        const label = el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('class') || '';
+        return RE.test(label);
+      });
+      if (!ctl) return null;
+      try { ctl.click(); } catch { return null; }
+      return ctl.tagName.toLowerCase() + ':'
+        + String(ctl.getAttribute('aria-label') || ctl.getAttribute('title') || ctl.getAttribute('class') || '').slice(0, 60);
+    }, { NAME: String(name || ''), MAX: 200 }).catch(() => null);
+    if (!clicked) {
+      return { cleaned: false, cleanedBy: 'none', note: '未找到清除入口（只试了 setInputFiles([]) 与附件节点自身容器内的删除控件）' };
+    }
+    await page.waitForTimeout(600);   // 给网页一拍把 chip 从 DOM 里摘掉
+    if (await gone()) return { cleaned: true, cleanedBy: 'removed:' + clicked };
+    return { cleaned: false, cleanedBy: 'clicked-no-effect:' + clicked, note: '点了清除控件，但文件名仍留在页面上' };
+  }
+
+  /**
+   * 附件投递**探针**：只上传、**绝不发送**（0.16.3，M5）。
+   *
+   * 存在的理由：`GET /__webcode/attach-entry` 只能证明「入口在、格式被接受」
+   *（真机读数 `available:true`、`accept` 含 `.md/.txt/.json/.log`、`multiple:true`），
+   * 它**不能**回答「上传之后网页会不会渲染出可见的附件」。而真机失败读数
+   * `attachTransport = {fallback:true, code:'ATTACH_NOT_CONFIRMED', total:417276}`
+   * 恰好卡在这一步——没有探针，就只能靠「发一条真消息看模型有没有读到附件」，
+   * 那是拿一次真实会话（和一次站点风控）换一个读数。
+   *
+   * 与 uploadTextAttachment 的分工：那个是**投递路径**（失败要抛错、由调用方
+   * 回落 inline）；这个是**读数路径**（失败返回结构化现场，绝不抛错、绝不发送，
+   * 并且必须清理）。两者共用同一套证据判据（waitForAttachment 的 name 分支与
+   * attachEvidenceDiag），不各写一份——否则会出现「探针说有附件、投递说没有」。
+   *
+   * 副作用与纪律（写在这里，因为调用方是 HTTP 路由）：会上传一个真实文件；
+   * 因此调用前必须确认驱动空闲（busy 中直接拒绝，绝不插进正在跑的一轮），
+   * 且清理路径在任何返回分支上都被走到。
+   *
+   * @param {string} text 探针内容（字符数即返回的 chars）
+   * @param {{timeoutMs?:number, name?:string, cleanup?:boolean}} [opts]
+   */
+  async function probeAttachment(text, { timeoutMs = 20_000, name = 'webcode-probe.md', cleanup = true } = {}) {
+    const t0 = Date.now();
+    const body = String(text ?? '');
+    const base = { siteId, chars: body.length, name, sent: false };
+    if (busy || transitioning) {
+      return { ...base, ok: false, code: 'DRIVER_BUSY', evidence: null, selector: null, domSnippet: null,
+        candidates: [], cleaned: true, cleanedBy: 'nothing-uploaded',
+        note: '驱动正在跑一轮——探针绝不插进正在进行的轮次（那会污染真实消息），请稍后重试' };
+    }
+    if (!page || page.isClosed?.()) {
+      // 与 diagnostics()/GET attach-entry 同一取向：**不因为一次只读探测去拉起浏览器**。
+      // 探针的价值在于「回答上传后网页长什么样」，页面都没起来时它给不出任何答案。
+      return { ...base, ok: false, code: 'ATTACH_UNAVAILABLE', evidence: null, selector: null, domSnippet: null,
+        candidates: [], nameHit: null, cleaned: true, cleanedBy: 'nothing-uploaded', ms: Date.now() - t0,
+        note: '驱动页面不可用（浏览器未启动或页面已关闭）：**未做任何上传**。先在设置页连上该站点或发过一轮，再探。' };
+    }
+    const fi = page.locator(contract.attachSelector || "input[type='file']").first();
+    // 只在**本驱动的站点页面**上上传：页面被人工导航到别处时（用户在独立窗口里
+    // 切到了别的站点/别的页面），往那个页面塞一个文件属于用户看不见的越界副作用。
+    // 宁可拒绝并说清原因——探针的整个意义是「读数诚实」。
+    try {
+      if (new URL(page.url()).origin !== new URL(cfg.site).origin) {
+        return { ...base, ok: false, code: 'ATTACH_UNAVAILABLE', reason: 'wrong-origin', evidence: null, selector: null,
+          domSnippet: null, candidates: [], nameHit: null, cleaned: true, cleanedBy: 'nothing-uploaded', ms: Date.now() - t0,
+          note: '当前页面不在本驱动的站点上（' + page.url().slice(0, 120) + '）：**未做任何上传**' };
+      }
+    } catch { /* url 不可解析（about:blank 等）：交给下面的入口检查 */ }
+    if (!await fi.count()) {
+      const diag = await attachEvidenceDiag(name);
+      return { ...base, ok: false, code: 'ATTACH_UNAVAILABLE', evidence: null, selector: null,
+        domSnippet: diag?.domSnippet ?? null, candidates: diag?.candidates ?? [], nameHit: diag?.nameHit ?? null,
+        cleaned: true, cleanedBy: 'nothing-uploaded', ms: Date.now() - t0,
+        note: '页面没有可用的文件上传入口：未上传任何文件，因此无需清理' };
+    }
+    await fi.setInputFiles([{ name, mimeType: 'text/markdown', buffer: Buffer.from(body, 'utf8') }]);
+    const hit = await waitForAttachment(timeoutMs, { name });
+    // 现场必须在**清理之前**抓：清理成功会把证据节点一起摘掉，之后再抓只剩空 DOM，
+    // 这个读数本来就是为了回答「当时页面上到底有什么」。
+    const diag = await attachEvidenceDiag(name);
+    let cleanupInfo = { cleaned: false, cleanedBy: 'skipped', note: '调用方显式要求不清除（cleanup:false）' };
+    if (cleanup) cleanupInfo = await cleanupAttachment(name);
+    const result = {
+      ...base,
+      ok: Boolean(hit),
+      code: hit ? null : 'ATTACH_NOT_CONFIRMED',
+      evidence: hit,
+      selector: hit,                       // 与 task 约定的字段名对齐：命中的选择器 / `text:<name>`
+      domSnippet: diag?.domSnippet ?? null,
+      candidates: diag?.candidates ?? [],
+      nameHit: diag?.nameHit ?? null,
+      cleaned: cleanupInfo.cleaned,
+      cleanedBy: cleanupInfo.cleanedBy,
+      cleanupNote: cleanupInfo.note ?? null,
+      ms: Date.now() - t0,
+    };
+    if (hit) log('attach-probe ok: evidence=' + hit + ' chars=' + body.length + ' cleaned=' + result.cleaned + '(' + result.cleanedBy + ')');
+    else warn('attach-probe failed: ' + result.code + ' candidates=' + JSON.stringify(result.candidates));
+    attachProbe = { at: Date.now(), ...result };
+    return result;
+  }
+
+  async function runTurn(message, { navigate, key = null, signal, onDelta, onThink, onImage, model, images, thinkMode } = {}) {
     if (busy || transitioning) throw new Error('driver busy');
     busy = true;
     let timer = null;
@@ -1373,6 +1968,44 @@ export function createBrowserDriver(options = {}) {
         }
       }
 
+      /**
+       * 「落地即落盘」——本轮导航真的落到某个网页会话上之后**立刻**把身份记下来，
+       * **不等这一轮跑完**。
+       *
+       * 为什么必须提前到这一刻（真机事故 2026-09-17 20:52，DSH 会话
+       * `session-063b0a99`）：那一轮首轮导航落地到网页会话 `187fdbbd-…`、
+       * 407,064 字符也已经发出去，但流后来失败（WEB_NO_PROGRESS）。旧实现只在
+       * `sendTurn` 的成功返回处调 rememberConversation，于是「已经真正建立起来的
+       * 那个网页会话」在失败路径上被整体丢掉：槽为空 ⇒ 下一轮
+       * `unsupported/no-stored-session` ⇒ 整段重建 + 又开一个新对话。
+       * 身份与轮次成败是两件事——**失败的轮次同样产生身份**，这就是本函数存在的
+       * 全部理由；把它删掉，那次事故会逐字复现。
+       *
+       * 只在有 key 时写：`sendPrompt` 是无会话键的无状态轮（OpenAI 前端 / aux），
+       * 把那种轮次临时开出来的会话记到 'main' 上，会让之后同 key 的会话轮次误续
+       *（续到一个没有前文、也没有工具协议的对话里）。
+       *
+       * @param {string} phase 本次读取发生在哪一步（写进 navTrace 与日志，便于复核）
+       * @returns {string|null} 读到的网页会话 id（没读到则 null）
+       */
+      const noteLanded = (phase) => {
+        if (!key) return null;
+        const id = sessionIdFromUrl(page?.url?.() || '');
+        if (!id) return null;
+        const before = conversationFor(key)?.webSessionId || null;
+        if (before === id) return id;
+        rememberConversation(key, id);
+        pushNavTrace({
+          phase: 'landed:' + phase, key: String(key),
+          storedBefore: before, landedId: id, pageUrl: safeUrl(page?.url?.() || ''),
+        });
+        log(`web session slot written at ${phase}: key=${key} id=${id}${before ? ' (was ' + before + ')' : ''}`);
+        return id;
+      };
+      // ① 导航落地这一刻。resume 的目标地址本来就带 id（通常与槽里一致，无事
+      //    发生）；fresh 之后地址栏一般还是站点根，由下面 ② 的发送后读取补上。
+      noteLanded('nav');
+
       loggedIn = true;
       // thinkMode: 'auto'(按模型默认) | 'on'(强制开) | 'off'(强制关)——设置页手动覆盖。
       // DeepSeek 的「深度思考」pill 是独立开关,auto 时按模型 thinking 属性双向同步。
@@ -1404,6 +2037,12 @@ export function createBrowserDriver(options = {}) {
         attachEvidence = await uploadImages(images);
         throwIfAborted();
       }
+      // 新一轮开始：把两段现场读数清空再采（0.16.3）。**必须清**，理由就是这次事故本身：
+      // 看门狗当时读到的 `lastEndReason=finished` 其实是**上一轮**的收束原因，被当成了
+      // 本轮的线索，于是「网页还在 prefill」被误判成「网页已经正常结束」。同一个陷阱
+      // 不能让新字段再踩一次——它们的语义写的就是「本轮」。
+      lastActivityAt = null;
+      domReplyChars = null;
       const done = new Promise((resolve, reject) => {
         let settleResolve;
         const settled = new Promise((r) => { settleResolve = r; });
@@ -1449,6 +2088,7 @@ export function createBrowserDriver(options = {}) {
         // 而这正是「页面早有全文、捕获从未建立」这类事故的唯一直接证据。
         lastTimeoutScene = scene ? { ...scene, at: Date.now() } : { at: Date.now(), page: 'unavailable' };
         lastEndReason = 'timeout';
+        lastEndReasonAt = Date.now();
         const err = new Error(`web turn timed out after ${cfg.requestTimeoutMs}ms（${detail}）`);
         if (a) a.reject(err); else warn(err.message);
       }, cfg.requestTimeoutMs);
@@ -1457,6 +2097,79 @@ export function createBrowserDriver(options = {}) {
       done.catch(() => {});
       if (String(message).length > 400_000) {
         warn(`large prompt:${String(message).length} chars — the web composer may become slow; consider trimming context`);
+      }
+      // 0.16.2：超长提示词改走**附件**投递；任何一步失败都回落 inline。
+      // 0.16.3：默认阈值 60_000（见 lib/index.js 的 DEFAULTS 注释：真机事故那一轮
+      // 发进网页的是 127,888 字符纯文本），失败原因与现场一律落进 attachTransport
+      // （进 status()），因此「有没有真的走附件」在 /__webcode/status 上可核对；
+      // 设置面的「投递形态」开关（inline = 永远纯文本）由 promptTransportNow 现读。
+      if (!attachEvidence) {
+        const plan = promptTransportPlan({
+          chars: String(message).length,
+          inlineLimit: cfg.attachInlineLimitChars,
+          attachEnabled: cfg.attachInlineLimitChars > 0,
+          attachSupported: true,
+          // 设置面的「投递形态」开关（0.16.3）：'inline' = 用户显式要求纯文本，
+          // 逐字回到旧行为；其余一律 'attach'（是否真的走附件仍由上面的阈值决定）。
+          // 现读而不是取构造函数快照，理由见 promptTransportNow。
+          transport: promptTransportNow(),
+          // cfg.attachMaxChars 由 index.js 透传（task-1 / lib/index.js）。
+          // 未配置时这里是 undefined，**必须显式转成 null**再传：undefined 在
+          // promptTransportPlan 里是「取默认 1_500_000」，而缺配置时的正确行为是
+          // 「不设上限」——缺配置只退化成 0.16.2 的旧行为，绝不因此砍掉消息。
+          maxChars: cfg.attachMaxChars === undefined ? null : cfg.attachMaxChars,
+        });
+        if (plan.mode === 'attach') {
+          try {
+            let attachText = String(message);
+            let attachName = 'webcode-context.md';
+            let omitted = 0;
+            if (plan.truncate) {
+              // 尾部保留：提示词的开头是长期不变的工具教学与历史 transcript，
+              // **尾部才是当下要执行的那一步**（失败会话的 step5 就在最后一次增量里）。
+              // 丢掉头部必须留痕：少一句「已省略前 N 字符」，模型会把「没看到」当成
+              // 「不存在」，而用户也看不出这一轮其实投了半截——那就是静默丢上下文。
+              // 头部声明本身占掉的字符要算进 omitted，读者按 omitted 复算时才对得上。
+              omitted = plan.total - plan.payloadChars;
+              const head = '【本文件已省略前 ' + omitted + ' 字符】'
+                + '为控制附件长度，以下内容从原文第 ' + (omitted + 1) + ' 字符起保留（原文共 '
+                + plan.total + ' 字符）；被省略的是更早的会话历史与教学文本。\n\n';
+              attachText = head + attachText.slice(-plan.payloadChars);
+              attachName = 'webcode-context-tail' + plan.payloadChars + 'of' + plan.total + '.md';
+            }
+            const info = await uploadTextAttachment(attachText, { name: attachName });
+            attachEvidence = { attached: 1, evidence: info.evidence };
+            attachTransport = {
+              at: Date.now(), name: info.name, chars: plan.total, payloadChars: plan.payloadChars,
+              truncated: plan.truncate, evidence: info.evidence, total: plan.total,
+              transport: 'attach', reason: plan.reason, selector: info.evidence,
+            };
+            onThink?.('提示词以附件投递：' + info.name + '（原始 ' + plan.total + ' 字符，实际上传 '
+              + plan.payloadChars + ' 字符' + (plan.truncate ? '，已省略前 ' + omitted + ' 字符' : '')
+              + '，证据 ' + info.evidence + '）');
+            log('prompt sent as attachment: name=' + info.name + ' total=' + plan.total
+              + ' payloadChars=' + plan.payloadChars + ' truncated=' + plan.truncate + ' evidence=' + info.evidence);
+            message = '提示词正文已作为附件 ' + info.name + ' 上传（原始 ' + plan.total + ' 字符，实际上传 '
+              + plan.payloadChars + ' 字符' + (plan.truncate ? '，开头已省略的 ' + omitted + ' 字符不再重复列出' : '')
+              + '）。请先读取该附件全文，再按其中的要求继续任务。';
+          } catch (err) {
+            // 回落 inline 的决策也要可核对——只 warn 到控制台等于没有读数。
+            // 0.16.3：`diag` 是失败现场（候选选择器 × 命中数 × DOM 片段，截断 200），
+            // 由 uploadTextAttachment 挂在 err.attachDiag 上。没有它，「附件没确认」
+            // 这一条在面板上只是一句话，用户与下一个会话都无法判断下一步改什么。
+            attachTransport = { at: Date.now(), fallback: true, code: err?.code || null, total: String(message).length,
+              transport: 'attach', reason: 'attach-failed', diag: err?.attachDiag || null };
+            warn('prompt attachment transport failed, falling back to inline: ' + (err?.code || err?.message));
+          }
+        } else if (plan.reason === 'transport-inline') {
+          // 用户在设置面显式选了「纯文本」：这也要落读数。否则面板上「当前生效值」
+          // 与「最近一次实际投递结果」会互相矛盾（选了纯文本，却仍显示上一轮的
+          // 附件成功记录），而这一整块存在的意义就是「不许只留一行 warn」。
+          // code 用 TRANSPORT_INLINE 而不是错误码：这不是故障，是用户的选择。
+          attachTransport = { at: Date.now(), fallback: true, code: 'TRANSPORT_INLINE', total: String(message).length,
+            transport: 'inline', reason: plan.reason };
+          log('prompt transport forced inline by settings (promptTransport=inline), chars=' + plan.total);
+        }
       }
       const input = page.locator(SEL.input).first();
       // 2026-09-13：doubao（tiptap/ProseMirror）与 kimi（div.chat-input-editor）
@@ -1494,6 +2207,27 @@ export function createBrowserDriver(options = {}) {
       }
       // 发送已发出：启动 WIP 稳态巡检器（网页不发 FINISHED 时的秒级收束）。
       startWipWatch();
+      // ② 发送之后：**新会话的地址是网页收下消息那一刻才被 SPA 写进地址栏的**
+      //   （DeepSeek：`/` → `/a/chat/s/<id>`，history.replaceState），所以这一刻
+      //    读一次往往就拿到了——这正是 2026-09-17 那次失败轮次之前必须落盘的时机。
+      //    读不到时用一个**不阻塞本轮**的短轮询兜底（≤3s；轮次一结束立即自停，
+      //    不留定时器），而不是退回「等 runTurn 成功」。12 × 250ms 的依据：真机
+      //    上地址改写发生在发送成功后几百毫秒内，3s 已是宽裕上界。
+      if (key) {
+        // 轮询只属于**这一轮**：绑定到本轮那个 active 对象上，换轮/收尾即停。
+        // 只看 `!active` 不够——两轮之间若在 250ms 内接上（sendGapMs=0 时可能），
+        // 上一轮的残余轮询会读到**下一轮**落地出来的会话 id，并把它写进本轮的 key
+        // （两个 key 各自的槽被写串，比不写更坏）。
+        const ownTurn = active;
+        let landedTries = 0;
+        const waitLanded = () => {
+          if (active !== ownTurn) return;              // 本轮已结束（或已换轮）：收工
+          if (noteLanded('after-submit')) return;      // 已读到 → 已落盘，收工
+          if (++landedTries >= 12) return;             // 3s 到点
+          setTimeout(waitLanded, 250);
+        };
+        waitLanded();
+      }
 
       let result;
       if (site.decoder === 'dom') {
@@ -1571,7 +2305,7 @@ export function createBrowserDriver(options = {}) {
       };
       // 本轮收束原因：稳态巡检器收束时已写好 settled_by；否则就是正常 FINISHED
       // 或 dom 站点抄全文。透出到 /status 与右栏，用户不必再靠「卡了多久」猜。
-      lastEndReason = lastFinished?.settled_by || (site.decoder === 'dom' ? 'dom-capture' : 'finished');
+      noteEndReason(lastFinished?.settled_by || (site.decoder === 'dom' ? 'dom-capture' : 'finished'));
       metrics.endReason = lastEndReason;
       if (fin) Object.assign(fin, { metrics, chars: (result.text || '').length });
       return {
@@ -1592,7 +2326,33 @@ export function createBrowserDriver(options = {}) {
   }
 
   async function sendTurn(key, message, { fresh = false, signal, onDelta, onThink, onImage, model, images, thinkMode } = {}) {
-    const existing = conversationFor(key);
+    // 这个 key 就是「当前」会话槽（`status().sessionSlot` 报它）。
+    lastSessionKey = String(key || 'main');
+    let existing = conversationFor(key);
+    // 自愈补槽（B）：槽为空、但页面**此刻就停在**某个网页会话上。
+    //
+    // 那正是上一轮真正落地的那个会话——本轮修复前「失败轮次不落盘」的历史槽就是
+    // 这样坏掉的（2026-09-17 20:52 事故的后效）。不补这一刀，conversationNav 会回
+    // `unsupported/no-stored-session`，上层就把整段首轮（真机 407,064 字符）重放进
+    // 一个**新**对话——即用户报的「一直新开对话」。
+    //
+    // 两个刻意收窄的条件：
+    //   • 只在 fresh=false 时补。调用方明确要求「开新会话」时页面停在哪里都无所谓，
+    //     把旧 id 记进槽反而会让下一轮续到一个缺少本轮内容的旧对话上。
+    //   • 跳过 deadSessions 里刚被判「不可达」的 id，避免「导航失败 → 丢槽 →
+    //     下一轮又从地址栏把同一个死会话补回来」的循环。
+    if (!existing?.webSessionId && !fresh) {
+      const fromUrl = sessionIdFromUrl(page?.url?.() || '');
+      if (fromUrl && !deadSessions.has(fromUrl)) {
+        rememberConversation(key, fromUrl, 'url-heal');
+        existing = conversationFor(key);
+        warn(`web session slot healed from page URL (site=${siteId}, key=${key}, id=${fromUrl}) — 槽为空但页面就停在该会话上`);
+        pushNavTrace({
+          phase: 'heal', key: String(key || 'main'),
+          healedId: fromUrl, pageUrl: safeUrl(page?.url?.() || ''),
+        });
+      }
+    }
     // 三态导航（C-2）：'fresh' 开新会话、'resume' 导航回既有会话、
     // 'unsupported' 明确报错。**没有第四态**——旧实现在这里默默开新会话并把增量
     // 发进去，网页模型在毫无前文的情况下接着答，是「跑着跑着变傻」的根因。
@@ -1631,15 +2391,26 @@ export function createBrowserDriver(options = {}) {
     const navigate = nav.state === 'resume' ? nav.url : 'fresh';
     let result;
     try {
-      result = await runTurn(message, { navigate, signal, onDelta, onThink, onImage, model, images, thinkMode });
+      // key 一并交给 runTurn：「落地即落盘」的写点在里面（见 runTurn 的
+      // noteLanded）——身份必须在导航落地那一刻就记下，而不是等这里成功返回。
+      result = await runTurn(message, { key, navigate, signal, onDelta, onThink, onImage, model, images, thinkMode });
     } catch (err) {
       // 会话槽里存的是一个已经死掉的网页会话：立刻丢掉，别让下一轮再撞一次。
       // 上层收到 WEB_SESSION_LOST 后作废游标并以整段首轮提示词重开。
-      if (err?.code === 'WEB_SESSION_LOST') forgetConversation(key);
+      // 同时把该 id 标成不可达：下一个轮次的自愈补槽必须跳开它（见 deadSessions）。
+      if (err?.code === 'WEB_SESSION_LOST') {
+        markSessionDead(existing?.webSessionId);
+        forgetConversation(key);
+      }
       throw err;
     }
     // 身份优先来自地址、其次来自流（C-1）。两者都拿不到时才丢掉会话槽——
     // 而这种情况在 GLM/Z.ai 上曾经是**恒态**（旧实现只认 DeepSeek 的地址形状）。
+    //
+    // 这里是**确认写**，不是唯一写点：落地那一刻已经写过一次（runTurn 的
+    // noteLanded），所以即使本轮抛错，槽里也留着真实落地过的会话——那次事故
+    //（2026-09-17）就是因为只有这一处写点才把槽丢空的。删掉上面那处、只留这里，
+    // 等于把事故原样恢复。
     const storedBefore = existing?.webSessionId || null;
     if (storedBefore && result.sessionId && storedBefore !== result.sessionId) conversationReplacedCount += 1;
     pushNavTrace({
@@ -1940,8 +2711,45 @@ export function createBrowserDriver(options = {}) {
       }
       return out.slice(0, 20);
     }).catch(() => null);
+    // 附件入口的存在性读数（0.16.3）——**只读，不上传任何东西**。
+    //
+    // 为什么需要它：超长提示词改走附件投递（`uploadTextAttachment`）之后，必须能
+    // 当场回答一个问题——「这个站点的页面上到底有没有可用的上传入口」。没有这个
+    // 读数的话，「附件投递没生效」与「网页根本没有上传入口」在事后完全不可分：
+    // 两条路径都只是回落 inline，日志里都只有一行 warn。
+    //
+    // 判据与 `uploadImages` / `uploadTextAttachment` 用的是**同一个选择器来源**
+    // （契约的 attachSelector + 站点 attachPreview）。刻意不复制一份选择器清单：
+    // 读数与真实投递路径一旦各写一份，迟早出现「探针说有入口、投递说没有」这种
+    // 自相矛盾的现场。
+    const attachEntry = await page.evaluate(({ inputSel, previewSels }) => {
+      const pick = (sel) => {
+        try { return [...document.querySelectorAll(sel)]; } catch { return []; }
+      };
+      const inputs = pick(inputSel);
+      const first = inputs[0] || null;
+      const hitPreviews = [];
+      for (const sel of previewSels || []) {
+        const n = pick(sel).length;
+        if (n) hitPreviews.push({ sel, count: n });
+      }
+      return {
+        inputs: inputs.length,
+        inputSel,
+        accept: first ? (first.getAttribute('accept') || '') : null,
+        multiple: first ? first.hasAttribute('multiple') : null,
+        disabled: first ? Boolean(first.disabled) : null,
+        // 预览节点是「附件真的进了网页」的可见证据（见 waitForAttachment）。
+        // 页面此刻可能本来就带着历史附件，所以它只是**参考**，不是本轮投递的证明。
+        previewHits: hitPreviews,
+      };
+    }, {
+      inputSel: contract.attachSelector || "input[type='file']",
+      previewSels: [...(contract.attachPreviewSelector ? [contract.attachPreviewSelector] : []), ...ATTACH_PREVIEW_FALLBACK],
+    }).catch(() => null);
     return {
       urlPath: new URL(page.url()).pathname,
+      attachEntry,
       ui: await detectDeepSeekUi(),
       selectedModel,
       requestMetadata,
@@ -2439,7 +3247,10 @@ export function createBrowserDriver(options = {}) {
   }
   function safeUrl(url) { try { return String(new URL(url)); } catch { return null; } }
 
-  return { sendPrompt, sendTurn, resetConversation, conversationFor, connect, interact, openLogin, openWindow, closeWindow, importStorageFromProfile, status, close, diagnostics, getToken, profileCookies, writeProfileCookies, userAgent, get page() { return page; }, webApi, listSessions, fetchHistory, screenshotBase64, setImageLimitsProvider };
+  // sessionSlot 与 status().sessionSlot 同源（sessionSlotFor）：控制面
+  //（`GET/POST /__webcode/session-slot`）与面板都要能按 key 直接问一次，
+  // 而不是只能读「最近一个 key」的 status 投影。省略 key = 最近一次 sendTurn 的 key。
+  return { sendPrompt, sendTurn, resetConversation, conversationFor, sessionSlot: sessionSlotFor, connect, interact, openLogin, openWindow, closeWindow, importStorageFromProfile, status, close, diagnostics, getToken, profileCookies, writeProfileCookies, userAgent, probeAttachment, get page() { return page; }, webApi, listSessions, fetchHistory, screenshotBase64, setImageLimitsProvider };
 }
 
 function abortError() {

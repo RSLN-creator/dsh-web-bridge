@@ -1,0 +1,11 @@
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="grep">
+<｜｜DSML｜｜ parameter name="pattern" string="true">function waitStatsPayload</｜｜DSML｜｜ parameter name="path" string="true">package/dsh-webcode-bridge/lib/web-control.js</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ parameter name="command">git diff -- package/dsh-webcode-bridge/lib/web-control.js package/dsh-webcode-bridge/package.json</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="description" string="true">Show uncommitted diff</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ parameter name="command">Get-Content doc/progress.md -Tail 100</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="description" string="true">Read progress ledger tail</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>

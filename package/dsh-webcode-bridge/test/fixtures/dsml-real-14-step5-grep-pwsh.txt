@@ -1,0 +1,15 @@
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="grep">
+<｜｜DSML｜｜ parameter name="pattern">repairNamelessClosers|resolveNamelessClosers|dsml-repair</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="path">D:\9_Code_Workspace\dsh-webcode-bridge\package\dsh-webcode-bridge\lib</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ invoke name="pwsh">
+<｜｜DSML｜｜ parameter name="command">node --test test/dsml-native-close.test.mjs 2>&1 | Select-Object -Last 40</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="description">Run DSML native-close regression tests</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="workdir">D:\9_Code_Workspace\dsh-webcode-bridge\package\dsh-webcode-bridge</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ invoke name="pwsh">
+<｜｜DSML｜｜ parameter name="command">$h='C:\Users\rsyhn\.dsh'; Get-ChildItem "$h\local-link" -Force -ErrorAction SilentlyContinue | Select-Object Mode,LastWriteTime,Name | Format-Table -AutoSize; Write-Output "---- settings.yaml ----"; Select-String -Path "$h\settings.yaml" -Pattern 'webcode' -Context 2,2</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="description" string="true">Find how bridge plugin is installed</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>

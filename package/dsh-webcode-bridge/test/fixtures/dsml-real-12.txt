@@ -1,0 +1,6 @@
+<｜｜DSML｜｜ invoke name="read">
+<｜｜DSML｜｜ parameter name="file_path">package/dsh-webcode-bridge/lib/web-control.js</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="offset" string="false">210</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="limit" string="false">80</｜｜DSML｜｜>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>

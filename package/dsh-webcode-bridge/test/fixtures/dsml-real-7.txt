@@ -1,0 +1,11 @@
+Let me read the core wait logic.
+
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ parameter name="command">Get-Content package/dsh-webcode-bridge/lib/index.js | Select-Object -Skip 1500 -First 230 | ForEach-Object -Begin {$i=1501} -Process { "{0,5}: {1}" -f $i,$_; $i++ }</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="description" string="true">Read index.js wait stats region</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ parameter name="command">Get-Content package/dsh-webcode-bridge/lib/web-control.js | Select-Object -Skip 380 -First 60 | ForEach-Object -Begin {$i=381} -Process { "{0,5}: {1}" -f $i,$_; $i++ }</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="description" string="true">Read web-control wait stats route</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>

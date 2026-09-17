@@ -1,0 +1,11 @@
+Let me look at the wait-stats payload, the uncommitted diff, and the progress ledger.
+
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="grep">
+<｜｜DSML｜｜ parameter name="include" string="true">*.js</｜｜DSML｜｜ parameter name="path" string="true">package/dsh-webcode-bridge/lib/web-control.js</｜｜DSML｜｜ parameter name="pattern" string="true">function waitStatsPayload</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ parameter name="command">git diff -- package/dsh-webcode-bridge/lib/web-control.js package/dsh-webcode-bridge/package.json</｜｜DSML｜｜ parameter name="description" string="true">Show uncommitted diff for web-control</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ parameter name="command">Get-Content doc/progress.md -Tail 120</｜｜DSML｜｜ parameter name="description" string="true">Read tail of progress ledger</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ parameter name="description2" string="true">read progress</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ calls>

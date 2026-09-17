@@ -1,0 +1,11 @@
+I'll start by exploring the project to understand what we're working with.
+
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="pwsh">
+<｜｜DSML｜｜ parameter name="command" string="true">Get-ChildItem -Force | Select-Object Mode,Length,Name; Write-Output "---"; git log --oneline -15 2>&1 | Select-Object -First 20; Write-Output "---status---"; git status --short 2>&1 | Select-Object -First 40</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="description" string="true">List workspace files and git state</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ invoke name="glob">
+<｜｜DSML｜｜ parameter name="pattern" string="true">**/*.md</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>

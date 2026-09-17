@@ -1,0 +1,9 @@
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="read">
+<｜｜DSML｜｜ parameter name="file_path">package/dsh-webcode-bridge/lib/wait-stats.js</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ invoke name="pwsh">
+<｜｜DSML｜｜ parameter name="command">Get-Content package/dsh-webcode-bridge/lib/client.cjs | Select-Object -Skip 180 -First 220 | ForEach-Object -Begin {$i=181} -Process { "{0,5}: {1}" -f $i,$_; $i++ }</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="description" string="true">Read client.cjs wait section</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>

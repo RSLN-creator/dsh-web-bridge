@@ -1,0 +1,11 @@
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="pwsh">
+<｜｜DSML｜｜ parameter name="command">git diff --stat -- package/dsh-webcode-bridge/lib/client.cjs; Write-Output "=== progress tail ==="; Get-Content doc/progress.md -Tail 60</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="description" string="true">Show client diff stat and progress tail</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜>
+<｜｜DSML｜｜ invoke name="read">
+<｜｜DSML｜｜ parameter name="file_path">doc/progress.md</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="offset" string="false">1</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="limit" string="false">80</｜｜DSML｜｜>
+</｜｜DSML｜｜>
+</｜｜DSML｜｜ calls>

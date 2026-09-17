@@ -296,6 +296,132 @@ export function createWebControl(deps = {}) {
       return driver.interact(body);
     },
     'GET diagnostics': async () => ({ ok: true, ...(await driver.diagnostics()) }),
+    // 附件投递**入口**的只读读数（0.16.3）。
+    //
+    // 为什么不能让调用方自己去 GET diagnostics 里翻：设置页与排障脚本要的是
+    // 一个能直接下结论的答案——「这个站点的页面此刻有没有可用的上传入口」。
+    // 把判据留在服务端（与真实投递路径同源），调用方只读结论，不复制形态知识。
+    // 这个动作**不上传、不写入、不发送**任何东西，因此可以在真机随时跑。
+    'GET attach-entry': async () => {
+      const d = await driver.diagnostics();
+      const entry = d?.attachEntry ?? null;
+      return {
+        ok: true,
+        siteId: d?.siteId ?? null,
+        preview: d?.preview === true,
+        // available = 页面上真的存在文件 input。**刻意不用 visible 判定**：
+        // 上传入口在各站点几乎都是隐藏 input（由按钮转发点击），按可见性判定
+        // 会把「有入口」误报成「没有入口」，那比没有读数更坏。
+        available: Boolean(entry && entry.inputs > 0),
+        entry,
+      };
+    },
+    // 附件投递**探针**：只上传、**绝不发送**（0.16.3，M5）。
+    //
+    // 与上面那条只读读数的分工：`GET attach-entry` 回答「入口在不在」（真机读数
+    // available:true、accept 含 .md/.txt/.json/.log），本动作回答**下一个问题**：
+    // 「上传之后网页到底有没有渲染出附件」。真机失败读数
+    // `attachTransport = {fallback:true, code:'ATTACH_NOT_CONFIRMED', total:417276}`
+    // 正好卡在这一步，而没有探针时只能「发一条真消息看模型读没读到附件」——
+    // 那是拿一次真实会话换一个读数。
+    //
+    // 为什么必须是 POST（不能做成 GET）：它有副作用（一次真实上传）。
+    // GET 会被面板刷新/预取重复触发，同一个上传连发三次就是一次站点风控风险。
+    //
+    // 返回**平铺**的 `{ ok, evidence, selector, domSnippet, cleaned, chars }`：
+    //   · `ok` 的语义是「上传被页面确认」，**不是** HTTP 成功——没确认时同样回
+    //     200 并带 `{ ok:false, code:'ATTACH_NOT_CONFIRMED', cleaned, … }` 与现场
+    //     （候选选择器 × 命中数 × DOM 片段）。调用方按 ok 判断，不要只看状态码。
+    //   · `cleaned` 如实反映清理结果（false = 附件可能仍留在这个输入框里，
+    //     下一条消息会带上它，面板必须能说出来）。
+    //
+    // 副作用纪律：探针会把默认槽驱动所在站点的浏览器拉起来（如果它还没起）；
+    // **跨站点探测暂不自动做**——那会顺带启动另一个站点的浏览器 profile，
+    // 是调用方看不见的额外副作用，因此显式要求时回一条明确错误。
+    'POST attach-probe': async (body) => {
+      if (!relay?.status().consent) return { ok: false, error: '请在设置中启用网页自动化' };
+      if (typeof driver.probeAttachment !== 'function') {
+        return { ok: false, error: 'driver 不支持 attach-probe（注入的测试桩或旧驱动）' };
+      }
+      const wantSite = String(body?.siteId || '').trim();
+      const runningSite = String(driver.status?.()?.siteId || 'deepseek');
+      if (wantSite && wantSite !== runningSite) {
+        return { ok: false, error: 'attach-probe 只对默认槽站点（' + runningSite + '）生效：'
+          + '探测 ' + wantSite + ' 会顺带启动该站点的浏览器 profile，属于看不见的额外副作用，请先连上该站点再探' };
+      }
+      // 探针是**结构确认**，不是投递：默认正文带时间戳（便于在页面 DOM 里认出这一次），
+      // 并硬性截到 20_000 字符——真机最长一轮 417,276 字符（attachTransport.total），
+      // 探针不需要那么大，上传越大越可能撞站点限制而把结论污染成「探针本身失败」。
+      const PROBE_MAX = 20_000;
+      const raw = String(body?.text ?? ('# webcode attach probe\n' + new Date().toISOString() + '\n'));
+      const text = raw.slice(0, PROBE_MAX);
+      const name = String(body?.name || 'webcode-probe.md').replace(/[\\/:*?"<>|]/g, '_').slice(0, 80) || 'webcode-probe.md';
+      const r = await driver.probeAttachment(text, { name });
+      return {
+        ...r,
+        // 请求侧读数与结论分开列：一眼能看出「探针收到多少字符 / 真正传了多少」，
+        // 以及「是否因为上限被截」（截了就必须说，否则读数会被当成原文长度）。
+        requestedChars: raw.length,
+        truncated: raw.length > PROBE_MAX,
+        cleanupRequested: body?.cleanup !== false,
+        siteId: runningSite,
+      };
+    },
+    // 会话槽只读读数（T1）。
+    //
+    // 回答的问题只有一个，但它是用户报的那条症状的第一现场：「这个会话此刻到底
+    // 有没有落在同一个网页会话上，这条记录是怎么来的」。
+    //
+    // 为什么不能靠 `GET status` 的 conversations 代替：槽为空时那张映射只能回
+    // `{}`，而 2026-09-17 20:52 那次事故的现场恰恰是「槽为空 + 页面正停在该网页
+    // 会话上」——两者必须能分开读，`source:'url-heal'` 就是把这一态如实说出来
+    //（判据在 browser-driver 的 sessionSlotFor，与 status().sessionSlot 同源）。
+    //
+    // 纯读：不导航、不落盘、不发送。调用方（面板 / curl）可以随时跑：
+    //   curl -X POST .../__webcode/session-slot -d '{"sessionKey":"…"}'
+    // 省略 sessionKey 时问的是「最近一次 sendTurn 的那个 key」。
+    'GET session-slot': async (body) => {
+      const key = String(body?.sessionKey || body?.sessionId || '') || null;
+      // 三个来源按**具体到笼统**的顺序取，先取到就用：
+      //   ① `driver.sessionSlot(key)` —— 驱动自带的按 key 投影，只有它认得
+      //      `'url-heal'`（槽为空但页面此刻正停在某个会话上）这一态；
+      //   ② `driver.status().sessionSlot` —— 冻结接口里的那一枚读数，旧驱动与
+      //      测试替身都是这个形态；
+      //   ③ relay 聚合 status 上的同名投影（默认槽驱动）。
+      // 控制面**绝不自作主张**去读地址或猜会话 id：那层形态知识归驱动所有。
+      const readers = [
+        () => (typeof driver?.sessionSlot === 'function' ? driver.sessionSlot(key || undefined) : null),
+        () => driver?.status?.()?.sessionSlot ?? null,
+        () => relay?.config?.driverStatus?.()?.sessionSlot ?? null,
+      ];
+      let slot = null;
+      for (const read of readers) {
+        try { slot = read(); } catch { slot = null; }
+        if (slot && typeof slot === 'object') break;
+        slot = null;
+      }
+      const view = slot && typeof slot === 'object'
+        ? {
+          webSessionId: slot.webSessionId ?? null,
+          at: slot.at ?? null,
+          source: slot.source === 'url-heal' ? 'url-heal' : (slot.source === 'store' ? 'store' : 'none'),
+        }
+        : { webSessionId: null, at: null, source: 'none' };
+      return {
+        ok: true,
+        // 'current' = 调用方没给 key，读的是「最近一次 sendTurn 的那个 key」
+        //（与 status().sessionSlot 同口径）；给了 key 就原样回显，便于并发核对。
+        key: key || 'current',
+        siteId: (() => { try { return driver?.status?.()?.siteId ?? null; } catch { return null; } })(),
+        sessionSlot: view,
+        // 平铺这三个字段：面板与排障脚本可以直接取用，不必再往下钻一层。
+        //（同一动作给两种形状是本文件的既有做法，见 'GET status' 同时给
+        //  `team` 与 `members`——两端改名不会让另一端读到 undefined。）
+        webSessionId: view.webSessionId,
+        at: view.at,
+        source: view.source,
+      };
+    },
     'GET status': async (body) => ({
       ok: true,
       build: { hash: config.buildHash || null, version: config.version || null },
@@ -340,9 +466,21 @@ export function createWebControl(deps = {}) {
                 //（对照研究 doc/research/task-board-vs-agentteams-graph.md §3⑧）。
                 // 拿不到时为 null，面板如实说「图诊断不可用」，不编造。
                 graph: r.graph && typeof r.graph === 'object' ? r.graph : null,
+                // 执行语义（0.16.2）：可派发集 / 等依赖 / 等资源 / 可重试 / 终止性 /
+                // 结构校验 / 写范围冲突。与 graph 同一性质——是 tasks 的补充视角，
+                // 算不出来时为 null 并带 `planError`，**不连坐** tasks 与 graph。
+                // 为什么由服务端算：两条轴（依赖 / 资源）的判据必须与成员状态同源，
+                // 浏览器侧重算会立刻产生「面板说能开工、服务端说不能」两份真相。
+                plan: r.plan && typeof r.plan === 'object' ? r.plan : null,
+                planError: r.planError ?? null,
                 subAgentsError: r.subAgentsError ?? null,
                 teamError: r.teamError ?? r.membersError ?? null,
                 tasksError: r.tasksError ?? null,
+                // 来源标注（0.16.1）：`service` = 官方 agentTeams 服务，`disk` = 磁盘
+                // 回落，`null` = 两边都没读到。卸载 AgentTeams 之后用户看到的应当是
+                // `disk`——把这层透出去，用户才能判断「面板空了」是没团队还是没数据源。
+                teamSource: r.teamSource ?? null,
+                tasksSource: r.tasksSource ?? null,
               };
             } catch (e) {
               return fail(e?.message || e);
@@ -364,10 +502,15 @@ export function createWebControl(deps = {}) {
       relay: relay ? (({ running, consent, consentPersistent, requireConsent, busy, queueLength, activeRequests, lastError, metrics }) => ({
         running, consent, consentPersistent, requireConsent, busy, queueLength, activeRequests, lastError, metrics,
       }))(relay.status()) : null,
-      driver: relay?.config?.driverStatus?.() ?? (driver ? (({ running, busy, loggedIn, needLogin, selectedModel, lastTurn, profileDir, conversations, recoveredTurns, lastRecovered, lastEndReason, lastTimeoutScene, sessionLostCount, lastSessionLost }) => ({
+      driver: relay?.config?.driverStatus?.() ?? (driver ? (({ running, busy, loggedIn, needLogin, selectedModel, lastTurn, profileDir, conversations, recoveredTurns, lastRecovered, lastEndReason, lastTimeoutScene, sessionLostCount, lastSessionLost, sessionSlot, sessionCursorInvalidations, attachTransport, attachProbe, promptTransport }) => ({
         running, busy, loggedIn, needLogin, selectedModel, profileDir,
         conversationCount: conversations ? Object.keys(conversations).length : 0,
         lastTurn: lastTurn ? { sessionId: lastTurn.sessionId, at: lastTurn.at } : null,
+        // T1（0.16.4）：会话连续性的两枚只读读数也必须在**两个入口**上都在——
+        // 面板要回答「这个会话有没有落到同一个网页会话上 / 是谁把游标清了」，
+        // 缺一枚就会把「读不到」显示成「没发生」（本文件反复吃过这个亏）。
+        sessionSlot: sessionSlot ?? { webSessionId: null, at: null, source: 'none' },
+        sessionCursorInvalidations: sessionCursorInvalidations ?? 0,
         // 0.14.0：这条兜底分支（无 relay 的独立启动）此前把这几个字段丢了，
         // 而 relay 分支的 driverStatus 一直带着它们——于是「网页已回复但桥卡住」
         // 在独立运行时完全没有任何线索。补齐后两个入口的字段集一致。
@@ -378,8 +521,69 @@ export function createWebControl(deps = {}) {
         // C-3：会话槽丢失不再静默（glm 每轮新开对话的根因就是它恒丢）
         sessionLostCount: sessionLostCount ?? 0,
         lastSessionLost: lastSessionLost ?? null,
+        // 0.16.3：同一条「两个入口字段集一致」的纪律，投递形态三件套也要在
+        // 这条兜底分支上带着——否则独立启动时设置面板会显示「最近一次投递：
+        // 无读数」，而真相只是这条分支漏了字段（面板读不到 ≠ 没发生过）。
+        attachTransport: attachTransport ?? null,
+        attachProbe: attachProbe ?? null,
+        promptTransport: promptTransport ?? 'attach',
       }))(driver.status()) : null),
     }),
+    // 投递形态与「最近一次投递」的**现成文案**（0.16.3）。
+    //
+    // 为什么文案在服务端算：原生设置面板（client.cjs）是单文件 bundle，import
+    // 不到 lib/ 里的模块——同一条读数在浏览器侧再写一份格式化就是两份真相，
+    // 而本项目的既定做法是服务端算好（见 composerWaitLine / waitStatRows 的注释）。
+    // 独立设置页（settings-page.js）与原生面板共用这一条路由，因此两边显示逐字
+    // 相同，不会出现「面板说成功了、独立页说回落了」。
+    //
+    // 只读、无副作用：不上传、不发送、不写设置。
+    'GET attach-status': async () => {
+      const settings = settingsStore ? (settingsStore.get() || {}) : {};
+      // 与 browser-driver 的 promptTransportNow 同一判据（只有逐字 'inline' 算纯文本）：
+      // 设置面优先于插件 config，两者都没有才落到『attach』默认值。
+      const chosen = settings.promptTransport === 'inline' ? 'inline'
+        : (config.promptTransport === 'inline' ? 'inline' : 'attach');
+      const limit = Number(config.attachInlineLimitChars) > 0 ? Math.floor(Number(config.attachInlineLimitChars)) : 0;
+      const st = (relay?.config?.driverStatus?.() ?? (typeof driver?.status === 'function' ? driver.status() : null)) || {};
+      const last = st.attachTransport || null;
+      const probe = st.attachProbe || null;
+      const transportLine = chosen === 'inline'
+        ? '纯文本：永远把正文写进输入框（附件投递已关闭）'
+        : (limit > 0
+          ? '附件投递（默认）：正文超过 ' + limit + ' 字符时改走附件，失败自动回落纯文本'
+          : '纯文本：附件阈值 0（附件投递已关闭）');
+      let lastLine;
+      if (!last) lastLine = '本会话还没触发过附件投递（正文未超过阈值）。';
+      else if (last.code === 'TRANSPORT_INLINE') {
+        lastLine = '纯文本（设置面选择「纯文本」，原始 ' + last.total + ' 字符）。';
+      } else if (last.fallback) {
+        // 回落原因必须打到面板（0.16.3 要求）：命中数与 DOM 片段是用户唯一能拿到的现场，
+        // 只给一个错误码等于让用户无法判断下一步该改配置还是该等站点修复。
+        //
+        // 「零命中」与「根本没扫」必须分开说：ATTACH_UNAVAILABLE 是在 setInputFiles
+        // **之前**就失败的（页面没有上传入口），那时一次候选扫描都没发生——把它写成
+        // 「候选节点全部零命中」会把下一个会话引去改证据选择器，而真因是入口没了。
+        const cands = last.diag?.candidates || [];
+        const hitCands = cands.filter((c) => c.count > 0);
+        const detail = !last.diag
+          ? '；未做候选扫描（上传之前就失败了）'
+          : (hitCands.length
+            ? '；候选节点命中 ' + hitCands.map((c) => c.sel + ' × ' + c.count).join('、')
+            : '；候选节点全部零命中')
+            + (last.diag.domSnippet ? '；现场 ' + last.diag.domSnippet : '');
+        lastLine = '回落纯文本 —— 原因 ' + (last.code || '未知') + '（原始 ' + last.total + ' 字符）' + detail;
+      } else {
+        lastLine = '附件投递成功 —— ' + last.name + '（原始 ' + last.total + ' 字符 / 上传 '
+          + last.payloadChars + ' 字符' + (last.truncated ? '，已省略前 ' + (last.total - last.payloadChars) + ' 字符' : '')
+          + ' / 证据 ' + last.evidence + '）。';
+      }
+      const probeLine = !probe ? '尚未运行探针。'
+        : ((probe.ok ? '上传已确认 —— 证据 ' + probe.evidence + '（' + probe.chars + ' 字符）'
+          : '未确认 —— ' + (probe.code || '未知') + '（' + probe.chars + ' 字符）')
+          + '；清理 ' + (probe.cleaned ? '成功（' + probe.cleanedBy + '）' : '未完成（' + (probe.cleanupNote || probe.cleanedBy) + '）'));
+      return { ok: true, effective: chosen, limit, last, probe, transportLine, lastLine, probeLine };
+    },
     'POST consent': async (body) => {
       if (!relay) return { ok: false, error: 'no relay' };
       relay.setConsent(body?.accepted === true);
@@ -460,7 +664,10 @@ export function createWebControl(deps = {}) {
     'GET settings': async () => {
       if (!settingsStore) return { ok: true, extraPrompt: '' };
       const config = settingsStore.get();
-      return { ok: true, ...config };
+      // 投递形态必须**带默认值**回给调用方（0.16.3）：设置页要显示「当前生效值」，
+      // 而用户从未保存过时设置文件里根本没有这个键。回 undefined 会让面板上的
+      // 单选一个都没选中，看起来像「设置坏了」——实际是默认 'attach'。
+      return { ok: true, ...config, promptTransport: config.promptTransport === 'inline' ? 'inline' : 'attach' };
     },
     'POST settings': async (body) => {
       if (!settingsStore) return { ok: false, error: 'settings store unavailable' };
@@ -495,6 +702,18 @@ export function createWebControl(deps = {}) {
           out[key] = Math.min(600_000, Math.max(0, Math.round(Number(val) || 0)));
         }
         updated.sendGapMsBySlot = out;
+      }
+      // 提示词**投递形态**（0.16.3）：只有逐字等于 'inline' 才是「永远纯文本」，
+      // 其余一律归一成 'attach'（含空值、拼错、旧版本没这个键）。
+      //
+      // 这个字面量判据在三个地方逐字相同：这里、browser-driver 的
+      // promptTransportNow（真正的行为）、client.cjs 的渲染（bundle 里 import
+      // 不到本文件）。三处必须一致——任何一处放宽（例如把 'Inline' 也当纯文本），
+      // 面板显示的生效值就会与驱动的真实行为分叉，而面板是用户判断「设置到底有没有
+      // 生效」的唯一入口。归一化放在写入侧，是为了让**落盘的设置文件**里永远只有
+      // 两个合法值，下次读的人不必再猜。
+      if ('promptTransport' in updated) {
+        updated.promptTransport = updated.promptTransport === 'inline' ? 'inline' : 'attach';
       }
       const result = settingsStore.set(updated);
       return { ok: true, ...result };
@@ -688,6 +907,11 @@ export function createWebControl(deps = {}) {
   // `api(action, body)` 推导出的方法与服务端动作表直接对齐，于是这一族
   // 「调用点存在、另一端没有」的缺陷从此在离线就能红。
   actions['POST status'] = actions['GET status'];
+
+  // `session-slot` 同样两头都收（与 status 同一理由：客户端统一走「有 body 就
+  // POST」，而排障形态天然是 `curl .../__webcode/session-slot` 这种 GET）。
+  // 别名而不是复制实现——两个方法必须返回逐字相同的形状。
+  actions['POST session-slot'] = actions['GET session-slot'];
 
   /**
    * Handle one request. `pathname` is the full path; any suffix that ends

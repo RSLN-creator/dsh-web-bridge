@@ -1,0 +1,10 @@
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="grep">
+<｜｜DSML｜｜ parameter name="pattern" string="true">sendGapMs|sendWaitMs|sincePrevSendMs|gapTargetMs|wait-stats</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="path" string="true">package/dsh-webcode-bridge/lib</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="include" string="true">*.js</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ parameter name="command">grep -rn "sendGapMs\|wait-stats\|sendWaitMs" package/dsh-webcode-bridge/lib/*.js package/dsh-webcode-bridge/lib/*.cjs | Select-Object -First 80</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="description" string="true">Grep wait-stats route and gap fields</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>

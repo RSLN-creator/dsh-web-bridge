@@ -1,0 +1,21 @@
+我已经核对了三处判据，下面逐个读取并执行。
+
+<｜｜DSH calls>
+<｜｜DSH invoke name="read">
+<｜｜DSH parameter name="file_path" string="true">doc/progress.md</｜｜DSH parameter>
+</｜｜DSH invoke>
+</｜｜DSH calls>
+
+<｜｜DSH｜｜ calls>
+<｜｜DSH｜｜ invoke name="grep">
+<｜｜DSH｜｜ parameter name="pattern" string="true">block-end</｜｜DSH｜｜ parameter>
+<｜｜DSH｜｜ parameter name="path" string="true">package/dsh-webcode-bridge/lib</｜｜DSH｜｜ parameter>
+</｜｜DSH｜｜ invoke>
+</｜｜DSH｜｜ calls>
+
+<｜｜DSH｜｜calls>
+<｜｜DSH｜｜invoke name="pwsh">
+<｜｜DSH｜｜parameter name="command" string="true">Get-Date -Format o</｜｜DSH｜｜parameter>
+<｜｜DSH｜｜parameter name="description" string="true">Read the current local time</｜｜DSH｜｜parameter>
+</｜｜DSH｜｜invoke>
+</｜｜DSH｜｜calls>
