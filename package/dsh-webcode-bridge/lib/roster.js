@@ -69,6 +69,8 @@
 //   这是本项目一贯的「不造假状态」纪律（同账户头像的三态环）。
 
 import { analyzeTaskGraph } from './task-graph.js';
+import { analyzePlan, validatePlan, writeScopeConflicts } from './task-plan.js';
+import { projectTeamFromDisk, projectTasksFromDisk } from './team-state.js';
 
 /**
  * 从 cordis 上下文里取一个服务，容忍两种取法。
@@ -126,7 +128,7 @@ function bindMethod(fn, thisArg) {
  * @param {string|null} sessionId 当前会话 id（它就是隐式 Team 的 Lead）
  * @returns {{team: object[], teamError: string|null}} 成员行与不可用原因
  */
-export function projectTeam(ctx, sessionId) {
+function teamFromService(ctx, sessionId) {
   const svc = serviceOf(ctx, 'agentTeams');
   if (!svc) return { team: [], teamError: 'official-team-package-not-loaded' };
   const listMembers = bindMethod(svc.listMembers, svc);
@@ -200,6 +202,64 @@ export function projectTeam(ctx, sessionId) {
 }
 
 /**
+ * 取当前会话的工作区根目录（磁盘状态根要拼在它下面）。
+ *
+ * 两条取法，权威优先：`sessions.get(sessionId).header.cwd`（`SessionHeader.cwd`
+ * 是官方持久化的绝对工作目录），退一步看 agent 上有没有。**拿不到就返回 null**，
+ * 由 team-state.js 报 `no-session-cwd`——绝不猜一个相对路径（见该文件的注释）。
+ *
+ * @param {object} ctx cordis 上下文
+ * @param {string|null} sessionId 当前会话 id
+ * @returns {string|null} 工作区根绝对路径，或 null
+ */
+function cwdOf(ctx, sessionId) {
+  if (!sessionId) return null;
+  const sessions = serviceOf(ctx, 'sessions');
+  const get = bindMethod(sessions?.get, sessions);
+  if (!get) return null;
+  try {
+    const s = get(String(sessionId));
+    const cwd = s?.header?.cwd;
+    return typeof cwd === 'string' && cwd !== '' ? cwd : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Team 成员的投影：**官方服务优先，磁盘回落**（0.16.1）。
+ *
+ * ## 为什么需要回落（这是「取代 AgentTeams」的实现前提）
+ *
+ * 0.15.x 只有一个来源（官方 `agentTeams` 服务）。那个包不在时面板永远是空的，
+ * 于是「取代 AgentTeams」在实现上无从落地——卸载等于连面板一起卸掉。
+ * 现在：服务在就用服务（它多给实时 `activity`），服务不在就读磁盘上的
+ * `.agent-teams/<teamId>/team.json`——那份文件本来就是 AgentTeams 自己的真相来源。
+ *
+ * ## 错误口径（刻意如此）
+ *
+ * 磁盘也读不到时，报的是**服务那一侧的原因**（`serviceError`），因为它是主来源；
+ * 磁盘的原因另放 `diskError`。这样既有的错误字符串（`caller-not-live` /
+ * `agentTeams-service-has-no-listMembers` / `no-session-id` …）逐字不变，
+ * 既有护栏与用户读到的解释都不受影响。
+ *
+ * @param {object} ctx cordis 上下文
+ * @param {string|null} sessionId 当前会话 id（它就是隐式 Team 的 Lead）
+ * @returns {{team: object[], teamError: string|null, source: string|null,
+ *   serviceError?: string|null, diskError?: string|null}}
+ */
+export function projectTeam(ctx, sessionId) {
+  const svc = teamFromService(ctx, sessionId);
+  if (svc.teamError === null) return { ...svc, source: 'service' };
+  const disk = projectTeamFromDisk(cwdOf(ctx, sessionId), sessionId);
+  if (disk.team.length > 0) {
+    return { team: disk.team, teamError: null, source: 'disk', serviceError: svc.teamError };
+  }
+  // 两边都没读到：主来源是服务，因此报它的原因。
+  return { team: [], teamError: svc.teamError, source: null, diskError: disk.teamError };
+}
+
+/**
  * Team 任务板的只读投影（官方 `listTasks` → `TeamTaskView[]`）。
  *
  * 「Team 成员平级」这句话如果只显示名字，用户看不出他们**在协作什么**。
@@ -210,7 +270,7 @@ export function projectTeam(ctx, sessionId) {
  * @param {string|null} sessionId 当前会话 id
  * @returns {{tasks: object[], tasksError: string|null}}
  */
-export function projectTasks(ctx, sessionId) {
+function tasksFromService(ctx, sessionId) {
   const svc = serviceOf(ctx, 'agentTeams');
   if (!svc) return { tasks: [], tasksError: 'official-team-package-not-loaded' };
   const listTasks = bindMethod(svc.listTasks, svc);
@@ -257,6 +317,33 @@ export function projectTasks(ctx, sessionId) {
   } catch (e) {
     return { tasks: [], graph: null, tasksError: `not-a-team-member: ${String(e?.message || e).slice(0, 160)}` };
   }
+}
+
+/**
+ * 任务板的投影：**官方服务优先，磁盘回落**（0.16.1）。
+ *
+ * 与 `projectTeam` 同一套优先级与错误口径。磁盘路径的图诊断**复用同一个**
+ * `analyzeTaskGraph`——「官方路径」与「磁盘路径」各算一份图论迟早会不一致，
+ * 而面板上「被阻塞几条」只该有一个答案。
+ *
+ * 磁盘行**没有 `ready` 键**，因此 `analyzeTaskGraph` 会按官方判据现算一次并把
+ * `readySource` 标成 `computed`——「这一屏的就绪是谁算的」在数据里可查。
+ *
+ * @param {object} ctx cordis 上下文
+ * @param {string|null} sessionId 当前会话 id
+ * @returns {{tasks: object[], graph: object|null, tasksError: string|null, source: string|null,
+ *   serviceError?: string|null, diskError?: string|null}}
+ */
+export function projectTasks(ctx, sessionId) {
+  const svc = tasksFromService(ctx, sessionId);
+  if (svc.tasksError === null) return { ...svc, source: 'service' };
+  const disk = projectTasksFromDisk(cwdOf(ctx, sessionId), sessionId);
+  if (disk.tasks.length > 0) {
+    let graph = null;
+    try { graph = analyzeTaskGraph(disk.tasks); } catch { /* 图是补充信息，缺了不该连坐 tasks */ }
+    return { tasks: disk.tasks, graph, tasksError: null, source: 'disk', serviceError: svc.tasksError };
+  }
+  return { tasks: [], graph: null, tasksError: svc.tasksError, source: null, diskError: disk.tasksError };
 }
 
 /**
@@ -413,6 +500,38 @@ export function projectRoster(ctx, sessionId) {
     sub = { subAgents: [], subAgentsError: `subagent-projection-threw: ${String(e?.message || e).slice(0, 160)}` };
   }
   const teamRows = Array.isArray(team.team) ? team.team : [];
+  // 执行语义（0.16.2）：图诊断回答「结构长什么样」，这一层回答「现在允许开工吗」。
+  // 两者刻意分开（见 task-plan.js 文件头），但都在这里算一次——面板与 /status
+  // 消费同一份结果，不在浏览器侧重算（重算必然与这里漂移）。
+  // 成员可用性用 team 行的 status 判：`running`/`working`/`busy` 视为忙。
+  const members = teamRows;
+  const busy = new Set(
+    members.filter((m) => ['running', 'working', 'busy'].includes(String(m?.status || '').toLowerCase()))
+      .map((m) => String(m?.name || '')),
+  );
+  const ownerAvailable = (name) => !busy.has(String(name || ''));
+  let plan = null;
+  let planError = null;
+  try {
+    const rows = Array.isArray(tasks.tasks) ? tasks.tasks : [];
+    const analysis = analyzePlan(rows, { ownerAvailable });
+    const validation = validatePlan(rows);
+    // 只回传面板真正要用的那几项：admissions 里每条带两个轴与重试判定，
+    // 那是「为什么这条不能开工」的唯一答案来源。
+    plan = {
+      dispatchable: analysis.dispatchable.map((a) => a.id),
+      waitingDeps: analysis.waitingDeps.map((a) => ({ id: a.id, edges: a.unsatisfiedEdges })),
+      waitingResource: analysis.waitingResource.map((a) => ({ id: a.id, ownerName: a.ownerName })),
+      retryable: analysis.retryable.map((a) => ({ id: a.id, retry: a.retry })),
+      admissions: analysis.admissions,
+      termination: analysis.termination,
+      validation,
+      writeScopeConflicts: writeScopeConflicts(rows),
+    };
+  } catch (e) {
+    // 执行语义算不出来**不该**让任务板消失：tasks/graph 照给，plan 为 null 并带原因。
+    planError = `plan-analysis-threw: ${String(e?.message || e).slice(0, 160)}`;
+  }
   return {
     team: teamRows,
     // 同值别名：官方 TeamView 的词是 members。见函数注释。
@@ -420,10 +539,18 @@ export function projectRoster(ctx, sessionId) {
     tasks: tasks.tasks,
     // 图诊断（0.15.12）：官方逐行事实之外的那一层视角。拿不到时为 null。
     graph: tasks.graph ?? null,
+    // 执行语义（0.16.2）：可派发集 / 等依赖 / 等资源 / 可重试 / 终止性 / 结构校验。
+    plan,
+    planError,
     subAgents: sub.subAgents,
     teamError: team.teamError ?? null,
     membersError: team.teamError ?? null,
     tasksError: tasks.tasksError ?? null,
     subAgentsError: sub.subAgentsError ?? null,
+    // 来源标注（0.16.1）：`service` = 官方 agentTeams 服务，`disk` = 磁盘回落，
+    // `null` = 两边都没读到。面板据此说明「这一屏数据从哪来」——卸载 AgentTeams
+    // 之后用户看到的应当是 `disk`，而不是一个说不清出处的空列表。
+    teamSource: team.source ?? null,
+    tasksSource: tasks.source ?? null,
   };
 }

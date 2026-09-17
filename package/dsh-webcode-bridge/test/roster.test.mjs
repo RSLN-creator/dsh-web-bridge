@@ -378,9 +378,27 @@ test('★ projectRoster：四个分区键齐全，且 members 是 team 的同值
   // 0.15.12 追加 `graph`（图诊断：就绪集/阻塞点/关键路径/结构问题）。
   // 它**不是**第五个分区——分区仍是四个（team/subAgents/tasks 各带一个 *Error），
   // graph 是 tasks 的补充视角，服务端算不出来时为 null 而不是缺席。
+  //
+  // 0.16.1 追加 `teamSource` / `tasksSource`：Team 与任务板各有**两个**数据来源
+  //（官方 agentTeams 服务 / 磁盘 `.agent-teams`），卸载 AgentTeams 后必须还能
+  // 说清「这一屏数据从哪来」。它们是来源标注而不是新分区。
+  //
+  // 0.16.2 追加 `plan` / `planError`：任务图的**执行语义**层（可派发集 / 等依赖 /
+  // 等资源 / 可重试 / 终止性 / 结构校验）。与 graph 同一性质——它是 tasks 的
+  // 补充视角而不是第五个分区，算不出来时为 null + 原因，不让任务板消失。
   assert.deepEqual(Object.keys(r).sort(),
-    ['graph', 'members', 'membersError', 'subAgents', 'subAgentsError', 'tasks', 'tasksError', 'team', 'teamError']);
+    ['graph', 'members', 'membersError', 'plan', 'planError', 'subAgents', 'subAgentsError',
+      'tasks', 'tasksError', 'tasksSource', 'team', 'teamError', 'teamSource']);
   assert.equal(r.graph, null, '读不到任务板时不得凭空造一张图');
+  // 没有任务行时执行语义仍应是**可算的**（空图是合法图）：
+  // plan 非 null 且 termination 说「0 条剩余」，而不是 null + 报错。
+  assert.ok(r.plan, '空任务板也必须给出执行语义（空图是合法图）');
+  assert.equal(r.plan.termination.total, 0);
+  assert.equal(r.plan.termination.allSettled, true, '空图没有未终态节点 ⇒ 整批已结束');
+  assert.equal(r.planError, null);
+  // 两边都读不到时来源为 null——不得谎报成 disk 或 service。
+  assert.equal(r.teamSource, null, '两个来源都没读到时不得谎报来源');
+  assert.equal(r.tasksSource, null, '两个来源都没读到时不得谎报来源');
   assert.ok(Array.isArray(r.team) && Array.isArray(r.subAgents) && Array.isArray(r.tasks) && Array.isArray(r.members));
   assert.ok(r.teamError && r.subAgentsError && r.tasksError, '三个分区都要说明原因');
   // 官方 TeamView 的词是 members，0.15.0 起本项目叫 team —— 两个名字同值，

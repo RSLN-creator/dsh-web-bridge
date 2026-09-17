@@ -96,7 +96,20 @@ async function withBridge(services, fn) {
       },
     });
   } finally {
-    server.close();
+    // 收尾把监听句柄关干净：`closeAllConnections()` 断掉上面那次 `fetch` 留下的
+    // keep-alive socket，`await` 保证关完再往下走。
+    //
+    // 实测读数（2026-09-17）：这样收尾后本文件**不加 `--test-force-exit` 也能自己退出**
+    // （2/2 全绿、进程自然结束）。反过来，加了 `--test-force-exit` 时本文件会撞 libuv 的
+    // `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\win\async.c line 94`
+    // ——**两条断言都 ✔，文件级却是红**（3/3 复现）。排查结论：把收尾改成 await 仍然复现、
+    // 让响应带 `connection: close` 仍然复现、`apply()+dispose()` 单独跑则完全干净
+    // ⇒ 触发条件是**这个开关本身**在 Windows + Node 24 下的退出路径竞态，不是本文件（更不是插件）
+    // 的缺陷。因此这类「真 HTTP + 真 apply()」的护栏请用 `node --test <file>` 跑。
+    await new Promise((resolve) => {
+      server.close(() => resolve());
+      server.closeAllConnections?.();
+    });
     await dispose();
   }
 }

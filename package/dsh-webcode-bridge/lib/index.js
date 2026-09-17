@@ -20,8 +20,9 @@ import { createRelay } from './relay.js';
 import { createOpenAiFront } from './openai.js';
 import { createBrowserDriver } from './browser-driver.js';
 import { zeroProgressDecision } from './zero-progress.js';
+import { idleWindowDecision } from './idle-window.js';
 import { createWebControl, buildSessionEvents, mainLineOf } from './web-control.js';
-import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, proseSafeEnd, readCallAt, partialProtocolAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeDsml, normCallArgs, inferToolNameFromArgs } from './agent-preset.js';
+import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, stripProtocolRegions, proseSafeEnd, readCallAt, partialProtocolAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeDsml, normCallArgs, inferToolNameFromArgs } from './agent-preset.js';
 import { createMirror } from './mirror.js';
 import { httpFetch } from './upstream.js';
 import { textOfBlocks } from './flatten.js';
@@ -60,6 +61,32 @@ export const name = 'webcode-bridge';
 // 兜底路径保留：serviceOf 仍同时试 ctx[name] 与 ctx.get(name)。
 export const inject = ['llm', 'webServer', 'agents', 'sessions', 'sessionProjections', 'subagents'];
 
+/**
+ * 哪些失败码才有资格**作废发送游标**（`sessionState.delete(keyPath)`）。
+ *
+ * 判据（0.16.4，真机事故 2026-09-17 20:52 / 会话 `session-063b0a99`）：**失败发生在
+ * 「内容已经发出去之后」的一律不作废**。那一轮的四十几万字符已经在网页会话里了，
+ * 重发整段不但救不回来，还会（a）把上下文顶爆、（b）经 `fresh:true` 把这一轮送进
+ * 一个**新建的**网页对话——用户看到的就是「明明上下文没到，却一直新开对话」。
+ * 反过来，只有「网页侧那段前文**确定不在/不可用**」时，重放整段才是唯一正确的恢复
+ *（见 executor 里 WEB_SESSION_LOST 分支的注释）。
+ *
+ * 因此这是一张**白名单**：不在表里的码（含将来新加的码）默认**保留**游标。
+ * 默认安全侧选「保留」而不是「作废」的理由是代价不对称——错误地保留游标，最坏是
+ * 下一轮把一个增量发进一个已知有前文的网页会话（可恢复）；错误地作废游标，是每一轮
+ * 都重发四十万字符并新开一个对话（用户报的那条症状本身）。
+ *
+ * 行为级实测（guards 的脚本驱动、同一 apply 实例三轮）：修前 fresh 序列
+ * `[true,false,true]`、第三轮 messageChars=150,072；修后第三轮 `fresh=false` 且只有
+ * 增量（护栏 test/session-continuity.test.mjs ④ 钉住这条红基线）。
+ */
+export const CURSOR_INVALIDATING_CODES = Object.freeze(new Set([
+  'WEB_SESSION_LOST',              // 槽里的网页会话已删/过期/被风控拦：前文确实没了
+  'WEB_SESSION_REBUILD_THROTTLED', // 刚整段重建过又丢：游标已与网页侧脱节，作废重新对齐
+  'NEED_LOGIN',                    // 未登录：这一轮根本没进网页会话
+  'MODEL_UI_CHANGED',              // 网页模型契约失配：这一轮的请求元数据都不可信
+]));
+
 const DEFAULTS = {
   port: 8931,
   host: '127.0.0.1',
@@ -81,10 +108,82 @@ const DEFAULTS = {
   // 任何人想调这个值都会发现自己改的东西没有任何效果。这正是「静默不生效」那一类
   // 缺陷，所以两处都要有，且注释写明原因。
   answerTimeoutMs: 180_000,
+  // 「网页还没开口」相位的窗口倍数（0.16.3，真机事故的修法）。
+  //
+  // 起因：2026-09-17 真机，DSH 会话把 **127,888 字符**纯文本发进 DeepSeek 网页
+  // （POST /__webcode/history 的 user 消息：工具教学 38,279 + 会话 transcript
+  // 89,609），那一轮 step5 从 18:41:59 到 18:43:51 **跨度 112 秒零事件**，适配器侧
+  // 120s 看门狗开火报 WEB_NO_PROGRESS；而同一轮 step1-4 每步都有事件（工具调用
+  // 2-4 条）⇒ 捕获链是活的，网页只是在 prefill 那 12.8 万字符的输入。用户看到的
+  // 就是「web 明明有回复，桥说没内容」。
+  //
+  // 倍数**只作用于**「本轮还没有任何事件」且「驱动 status().busy === true」这一格；
+  // 已经开流后的静默、以及驱动不在忙（链路根本没跑起来）一律按 IDLE_TIMEOUT_MS
+  // 照旧快报——那两种情况下拖长窗口只会让真正的故障更晚暴露。判据抽成纯函数
+  // lib/idle-window.js（可离线反向验证），接线在 nextWithIdle()，护栏见
+  // test/watchdog-first-byte.test.mjs。
+  //
+  // 非法值（<=0/NaN/非数字）由 idleWindowDecision 回落成 1（= 不做任何放宽）；
+  // 这里**不重复 clamp**——同一个判据写两份必然漂移（本文件 78-82 行那类
+  // 「配置看起来存在、行为却够不着」的缺陷就是这么来的）。
+  //
+  // 必须在这里也列一份：driver/适配器侧的默认值只有**被显式传进去**才生效，
+  // 不声明的话「可配」只对了一半（同 answerTimeoutMs 的教训，见上方注释）。
+  idleFirstByteMultiplier: 2,
   // 写入 composer 的单块字符上限（0.14.5）。超长提示词一次性交给 Playwright
   // 的 fill() 会在网页侧整段卡住并以 30s 超时收尾，且没有任何中间态可诊断；
   // 分块写入 + 块间回读长度让失败更早、且带得出已写进度（PROMPT_WRITE_STALLED）。
   composerChunkChars: 20_000,
+  // 超过这个字符数就把提示词改为**附件**投递。**默认 60_000（0.16.3 起启用）**。
+  //
+  // ## 为什么 0.16.2 默认关、0.16.3 改成 60_000
+  //
+  // 0.16.2 的立场是「没有真机配对数据之前不改默认行为」。0.16.3 有了那次真机事故的
+  // 完整读数，立场随之改变：
+  //   · 事故会话 `session-dff3edf7` 的 turn1 step5，发进网页的是 **127,888 字符**
+  //     纯文本（POST /__webcode/history 的 user 消息读数：工具教学 38,279 + 会话
+  //     transcript 89,609），该步 18:41:59→18:43:51 **112 秒零事件**，
+  //     被适配器侧 120s 看门狗判死 —— 而网页那侧仍在生成（用户看到的就是
+  //     「web 明明有回复、桥说没内容」）；
+  //   · 纯文本投递另有两次已发生的真机事故：PROMPT_WRITE_STALLED（写入停滞）与
+  //     PROMPT_TRUNCATED（网页只收了半截，模型照常作答）。
+  // 真机最大一轮是 409,555 字符（GET /__webcode/preset），60,000 这个阈值正好把
+  // 「一轮塞进几万字符的 transcript」挡在纯文本路径之外，而**普通单轮增量
+  // （几十~几千字符）仍然逐字走 inline**，行为不变。
+  //
+  // ## 风险与回落（每一层都有护栏）
+  //
+  // 附件投递是有副作用的动作（上传、可能撞站点风控、模型未必读附件），因此：
+  //   · 页面没有上传入口 → `ATTACH_UNAVAILABLE`，回落 inline；
+  //   · 附件未在页面上确认出现 → `ATTACH_NOT_CONFIRMED`，回落 inline；
+  //   · 上传成功但模型没读 → composer 正文明确要求「先读取该附件全文」，
+  //     且**下一轮会把新的增量照常 inline 发出**，不会长期断上下文；
+  //   · 实际走了哪条路 → 落进 driver status 的 `attachTransport`（/status 可核对）。
+  // **0 = 关闭**的语义保留：想完全回到旧行为就显式写 0。判据见 promptTransportPlan。
+  attachInlineLimitChars: 60_000,
+  // 提示词**投递形态**（0.16.3）：'attach'（默认）| 'inline'。
+  //
+  // 为什么需要这个开关（用户原话：「没有做到能够把提示词放入文本（设置界面也改为
+  // 打开文本）」）：超长正文改走附件是一条**有副作用**的路径——触发一次真实上传，
+  // 可能撞站点风控，模型也未必读附件。用户必须能在设置面把这条路整条关掉、
+  // 逐字回到旧行为（40 万字符纯文本灌输入框），而不是只能改源码或删配置。
+  //
+  // 语义边界（两个方向都写清楚，避免下一个人理解成别的意思）：
+  //   · 'attach' —— 不强制任何方向；是否真的走附件仍由 attachInlineLimitChars
+  //     与页面是否有上传入口决定（判定层只有 promptTransportPlan 一处）。
+  //   · 'inline' —— **永远纯文本**，不看阈值、不看入口，即 0.16.1 的行为。
+  // 非法值一律按 'attach'（见 browser-driver 的 promptTransportNow）。
+  //
+  // 必须在这里也列一份：driver 侧的默认值只有**被显式传进去**才生效，不声明的话
+  // 「可配」只对了一半（同 answerTimeoutMs 的教训，见上方注释）。两个
+  // createBrowserDriver 调用点都要传读取函数，否则「设置页改了、行为没变」。
+  promptTransport: 'attach',
+  // 附件投递的**尺寸上限**（0.16.3，PLAN-2026-09-17-0.16.3 §3.2，默认 1_500_000）。
+  // 超过就不上传：超长附件塞给网页同样会撞风控/渲染，改为保留尾部截断后再上传
+  // （尾部才是当下要执行的内容），并在文件开头写明「已省略前 N 字符」，绝不静默丢内容。
+  // 真机读到的最大一轮是 409,555 字符（GET /__webcode/preset），离这个上限还很远，
+  // 因此这条是护栏而非常规路径。判据与截断动作见 browser-driver 的 promptTransportPlan。
+  attachMaxChars: 1_500_000,
   // 排队上限必须显著大于单轮上限：网页一次只跑一轮，并行子代理会排队；
   // 旧值 300s 只比单轮 240s 多 60s，排在第二位的请求几乎必然「刚开始跑就超时」，
   // 长任务里的并行分支会成片失败。900s 足够跨过 2-3 轮排队。
@@ -310,10 +409,42 @@ function resolveLlm(ctx) {
  *  的最小信息，旧实现只把它们 warn 到宿主控制台。 */
 function idleTimeoutError(timeoutMs, scene) {
   const stalled = scene?.lastStalledSettle;
+  // 0.16.3：驱动侧的两段现场读数（见 browser-driver status()）。真机事故
+  // （2026-09-17，step5 跨度 112s 零事件）里这两段**一起读**就能定性：
+  //   · `最近驱动活动时间` 很新 ⇒ WIP 巡检器还在采到页面，链路是活的（不是捕获死了）；
+  //   · `页面已有 N 字回复未回传` 不为零 ⇒ 正文早就写在页面 DOM 里了，缺的是回传。
+  // 取不到的读数（null）**不出现**在文案里、也不补一个猜的值：把「网页在 prefill」
+  // 与「链路死了」混成同一句话，正是这次事故绕远路的原因。
+  const activity = typeof scene?.lastActivityAt === 'number'
+    ? `，最近驱动活动时间 ${Math.max(0, Math.round((Date.now() - scene.lastActivityAt) / 1000))}s 前`
+    : '';
+  const pendingChars = typeof scene?.domReplyChars === 'number'
+    ? `，页面已有 ${scene.domReplyChars} 字回复未回传`
+    : '';
+  // 相位必须写进报错：只说「超过 240s」读者不知道那是不是已经宽限过的窗口，
+  // 也就分不清「网页还没开口」与「网页不说了」——这两者下一步完全不同。
+  const phaseNote = scene?.phase === 'awaiting-first-byte'
+    ? `，判定相位=网页还没开口（窗口已放宽到 ${Math.round(timeoutMs / 1000)}s`
+      + `${scene.windowCapped === true ? '，且已被整轮预算压到 90% 以内' : ''}）`
+    : scene?.phase === 'mid-stream' ? '，判定相位=已开流后的静默' : '';
+  // 收束原因必须**带时刻**（0.16.3）。真机 2026-09-17 18:43 的报错原文是
+  // 「（页面在，本轮收束原因 finished）」——而那一轮根本没跑完，`finished` 是
+  // **上一轮**写的。一个无标注的旧读数把「网页还在生成」读成了「网页已收束」，
+  // 排查方向当场被带偏。这里按写入时刻把它标注成「上一轮的」并给出距今秒数。
+  const endReason = (() => {
+    if (!scene?.lastEndReason) return '';
+    const at = typeof scene.lastEndReasonAt === 'number' ? scene.lastEndReasonAt : null;
+    if (at == null) return `，最近一次收束原因 ${scene.lastEndReason}（写入时刻未知）`;
+    const ageS = Math.max(0, Math.round((Date.now() - at) / 1000));
+    // ≤5s 视为「刚刚这一轮」；超过就是上一轮遗留下来的读数。
+    const label = ageS <= 5 ? '本轮收束原因' : `上一轮收束原因（${ageS}s 前）`;
+    return `，${label} ${scene.lastEndReason}`;
+  })();
   const hint = scene
     ? `（页面${scene.preview ? '在' : '不在'}${scene.lastRecovered ? `，最近一次部分流：${scene.lastRecovered.reason} ${scene.lastRecovered.chars} 字` : ''}`
       + `${stalled ? `，最近一次只出思维链：思考 ${stalled.thinkingChars} 字 / 正文 ${stalled.answerChars} 字（${stalled.reason}）` : ''}`
-      + `${scene.lastEndReason ? `，本轮收束原因 ${scene.lastEndReason}` : ''}）`
+      + endReason
+      + `${phaseNote}${activity}${pendingChars}）`
     : '';
   const err = new Error(`WEB_NO_PROGRESS: 网页侧超过 ${Math.round(timeoutMs / 1000)}s 没有任何新内容${hint} — 本轮已中止，可重试`);
   err.code = 'WEB_NO_PROGRESS';
@@ -431,6 +562,12 @@ export function apply(ctx, config = {}) {
     cfg.version = version;
   }
   const sessionState = new Map();
+  // 「本次进程里作废过几次发送游标」——只读计数，透出到 /__webcode/status 的
+  // driver.sessionCursorInvalidations（0.16.4）。存在的意义是把「又新开了一个对话」
+  // 一句话定位到**哪一侧**：驱动侧的槽丢了看 sessionLostCount / sessionSlot，
+  // 适配器侧把游标清掉了看这个数。没有它，同一个症状在两侧各有一个嫌疑，
+  // 只能靠读日志猜（这正是 2026-09-17 那次排查花掉一整天的地方）。
+  let sessionCursorInvalidations = 0;
   let buildTurn;
   let lastPresetInfo = null;   // the most recent first-turn prompt (settings-page preview)
   // 全局指令：设置页可追加，持久化在 profile 目录的 webcode-settings.json（优先使用宿主 settings 服务）。
@@ -613,36 +750,83 @@ export function apply(ctx, config = {}) {
       // 里清掉，一次调用一个定时器、零泄漏（旧写法若用常驻 interval，每轮都会
       // 留下一个永不清理的计时器）。
       const idleSiteId = turn?.meta?.siteId || 'deepseek';
+      // 本轮是否已经收到过**任何**事件（delta/think/image）。这是本闭包自己的标记，
+      // 刻意**不问驱动**：驱动的 status 是跨轮共享的（该事故里看门狗读到的
+      // `lastEndReason=finished` 其实是**上一轮**的收束原因，被当成了本轮线索），
+      // 而「网页开口了没有」必须严格属于本轮。null = 还没有，epoch ms = 首个事件时刻。
+      let firstEventAt = null;
+      // 驱动此刻是否在忙。status() 是同步的、已存在；懒驱动（glm#2 之类）可能还没建、
+      // 或被替换中的实现根本没有 status() ⇒ 取不到一律按「不在忙」，即按旧窗口快报
+      // （安全侧：宁可早报，也不给一个可能已经死掉的链路 2 倍宽限）。
+      const idleDriverBusy = () => {
+        try { return driverFor(idleSiteId)?.status?.()?.busy === true; } catch { return false; }
+      };
+      // 相位与窗口在**每次 next() 之前**重算：首个事件一到，窗口立刻回到 IDLE_TIMEOUT_MS，
+      // 已经开流的轮次不可能继续享受宽限（判据与安全线见 lib/idle-window.js）。
+      const idleDecision = () => idleWindowDecision({
+        baseMs: IDLE_TIMEOUT_MS,
+        firstEventAt,
+        driverBusy: idleDriverBusy(),
+        multiplier: cfg.idleFirstByteMultiplier,   // 非法值由纯函数回落成 1
+        // 整轮预算：相位窗口必须**严格小于**它，否则看门狗与驱动的整轮超时
+        // 会在同一条 deadline 上赛跑，用户可能拿到信息量最少的那句
+        // （`web turn timed out`，没有页面现场）。默认 120s×2 = 240s 恰好撞上
+        // 整轮 240s，纯函数因此把相位窗口压到预算的 90%。见 lib/idle-window.js。
+        totalBudgetMs: cfg.requestTimeoutMs,
+      });
       // 现场在**超时那一刻**才采（同步调用，无页面往返）：提前采会拿到过时状态。
-      const idleScene = () => {
+      const idleScene = (decision) => {
+        // 相位与窗口一并带进现场：报错里「超过 240s」到底是不是宽限后的窗口，
+        // 事后必须能一眼读出（旧实现只有一个超时数字，分不清相位）。
+        const base = {
+          phase: decision?.phase ?? null,
+          windowMs: decision?.windowMs ?? null,
+          // capped=true ⇒ 相位窗口被整轮预算压过（不是配置写错）。报错里要说出来，
+          // 否则下一次看到「判定相位=网页还没开口（窗口已放宽到 216s）」的人
+          // 会以为自己配的 240s 没生效。
+          windowCapped: decision?.capped === true,
+        };
         try {
           const st = driverFor(idleSiteId)?.status?.() || null;
-          if (!st) return null;
+          if (!st) return base;
           return {
+            ...base,
             preview: st.preview === true,
             running: st.running === true,
             busy: st.busy === true,
             recoveredTurns: st.recoveredTurns ?? 0,
             lastRecovered: st.lastRecovered ?? null,
             lastEndReason: st.lastEndReason ?? null,
+            // 0.16.3：收束原因的写入时刻。没有它就无法把「本轮刚收束」与
+            // 「上一轮遗留的读数」分开（真机事故里正是后者被当成了前者）。
+            lastEndReasonAt: st.lastEndReasonAt ?? null,
             // 0.15.2：只出思维链的硬上限现场。看门狗超时时，这三个字段能把
             // 「网页没生成」与「思考完就不回答」在报错文本里直接分开。
             thinkingOnlyTurns: st.thinkingOnlyTurns ?? 0,
             lastStalledSettle: st.lastStalledSettle ?? null,
             answerTimeoutMs: st.answerTimeoutMs ?? null,
+            // 0.16.3：驱动侧的两段现场读数（见 browser-driver status() 的投影注释）。
+            // `lastActivityAt` 很新 ⇒ 巡检器还在读到页面，链路是活的；
+            // `domReplyChars` 很大而这边零事件 ⇒ 网页早写完，缺的是回传。
+            lastActivityAt: st.lastActivityAt ?? null,
+            domReplyChars: st.domReplyChars ?? null,
           };
-        } catch { return null; }
+        } catch { return base; }
       };
       const nextWithIdle = async () => {
         let timer = null;
         try {
-          return await Promise.race([
+          const ev = await Promise.race([
             ch.next(),
             new Promise((_, reject) => {
-              timer = setTimeout(() => reject(idleTimeoutError(IDLE_TIMEOUT_MS, idleScene())), IDLE_TIMEOUT_MS);
+              const { windowMs, phase } = idleDecision();
+              timer = setTimeout(() => reject(idleTimeoutError(windowMs, idleScene({ windowMs, phase }))), windowMs);
               timer.unref?.();
             }),
           ]);
+          // 首个事件到达：置位本轮标记，下一次迭代起窗口立刻回到常规值。
+          if (firstEventAt === null) firstEventAt = Date.now();
+          return ev;
         } finally { if (timer) clearTimeout(timer); }
       };
       const settled = relay
@@ -654,7 +838,30 @@ export function apply(ctx, config = {}) {
           meta: turn.meta,
         })
         .then(({ text, thinking, images }) => ch.push({ end: { text, thinking, images } }))
-        .catch((err) => { turn.invalidate?.(); ch.push({ err }); });
+        .catch((err) => {
+          // 交付前的失败**按错误码**决定「要不要把发送游标作废」，不再一律作废
+          //（判据与整张白名单见 CURSOR_INVALIDATING_CODES 的注释）。
+          //
+          // 旧写法是 `turn.invalidate?.()` 无条件执行：任何一轮失败（包括
+          // WEB_NO_PROGRESS 这种「内容已经发出去、只是网页没吐完」的失败）都会把
+          // sessionState 里这一条删掉，于是下一轮 `const fresh = !st` 为 true ⇒
+          // 整段首轮提示词重发 + `fresh:true` ⇒ 又开一个新的网页对话。真机行为级
+          // 实测（guards，脚本驱动、同一 apply 实例三轮）：fresh 序列
+          // `[true,false,true]`、第三轮 messageChars=150,072——就是用户报的
+          // 「一直新开对话 + 每轮四十万字符」，与驱动侧的槽丢失**各自独立**。
+          const code = String(err?.code || '');
+          if (CURSOR_INVALIDATING_CODES.has(code)) {
+            turn.invalidate?.();
+            sessionCursorInvalidations += 1;
+            warn(`turn failed with ${code} — 作废发送游标（第 ${sessionCursorInvalidations} 次）：`
+              + '下一轮将整段重建网页会话');
+          } else {
+            // 未列出的码（含空 code）默认保留游标：这一轮的失败没有证据表明网页侧
+            // 的前文不可用，下一轮继续发增量即可——绝不因此重发整段、更不换新会话。
+            log(`turn failed with ${code || '(no code)'} — 保留发送游标，下一轮继续发增量`);
+          }
+          ch.push({ err });
+        });
 
       if (tools.length === 0) {
         // pure chat: stream deltas as they arrive
@@ -1069,9 +1276,23 @@ export function apply(ctx, config = {}) {
         if (textOpen && !pendingCalls.length) {
           // 流式收尾还扣着 PROSE_TAIL_CHARS 尾巴没发（正文无协议边界、调用来自
           // 思考兜底的 GLM-5.3 场景）：先补上再收口，否则正文尾巴被永远扣住。
+          //
+          // T2-D：权威散文**不能**用 stripProtocolText 算。那个函数在第一个协议
+          // 起点处截断，于是「调用之后的那段正文」在这里被整段丢掉——真机症状是
+          // 「话说到一半就没了」，护栏是 test/markdown-block-integrity.test.mjs ③
+          // （权威全文 = PROSE1 + CALL + PROSE2，增量只送 PROSE1 → 实测块内容只剩
+          // PROSE1，PROSE2 一个字节都不进会话）。stripProtocolRegions 把协议区间
+          // **挖掉**、两侧散文都留下，正好是「块内容 = 权威散文」需要的语义。
           const prose0 = proseSent.slice(proseBlockStart);
-          const clean = stripProtocolText(finalText);
-          const missing = (clean.startsWith(prose0) && clean.length > prose0.length) ? clean.slice(prose0.length) : '';
+          const clean = stripProtocolRegions(finalText);
+          let missing = (clean.startsWith(prose0) && clean.length > prose0.length) ? clean.slice(prose0.length) : '';
+          // T2-C 安全线：补发的这段是**新外发**的字节，所以它自己必须过一遍协议
+          // 探测——区间定位一旦失手（未知形态、闭合标签错配），宁可退回旧行为
+          // （少补一段正文）也绝不让协议原文进 text-delta / 块内容。
+          if (missing && findProtocolStart(missing).index >= 0) {
+            warn(`withheld ${missing.length} chars of unverified prose patch (协议痕迹未通过探测，按旧行为不补发)`);
+            missing = '';
+          }
           if (missing) { textSent += missing; proseSent += missing; yield { type: 'text-delta', index: textIndex, text: missing }; }
           const imageMd = imageMarkdown(endImages);
           if (imageMd) { textSent += imageMd; proseSent += imageMd; yield { type: 'text-delta', index: textIndex, text: imageMd }; }
@@ -1201,7 +1422,18 @@ export function apply(ctx, config = {}) {
       }
       // 块内容必须与外发的 delta 逐字一致，否则界面上这一块会凭空多出协议原文。
       // 因此 delta 必须在 tail 定稿（可能接了 unparsedCallNotice）之后才发。
-      if (tail) yield { type: 'text-delta', index: textIndex, text: tail };
+      //
+      // 0.16.4：**流式期间没开过文本块时必须先开块**。真机形态：正文只存在于网页给的
+      // 权威全文里（增量通道只送了调用之前的散文，甚至什么都没送），于是
+      // `textIndex` 还是初值 -1、`textOpen` 为 false；旧写法直接用 -1 发
+      // `text-delta` 与 `block-end`，把这一段正文挂在一个**从未 block-start 的下标**上。
+      // 界面上就是用户报的「有些 markdown 渲染有些不渲染」——文本在权威全文里，
+      // 却被写进了一个不存在的块。
+      // 护栏：`test/markdown-block-integrity.test.mjs` ③（块内容必须等于权威散文）。
+      if (tail) {
+        yield* openText();
+        yield { type: 'text-delta', index: textIndex, text: tail };
+      }
       const proseBlock = proseSent.slice(proseBlockStart) + tail;
       yield { type: 'block-end', index: textIndex, block: { type: 'text', text: proseBlock } };
       yield* closeThink();
@@ -1337,6 +1569,15 @@ function imageMarkdown(images) {
     answerTimeoutMs: cfg.answerTimeoutMs,
     loginTimeoutMs: cfg.loginTimeoutMs,
     composerChunkChars: cfg.composerChunkChars,
+    attachInlineLimitChars: cfg.attachInlineLimitChars,
+    // 附件尺寸上限（0.16.3）。同 answerTimeoutMs 的教训：不显式传，配置项就成了
+    // 摆设——driver 内部即使有同名默认值，用户改 index.js 这一层也永远够不着。
+    attachMaxChars: cfg.attachMaxChars,
+    // 投递形态（0.16.3）。这里传的是**读取函数**而不是 `cfg.promptTransport` 快照：
+    // 设置页写的是 webcode 设置命名空间（configManager），与插件 config 是两个来源，
+    // 传快照就等于「设置页选了纯文本、实际仍走附件」。函数每次投递前现读，
+    // 未设置时回落插件 config（cfg.promptTransport，默认 'attach'）。
+    getPromptTransport: () => configManager.get().promptTransport ?? cfg.promptTransport,
     logger: console,
   });
 
@@ -1384,6 +1625,16 @@ function imageMarkdown(images) {
         answerTimeoutMs: cfg.answerTimeoutMs,
         loginTimeoutMs: cfg.loginTimeoutMs,
         composerChunkChars: cfg.composerChunkChars,
+        // 同默认 driver：非默认槽也必须拿到附件阈值，否则「账户2 发长提示词」与
+        // 「默认槽发长提示词」行为不一致——两个槽走的是同一份代码。
+        attachInlineLimitChars: cfg.attachInlineLimitChars,
+        // 同默认 driver：附件尺寸上限也必须传，否则「账户2 发超长提示词」与「默认槽」
+        // 会走出两种行为——两个槽走的是同一份代码。
+        attachMaxChars: cfg.attachMaxChars,
+        // 同默认 driver（0.16.3）：第二个账户槽也必须拿到同一个投递形态读取函数，
+        // 否则「账户2 选了纯文本」与「默认槽选了纯文本」会走出两种行为——
+        // 两个槽走的是同一份代码。
+        getPromptTransport: () => configManager.get().promptTransport ?? cfg.promptTransport,
         logger: console,
       });
       try { d.setImageLimitsProvider?.(imageLimitsProvider); } catch { /* 同上 */ }
@@ -1588,10 +1839,38 @@ function imageMarkdown(images) {
   // 否则看门狗会先于稳态收束开火，把本可救回的回复判死。
   const WIP_IDLE_MS = Math.max(300, Number(cfg.wipIdleMs) || 2500);
   const IDLE_TIMEOUT_MS = Math.max(WIP_IDLE_MS + 1000, Number(cfg.idleTimeoutMs) || 120_000);
+  // 会话重建节流（T1）：同一 sessionKey 在窗口内只允许**整段重建**一次。
+  //
+  // 为什么必须有（2026-09-17 20:52 那次事故的雪崩形态）：会话槽一旦为空，每一轮
+  // 都会走 WEB_SESSION_LOST → 整段重建（真机 407,064 字符的首轮提示词重放进一个
+  // **新**网页会话）→ 又失败 → 下一轮再重建。用户看到的是「一直新开对话」，代价
+  // 是每轮四十万字符的发送加一次风控暴露；而「重建」这个动作本身并不比「等下一轮
+  // 自愈」更可能成功——驱动的落地即落盘（browser-driver 的 noteLanded）与 URL 自愈
+  // 已经能把槽补回来，短时间内重复重建只会把两边都拖垮。
+  //
+  // 60s 的依据：它要跨过「一轮失败 → 宿主立刻重试」的时间尺度（小于适配器看门狗
+  // 120s 与驱动单轮 240s，因此不会把一次正常的重试也挡在外面），又要短到不耽误用户
+  // 手动重试——超窗的重建请求照常放行。`cfg.sessionRebuildThrottleMs` 可调小
+  //（**供离线测试用**，0 = 关闭节流），与 cfg.rateLimitBackoffMinMs 的立场一致。
+  const SESSION_REBUILD_THROTTLE_MS = Math.max(0, Number(cfg.sessionRebuildThrottleMs ?? 60_000) || 0);
+  const lastSessionRebuildAt = new Map();   // sessionKey → { at, chars }
 
   let front = null;
   const relay = createRelay({
     ...cfg,
+    // 中继侧的**外层**总超时必须是两段内层预算之和，不能与它们同值（0.16.3 修正）。
+    //
+    // 三类超时串在同一条链上：中继外层 > 驱动单轮 > 适配器看门狗窗口。0.16.3 之前
+    // 默认全是 240s：驱动超时一到就 resolve/reject，中继的 240s 同时到点，两者在
+    // 同一条 deadline 上赛跑 —— 谁先跑完由事件循环决定，用户拿到的可能是中继那句
+    // 「request timed out after 240000ms」（没有页面现场），从而丢掉驱动那句带
+    // 捕获链是否存活、页面已有多少字回复的诊断。更糟的是首字节相位：看门狗宽限后
+    // 的窗口 120s×2 = 240s 与整轮总超时**同值**，于是「网页还在 prefill」那一轮
+    // 会被整轮超时先杀掉——0.16.3 想修的那次事故会原样复现，只是报错换了名字。
+    //
+    // 语义上这也是对的：中继的外层还要覆盖排队（最多 32 个请求串行）与一次
+    // 限流退避重试，本来就该比单轮预算宽。护栏见 test/watchdog-first-byte.test.mjs。
+    requestTimeoutMs: (Number(cfg.requestTimeoutMs) || 240_000) * 2,
     logger: console,
     // 累计等待时长的记账入口（见 recordWaitMetrics）。
     onMetrics: recordWaitMetrics,
@@ -1633,9 +1912,37 @@ function imageMarkdown(images) {
             // 与工具协议，而不是把一个没有前文的增量丢进新会话（那才是真正的
             // 「跑着跑着变傻」）。重放失败才把游标作废，交给下一轮。
             if (err?.code === 'WEB_SESSION_LOST' && typeof m.rebuild === 'function') {
-              log('web session lost — replaying the full first-turn prompt into a fresh web chat');
+              const prev = lastSessionRebuildAt.get(m.sessionKey) || null;
+              const now = Date.now();
+              // 节流（见 SESSION_REBUILD_THROTTLE_MS）：第二次重建**不带任何副作用**
+              // 地失败，而不是再发一遍四十万字符。错误里必须带齐现场与出路
+              //（doc/comment-style.md §7.2）：多久前重建过、重放了多少字符、还要等多久。
+              if (SESSION_REBUILD_THROTTLE_MS > 0 && prev && now - prev.at < SESSION_REBUILD_THROTTLE_MS) {
+                const waitMs = SESSION_REBUILD_THROTTLE_MS - (now - prev.at);
+                const throttled = new Error(
+                  'WEB_SESSION_REBUILD_THROTTLED: ' + Math.round(waitMs / 1000) + 's 内已经整段重建过一次，'
+                  + '本次不再重放（sessionKey=' + m.sessionKey + '，上次重建在 '
+                  + Math.round((now - prev.at) / 1000) + 's 前、重放了 ' + prev.chars + ' 字符）'
+                  + ' — 请等窗口过去后用「继续」重试，或先在 GUI 里压缩上下文再重试',
+                );
+                throttled.code = 'WEB_SESSION_REBUILD_THROTTLED';
+                throttled.sessionKey = m.sessionKey;
+                throttled.siteId = siteId;
+                throttled.retryAfterMs = waitMs;
+                throttled.lastRebuildAt = prev.at;
+                throttled.lastRebuildChars = prev.chars;
+                warn(`web session rebuild throttled (sessionKey=${m.sessionKey}, ${Math.round(waitMs / 1000)}s left, `
+                  + `last rebuild ${prev.chars} chars) — 不再重复整段重建`);
+                throw throttled;
+              }
+              // 重放文本只算一次：既要发给网页，也要作为「这次重建了多少字符」的读数
+              // 留给下一次节流判定（m.rebuild() 是纯序列化，但 40 万字符不该算两遍）。
+              const rebuildText = m.rebuild();
+              lastSessionRebuildAt.set(m.sessionKey, { at: now, chars: rebuildText.length });
+              while (lastSessionRebuildAt.size > 512) lastSessionRebuildAt.delete(lastSessionRebuildAt.keys().next().value);
+              log(`web session lost — replaying the full first-turn prompt into a fresh web chat (${rebuildText.length} chars)`);
               await drive.resetConversation(m.sessionKey).catch(() => {});
-              return drive.sendTurn(m.sessionKey, m.rebuild(), { ...turnOpts, fresh: true });
+              return drive.sendTurn(m.sessionKey, rebuildText, { ...turnOpts, fresh: true });
             }
             // a vanished/deleted conversation poisons the stored slot — reset
             // it so the NEXT turn reopens a fresh web chat
@@ -1712,7 +2019,14 @@ function imageMarkdown(images) {
           sites.push(siteStatusRow(st, acc));
         }
       }
-      return { ...base, sites };
+      return {
+        ...base,
+        sites,
+        // 适配器侧的会话连续性读数（0.16.4）：本次进程里作废过几次发送游标。
+        // 与驱动侧的 sessionLostCount / sessionSlot 并列——「又新开对话」这类症状
+        // 从此能一句话分成两侧：槽丢了看驱动那一组，游标被清掉了看这个数。
+        sessionCursorInvalidations,
+      };
 
       /** 单个槽的状态行。拆成函数是因为默认槽与非默认槽的「未初始化」分支要逐字一致。 */
       function siteStatusRow(st, acc) {
@@ -1745,14 +2059,21 @@ function imageMarkdown(images) {
           // 「glm (账户2)」而退化成裸 siteId，两行看起来一模一样。
          return { siteId: st.id, siteName: st.name, origin: st.origin, slot: acc.slot, accountKey: acc.key, displayName: accountLabel(st.name, acc.slot), profileDir: slotDir, initialized: false, running: false, busy: false, loggedIn: has ? cached.loggedIn : null, loggedInCached: has && cached.loggedIn === true, loginBasis: trusted ? cached.basis : (cached ? 'stale' : null), loginCheckedAt: cached ? cached.at : null, needLogin: has && cached.loggedIn === false, selectedModel: null, window: null, loginState: 'idle', lastLogin: null, sessionLostCount: 0, lastSessionLost: null };
         }
-        const s = d.status();
+        // status() 可能是 null——「取不到现场」在契约里是合法返回值（懒驱动还没建起来、
+        // 测试替身、或本进程尚未观测到任何东西）。旧写法紧接着就读 `s.profileDir`，
+        // 于是抛 TypeError；而这条路径在 `apply() → relay.start() → relay.status()
+        // → driverStatus()` 上**一定会被走到**，等于「一个还没初始化的驱动能让整个插件
+        // 挂载失败」。2026-09-17 实测（node -e 直接调用 apply，注入 status(){return null}
+        // 的驱动）：`TypeError: Cannot read properties of null (reading 'profileDir')
+        // at siteStatusRow (lib/index.js)`。
+        const s = d.status() || {};
         // sessionLostCount / lastSessionLost 必须**逐槽**透出（0.14.8 账户头像）：
         // 前端要按账户显示「会话没了」的浅红状态环，而这两个读数原先只在
         // driver.status() 顶层有——`sites` 的每一行都没有。没有它，UI 就只能
         // 靠 loggedIn 猜，或者干脆写死一个假状态（那是用户明确不要的）。
         // 未初始化的槽给 0/null（不是 omit）：前端按键索引，缺字段会让该行
         // 退化成「undefined 次」，看起来像读数坏了。
-        return { siteId: st.id, siteName: st.name, origin: st.origin, slot: acc.slot, accountKey: acc.key, displayName: accountLabel(st.name, acc.slot), profileDir: s.profileDir ?? null, initialized: true, running: s.running, busy: s.busy, loggedIn: s.loggedIn, loggedInCached: s.loggedInCached === true, loginBasis: s.loginBasis ?? null, loginCheckedAt: s.loginCheckedAt ?? null, needLogin: s.needLogin, selectedModel: s.selectedModel, window: s.window ?? null, loginState: s.loginState ?? 'idle', lastLogin: s.lastLogin ?? null, sessionLostCount: s.sessionLostCount ?? 0, lastSessionLost: s.lastSessionLost ?? null };
+        return { siteId: st.id, siteName: st.name, origin: st.origin, slot: acc.slot, accountKey: acc.key, displayName: accountLabel(st.name, acc.slot), profileDir: s.profileDir ?? null, initialized: true, running: s.running === true, busy: s.busy === true, loggedIn: s.loggedIn ?? null, loggedInCached: s.loggedInCached === true, loginBasis: s.loginBasis ?? null, loginCheckedAt: s.loginCheckedAt ?? null, needLogin: s.needLogin === true, selectedModel: s.selectedModel ?? null, window: s.window ?? null, loginState: s.loginState ?? 'idle', lastLogin: s.lastLogin ?? null, sessionLostCount: s.sessionLostCount ?? 0, lastSessionLost: s.lastSessionLost ?? null };
       }
     },
     loginTrigger: (accountKey) => driverFor(accountKey || 'deepseek').openLogin(),
