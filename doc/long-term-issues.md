@@ -1369,7 +1369,7 @@ if (!isCall) return;      // ← JSON 合法、只是没写 name ⇒ 静默丢�
 ---
 
 本文件是维护台账，不是发布阻塞清单。
-## 25. **TOOL_CALL_UNPARSED 两类残根：缺 `name` 的流式块 / 断流截断的参数**（0.16.10 定性，**未修**）
+## 25. **TOOL_CALL_UNPARSED 两类残根：缺 `name` 的流式块 / 断流截断的参数**（0.16.10 定性；0.16.11–0.16.15 **大幅收口**）
 
 ### 现象
 
@@ -1413,12 +1413,24 @@ if (!isCall) return;      // ← JSON 合法、只是没写 name ⇒ 静默丢�
 
 ### 安全边界
 
-「不许猜名字」的红线不放宽：候选不唯一仍返回 `null`（#23 护栏 ⑦：`{file_path}`
-不得被认成 `write`）。
+「不许猜名字」的红线**分两层收口**（0.16.14）：严格推断不唯一时，若候选**全部**落在
+只读白名单（read/glob/grep）内，允许取第一个可行者并标 `ambiguous`（最坏代价=一次
+无害错误读取 + 模型按 RECOVERED_CALL 提示重发）；候选涉及任何写类/副作用工具仍整簇
+放弃（`{file_path}` → write 的危险不放宽）。
+
+### 状态（2026-09-19，0.16.15）
+
+- 简写参数漂移（run-2 形态）：`normalizeDsml` 宽容已修（0.16.12，夹具 15）；
+- 缺 invoke 开标签 / 闭标记残缺（run-4/6 形态）：恢复派发 + 恢复层预修已修
+  （0.16.13–0.16.15，夹具 17/18 全文）；
+- **残余风险**：漂移形状持续翻新（一晚 4 种），不可恢复形状仍走 UNPARSED 提示；
+  0.16.14 起两轮长跑实测 **0 UNPARSED**（3+3 条经恢复派发救回）；
+- 无人值守循环把纯文本提示轮当最终答案的终止问题，靠恢复派发使循环存活，
+  DSH 侧循环语义未动（不属于本仓库）。
 
 ---
 
-## 26. **`empty response from web AI`：思考-only 流走硬失败**（2026-09-19 新登记，**未修**）
+## 26. **`empty response from web AI`：思考-only 流走硬失败**（2026-09-19 新登记，**0.16.11 已修**）
 
 ### 现象（取证）
 
@@ -1451,3 +1463,10 @@ turn/end reason = {"kind":"error","error":{"message":"empty response from web AI
    软提示（把现场与下一步交给模型），不整轮作废；
 3. 报错文本带现场：思考字符数、`lastEndReason`、`domReplyChars`；
 4. 护栏：构造 reasoning-only 流夹具，断言「不抛 UNKNOWN、交回提示正文」。
+
+### 状态（2026-09-19，0.16.11 已修）
+
+判定抽成纯函数 `emptyWebResponseError`（`lib/zero-progress.js`）：正文/思考/图片全空才
+判空，报错带收束原因与流首段；思考-only 轮交回适配器走 `thinkingOnlyNotice`。
+护栏 `test/empty-response.test.mjs`（5 条）。**披露**：驱动接线 2 行无自动化红线
+（既有测试桩全部绕过真驱动），靠代码评审与真机 run-5/7 连续零 empty-response 佐证。

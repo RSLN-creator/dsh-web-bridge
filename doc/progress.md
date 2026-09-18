@@ -24,7 +24,7 @@
 | 已装版本（profile） | **0.16.15**（web + headless 逐 profile 实测：声明 `package.json`、`pnpm-lock.yaml`、`node_modules/dsh-webcode-bridge/package.json` 三处一致指向 `dsh-webcode-bridge-0.16.15.tgz`；`lib/index.js` sha256 前 12 位与工作树一致。headless 的声明欠账 0.14.6 已在 0.16.11 轮清掉） |
 | 运行中的进程 | headless 长跑验证以 `dsh --profile headless` 进程级验证（每次真机长跑即运行版核对）；DSH web（3080）2026-09-19 凌晨未运行 |
 | 上游 | `origin/main` = `9d4c61a`（0.16.10 台账推送）；0.16.11–0.16.15 本地已提交/待推 |
-| 单测基线 | **64/64 测试文件**；全量 **755 条**（729 + 本轮新增：`empty-response` 5、`unparsed-notice-head` 2、`prompt-compact` 5、`dsml-param-shorthand` 5、`recovered-dispatch` 5、`dsml-real-drift-2026-09-19` 5；另有真机夹具 `dsml-real-15/16/17/18` 入档） |
+| 单测基线 | **64/64 测试文件**；全量 **756 条**（729 + 本轮新增：`empty-response` 5、`unparsed-notice-head` 2、`prompt-compact` 5、`dsml-param-shorthand` 5、`recovered-dispatch` 5、`dsml-real-drift-2026-09-19` 5；另有真机夹具 `dsml-real-15/16/17/18` 入档） |
 | 注释闸门 | **error 0 / warn 0，退出码 0**（2026-09-19 实跑） |
 | 文件规范闸门 | `check-repo-hygiene.mjs` **PASS**（无 BOM + 索引无死链 + CI/engines Node 版本相容） |
 | 发布闸门 | `verify-pack` 逐文件 sha256 相同 + 接线完好，退出 0（0.16.11 实跑，见 §0.16.11） |
@@ -44,64 +44,60 @@
 > **教训记在这里而不是删掉**：凡是「已装/已重启/已验证」这类状态行，**必须逐 profile 写、并附
 > sha256 前 12 位**，否则它会把「一个 profile 装了」读成「都装了」。 |
 
-## 0.16.11（本轮）—— 长跑会话四类阻断点的修复（真机读数待补）
+## 0.16.11–0.16.15（2026-09-19 本轮）—— 长跑会话阻断点修复与真机连续验证
 
 **用户指令（逐字）**：「把我提到的这些写入doc/，然后开始修复长跑会话问题，真机实际长时间
 会话验证（30分钟+50轮无外部提醒工具调用+最佳工程提示词）」「然后等我验收，版本号保持0.16.x」
-「其他不要动」。
+「其他不要动」；执行中追加：「1.注意写好你实时调试记录 2.请你将每次真实调用失误原文记录好！
+看原有已记录的工具调用失败文档！」；收尾指令：「就这样先，直接打包按照做好记录和文档，提交git」。
 
-本轮只动长跑链路；取证见 [`diagnosis-2026-09-19.md`](diagnosis-2026-09-19.md)，
-缺陷立条 #25/#26 见 [`long-term-issues.md`](long-term-issues.md)。
+实时调试日志（逐时间线）：`.tmp/debug-log-longrun-2026-09-19.md`（工作区暂存，持久事实以本节为准）。
+取证底稿：`doc/diagnosis-2026-09-19.md`；缺陷条目：#25 / #26（`long-term-issues.md`）。
 
-### 一、修了什么（四类，全部最小改动）
+### 一、修了什么（六类，全部最小改动，逐项有护栏+反向验证）
 
-| # | 缺陷 | 修法 | 落点 |
+| 版本 | 缺陷/改动 | 落点 | 反向验证 |
 | --- | --- | --- | --- |
-| ① | `empty response from web AI` 硬失败（#26）：只看 `result.text`，思考-only 轮整轮作废（真机 d5fd2e11 turn 8） | 判定抽成纯函数 `emptyWebResponseError`：正文/思考/图片**全空**才判空，报错带收束原因与流首段；思考-only 交回适配器走 `thinkingOnlyNotice` | `lib/zero-progress.js`、`lib/browser-driver.js` |
-| ② | TOOL_CALL_UNPARSED 提示只报字数（#25）：模型看不见被扣的是哪条调用，无法精确重发 | 提示新增「被扣协议原文开头」（≤200 字符原样引用）；**两类残根仍不许桥侧代猜代拼**（PROMPT-ENGINEERING.md §二红线） | `lib/index.js`（`unparsedCallNotice` + 两处调用点） |
-| ③ | PROMPT_TRUNCATED 无退路：真机 0a62dbb8 差 **11 个字符**整轮作废、模型零回复 | 驱动报错带 `accepted/total`；executor 对 **fresh 首轮**按 `accepted−2KB` 预算自动压缩重试**一次**；`serializeFirstTurn` 支持 `maxPromptChars`（丢最旧消息段、留显式省略标记、最新任务与全部教学保底保留）；增量轮不重试（重放会丢本轮新消息，语义不对） | `lib/browser-driver.js`、`lib/index.js`（executor）、`lib/agent-preset.js` |
-| ④ | headless 声明欠账（连带发现）：`profiles/headless/package.json` 仍钉 `0.14.6.tgz`，node_modules 是 0.16.10 但声明从未更新——任何 pnpm 通道会把 headless 打回 0.14.6 | 本轮装机用 `dsh plugin --profile headless add` 让声明指向 0.16.11 | 装机步骤（§六） |
+| 0.16.11 | #26：思考-only 轮 `empty response` 硬失败 → 纯函数 `emptyWebResponseError`（全空才判空+报错带现场） | `lib/zero-progress.js`、`lib/browser-driver.js` | 纯函数红基线=实现前；**驱动接线 2 行无自动化红线（桩驱动绕过真驱动），如实披露** |
+| 0.16.11 | #25：UNPARSED 提示带被扣原文头（≤200 字符） | `lib/index.js` | 摘掉 head 实参 ⇒ 2/2 红 → 恢复 ⇒ 绿 |
+| 0.16.11 | PROMPT_TRUNCATED 无退路 → fresh 首轮按 accepted−2KB 自动压缩重试一次（`maxPromptChars` 丢最旧段+显式标记）；增量轮不重试 | `lib/browser-driver.js`、`lib/index.js`、`lib/agent-preset.js` | 分支错误码改失配 ⇒ 端到端红 → 恢复 ⇒ 绿 |
+| 0.16.12 | run-2 简写参数漂移（`｜｜DSML｜｜ file_path="…`）→ normalizeDsml 宽容（attr 名即参数名） | `lib/agent-preset.js` | 禁用规则 ⇒ 2 红 → 恢复 ⇒ 绿 |
+| 0.16.13–14 | UNPARSED 终止根因（无人值守循环把纯文本提示轮当最终答案）→ **恢复派发**：白名单只读工具（read/glob/grep）+ invoke 名真实存在/参数形状唯一推断（不唯一但候选全在白名单内取第一并标 `ambiguous`，涉写类整簇放弃）+ `RECOVERED_CALL` 说明 + finish `tool-calls`；扣留全文进日志（只进日志） | `lib/agent-preset.js`、`lib/index.js` | 调用点置空 ⇒ 端到端红 → 恢复 ⇒ 绿 |
+| 0.16.15 | run-6 闭标记残缺（`</｜｜DSML｜｜>`、`<｜｜DSML｜｜ invoke>`）→ 恢复层预修（无 name 的开形 invoke 只能是漏 `/` 的闭标签——结构唯一解） | `lib/agent-preset.js` | 夹具 18：恢复 4/4 |
 
-**「最佳工程提示词」的口径**：默认教学路径被 `test/prompt-variants.test.mjs` 逐字基线锁死
-（PROMPT-ENGINEERING.md §1.3 零位移纪律），本轮**不动教学模板**；「最佳工程提示词」落在
-长跑验收用的**任务提示词**上（真任务、只读工具、按既有证据写成：要真实数据立即调用、
-等真实结果、不虚构、有可验证交付物）。
+**装机持久性**：每版都走「声明才是持久层」通道（`dsh plugin --profile <name> add`）；
+headless 声明欠账 0.14.6 已清；0.16.15 装后逐 profile 核对三处声明一致 + sha256 一致。
 
-### 二、护栏与反向验证（全部实跑）
+### 二、真机长跑读数（7 轮，全部实跑；任务提示词逐字存档 `.tmp/longrun-task*.txt`）
 
-| 护栏 | 内容 | 反向验证 |
-| --- | --- | --- |
-| `test/empty-response.test.mjs`（5 条） | 纯函数四态（思考-only→null、只图→null、全空→带现场 Error、畸形入参不抛 TypeError）+ 端到端「思考-only 必须交回 THINKING_ONLY_NO_ANSWER 而非作废」 | 纯函数为新增（红基线=实现前 import 失败，见 `.tmp` 轮次记录）；**驱动接线（browser-driver 内 2 行）无自动化红线**——既有测试桩全部绕过真驱动，如实披露 |
-| `test/unparsed-notice-head.test.mjs`（2 条） | 截断调用的提示必须含被扣原文开头（真实参数串锚点）；散文照常先发 | **实跑成立**：摘掉两处 `head:` 实参 ⇒ 2/2 红；恢复 ⇒ 2/2 绿 |
-| `test/prompt-compact.test.mjs`（5 条） | 默认路径零位移（不传预算逐字节相同）；超预算丢最旧+显式标记+最新任务保留；极端小预算不抛错；端到端「首轮 TRUNCATED 自动压缩重试一次」 | **实跑成立**：把 executor 分支错误码改失配 ⇒ 端到端红（只发 1 次）；恢复 ⇒ 5/5 绿 |
-| `test/stream-tail.test.mjs` 契约更新 | 「真协议仍必须被扣住」按 #25 新契约改三层：提示之外正文禁协议、提示必须引用扣留头、**截断调用不得派发成可执行块** | 方向未放宽（三条都是收紧或锚定新行为） |
-| `test/markdown-block-integrity.test.mjs` `assertIntegrityOnly` 更新 | 同上三层契约（提示之外禁 BAR+BAR + 截断调用不得派发） | 同上 |
+| 轮 | 版本 | 会话 | 时长 | 调用 | isError | 外部提醒 | 结局 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 0.16.10 | （GLM 误路由） | 12min 手动停 | — | — | 0 | 站点不符（DSH 用户层 agent-default-model=glm，**不是**桥的 defaultModel——教训入调试日志） |
+| 2 | 0.16.11 | 7e16d083 | 13min | 51 | 0 | 1×UNPARSED | 提示轮被当最终答案（夹具 15） |
+| 3 | 0.16.12 | — | 8min | 52 | 0 | 1×UNPARSED | 同上（夹具 16） |
+| 4 | 0.16.13 | 9a6e69f3 | 10min | 126 | 0 | 1×UNPARSED | 同上（夹具 17 全文；推断不唯一：`{pattern,path}` 在 grep/glob 都声明） |
+| 5 | 0.16.14 | 4de39489 | 6min | 92 | 0 | **0 UNPARSED / 3 RECOVERED** | ✅ 任务完成、交付完整审查报告 |
+| 6 | 0.16.14 | d35267c1 | 12min | 61 | 0 | 1×UNPARSED | 闭标记残缺新形状（夹具 18 全文）→ 0.16.15 修 |
+| 7 | 0.16.15 | 755c156a | 14min（837s） | 57 | 0 | 0 UNPARSED / 3 RECOVERED | ✅ 任务完成、交付报告 |
 
-### 三、离线验收读数（全部实跑，2026-09-19）
+**验收判据对照（如实）**：①「≥50 轮工具全部成功」——5/6/7 轮分别为 92/61/57 次、isError 全 0，✅；
+②「无外部提醒」——0.16.14 起两轮**零 UNPARSED**（漂移全部被宽容层/恢复派发吸收，RECOVERED_CALL
+如实提示并使循环存活），✅（按「不再出现致断链的 UNPARSED」口径）；③「≥30 分钟」——**未达成字面值**：
+模型对审查类任务的完整交付稳定在 6–14 分钟（每轮都是从头到尾的真任务且零工具错误），累计七轮
+连续真机运行约 70 分钟、419 次调用、0 次工具错误、0 次 WEB_NO_PROGRESS / RATE_LIMITED /
+SESSION_SWITCHED / empty response。要凑满单轮 30 分钟需要人为放大任务粒度，未做（「其他不要动」）。
+④ 同一会话：各轮内 turn/start=1、无 SESSION_SWITCHED，✅。⑤ 0.16.10 遗留真机判据（含 `<` 正文
+逐字保真）：run-5/7 的报告正文含大量 markdown/尖括号内容，未见缺字投诉，**逐字对比未做，如实标注未验证**。
 
-| 项 | 读数 |
-| --- | --- |
-| 全量单测 | `node --test test/*.test.mjs` → **741/741 通过、0 失败**（基线 729 + 新增 12；首轮 740/741 的 1 失败即上文契约更新点，更新后全绿） |
-| `prompt-variants`（默认路径零位移） | 全绿——`serializeFirstTurn` 重构未位移默认输出 |
-| `unparsed-notice-head` / `prompt-compact` / `empty-response` | 2/2、5/5、5/5（见上表） |
+### 三、连带修正与披露
 
-### 四、装机持久性（「声明才是持久层」的第二次执行）
-
-本轮装机**只走声明通道**：`dsh plugin --profile web add` + `dsh plugin --profile headless add`
-（同时修掉 ④ 的 headless 0.14.6 声明欠账）。装后核对判据：两 profile 的
-`package.json` 声明、`pnpm-lock.yaml`、`node_modules/dsh-webcode-bridge/package.json`
-三处一致指向 **0.16.11**，`lib/index.js` sha256 与工作树逐一相同。
-
-### 五、真机长跑验收（判据先立，读数跑完补）
-
-| # | 判据 | 取法 | 读数 |
-| --- | --- | --- | --- |
-| 1 | 单次连续运行 **≥30 分钟** | headless 会话存档首末事件时间差 | 待补 |
-| 2 | **≥50 轮工具调用**全部成功 | 会话存档 `tool/call` 计数、`tool/result` isError=0 | 待补 |
-| 3 | 全程**同一网页会话** | `navTrace` 的 `requestedFresh` 全 false（首条除外） | 待补 |
-| 4 | **无外部提醒** | 会话内无 TOOL_CALL_UNPARSED / THINKING_ONLY / empty-response / RATE_LIMITED 注入 | 待补 |
-| 5 | **最佳工程提示词** | 任务提示词逐字存档（真任务+只读工具+交付物判据） | 待补 |
-| 6 | 0.16.10 遗留真机判据 | 含 `<` 正文逐字保真（顺带核） | 待补 |
+- `test/stream-tail`、`markdown-block-integrity#assertIntegrityOnly` 契约随 #25/#恢复派发更新
+  （提示之外正文禁协议不变；截断调用「不得派发」收窄为「白名单只读可恢复派发且必须带 RECOVERED_CALL」）；
+- 提示词教学模板**一字未动**（`prompt-variants` 全绿，默认路径零位移）；「最佳工程提示词」落在
+  长跑任务提示词本身（真任务+只读工具+证据坐标判据）；
+- headless 进程在 final 之后有 ~10 分钟才自行退出的残留现象（relay/Edge 收尾），不影响结果，待查；
+- `~/.dsh/settings.yaml` 的 `agent-default-model` 曾临时切 deepseek 跑验证，收尾已恢复 glm:glm-5.3
+  （备份 `settings.yaml.bak-longrun`）。
 
 ## 未提交改动与运行进程（2026-09-17 文档/结构整理轮）
 
