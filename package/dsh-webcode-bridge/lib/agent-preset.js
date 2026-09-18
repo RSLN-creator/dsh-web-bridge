@@ -866,6 +866,23 @@ export function normalizeDsml(text) {
     // ——散文里「无标签名的属性 + 紧跟闭标签」实际不可出现，
     // 反向安全线见 `test/dsml-param-shorthand.test.mjs`。
     .replace(/<\s+([\w.-]+)\s*=\s*"([^<]*)<\s*\/\s*parameter\s*>/g, '<parameter name="$1">$2</parameter>')
+    // 0.16.16：闭/开参数标记「熔接」宽容（#25 同族）。真机长跑第 7 轮的子代理会话
+    // session-6541b055（grep ×4）与 session-489b0093（read ×1）：模型把前一个参数的
+    // 闭标签与下一个参数的开标签写成一枚熔接标签——闭标签壳里塞进了下一参数的
+    // `name=` 与原生 `string=` 属性（夹具 19/20）：
+    //   `…bridge</｜｜DSML｜｜ parameter name="pattern" string="true">fake-extension|run-m1`
+    // 上面的 RE_DSML_CLOSE 把 `</｜｜DSML｜｜` 折成 `</` 后，残片成
+    // `</ parameter name="pattern" string="true">`；paramRe 的闭判定
+    // `<\s*\/\s*parameter\s*>` 认不出它（后面跟的是 `name=` 不是 `>`），参数值一路
+    // 吞到真正的闭标签——残片粘进 path/file_path 值、pattern/limit 参数整体丢失。
+    // 后果是「解析成功但参数脏」：grep 报 missing required property "pattern"、
+    // read 报 cannot read … not found（台账 TOOL_ARGS_MISSING_REQUIRED 的归因至此落定，
+    // 并非模型漏参，也非文件真不存在）。改写为闭+开两枚规范标签。保守判据：
+    // **闭标签带 name 属性**在合法 DSML 与合法 XML 里都不存在（闭标签按定义不带
+    // 属性），散文里这一形状只能出自讲解熔接残缺本身——与 0.16.12「attr 名即参数名」
+    // 同一先例；无 name 属性的闭标签（`</parameter>`、`</ parameter>`）不在匹配内，
+    // 夹具 15 的既有安全线断言不受影响。
+    .replace(/<\s*\/\s*parameter\s+name\s*=\s*"([^"]+)"[^>]*>/g, '</parameter><parameter name="$1">')
     .replace(RE_DSML_BARE_OPEN, '$1<');
 }
 

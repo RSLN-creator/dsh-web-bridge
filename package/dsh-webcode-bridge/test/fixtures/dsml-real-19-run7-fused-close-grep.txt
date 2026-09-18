@@ -1,0 +1,5 @@
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="grep">
+<｜｜DSML｜｜ parameter name="path">D:\9_Code_Workspace\dsh-webcode-bridge\package\dsh-webcode-bridge</｜｜DSML｜｜ parameter name="pattern" string="true">fake-extension|run-m1</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>

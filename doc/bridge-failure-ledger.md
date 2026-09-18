@@ -47,7 +47,7 @@ turn/end reason = {"kind":"error","error":{"message":"locator.fill: Timeout 3000
 | `NEED_LOGIN` | `visibleComposerCount` 逐元素检查可见性，且**遍历全部候选选择器**（GLM 真实 composer 是裸 `<textarea>`） | 0.14.3，已装 | 只数个数会把 WAF 隐藏 textarea 判成已登录 |
 | `challenge-page` | 0.14.3：`detectChallenge` 认验证页文案与 WAF 指纹（`CF_APP_WAF`/`aliyun_waf`），在 `judgeLoggedIn` **之前**调用；`navReason='challenge-page'` 与「会话过期」分开报 | 0.14.3，已装 | 否则用户按「会话过期」去查，永远查不到风控 |
 | 协议残片（`<call>` 家族） | 0.14.6：锚点候选集补 `call_call|call`（**只进锚点、不进 transport**）；`partialProtocolAt` 前缀表同步补 `<call`/`<call_call`；`detectProtocolLeak` **同步扩集**（否则仍是假阴性） | **已修，已装，已验证**（v0.14.6） | `<calling>` 由 `\b` 保护不误伤；护栏 **15/15** 通过。**重启后正面证据**：`session-ec60921d` / `session-abaa2740` 零 `protocol-leak` 命中（修复前 `session-b01554c3` 有 4 处） |
-| `TOOL_ARGS_MISSING_REQUIRED`（新族，**未归因**） | 无 | **未修** | `session-ec60921d` 实测：`tool/result isError: invalid arguments: missing required property "command"`。与 composer 无关；待判是 `fillMissingRequired` 覆盖不到这一层，还是网页模型本身漏参 |
+| `TOOL_ARGS_MISSING_REQUIRED`（0.16.16 **归因落定 + 已修**） | 0.16.16：真机 run-7 取证（`session-6541b055` grep ×4 / `session-489b0093` read ×1）证明根因是模型把闭/开参数标记**熔接**成 `</ parameter name="X" string="Y">`（夹具 19/20，0.16.15 代码上污染值与存档逐字复现）——不是模型漏参、不是 `fillMissingRequired` 缺表。修法：`normalizeDsml` 熔接改写 `</parameter><parameter name="X">`，护栏 7 条 | **已修（0.16.16），待真机复验** | ① `command` 样本（`session-ec60921d`）raw 未落盘，不能确认同形；② `｜｜DSML｜｜` 残片**入参数值**形（`session-755c156a` task-split.js ×2 → not found）未修——保守原则：桥不剥参数值内部标记，若真机复发出现在 args 里如实记录 |
 
 ## 2. `<call>` / `</call_call>` 泄漏（0.14.6 已修）
 

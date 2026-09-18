@@ -27,7 +27,7 @@
 | 14 | Z.ai 无会话地址形状（新，0.14.2） | 中 | 否 | `lib/providers.js`、`lib/browser-driver.js` |
 | 15 | `<call>` / `</call_call>` 残片漏进正文（**已修，0.14.6**；无下划线族 **0.15.0**） | 中 | 否 | `lib/agent-preset.js`、`test-mock/parse-session-log.mjs` |
 | 16 | 同站多账户（**已实现，0.14.7**）+ Team 面板（**已实现，0.15.0**） | — | 否 | `lib/accounts.js`、`lib/providers.js`、`lib/browser-driver.js`、`lib/client.cjs`、`lib/roster.js` |
-| 17 | 工具调用参数缺失族（新，本轮发现，**未归因**） | 中 | 否 | `lib/agent-preset.js`（`fillMissingRequired`）、`lib/index.js` |
+| 17 | 工具调用参数缺失族（**0.16.16 归因落定**：熔接形吃参；熔接形**已修**，`command` 原样本无法确证同形） | 中 | 否 | `lib/agent-preset.js`（`normalizeDsml`）、`lib/index.js` |
 | 18 | **协议原文被持久化进助手正文**（新，0.15.0，**已修**） | 高 | 否 | `lib/agent-preset.js`（`proseSafeEnd`/`normalizeDsml`）、`lib/index.js` |
 | 19 | **0.15.6 修复不完整：边界命中但不可执行**（2026-09-16 **已归因 / 0.15.8 已修**） | 高 | 否 | `lib/agent-preset.js`（`invokeBodyEnd`）、`test/fence-nested-call.test.mjs` |
 | 20 | `doc/security-review.md` 带 BOM（2026-09-16，低优先） | 低 | 否 | `doc/security-review.md` |
@@ -839,7 +839,14 @@ zai 的每一轮都会走 `unsupported` 分支 → 抛 `WEB_SESSION_LOST` → �
   `subAgentsError`），面板据此把「确实没有」与「读不到」分开说。
   负向断言见 `test/roster.test.mjs`。
 
-## 17. 工具调用参数缺失族：`missing required property "command"`（本轮新发现，**未归因**）
+## 17. 工具调用参数缺失族：`missing required property "command"`（本轮新发现；0.16.16 **归因落定**）
+
+> **归因补记（2026-09-19，0.16.16）**：真机长跑第 7 轮的同族样本（`session-6541b055` grep ×4、
+> `session-489b0093` read ×1）取到了被污染的**参数值全文**——模型把闭/开参数标记熔接成
+> `</ parameter name="X" string="Y">`，残片粘进前一参数值、后参数整体丢失（夹具 19/20，
+> 0.16.15 代码上逐字复现）。熔接形已修（`normalizeDsml` 改写，护栏 7 条）。
+> 下方三可能里实锤的是第三种的近亲——**不是流式截断、不是漏产，是标记畸形吃掉参数**；
+> `command` 原始样本 raw 未落盘，不能确证同形，但机制已实锤存在。
 
 ### 现状
 
@@ -1418,13 +1425,18 @@ if (!isCall) return;      // ← JSON 合法、只是没写 name ⇒ 静默丢�
 无害错误读取 + 模型按 RECOVERED_CALL 提示重发）；候选涉及任何写类/副作用工具仍整簇
 放弃（`{file_path}` → write 的危险不放宽）。
 
-### 状态（2026-09-19，0.16.15）
+### 状态（2026-09-19，0.16.16）
 
 - 简写参数漂移（run-2 形态）：`normalizeDsml` 宽容已修（0.16.12，夹具 15）；
 - 缺 invoke 开标签 / 闭标记残缺（run-4/6 形态）：恢复派发 + 恢复层预修已修
   （0.16.13–0.16.15，夹具 17/18 全文）；
-- **残余风险**：漂移形状持续翻新（一晚 4 种），不可恢复形状仍走 UNPARSED 提示；
-  0.16.14 起两轮长跑实测 **0 UNPARSED**（3+3 条经恢复派发救回）；
+- 闭/开参数标记**熔接**形（run-7 形态，`</ parameter name="X" string="Y">`）：
+  `normalizeDsml` 熔接改写已修（0.16.16，夹具 19/20；红基线污染值与真机 `tool/call`
+  存档逐字复现）。本形解析**成功**、参数脏，不走 UNPARSED——后果是
+  `missing required property` / `not found` 类 isError 回流（台账同族归因落定）；
+- **残余风险**：漂移形状持续翻新（一晚 5 种），不可恢复形状仍走 UNPARSED 提示；
+  `｜｜DSML｜｜` 残片入参数值形未修（保守原则：不剥参数值内部标记）；
+  0.16.14 起长跑实测 **0 UNPARSED**；
 - 无人值守循环把纯文本提示轮当最终答案的终止问题，靠恢复派发使循环存活，
   DSH 侧循环语义未动（不属于本仓库）。
 

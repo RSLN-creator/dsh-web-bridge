@@ -20,17 +20,17 @@
 
 | 项 | 值 |
 | --- | --- |
-| 工作树版本 | **0.16.15** |
-| 已装版本（profile） | **0.16.15**（web + headless 逐 profile 实测：声明 `package.json`、`pnpm-lock.yaml`、`node_modules/dsh-webcode-bridge/package.json` 三处一致指向 `dsh-webcode-bridge-0.16.15.tgz`；`lib/index.js` sha256 前 12 位与工作树一致。headless 的声明欠账 0.14.6 已在 0.16.11 轮清掉） |
+| 工作树版本 | **0.16.16** |
+| 已装版本（profile） | **0.16.16**（2026-09-19 实测：web + headless 逐 profile 核对，声明 `package.json`、`pnpm-lock.yaml`、`node_modules/dsh-webcode-bridge/package.json` 三处一致指向 `dsh-webcode-bridge-0.16.16.tgz`；`lib/index.js` sha256 前 12 位 `4B3C10D9C594` 与工作树一致。走 `dsh plugin --profile <name> add` 声明持久层通道，不会被 pnpm reconcile 回退） |
 | 运行中的进程 | headless 长跑验证以 `dsh --profile headless` 进程级验证（每次真机长跑即运行版核对）；DSH web（3080）2026-09-19 凌晨未运行 |
-| 上游 | `origin/main` = `9d4c61a`（0.16.10 台账推送）；0.16.11–0.16.15 本地已提交/待推 |
-| 单测基线 | **64/64 测试文件**；全量 **756 条**（729 + 本轮新增：`empty-response` 5、`unparsed-notice-head` 2、`prompt-compact` 5、`dsml-param-shorthand` 5、`recovered-dispatch` 5、`dsml-real-drift-2026-09-19` 5；另有真机夹具 `dsml-real-15/16/17/18` 入档） |
+| 上游 | `origin/main` = `9d4c61a`（0.16.10 台账推送）；0.16.11–0.16.16 本地已提交/待推 |
+| 单测基线 | **64/64 测试文件**；全量 **763 条**（0.16.15 为 756；0.16.16 新增：`dsml-param-shorthand` +5（至 10）、`dsml-real-drift-2026-09-19` +2（至 7）；真机夹具 `dsml-real-19/20` 入档） |
 | 注释闸门 | **error 0 / warn 0，退出码 0**（2026-09-19 实跑） |
 | 文件规范闸门 | `check-repo-hygiene.mjs` **PASS**（无 BOM + 索引无死链 + CI/engines Node 版本相容） |
 | 发布闸门 | `verify-pack` 逐文件 sha256 相同 + 接线完好，退出 0（0.16.11 实跑，见 §0.16.11） |
-| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.11 / testFiles 61/61） |
-| 已装包核对 | 待 0.16.11 装机后逐 profile 核对（`package.json` 声明 + `lib/index.js` sha256） |
-| 下一阶段 | ① **0.16.11 真机长跑验收**（判据见 §0.16.11 六：≥30 分钟、≥50 轮工具、同一网页会话、无 UNPARSED/empty-response 类提醒、最佳工程提示词、真任务）；② headless 声明欠账随本轮装机清掉 |
+| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.16 / testFiles 64/64） |
+| 已装包核对 | 待 0.16.16 装机后逐 profile 核对（`package.json` 声明 + `lib/index.js` sha256，判据见 §0.16.16 四） |
+| 下一阶段 | **0.16.16 真机验收由用户执行**（判据见 §0.16.16 四：同任务重跑，grep/read 熔接形不再产生 isError；`｜｜DSML｜｜` 残片入参值形是否复发出现在残留风险里） |
 
 > **§0.16.10 真机判据（重启后逐条核）**：① `GET /__webcode/status` 的 `build.version` = **0.16.10**；
 > ② 让模型回复一段含 `<b>`、`<foo>`、`Array<T>` 或字面 `<tool_call>` 示例的正文，**逐字对比** harness
@@ -44,7 +44,53 @@
 > **教训记在这里而不是删掉**：凡是「已装/已重启/已验证」这类状态行，**必须逐 profile 写、并附
 > sha256 前 12 位**，否则它会把「一个 profile 装了」读成「都装了」。 |
 
+## 0.16.16（2026-09-19）—— 闭/开参数标记「熔接」宽容：run-7 isError 7 条的根因收口
+
+**用户指令（逐字）**：「方向是给 normalizeDsml 增加对『</ parameter name=…> 闭开熔接形』的改写规则！
+然后我需要你通过校验！打包安装……我只需要你跑通测试，快速解决根问题，我来跑真机验证！」
+
+### 一、取证（会话存档逐字节，见 `doc/diagnosis-2026-09-19.md` 后续补记）
+
+长跑第 7 轮（0.16.15，`session-755c156a` 主会话 + 6 个派生子代理）的子代理会话里共 9 条
+`tool/result isError`，主会话 0 条（台账 §二第 7 轮只记了主会话）。三族：
+
+| 族 | 会话 | 条数 | 现象 |
+| --- | --- | --- | --- |
+| 熔接形 | `6541b055` / `489b0093` | 4+1 | `path`/`file_path` 值尾粘着 `</ parameter name="X" string="Y">` 残片 → pattern/limit 参数丢失 → `missing required property "pattern"` ×4、`cannot read … not found` ×1；`6541b055` 连续 4 次写出同形 |
+| 残片入参值 | `755c156a` | 2 | `file_path` 值内部被写进 `｜｜DSML｜｜`（`task-split.js｜｜DSML｜｜`）→ not found |
+| 策略正确拒绝 | `6541b055` | 2 | 子代理（`provider: spawn`）自己再调 subagent → `depth 2 exceeds maxDepth 1`，**不是缺陷** |
+
+### 二、修法（最小改动一处）
+
+`normalizeDsml` 末尾（简写宽容之后、裸开标记之前）新增一条：`</ parameter name="X"[属性]>` →
+`</parameter><parameter name="X">`。保守判据：**闭标签带 name 属性**在合法 DSML 与合法 XML 里
+都不存在；无 name 属性的闭标签（`</parameter>`、`</ parameter>`）不在匹配内，夹具 15 的既有
+安全线断言逐字不变。
+
+**红基线**：夹具 19/20 在 0.16.15 代码上解析出的污染值与真机 `tool/call` 存档**逐字相同**
+（path 值尾残片、file_path 值尾残片 + offset 存活），这是「外层骨架重构」口径成立的证据——
+见 `test/dsml-real-drift-2026-09-19.test.mjs` 头注释。
+
+### 三、护栏（全绿）
+
+- `test/dsml-real-drift-2026-09-19.test.mjs` +2：夹具 19（grep 双参干净）、20（read 三参干净，
+  limit 回归）；19/20 的取法口径（原始网页回复未落盘、残片逐字、骨架按夹具 15 同款风格重构）
+  写在文件头；
+- `test/dsml-param-shorthand.test.mjs` +5：熔接改写正向 ×2、反向安全线 ×3（无 name 属性闭标签
+  不动、开标签 `string=` 原生属性不动 + 补壳行为不变、非 parameter 闭壳不动）。
+
+### 四、装机与真机验收（用户执行）
+
+- 打包 `dsh-webcode-bridge-0.16.16.tgz`（`verify-pack` 37/37 逐字相同 + 接线完好），
+  走声明持久层通道 `dsh plugin --profile <name> add` 装 web + headless 两个 profile；
+  装后逐 profile 核对三处声明一致 + `lib/index.js` sha256 前 12 位 `4B3C10D9C594`（已核，见当前状态表）。
+- **验收判据**：同任务重跑（含子代理派发的审计类任务），① 无 `missing required property` 类
+  isError；② 无 `cannot read` 类因参数污染产生的 not found；③ `｜｜DSML｜｜` 残片入参值形
+  （本版**未修**，见残留风险）若复发出现在 `tool/call` args 里，如实记录——按保守原则桥不剥
+  参数值内部的标记。
+
 ## 0.16.11–0.16.15（2026-09-19 本轮）—— 长跑会话阻断点修复与真机连续验证
+
 
 **用户指令（逐字）**：「把我提到的这些写入doc/，然后开始修复长跑会话问题，真机实际长时间
 会话验证（30分钟+50轮无外部提醒工具调用+最佳工程提示词）」「然后等我验收，版本号保持0.16.x」

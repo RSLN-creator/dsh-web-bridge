@@ -118,3 +118,26 @@ turn 按 `completed` 收束。**后果：CodeQL 与 CI 四条腿的结论在会�
   `reasoning` 与 `text` 两类）/ `tool/call`（`data.arguments` 为 JSON 字符串）/
   `assistant/attempt`（`data.stream[]` 为块级 chunk 现场）/ `turn/end`；
 - 本地复核用临时副本在 `.tmp/session-review/`（gitignore 已覆盖）。
+
+## 六、后续补记（2026-09-19 上午）：长跑第 7 轮子代理会话的 9 条 isError
+
+上文的「最近两次」指 09-18 晚间会话。当天 03:33–03:47 的长跑第 7 轮
+（0.16.15，主会话 `session-755c156a` + 6 个派生子代理）子代理里另发现
+9 条 `tool/result isError`（主会话 0 条，台账 §二第 7 轮行只记了主会话）。
+逐条解码 `session.v3.jsonl.zstd` 按 `isError` 标志筛出，三族：
+
+1. **熔接形（5 条，0.16.16 已修）**：`session-6541b055` grep ×4（连续 4 次同形，
+   `missing required property "pattern"`）+ `session-489b0093` read ×1
+   （`cannot read …client.cjs<…> not found`）。根因：模型把前参数闭标签与后参数
+   开标签熔接成 `</ parameter name="X" string="Y">`（闭壳里塞进下一参数的 `name=`
+   与原生 `string=` 属性），残片粘进前一参数值、后参数整体丢失。修复与护栏见
+   `doc/progress.md` §0.16.16，夹具 19/20；
+2. **残片入参数值（2 条，未修）**：`session-755c156a`（主会话）read ×2，
+   `file_path` 值内被写进 `｜｜DSML｜｜`（`task-split.js｜｜DSML｜｜`）→ not found。
+   保守原则：桥不剥参数值内部标记；
+3. **策略正确拒绝（2 条，非缺陷）**：`session-6541b055` 自身是派生子代理
+   （descriptor `provider: spawn`），又调 subagent → `depth 2 exceeds maxDepth 1`。
+
+取证命令：python `zstandard` 解码后按 `data.message.content[].isError` 过滤，
+配对 `tool/call` 取 `arguments`；污染值与会话存档逐字一致，夹具 19/20 的红基线
+即以「0.16.15 代码复现存档污染值」为口径。

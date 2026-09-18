@@ -138,7 +138,12 @@ function toMarkdown(rows) {
   out.push('| --- | --- | --- | --- |');
   for (const r of rows) {
     if (!r.isClone) {
-      out.push(`| \`${r.name}\` | **不是 clone**（见 §6「约定违例」） | — | ${r.mb} MB |`);
+      // 非 clone 条目的注记必须落在这里而不是手改 README（2026-09-19 补）：
+      // 2180355 曾把 web-login 的「npm 包解包 + 版本号」注记手写进 README 表格段，
+      // 生成器不知道它，闸门从此恒红。注记属于「怎么把内容拿回来」这一层，
+      // 是清单的**内容**，所以正本在脚本里、README 只是生成物。
+      const remote = NONCLONE_NOTES[r.name] ?? '**不是 clone**（见 §6「约定违例」）';
+      out.push(`| \`${r.name}\` | ${remote} | — | ${r.mb} MB |`);
       continue;
     }
     const mirror = r.remote && r.remote.includes('ghfast.top') ? ' ⚠️镜像' : '';
@@ -146,6 +151,11 @@ function toMarkdown(rows) {
   }
   return out.join('\n');
 }
+
+/** 非 clone 条目的「remote」格注记正本。键是 `reference/` 下的目录名；缺省用通用文案。 */
+const NONCLONE_NOTES = Object.freeze({
+  'web-login': '**不是 clone**（npm 包解包，见 `local-refs/web-login-notes.md`）：`dsh-login@0.1.1` / `@islibaodong/dsh-login@0.2.1` / `dsh-auth-gate@0.13.0`',
+});
 
 /**
  * 取某个条目在给定 markdown 里的**可比较**那一行——**去掉大小列**。

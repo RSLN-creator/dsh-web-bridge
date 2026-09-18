@@ -72,3 +72,58 @@ test('反向安全线：散文里讲解协议的规范标签一字不动', () =>
   const doc = '文档示例：<parameter name="path">value</parameter> 是规范写法。';
   assert.equal(normalizeDsml(doc), doc, '无 DSML 标记的文本必须逐字不动');
 });
+
+// ─── 0.16.16：闭/开参数标记「熔接」宽容（#25 同族，真机证据见
+// dsml-real-drift-2026-09-19.test.mjs 夹具 19/20）────────────────────────
+//
+// 模型把前参数的闭标签与后参数的开标签写成 `</ parameter name="X" string="Y">`
+// （闭壳里塞进下一参数的 name= 与原生 string= 属性）。改写为闭+开两枚规范标签。
+// 保守判据：闭标签带 name 属性在合法 DSML/合法 XML 里都不存在——散文里这一形状
+// 只能出自讲解熔接残缺本身（改写它无害且使示例更接近作者本意）。
+
+const FUSED_RAW = MARK + 'invoke name="grep">\n'
+  + MARK + 'parameter name="path">D:\\dir</' + B + 'DSML' + B + ' parameter name="pattern" string="true">a|b'
+  + '</' + B + 'DSML' + B + ' parameter>\n</' + B + 'DSML' + B + ' invoke>';
+
+test('0.16.16 修复后：熔接标签还原成闭+开两枚规范标签', () => {
+  const out = normalizeDsml(FUSED_RAW);
+  // pattern 参数的闭标签来自 `</｜｜DSML｜｜ parameter>` 剥标记，保留空格成
+  // `</ parameter>`（既有钉死行为，见上方「规范的 parameter 标签」用例）。
+  assert.ok(out.includes('<parameter name="path">D:\\dir</parameter><parameter name="pattern">a|b</ parameter>'),
+    `熔接形必须拆成规范闭+开，实际：${JSON.stringify(out)}`);
+});
+
+test('0.16.16 修复后：熔接形解出双参数齐全的调用（pattern 不再丢失）', () => {
+  const r = parseAgentReply(FUSED_RAW, {
+    tools: [
+      { name: 'grep', description: '', parameters: { type: 'object', properties: { pattern: { type: 'string' }, path: { type: 'string' } } } },
+    ],
+  });
+  assert.equal(r.calls.length, 1);
+  assert.equal(r.calls[0].arguments.path, 'D:\\dir');
+  assert.equal(r.calls[0].arguments.pattern, 'a|b');
+});
+
+test('0.16.16 反向安全线：无 name 属性的闭标签（规范与残缺）都不改写', () => {
+  const proper = '值</parameter> 后文';
+  assert.equal(normalizeDsml(proper), proper, '规范闭标签逐字不动');
+  const spaced = MARK + 'parameter name="command">ls</' + B + 'DSML' + B + ' parameter>';
+  // 既有行为逐字钉住（0.16.12 轮已断言）：剥标记后闭标签保留空格 `</ parameter>`，
+  // 新规则不得把没有 name 属性的它改写、也不得给它补开标签。
+  assert.ok(normalizeDsml(spaced).includes('</ parameter>'), '残缺空格闭标签保持原状');
+});
+
+test('0.16.16 反向安全线：开标签带 string= 属性不受影响（夹具 15 原生风格）', () => {
+  const open = MARK + 'parameter name="limit" string="false">130</' + B + 'DSML' + B + ' parameter>';
+  const out = normalizeDsml(open);
+  // 既有行为（0.16.12 轮已断言）逐字钉住：剥标记 + repairNamelessClosers 补
+  // `<invoke name="">` 外壳 + 闭标签保留空格。新规则不得碰开标签壳。
+  assert.ok(out.includes('<invoke name=""><parameter name="limit" string="false">130</ parameter>'),
+    `开标签属性与补壳行为逐字保留，实际：${JSON.stringify(out)}`);
+  assert.ok(!out.includes('</parameter><parameter'), '开标签壳不得被拆成闭+开');
+});
+
+test('0.16.16 反向安全线：其他标签名的闭壳带属性不改写（只认 parameter）', () => {
+  const other = '讲解： </ invoke name="read"> 不是熔接形。';
+  assert.equal(normalizeDsml(other), other, '非 parameter 闭壳逐字不动');
+});

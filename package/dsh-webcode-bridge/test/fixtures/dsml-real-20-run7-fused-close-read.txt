@@ -1,0 +1,4 @@
+<｜｜DSML｜｜ invoke name="read">
+<｜｜DSML｜｜ parameter name="file_path">D:\9_Code_Workspace\dsh-webcode-bridge\package\dsh-webcode-bridge\lib\client.cjs</｜｜DSML｜｜ parameter name="limit" string="false">290</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="offset">2120</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
