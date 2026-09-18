@@ -20,11 +20,11 @@
 
 | 项 | 值 |
 | --- | --- |
-| 工作树版本 | **0.16.11** |
-| 已装版本（profile） | **待装机**（0.16.11 打包后按「声明才是持久层」用 `dsh plugin --profile <name> add` 装进 web + headless；**headless 的声明在 2026-09-19 审计发现仍钉着 `0.14.6.tgz`**——0.16.10 那次对 headless 走的是绕开声明的直解包，声明从未更新，任何 pnpm 通道都会把 headless 打回 0.14.6。本轮装机同时修掉这笔） |
-| 运行中的进程 | **待重启核对**（2026-09-19 上午 3080 无监听，DSH web 未运行；最后一次已验证读数是 2026-09-18 晚 `build.version=0.16.10`） |
-| 上游 | `origin/main` = `9d4c61a`（0.16.10 台账推送） |
-| 单测基线 | **61/61 测试文件**；全量 **741 条**（0.16.10 的 729 + 本轮 3 份新护栏 12 条：`empty-response` 5、`unparsed-notice-head` 2、`prompt-compact` 5；`stream-tail` ⑤契约随 #25 更新；`markdown-block-integrity` 的 `assertIntegrityOnly` 同步更新） |
+| 工作树版本 | **0.16.15** |
+| 已装版本（profile） | **0.16.15**（web + headless 逐 profile 实测：声明 `package.json`、`pnpm-lock.yaml`、`node_modules/dsh-webcode-bridge/package.json` 三处一致指向 `dsh-webcode-bridge-0.16.15.tgz`；`lib/index.js` sha256 前 12 位与工作树一致。headless 的声明欠账 0.14.6 已在 0.16.11 轮清掉） |
+| 运行中的进程 | headless 长跑验证以 `dsh --profile headless` 进程级验证（每次真机长跑即运行版核对）；DSH web（3080）2026-09-19 凌晨未运行 |
+| 上游 | `origin/main` = `9d4c61a`（0.16.10 台账推送）；0.16.11–0.16.15 本地已提交/待推 |
+| 单测基线 | **64/64 测试文件**；全量 **755 条**（729 + 本轮新增：`empty-response` 5、`unparsed-notice-head` 2、`prompt-compact` 5、`dsml-param-shorthand` 5、`recovered-dispatch` 5、`dsml-real-drift-2026-09-19` 5；另有真机夹具 `dsml-real-15/16/17/18` 入档） |
 | 注释闸门 | **error 0 / warn 0，退出码 0**（2026-09-19 实跑） |
 | 文件规范闸门 | `check-repo-hygiene.mjs` **PASS**（无 BOM + 索引无死链 + CI/engines Node 版本相容） |
 | 发布闸门 | `verify-pack` 逐文件 sha256 相同 + 接线完好，退出 0（0.16.11 实跑，见 §0.16.11） |

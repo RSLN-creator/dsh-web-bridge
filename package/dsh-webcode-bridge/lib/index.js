@@ -22,7 +22,7 @@ import { createBrowserDriver } from './browser-driver.js';
 import { zeroProgressDecision } from './zero-progress.js';
 import { idleWindowDecision } from './idle-window.js';
 import { createWebControl, buildSessionEvents, mainLineOf } from './web-control.js';
-import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, stripProtocolRegions, proseSafeEnd, readCallAt, partialProtocolAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeDsml, normCallArgs, inferToolNameFromArgs } from './agent-preset.js';
+import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, stripProtocolRegions, proseSafeEnd, readCallAt, partialProtocolAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeDsml, normCallArgs, inferToolNameFromArgs, recoverUnparsedCalls } from './agent-preset.js';
 import { createMirror } from './mirror.js';
 import { httpFetch } from './upstream.js';
 import { textOfBlocks } from './flatten.js';
@@ -1438,6 +1438,37 @@ export function apply(ctx, config = {}) {
         // protocol-withheld 直接静默收束（界面上一片空白）。第 4 种事实是
         // 「网页发了调用、桥没认出来」，它有自己的提示与自我改正路径。
         if (withheld > 0 && !calls.length) {
+          // 扣留全文进日志（只进日志、不进会话）：真机漂移每次形状不同且头部
+          // 200 字符可能完全正常（run-3 实测），没有全量原文就无法离线归因。
+          warn(`withheld protocol text (log-only full copy): ${finalText.slice(safe)}`);
+          // 0.16.12 恢复派发：无人值守循环把「纯文本提示轮」当最终答案收场
+          // （长跑第 2/3 轮分别死在 13 分钟 / 8 分钟）。白名单只读工具且参数
+          // 可读时，把模型本就打算发起的调用送达——循环靠工具结果存活；
+          // 白名单外维持 UNPARSED 提示，绝不放宽。
+          const recovered = recoverUnparsedCalls(finalText, tools);
+          if (recovered.length) {
+            const notice = recoveredCallNotice({ count: recovered.length, scene: idleScene(), withheld });
+            warn(notice);
+            yield* closeThink();
+            for (const rc of recovered) {
+              const idx = nextIndex++;
+              const id = callId(idx);
+              const target = tools.find((t) => t?.name === rc.name) || null;
+              const { args: fixedArgs } = coerceArguments(rc.arguments, target?.parameters);
+              const { args: filledArgs, filled } = fillMissingRequired(fixedArgs, target?.parameters, 'recovered from unparsed protocol block');
+              if (filled.length) log(`filled missing required args for recovered ${rc.name}: ${filled.join(', ')}`);
+              const args = JSON.stringify(filledArgs);
+              yield { type: 'block-start', index: idx, blockType: 'tool-call' };
+              yield { type: 'tool-call-delta', index: idx, id, name: rc.name, argumentsDelta: args };
+              yield { type: 'block-end', index: idx, block: { type: 'tool-call', id, name: rc.name, arguments: args } };
+            }
+            yield* openText();
+            const text = (out ? out + '\n\n' : '') + notice;
+            yield { type: 'text-delta', index: textIndex, text };
+            yield { type: 'block-end', index: textIndex, block: { type: 'text', text } };
+            yield* finishChunks(turn, (out || '') + thinkAcc, 'tool-calls');
+            return;
+          }
           const notice = unparsedCallNotice({ thinkAcc, tools, scene: idleScene(), withheld, head: finalText.slice(safe, safe + 200) });
           warn(notice);
           yield* emitText(out ? `${out}\n\n${notice}` : notice, turn, nextIndex);
@@ -1478,10 +1509,19 @@ export function apply(ctx, config = {}) {
       // 在界面上长得像「模型只说了半句话就没下文」。把真实原因与重发格式接在同一
       // 个文本块里——tail 同时用于 text-delta 与 block-end 的块内容，接在这里
       // 两处逐字一致，不会出现「块内容比外发的 delta 多一段」的错位。
+      let recoveredCalls = null;
       if (withheld > 0 && !calls.length) {
-        const notice = unparsedCallNotice({ thinkAcc, tools, scene: idleScene(), withheld, head: finalText.slice(proseLimit, proseLimit + 200) });
-        warn(notice);
-        tail = tail ? `${tail}\n\n${notice}` : notice;
+        warn(`withheld protocol text (log-only full copy): ${finalText.slice(proseLimit)}`);
+        recoveredCalls = recoverUnparsedCalls(finalText, tools);
+        if (recoveredCalls.length) {
+          const notice = recoveredCallNotice({ count: recoveredCalls.length, scene: idleScene(), withheld });
+          warn(notice);
+          tail = tail ? `${tail}\n\n${notice}` : notice;
+        } else {
+          const notice = unparsedCallNotice({ thinkAcc, tools, scene: idleScene(), withheld, head: finalText.slice(proseLimit, proseLimit + 200) });
+          warn(notice);
+          tail = tail ? `${tail}\n\n${notice}` : notice;
+        }
       }
       // 块内容必须与外发的 delta 逐字一致，否则界面上这一块会凭空多出协议原文。
       // 因此 delta 必须在 tail 定稿（可能接了 unparsedCallNotice）之后才发。
@@ -1500,7 +1540,25 @@ export function apply(ctx, config = {}) {
       const proseBlock = proseSent.slice(proseBlockStart) + tail;
       yield { type: 'block-end', index: textIndex, block: { type: 'text', text: proseBlock } };
       yield* closeThink();
-            yield* finishChunks(turn, proseBlock + thinkAcc, 'stop');
+      if (recoveredCalls?.length) {
+        // 恢复派发（0.16.12）：正文块照发，调用块跟在后面，finish 用 tool-calls
+        // 让 agent 循环继续——无人值守下纯文本轮等于提前终止。
+        for (const rc of recoveredCalls) {
+          const idx = nextIndex++;
+          const id = callId(idx);
+          const target = tools.find((t) => t?.name === rc.name) || null;
+          const { args: fixedArgs } = coerceArguments(rc.arguments, target?.parameters);
+          const { args: filledArgs, filled } = fillMissingRequired(fixedArgs, target?.parameters, 'recovered from unparsed protocol block');
+          if (filled.length) log(`filled missing required args for recovered ${rc.name}: ${filled.join(', ')}`);
+          const args = JSON.stringify(filledArgs);
+          yield { type: 'block-start', index: idx, blockType: 'tool-call' };
+          yield { type: 'tool-call-delta', index: idx, id, name: rc.name, argumentsDelta: args };
+          yield { type: 'block-end', index: idx, block: { type: 'tool-call', id, name: rc.name, arguments: args } };
+        }
+        yield* finishChunks(turn, proseBlock + thinkAcc, 'tool-calls');
+        return;
+      }
+      yield* finishChunks(turn, proseBlock + thinkAcc, 'stop');
     },
   };
   llm.registerAdapter([cfg.providerId], adapter);
@@ -1604,6 +1662,26 @@ function unparsedCallNotice({ thinkAcc = '', tools = [], scene = null, withheld 
     + (bits.length ? `（${bits.join('，')}）` : '')
     + (headText ? `\n被扣协议原文开头：${headText}` : '')
     + (tail ? `\n思考末尾：${tail}。` : '');
+}
+
+/**
+ * 「已按可读参数恢复派发」的提示文本（0.16.12）。
+ *
+ * 与 `unparsedCallNotice` 同场出现的选择：扣留块里能读出白名单只读工具的合法
+ * invoke 时，桥把调用**代为派发**（工具名与参数都是模型亲笔，不是伪造意图），
+ * 循环靠工具结果存活；本提示如实告知模型「已代派发 + 请核对结果」。
+ * 正文不含角度括号与 JSON，不会被工具协议锚点当成调用。
+ *
+ * @param {{count?: number, scene?: object|null, withheld?: number}} v 本轮现场
+ * @returns {string} 作为助手回复文本块交回会话的提示
+ */
+function recoveredCallNotice({ count = 0, scene = null, withheld = 0 } = {}) {
+  const bits = [];
+  if (withheld > 0) bits.push(`已扣留 ${withheld} 字符协议原文`);
+  if (scene?.lastEndReason) bits.push(`本轮收束原因 ${scene.lastEndReason}`);
+  return `RECOVERED_CALL: 网页这一轮有 ${count} 条调用因标记畸形未被直接解析，已按可读参数恢复派发（仅只读工具）。`
+    + '如果工具结果与你的意图不符，请重新发起完整、规范的调用。'
+    + (bits.length ? `（${bits.join('，')}）` : '');
 }
 
 /**

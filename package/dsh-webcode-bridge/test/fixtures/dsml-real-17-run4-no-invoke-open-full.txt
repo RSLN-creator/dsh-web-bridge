@@ -1,0 +1,12 @@
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ parameter name="pattern">task-ledger|task-split|comparison-view</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="path">D:\9_Code_Workspace\dsh-webcode-bridge\package\dsh-webcode-bridge\lib</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ parameter name="pattern">logCall|function logCall</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="path">D:\9_Code_Workspace\dsh-webcode-bridge\package\dsh-webcode-bridge\lib\index.js</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ parameter name="file_path">D:\9_Code_Workspace\dsh-webcode-bridge\package\dsh-webcode-bridge\lib\index.js</｜｜DSML｜｜ parameter name="offset">480｜｜DSML｜｜ parameter name="limit">40｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="pattern">relay\.config\.port|cfg\.port|config\.port</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="path">D:\9_Code_Workspace\dsh-webcode-bridge\package\dsh-webcode-bridge\lib｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>

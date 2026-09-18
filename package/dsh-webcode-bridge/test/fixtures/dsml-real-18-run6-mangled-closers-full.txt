@@ -1,0 +1,20 @@
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="grep">
+<｜｜DSML｜｜ parameter name="pattern">child_process|execSync|spawnSync|exec\(</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="path">package/dsh-webcode-bridge/lib</｜｜DSML｜｜>
+<｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ invoke name="grep">
+<｜｜DSML｜｜ parameter name="pattern">readFileSync|writeFileSync|mkdirSync|unlinkSync|rmSync|createWriteStream</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="path">package/dsh-webcode-bridge/lib</｜｜DSML｜｜>
+<｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ invoke name="grep">
+<｜｜DSML｜｜ parameter name="pattern">token|Token|cookie|Cookie|password|secret|apiKey</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="path">package/dsh-webcode-bridge/lib</｜｜DSML｜｜>
+<｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ invoke name="read">
+<｜｜DSML｜｜ parameter name="file_path">package/dsh-webcode-bridge/lib/agent-preset.js</｜｜DSML｜｜>
+<｜｜DSML｜｜ parameter name="offset">311</｜｜DSML｜｜>
+<｜｜DSML｜｜ parameter name="limit">400</｜｜DSML｜｜>
+<｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜>
+</｜｜DSML｜｜ calls>

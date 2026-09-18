@@ -278,14 +278,26 @@ function assertIntegrityOnly(r, label) {
       + '  块内容 = ' + JSON.stringify(end.text) + '\n   Σ 增量 = ' + JSON.stringify(deltas.get(end.index) ?? ''));
   }
   const outsideNotice = (t) => {
-    const at = t.indexOf('TOOL_CALL_UNPARSED');
-    return at >= 0 ? t.slice(0, at) : t;
+    let cut = t.indexOf('TOOL_CALL_UNPARSED');
+    const atRec = t.indexOf('RECOVERED_CALL');
+    if (cut < 0 || (atRec >= 0 && atRec < cut)) cut = atRec;
+    return cut >= 0 ? t.slice(0, cut) : t;
   };
   for (const c of r.chunks) {
     if (c.type === 'text-delta') assert.ok(!outsideNotice(c.text).includes(BAR + BAR), label + '：增量（提示之外）出现协议标记');
     if (c.type === 'block-end' && c.block?.type === 'text') assert.ok(!outsideNotice(c.block.text).includes(BAR + BAR), label + '：块内容（提示之外）出现协议标记');
   }
-  assert.ok(!r.chunks.some((c) => c.type === 'block-end' && c.block?.type === 'tool-call'),
-    label + '：截断调用不得被派发成可执行调用块');
+  // 0.16.12 恢复派发契约：畸变的白名单只读调用**允许**被代为派发（循环存活），
+  // 但必须伴随 RECOVERED_CALL 说明；白名单外（pwsh/write…）的调用仍不得派发。
+  for (const c of r.chunks) {
+    if (c.type === 'block-end' && c.block?.type === 'tool-call') {
+      assert.ok(['read', 'glob', 'grep'].includes(c.block.name),
+        label + `：恢复了白名单之外的工具 ${c.block.name}`);
+      const hasNotice = r.chunks.some((x) =>
+        (x.type === 'text-delta' && /RECOVERED_CALL/.test(x.text || ''))
+        || (x.type === 'block-end' && x.block?.type === 'text' && /RECOVERED_CALL/.test(x.block.text || '')));
+      assert.ok(hasNotice, label + '：恢复派发必须带 RECOVERED_CALL 说明');
+    }
+  }
   return r.chunks;
 }

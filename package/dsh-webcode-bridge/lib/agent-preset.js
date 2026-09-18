@@ -855,6 +855,17 @@ export function normalizeDsml(text) {
     // 结果 `｜｜DSH｜ calls>` 变成孤零零的 `</`——实测把 13 个真机块的 16 条调用
     // 全部打回 0 条。
     .replace(RE_DSML_BARE_CLOSE, bareCloseReplacer)
+    // 0.16.12：参数开标记的「简写漂移」宽容（#25 同族）。真机长跑会话
+    // session-7e16d083 turn1 step15（扣留 1103 字符）：模型把参数开标记写成
+    // `｜｜DSML｜｜ file_path="…`——丢了 `parameter name=`。剥标记后剩
+    // `< file_path="…</ parameter>`（闭标记经上面规则补回 `</`，但参数开标记
+    // 没有标签名可补），参数收集正则 `paramRe` 认不出 → 整条 invoke 丢弃 →
+    // UNPARSED → 无人值守循环把提示轮当最终答复收场。attr 名即参数名是标记
+    // 语法自身的结构，**不是猜**；与上面认 `DSH/DS` 词形同一先例。保守边界：
+    // 值内不得再出现 `<`（一旦出现整条不改写），且必须紧跟闭 parameter 标签
+    // ——散文里「无标签名的属性 + 紧跟闭标签」实际不可出现，
+    // 反向安全线见 `test/dsml-param-shorthand.test.mjs`。
+    .replace(/<\s+([\w.-]+)\s*=\s*"([^<]*)<\s*\/\s*parameter\s*>/g, '<parameter name="$1">$2</parameter>')
     .replace(RE_DSML_BARE_OPEN, '$1<');
 }
 
@@ -1552,6 +1563,114 @@ function invokeBodyEnd(src, from) {
  * @param {{tools?: Array<{name?: string, parameters?: object}>}} [options] 本会话工具表
  * @returns {{calls: Array<{name: string, arguments: object, purpose?: string, nameInferred?: true}>, text: string, diagnostics: string[]}}
  */
+/**
+ * 从「一条可执行调用都没解析出来」的扣留文本里，恢复**白名单只读工具**的调用
+ * （0.16.12，无人值守长跑存活关键）。
+ *
+ * ## 为什么需要它
+ *
+ * 真机取证（长跑第 2/3 轮，session-7e16d083，见 doc/progress.md §0.16.12）：网页
+ * 模型每 ~50 次调用就会出现一次 DSML 标记漂移，且每次形状不同。桥扣住后交回
+ * UNPARSED 提示——但 headless 的 agent 循环把「纯文本回复」当最终答案收场，
+ * 两轮长跑分别死在 13 分钟 / 8 分钟。提示让模型改正的前提是**循环还在跑**；
+ * 无人值守下纯文本轮 = 提前终止。
+ *
+ * ## 红线（不放宽）
+ *
+ * 只恢复**白名单只读工具**（read/glob/grep）且「invoke 的工具名真实存在于本会话
+ * 工具表 + 至少一个参数按规范形态完整配对」的调用——工具名与参数都是模型亲笔，
+ * 这不是伪造意图，而是把没送达的调用送达；参数不齐时 DSH 会报自己的错回流，
+ * 循环继续。白名单外（pwsh/write 等有副作用的工具）与参数不可读时返回空数组，
+ * 调用方维持 UNPARSED 提示。护栏见 `test/recovered-dispatch.test.mjs`。
+ *
+ * @param {string} text 收尾权威全文（含被扣住的协议块）
+ * @param {Array<{name?: string}>} tools 本会话下发的工具表
+ * @returns {Array<{name: string, arguments: object}}>} 可恢复的调用
+ */
+export function recoverUnparsedCalls(text, tools) {
+  // 恢复层专用预修（真机 run-6 形态，全文见 test/fixtures/dsml-real-18-*.txt）：
+  // ① `<｜｜DSML｜｜ invoke>`——开形 invoke 且**无 name 属性**：规范的 invoke 开标签
+  //    必有 name="…"，所以这只能是丢了 `/` 的闭标签（结构上唯一解，不是猜）；
+  // ② `</｜｜DSML｜｜>`——闭标记缺标签名：本协议里闭标记缺名只能是 parameter 闭。
+  // 只在恢复层生效（产物过 DSH schema 校验 + 只读白名单），主解析路径不变。
+  const pre = String(text ?? '')
+    .replace(/<(\uFF5C{1,2}DS(?:ML)?\uFF5C{1,2})\s*invoke\s*>/g, '</$1 invoke>')
+    .replace(/<\/(\uFF5C{1,2}DS(?:ML)?\uFF5C{1,2})\s*>/g, '</$1 parameter>');
+  const s = normalizeDsml(pre);
+  const names = new Set((Array.isArray(tools) ? tools : []).map((t) => t?.name).filter(Boolean));
+  const out = [];
+  const openRe = /<\s*invoke\s+name\s*=\s*"([^"]*)"\s*[^>]*>/gi;
+  let m;
+  while ((m = openRe.exec(s)) !== null) {
+    const rawName = m[1].trim();
+    const bodyStart = m.index + m[0].length;
+    let bodyEnd = invokeBodyEnd(s, bodyStart);
+    if (bodyEnd < 0) {
+      // 畸形兜底（invokeBodyEnd 找不到任何闭标签时）：体取到下一个 invoke 开标签或文末。
+      const rest = s.slice(bodyStart);
+      const nextOpen = rest.search(/<\s*invoke\s+name\s*=/i);
+      bodyEnd = nextOpen >= 0 ? bodyStart + nextOpen : s.length;
+    }
+    const body = s.slice(bodyStart, bodyEnd);
+    // 恢复层的参数正则比解析层（parseAgentReply 的 paramRe）**更宽容**：
+    // 值到「任意闭合残片（含截断的 `</ param`）、下一个参数开标记或体尾」为止。
+    // 依据：恢复产物会被 DSH 的 schema 校验再验一遍（缺必填→报错回流），且只涉及
+    // 白名单只读工具——宽容的代价上限是一次无害的工具报错，收益是循环存活。
+    const recParamRe = /<\s*parameter\s+name\s*=\s*"([^"]*)"[^>]*>([\s\S]*?)(?=<\s*\/|<\s*parameter\s|$)/gi;
+    const args = {};
+    let n = 0;
+    let pm;
+    while ((pm = recParamRe.exec(body)) !== null) { args[pm[1]] = pm[2].trim(); n++; }
+    if (n < 1) continue;
+    // 名字为空（repairNamelessClosers 给缺 invoke 开标签的参数簇补的外壳，
+    // 真机 run-4 形态：<calls> 里直接跟 <parameter>，invoke 整个没写）时按参数
+    // 形状推断工具名。严格唯一用 0.15.9/#23 同一份判据；不唯一时**只在白名单内**
+    // 宽容：候选全部是只读工具才取第一个可行者并标 ambiguous（最坏代价=一次无害
+    // 的错误读取 + 模型重发），候选涉及任何写类/副作用工具则整簇放弃（#23 红线
+    // 不放宽：`{file_path}` → write 的危险仍在）。
+    let name = rawName;
+    let ambiguous = false;
+    if (!names.has(name)) {
+      const guess = inferToolNameFromArgs(args, tools);
+      if (guess && RECOVERABLE_TOOLS.has(guess) && names.has(guess)) {
+        name = guess;
+      } else {
+        const alt = resolveRecoverableName(args, tools);
+        if (!alt) continue;
+        name = alt.name;
+        ambiguous = alt.ambiguous;
+      }
+    } else if (!RECOVERABLE_TOOLS.has(name)) continue;
+    out.push({ name, arguments: args, ambiguous: rawName === '' && ambiguous });
+  }
+  return out;
+}
+
+/**
+ * 恢复派发专用的宽容名字解析：候选必须「全部声明了调用提供的每个键」且本身在
+ * 只读白名单内；按「required 被满足者优先」排序取第一个。唯一候选/多候选都返回
+ * （多候选由调用方在提示里如实标注 ambiguous）；没有任何白名单可行者返回 null。
+ */
+function resolveRecoverableName(args, tools) {
+  const keys = Object.keys(args || {});
+  const cands = (Array.isArray(tools) ? tools : []).filter((t) => {
+    if (!t?.name || !RECOVERABLE_TOOLS.has(t.name)) return false;
+    const props = t.parameters && typeof t.parameters === 'object' ? t.parameters.properties : null;
+    if (!props) return false;
+    return keys.every((k) => k in props);
+  });
+  if (!cands.length) return null;
+  const satisfied = (t) => {
+    const req = Array.isArray(t.parameters?.required) ? t.parameters.required : [];
+    return req.every((r) => keys.includes(r));
+  };
+  cands.sort((a, b) => Number(satisfied(b)) - Number(satisfied(a)));
+  return { name: cands[0].name, ambiguous: cands.length > 1 };
+}
+
+/** 恢复派发的工具白名单：只读、无副作用、失败也无害。pwsh/write 一律不在列。 */
+const RECOVERABLE_TOOLS = new Set(['read', 'glob', 'grep']);
+
 export function parseAgentReply(text, options = {}) {
   if (!text) return { calls: [], text: '', diagnostics: [] };
   const tools = Array.isArray(options?.tools) ? options.tools : [];

@@ -1,0 +1,4 @@
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="read">
+<｜｜DSML｜｜ parameter name="file_path">D:\9_Code_Workspace\dsh-webcode-bridge\package\dsh-webcode-bridge\lib\openai.js</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ param
