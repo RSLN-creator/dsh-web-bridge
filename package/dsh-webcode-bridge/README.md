@@ -1,6 +1,6 @@
 # Harness Web Bridge
 
-已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.16.6。
+已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.16.7。
 
 安装（本包**不发 npm registry**，只以 `.tgz` 交付）：
 
@@ -14,6 +14,23 @@
 > 0.14.5 起发布流程收进仓库：`scripts/verify-pack.mjs` 逐文件核对 tarball 与工作树
 > （改完代码忘了重新 pack 时直接报错），`scripts/install-profiles.mjs` 先删旧目录再解包
 > （绕开 pnpm 对同版本 tarball「Already up to date」不重解的坑）。两条都是真实踩过的坑。
+
+## 0.16.7
+
+**DeepSeek 站点不再走附件投递。** 真机实测（2026-09-18）：71994 字符走附件时，附件确实
+传上去了、页面上也出现了，但这一轮**没有任何回复**——`domChars:0`、页面退回
+`chat.deepseek.com` 根地址，navTrace 里连 `landed:after-submit` 都没有；同一账号改回
+**纯文本投递**就正常（用户原话：「deepseek以附件投递会出问题！不能回复！前面时候改为
+输入框还行！」）。
+
+也就是说「网页收得下附件」与「网页模型会读这个附件」是两件事，而 DeepSeek 的答案是「不读」。
+因此新增站点契约 `ATTACH_FORBIDDEN_SITES`（当前含 `deepseek`），并在投递判定里把它排在
+**阈值之前**：该站点无论多长都只走输入框，宁可慢，也不要「网页收下了、什么都不回」。
+判据是**站点声明**而不是调用方的开关——这条知识属于站点契约，写在别处必然漂移。
+
+反向要求同样成立：GLM 的输入框装不下长文，必须留在附件路径上。**本表只排除，
+不改变其它站点的既有行为。** 护栏：`test/prompt-transport.test.mjs` ⑨（禁令生效）/
+⑨b（不误伤 GLM）。
 
 ## 0.16.6
 

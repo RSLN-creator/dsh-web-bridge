@@ -20,17 +20,17 @@
 
 | 项 | 值 |
 | --- | --- |
-| 工作树版本 | **0.16.6** |
-| 已装版本（profile） | **0.16.6**（`scripts/install-profiles.mjs` 装入 web + headless；`verify-pack` **37/37 逐字相同 + 接线完好**、退出 0；两个 profile 的 `lib/index.js` sha256 前 12 位都是 `C9D096EBF8AB`，与工作树**逐一相同**。**待重启生效**） |
-| 运行中的进程 | **0.16.5**（2026-09-18 实测：`GET /__webcode/status` → `build.version=0.16.5 hash=25effcbe0096`；0.16.6 已装机，**重启后**才加载） |
-| 上游 | `origin/main` = 本文件所在提交（2026-09-18 推送 0.16.5 + 0.16.6 两笔；0.16.0–0.16.4 五轮的历史欠账随之一并入库） |
+| 工作树版本 | **0.16.7** |
+| 已装版本（profile） | **0.16.7**（web + headless 两个 profile 的 `package.json` 实测均为 0.16.7；`verify-pack` **37/37 逐字相同 + 接线完好**、退出 0；两个 profile 的 `lib/index.js` sha256 前 12 位都是 `C9D096EBF8AB`，与工作树**逐一相同**。**已重启，运行进程亦为 0.16.7**） |
+| 运行中的进程 | **0.16.7**（2026-09-18 实测：`GET /__webcode/status` → `build.version=0.16.7 hash=54b59d39c9d7`；与工作树同版本，**无需再重启**） |
+| 上游 | `origin/main` = `45adddd`（2026-09-18 推送 0.16.7；同日已打 tag **v0.16.7** 并触发 Release 工作流，`dsh-webcode-bridge-0.16.7.tgz` 已挂上 GitHub Release，sha256 `fdd8d79e9df2…`） |
 | 单测基线 | **57/57 测试文件**（逐文件 `node --test --test-isolation=none <file>`，2026-09-18 实跑：**0 个失败文件**；`session-continuity` **11/11**，本轮新判据是 ⑥） |
 | 注释闸门 | **error 0 / warn 0，退出码 0**（111 个文件，2026-09-18 实跑） |
 | 文件规范闸门 | `check-repo-hygiene.mjs` **PASS**（无 BOM + 索引无死链 + CI/engines Node 版本相容，2026-09-18 实跑） |
-| 发布闸门 | `verify-pack` **37/37 逐字相同 + 接线完好**，退出 0（0.16.6 打包后实跑） |
-| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.6 / testFiles 57/57，2026-09-18 实跑） |
-| 已装包核对 | 两个 profile 都是 **0.16.6**，`lib/index.js` sha256 前 12 位 `C9D096EBF8AB` 与工作树**逐一相同**（`verify-pack` 之外的独立第二次核对） |
-| 下一阶段 | ① **重启 `dsh web` 让 0.16.6 生效**，然后真机再触发一次会话切换：判据是界面上出现「网页会话已切换」提示而**不是**「本轮运行失败」，且 `GET /__webcode/status` 的 `driver.sessionSwitchNotices` > 0（见下节 0.16.6）；② 按 [`ROADMAP.md`](ROADMAP.md) P1 取回 0.16.4 / 0.16.5 的真机读数 |
+| 发布闸门 | `verify-pack` **37/37 逐字相同 + 接线完好**，退出 0（0.16.7 打包后实跑） |
+| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.7 / testFiles 57/57，2026-09-18 实跑） |
+| 已装包核对 | 两个 profile 都是 **0.16.7**，`lib/index.js` sha256 前 12 位 `C9D096EBF8AB` 与工作树**逐一相同**（`verify-pack` 之外的独立第二次核对） |
+| 下一阶段 | ① 按 [`ROADMAP.md`](ROADMAP.md) P1 取回 0.16.4 / 0.16.5 的真机读数；② 0.16.7 的站点禁令已装机并生效，真机复验判据是：DeepSeek 站点发超阈值长文时 `/__webcode/status` 的 `attachTransport.transport` 为 `inline`（`reason='site-no-attach'`）且本轮**有回复** |
 
 ## 未提交改动与运行进程（2026-09-17 文档/结构整理轮）
 
@@ -61,7 +61,61 @@
 > 本轮结束后实测为 **59 项（19 改 + 40 新）**，`origin/main` 仍停在 `6b836d2`。
 > 上游那一行与 `git status` 的口径不变，只是数字长大了——**这不是漂移，是同一笔欠账在变厚**。
 
-## 0.16.6（已打包 / 已装 / 待重启）—— 会话重建节流不再中断会话：改交回「已切换会话」提示
+## 0.16.7（已打包 / 已装 / 已重启 / 已发布）—— DeepSeek 站点禁用附件投递：收得下但读不到
+
+**用户原话**（逐字）：「deepseek以附件投递会出问题！不能回复！前面时候改为输入框还行！」
+
+### 一、真机读数：附件传上去了，但这一轮零回复
+
+`/__webcode/status` 的 `attachTransport` 逐字：
+
+```
+{ transport:'attach', reason:'over-limit', name:'webcode-context.md',
+  total:71994, evidence:'text:webcode-context.md' }
+```
+
+即：**附件确实传上去了**（`evidence` 命中了文本），页面上也出现了附件卡片，但这一轮
+**没有任何回复**——`lastEndReason` 空、`domChars:0`、`lastRate:null`，页面退回
+`https://chat.deepseek.com/` 根地址，navTrace 里连 `landed:after-submit` 都没有。
+同一账号改回**纯文本投递**后恢复正常。
+
+结论：「网页收得下附件」与「网页模型会读这个附件」是**两件事**——后者只能真机试过才知道，
+而 DeepSeek 的答案是「不读」。这正是 0.16.4 那条 `ATTACH_NOT_CONFIRMED` 的同族问题，
+只是这一次不是「没渲染出来」，而是「渲染出来了但模型不认」。
+
+### 二、修法：站点契约，不是用户开关
+
+新增 `ATTACH_FORBIDDEN_SITES = Object.freeze(new Set(['deepseek']))`（`lib/browser-driver.js`），
+并在 `promptTransportPlan` 里把它排在**阈值之前**：
+
+```js
+if (o.attachForbidden) return cap('inline', 'site-no-attach');
+```
+
+该站点无论多长都只走输入框——宁可慢，也不要「网页收下了、什么都不回」。
+
+判据是**站点声明**而不是调用方每次都记得传的开关：这条知识属于站点契约，写在别处必然漂移。
+反向要求同样成立：GLM 的输入框装不下长文（用户原话「他在附件可以，输入框过长」），
+所以它必须留在附件路径上——**本表只排除，不改变其它站点的既有行为**。
+
+### 三、护栏与闸门读数（2026-09-18 实跑）
+
+| 项 | 读数 |
+| --- | --- |
+| 新增护栏 | `test/prompt-transport.test.mjs` ⑨（禁令生效）/ ⑨b（不误伤 GLM），10/10 通过 |
+| 相关单测 | `session-continuity` / `regression` / `tool-loop` / `parse` / `marker-typo` / `prompt-transport-attach` / `settings-transport` 逐文件实跑，0 失败 |
+| `verify-pack` | 37/37 逐字相同 + 接线完好，退出 0 |
+| 注释闸门 | error 0 / warn 0 |
+| 文件规范闸门 | PASS（BOM / 索引死链 / Node 版本） |
+| Release | tag `v0.16.7` → 工作流 success，tgz（418,765 字节）已挂 Release |
+
+### 四、仍未做（不假装完成）
+
+1. **站点禁令的清单只有一页**：目前只有 DeepSeek 被证实「收得下但不读」。GLM / Kimi /
+   千问 / 豆包 的附件到底读不读，**没有**逐站点真机取数——照现状推定会重犯同一类错。
+2. **禁令是硬编码集合，不是自愈判据**：若 DeepSeek 将来修好了附件解析，这一条不会自动解除，
+   需要人工复验后从集合里删掉。理想形态是「附件投递后零回复 ⇒ 自动降级并记住」，
+   但那需要跨轮状态，本轮的取舍是先止血。
 
 **用户原话**（逐字）：切换会话时出现
 「本轮运行失败 WEB_SESSION_REBUILD_THROTTLED: 30s 内已经整段重建过一次，本次不再重放
