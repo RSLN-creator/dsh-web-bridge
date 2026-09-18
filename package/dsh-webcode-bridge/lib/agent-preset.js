@@ -1538,32 +1538,6 @@ function invokeBodyEnd(src, from) {
 }
 
 /**
- * 把网页回复解析成工具调用列表（同时原样返回归一化后的全文）。
- *
- * 宽容地接受调用围栏周围的散文——这正是围栏协议的意义——但每个围栏必须是一个
- * 合法的、点名了工具的单个 JSON 对象。识别四种围栏形状，让适配器不依赖网页模型
- * 偏爱哪一种：
- *   1) ```json … ``` 代码围栏（本桥的 webcode 协议）；
- *   2) `<tool_call> … </tool_call>`（也含 `<function>` / `<stories>`）标签围栏
- *      （opplean / web-agent 风格，DeepSeek 网页版倾向产出这个）；
- *   3) 裸 `<invoke name="…">` XML（含 `<parameter>` 与畸形属性两种形态）；
- *   4) `**Calling:** \`name\`` 的网页原生渲染。
- * 最后回落兼容形态：整条回复就是一个 `{"tool": ...}` 对象。
- *
- * **只看内容，不看标签名**：`<toolcall>`（无下划线）这类外壳与 `<tool_call>`
- * 同等对待——外壳叫什么不重要，里面是不是一个配平的、名字在工具表里的 JSON 才算数。
- *
- * 0.15.9 起可传 `options.tools`：模型漏写 `name` 时按参数形状反推
- * （`inferToolNameFromArgs`）。**不传也能用**——只是缺名调用会退化成留痕的诊断，
- * 这正是真机 `session-07907f7c` 的现场。调用方（`lib/index.js`）必须传，
- * 否则「网页有输出、harness 显示不了」会原样复现；接线由
- * `test/nameless-call.test.mjs` ⑫ 钉住。
- *
- * @param {string} text 网页累积回复全文
- * @param {{tools?: Array<{name?: string, parameters?: object}>}} [options] 本会话工具表
- * @returns {{calls: Array<{name: string, arguments: object, purpose?: string, nameInferred?: true}>, text: string, diagnostics: string[]}}
- */
-/**
  * 从「一条可执行调用都没解析出来」的扣留文本里，恢复**白名单只读工具**的调用
  * （0.16.12，无人值守长跑存活关键）。
  *
@@ -1670,6 +1644,33 @@ function resolveRecoverableName(args, tools) {
 
 /** 恢复派发的工具白名单：只读、无副作用、失败也无害。pwsh/write 一律不在列。 */
 const RECOVERABLE_TOOLS = new Set(['read', 'glob', 'grep']);
+
+/**
+ * 把网页回复解析成工具调用列表（同时原样返回归一化后的全文）。
+ *
+ * 宽容地接受调用围栏周围的散文——这正是围栏协议的意义——但每个围栏必须是一个
+ * 合法的、点名了工具的单个 JSON 对象。识别四种围栏形状，让适配器不依赖网页模型
+ * 偏爱哪一种：
+ *   1) ```json … ``` 代码围栏（本桥的 webcode 协议）；
+ *   2) `<tool_call> … </tool_call>`（也含 `<function>` / `<stories>`）标签围栏
+ *      （opplean / web-agent 风格，DeepSeek 网页版倾向产出这个）；
+ *   3) 裸 `<invoke name="…">` XML（含 `<parameter>` 与畸形属性两种形态）；
+ *   4) `**Calling:** \`name\`` 的网页原生渲染。
+ * 最后回落兼容形态：整条回复就是一个 `{"tool": ...}` 对象。
+ *
+ * **只看内容，不看标签名**：`<toolcall>`（无下划线）这类外壳与 `<tool_call>`
+ * 同等对待——外壳叫什么不重要，里面是不是一个配平的、名字在工具表里的 JSON 才算数。
+ *
+ * 0.15.9 起可传 `options.tools`：模型漏写 `name` 时按参数形状反推
+ * （`inferToolNameFromArgs`）。**不传也能用**——只是缺名调用会退化成留痕的诊断，
+ * 这正是真机 `session-07907f7c` 的现场。调用方（`lib/index.js`）必须传，
+ * 否则「网页有输出、harness 显示不了」会原样复现；接线由
+ * `test/nameless-call.test.mjs` ⑫ 钉住。
+ *
+ * @param {string} text 网页累积回复全文
+ * @param {{tools?: Array<{name?: string, parameters?: object}>}} [options] 本会话工具表
+ * @returns {{calls: Array<{name: string, arguments: object, purpose?: string, nameInferred?: true}>, text: string, diagnostics: string[]}}
+ */
 
 export function parseAgentReply(text, options = {}) {
   if (!text) return { calls: [], text: '', diagnostics: [] };
