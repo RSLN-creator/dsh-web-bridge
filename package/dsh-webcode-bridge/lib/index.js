@@ -88,10 +88,15 @@ export const inject = ['llm', 'agents', 'sessions', 'sessionProjections', 'subag
  * 行为级实测（guards 的脚本驱动、同一 apply 实例三轮）：修前 fresh 序列
  * `[true,false,true]`、第三轮 messageChars=150,072；修后第三轮 `fresh=false` 且只有
  * 增量（护栏 test/session-continuity.test.mjs ④ 钉住这条红基线）。
+ *
+ * **0.16.6 起 `WEB_SESSION_REBUILD_THROTTLED` 不在这张表里**：节流不再抛错——它现在由
+ * executor 直接收场成一条「网页会话已切换」的提示（见 `sessionSwitchedNotice`），
+ * 而「这一轮正文没有进网页会话、游标不许前进」改由同一条链路里的
+ * `cededCursorKeys` 标记保证。留着这一格就是一条永不命中的孤儿规则：它描述的抛错
+ * 路径已经不存在（doc/comment-style.md §3.3）。
  */
 export const CURSOR_INVALIDATING_CODES = Object.freeze(new Set([
   'WEB_SESSION_LOST',              // 槽里的网页会话已删/过期/被风控拦：前文确实没了
-  'WEB_SESSION_REBUILD_THROTTLED', // 刚整段重建过又丢：游标已与网页侧脱节，作废重新对齐
   'NEED_LOGIN',                    // 未登录：这一轮根本没进网页会话
   'MODEL_UI_CHANGED',              // 网页模型契约失配：这一轮的请求元数据都不可信
 ]));
@@ -571,12 +576,24 @@ export function apply(ctx, config = {}) {
     cfg.version = version;
   }
   const sessionState = new Map();
+  // 节流收场那一轮的会话键：那一轮的正文**没有发给网页**（见 executor 的
+  // SESSION_SWITCHED 分支），所以适配器收尾处的 `turn.commit()` 不许让游标前进——
+  // 否则下一轮会把「这一轮没发出去的消息」当成已发、只发后续增量，也就是静默丢上下文
+  //（本仓库三条不可越界约束之一）。`commit()` 消费掉标记（一次性、同一轮内），
+  // `invalidate()` 一并清掉；尾部淘汰与 sessionState 同型，防止无界增长。
+  const cededCursorKeys = new Set();
   // 「本次进程里作废过几次发送游标」——只读计数，透出到 /__webcode/status 的
   // driver.sessionCursorInvalidations（0.16.4）。存在的意义是把「又新开了一个对话」
   // 一句话定位到**哪一侧**：驱动侧的槽丢了看 sessionLostCount / sessionSlot，
   // 适配器侧把游标清掉了看这个数。没有它，同一个症状在两侧各有一个嫌疑，
   // 只能靠读日志猜（这正是 2026-09-17 那次排查花掉一整天的地方）。
   let sessionCursorInvalidations = 0;
+  // 「本次进程里因节流改口成『网页会话已切换』几次」——只读计数，透出到
+  // /__webcode/status 的 driver.sessionSwitchNotices（0.16.6）。与上面那枚分开记：
+  // 它回答的是**用户看到几次提示**（0.16.6 之前这里是一条红色「本轮运行失败」，
+  // 用户报的就是它），混进 sessionCursorInvalidations 就分不清「作废游标」与
+  // 「改口成提示」各发生了几次。
+  let sessionSwitchNotices = 0;
   let buildTurn;
   let lastPresetInfo = null;   // the most recent first-turn prompt (settings-page preview)
   // 全局指令：设置页可追加，持久化在 profile 目录的 webcode-settings.json（优先使用宿主 settings 服务）。
@@ -1545,6 +1562,38 @@ function unparsedCallNotice({ thinkAcc = '', tools = [], scene = null, withheld 
     + (tail ? `思考末尾：${tail}。` : '');
 }
 
+/**
+ * 「网页会话已切换」提示（0.16.6）——会话重建节流命中那一轮交回会话的正文。
+ *
+ * ## 为什么是提示，而不是一次失败
+ *
+ * 0.16.4 的节流（同一会话键在窗口内只允许整段重建一次）修的是**雪崩**：会话槽一旦为空，
+ * 每一轮都会走 WEB_SESSION_LOST → 重放四十万字符 → 又失败 → 下一轮再重放。刹车是对的，
+ * 但它的表现形式是把这一轮**判死**（抛 `WEB_SESSION_REBUILD_THROTTLED`），于是 DSH 界面
+ * 上是一条红色「本轮运行失败」、会话当场中断。用户原话：
+ *「改为只提示已经切换会话而不是打扰直接中断会话」。
+ *
+ * 与 `thinkingOnlyNotice` / `unparsedCallNotice` 同型：**不抛错**，把带现场与出路的提示
+ * 当本轮回复交回会话（doc/comment-style.md §7.2 的「进度 + 现场 + 下一步」三条齐全）。
+ * 配套的两条副作用在 executor 那一侧，不在这条纯函数里：这一轮的正文没有进网页会话，
+ * 所以 `turn.commit()` 不许让游标前进（`cededCursorKeys`），而会话槽**刻意不重置**
+ *（留给下一轮的增量与驱动的 URL 自愈）。
+ *
+ * @param {{waitLeftMs?: number, sinceLastMs?: number, chars?: number}} scene 本轮现场：
+ *   节流窗还剩多久、上一次整段重放在多久之前、那次重放了多少字符
+ * @returns {string} 作为助手回复交回会话的提示文本（不含角度括号与 JSON，避免被
+ *   工具协议解析器当成调用）
+ */
+function sessionSwitchedNotice(scene = {}) {
+  const left = Math.max(0, Math.round(Number(scene.waitLeftMs) || 0) / 1000);
+  const since = Math.max(0, Math.round(Number(scene.sinceLastMs) || 0) / 1000);
+  const chars = Math.max(0, Math.round(Number(scene.chars) || 0));
+  return 'SESSION_SWITCHED: 网页会话已切换——本轮不再重放首轮上下文'
+    + `（上一次整段重建在 ${since}s 前、重放了 ${chars} 字符，节流窗还剩约 ${left}s）。`
+    + '会话没有中断：直接发送下一条消息即可继续——'
+    + '窗口过去后这一轮会整段重建，窗口内则继续显示本条提示。';
+}
+
 /** 每轮收尾的 usage + finish 事件对（outputTokens 口径：正文+思考一起估）。 */
 function* finishChunks(turn, outputText, kind) {
   yield { type: 'usage', usage: { inputTokens: inputTokensOf(turn), outputTokens: estimateTokens(outputText) } };
@@ -1861,8 +1910,15 @@ function imageMarkdown(images) {
   // 120s 与驱动单轮 240s，因此不会把一次正常的重试也挡在外面），又要短到不耽误用户
   // 手动重试——超窗的重建请求照常放行。`cfg.sessionRebuildThrottleMs` 可调小
   //（**供离线测试用**，0 = 关闭节流），与 cfg.rateLimitBackoffMinMs 的立场一致。
+  //
+  // 0.16.6 只改了**表现形式**：窗口内的第二次不再抛错，改交回一条「网页会话已切换」
+  // 提示（见 executor 里那一段与 sessionSwitchedNotice）。判据、窗口长度、
+  //「窗口外照常整段重建」全部逐字不变——变的只是它不再以「本轮运行失败」的样子
+  // 出现在用户面前。护栏：test/session-continuity.test.mjs ⑥（同一段剧本，断言从
+  // 「拿到 WEB_SESSION_REBUILD_THROTTLED」改成「拿到提示文本、仍只发 1 次、
+  // 且下一轮照旧整段重建」）。
   const SESSION_REBUILD_THROTTLE_MS = Math.max(0, Number(cfg.sessionRebuildThrottleMs ?? 60_000) || 0);
-  const lastSessionRebuildAt = new Map();   // sessionKey → { at, chars }
+  const lastSessionRebuildAt = new Map();   // sessionKey → { at, chars }（真发生过的那次整段重放）
 
   let front = null;
   const relay = createRelay({
@@ -1924,25 +1980,37 @@ function imageMarkdown(images) {
               const prev = lastSessionRebuildAt.get(m.sessionKey) || null;
               const now = Date.now();
               // 节流（见 SESSION_REBUILD_THROTTLE_MS）：第二次重建**不带任何副作用**
-              // 地失败，而不是再发一遍四十万字符。错误里必须带齐现场与出路
-              //（doc/comment-style.md §7.2）：多久前重建过、重放了多少字符、还要等多久。
+              // 地收场，而不是再发一遍四十万字符。
+              //
+              // 0.16.6：**不再抛错**。0.16.4 在这里抛 WEB_SESSION_REBUILD_THROTTLED，
+              // 于是这一轮在 DSH 界面上是一条红色「本轮运行失败」，会话被迫中断——
+              // 用户原话：「改为只提示已经切换会话而不是打扰直接中断会话」。
+              // 刹车本身是对的（不许再重放四十万字符），错的只是它的**表现形式**：
+              // 它把「这一轮没有内容可交」说成了「这一轮失败」。处置与 TOOL_UNKNOWN /
+              // thinkingOnlyNotice / unparsedCallNotice 同型——把带现场与下一步的提示
+              // 当本轮正文交回会话，任务不断链。
+              //
+              // 收场时**刻意什么都不改**（不删游标、不重置会话槽），只加一枚
+              // 「这一轮没落进网页会话」的标记（cededCursorKeys，见其声明处）：
+              //   · 不删游标 ⇒ 下一轮仍是增量（几千字符），而不是又一轮四十万重放；
+              //     它会把这一轮没发出去的消息一并带上，由驱动按老规矩重开或续聊——
+              //     两条路都保住了上下文，没有静默丢弃；
+              //   · 不重置会话槽 ⇒ 万一网页其实还停在那个会话上（驱动的 URL 自愈），
+              //     下一轮的增量直接落对地方，而不是被我们提前判死。
+              // 窗口过期后的重建照旧由上面的 `m.rebuild()` 分支放行。
               if (SESSION_REBUILD_THROTTLE_MS > 0 && prev && now - prev.at < SESSION_REBUILD_THROTTLE_MS) {
                 const waitMs = SESSION_REBUILD_THROTTLE_MS - (now - prev.at);
-                const throttled = new Error(
-                  'WEB_SESSION_REBUILD_THROTTLED: ' + Math.round(waitMs / 1000) + 's 内已经整段重建过一次，'
-                  + '本次不再重放（sessionKey=' + m.sessionKey + '，上次重建在 '
-                  + Math.round((now - prev.at) / 1000) + 's 前、重放了 ' + prev.chars + ' 字符）'
-                  + ' — 请等窗口过去后用「继续」重试，或先在 GUI 里压缩上下文再重试',
-                );
-                throttled.code = 'WEB_SESSION_REBUILD_THROTTLED';
-                throttled.sessionKey = m.sessionKey;
-                throttled.siteId = siteId;
-                throttled.retryAfterMs = waitMs;
-                throttled.lastRebuildAt = prev.at;
-                throttled.lastRebuildChars = prev.chars;
+                const notice = sessionSwitchedNotice({
+                  waitLeftMs: waitMs,
+                  sinceLastMs: now - prev.at,
+                  chars: prev.chars,
+                });
                 warn(`web session rebuild throttled (sessionKey=${m.sessionKey}, ${Math.round(waitMs / 1000)}s left, `
-                  + `last rebuild ${prev.chars} chars) — 不再重复整段重建`);
-                throw throttled;
+                  + `last rebuild ${prev.chars} chars) — 不再重复整段重建，改交回「已切换会话」提示`);
+                sessionSwitchNotices += 1;
+                cededCursorKeys.add(m.sessionKey);
+                while (cededCursorKeys.size > 512) cededCursorKeys.delete(cededCursorKeys.values().next().value);
+                return { text: notice, thinking: '', images: [] };
               }
               // 重放文本只算一次：既要发给网页，也要作为「这次重建了多少字符」的读数
               // 留给下一次节流判定（m.rebuild() 是纯序列化，但 40 万字符不该算两遍）。
@@ -2035,6 +2103,10 @@ function imageMarkdown(images) {
         // 与驱动侧的 sessionLostCount / sessionSlot 并列——「又新开对话」这类症状
         // 从此能一句话分成两侧：槽丢了看驱动那一组，游标被清掉了看这个数。
         sessionCursorInvalidations,
+        // 节流改口成提示的次数（0.16.6）：用户看到的「网页会话已切换」提示共几条。
+        // 与上一条分开正是为了让这两件事不再混成一个数：作废游标 = 下一轮整段重建，
+        // 改口成提示 = 这一轮没内容可交但会话还在。两者都发生时的排查路径完全不同。
+        sessionSwitchNotices,
       };
 
       /** 单个槽的状态行。拆成函数是因为默认槽与非默认槽的「未初始化」分支要逐字一致。 */
@@ -2374,7 +2446,12 @@ function imageMarkdown(images) {
         // 网页会话丢失时的整段重放文本（见 executor 的 WEB_SESSION_LOST 分支）
         rebuild: () => serializeFirstTurn({ ...options, extraPrompt, siteId }),
       },
-      invalidate: () => sessionState.delete(keyPath),
+      invalidate: () => {
+        // 失败的一轮同样要把节流那枚标记清掉：留着它会吃掉后面某一轮**正常**的提交，
+        // 表现成「明明发出去了，下一轮还是从头重发」——与它要防的那个洞正好相反。
+        cededCursorKeys.delete(keyPath);
+        sessionState.delete(keyPath);
+      },
       async attach() {
         // a fresh turn replays the whole transcript → attach every image in it;
         // an incremental turn attaches only newly-arrived images
@@ -2386,6 +2463,11 @@ function imageMarkdown(images) {
         return images;
       },
       commit() {
+        // 节流那一条收场（executor 的 SESSION_SWITCHED 分支）会先种下这枚标记：那一轮的
+        // 正文**一个字节都没发给网页**，游标因此不许前进——让它前进的话，下一轮会把
+        // 这一轮没发出去的消息当成已发、只发后续增量，网页侧于是永久缺一段前文
+        //（静默丢上下文，本仓库三条不可越界约束之一）。标记一次即销，不吃后续轮次。
+        if (cededCursorKeys.delete(keyPath)) return;
         // 先删后插把键移到 Map 尾部；配合尾部淘汰就是「最近最少使用」，
         // 旧写法对已存在键 set 不改变插入序，淘汰会先丢掉最老的热会话，
         // 表现为长会话莫名重新整段重发。

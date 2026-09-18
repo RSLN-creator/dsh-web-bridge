@@ -42,6 +42,8 @@ turn/end reason = {"kind":"error","error":{"message":"locator.fill: Timeout 3000
 | `PROMPT_TRUNCATED` | 填写**之后**的回读校验；只报长度差 | 已装 | 是兜底，不是主防线 |
 | `TOOL_PROTOCOL_INVALID` | 0.14.1：mismatch 改为**修复**（同名第 k 个流式块与第 k 个同名权威调用配对，未覆盖的补发新块）；只有块连 `raw` 都没有才抛错 | 已装 | 大幅降低整轮作废 |
 | `RATE_LIMITED` | 站点级 `sendGapMs` 节流 + 识别专用错误按 `max(间隔,10s)` 自动退避重试 | 已装 | 探针要节制（见 §3） |
+| `WEB_SESSION_REBUILD_THROTTLED`（**0.16.6 起不再抛**） | 0.16.4：同一 `sessionKey` 在 60s 内只允许**整段重建**一次，第二次抛本码让整轮失败（雪崩刹车）；**0.16.6：第二次不再抛错**，改交回 `SESSION_SWITCHED` 提示——判据、窗口长度、窗口外照常重建全部不变 | 0.16.6 已装，**待重启生效** | 窗口内不重放，因此网页侧缺的那段前文要等窗口过期后的一次整段重建才补齐；提示次数见 `/__webcode/status` 的 `driver.sessionSwitchNotices` |
+| `SESSION_SWITCHED`（**提示，不是失败码**） | 0.16.6：节流命中那一轮交回会话的**正文**（`lib/index.js` 的 `sessionSwitchedNotice`）。与 `TOOL_UNKNOWN` / `THINKING_ONLY_NO_ANSWER` / `TOOL_CALL_UNPARSED` 同型：不抛错，把现场与下一步作为本轮回复交回；正文不含角度括号与 JSON，因此不会被工具协议锚点当成调用 | 0.16.6 已装，**待重启生效** | 用户可能把它读成「会话真的被切走了」——正文已写明「会话没有中断、直接发下一条」；窗口内重复出现是设计行为（每次都要等窗口过期） |
 | `NEED_LOGIN` | `visibleComposerCount` 逐元素检查可见性，且**遍历全部候选选择器**（GLM 真实 composer 是裸 `<textarea>`） | 0.14.3，已装 | 只数个数会把 WAF 隐藏 textarea 判成已登录 |
 | `challenge-page` | 0.14.3：`detectChallenge` 认验证页文案与 WAF 指纹（`CF_APP_WAF`/`aliyun_waf`），在 `judgeLoggedIn` **之前**调用；`navReason='challenge-page'` 与「会话过期」分开报 | 0.14.3，已装 | 否则用户按「会话过期」去查，永远查不到风控 |
 | 协议残片（`<call>` 家族） | 0.14.6：锚点候选集补 `call_call|call`（**只进锚点、不进 transport**）；`partialProtocolAt` 前缀表同步补 `<call`/`<call_call`；`detectProtocolLeak` **同步扩集**（否则仍是假阴性） | **已修，已装，已验证**（v0.14.6） | `<calling>` 由 `\b` 保护不误伤；护栏 **15/15** 通过。**重启后正面证据**：`session-ec60921d` / `session-abaa2740` 零 `protocol-leak` 命中（修复前 `session-b01554c3` 有 4 处） |

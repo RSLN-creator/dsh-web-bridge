@@ -502,7 +502,7 @@ export function createWebControl(deps = {}) {
       relay: relay ? (({ running, consent, consentPersistent, requireConsent, busy, queueLength, activeRequests, lastError, metrics }) => ({
         running, consent, consentPersistent, requireConsent, busy, queueLength, activeRequests, lastError, metrics,
       }))(relay.status()) : null,
-      driver: relay?.config?.driverStatus?.() ?? (driver ? (({ running, busy, loggedIn, needLogin, selectedModel, lastTurn, profileDir, conversations, recoveredTurns, lastRecovered, lastEndReason, lastTimeoutScene, sessionLostCount, lastSessionLost, sessionSlot, sessionCursorInvalidations, attachTransport, attachProbe, promptTransport }) => ({
+      driver: relay?.config?.driverStatus?.() ?? (driver ? (({ running, busy, loggedIn, needLogin, selectedModel, lastTurn, profileDir, conversations, recoveredTurns, lastRecovered, lastEndReason, lastTimeoutScene, sessionLostCount, lastSessionLost, sessionSlot, sessionCursorInvalidations, sessionSwitchNotices, attachTransport, attachProbe, promptTransport }) => ({
         running, busy, loggedIn, needLogin, selectedModel, profileDir,
         conversationCount: conversations ? Object.keys(conversations).length : 0,
         lastTurn: lastTurn ? { sessionId: lastTurn.sessionId, at: lastTurn.at } : null,
@@ -511,6 +511,9 @@ export function createWebControl(deps = {}) {
         // 缺一枚就会把「读不到」显示成「没发生」（本文件反复吃过这个亏）。
         sessionSlot: sessionSlot ?? { webSessionId: null, at: null, source: 'none' },
         sessionCursorInvalidations: sessionCursorInvalidations ?? 0,
+        // 0.16.6：节流改口成「网页会话已切换」提示的次数。同上一条纪律——两个入口
+        // 都要带着它，否则「读不到」会被面板显示成「一次都没提示过」。
+        sessionSwitchNotices: sessionSwitchNotices ?? 0,
         // 0.14.0：这条兜底分支（无 relay 的独立启动）此前把这几个字段丢了，
         // 而 relay 分支的 driverStatus 一直带着它们——于是「网页已回复但桥卡住」
         // 在独立运行时完全没有任何线索。补齐后两个入口的字段集一致。

@@ -35,6 +35,12 @@
 // ④ 是用户报的那条红基线（失败一轮后第三轮仍不许 fresh）；⑥ 是「重建→失败→再重建」
 // 雪崩的刹车；⑨ 是落盘点的结构判据。三条都各自在 %TEMP% 拷贝里做过「改坏 → 变红」。
 //
+// 0.16.6 起 ⑥ 的**判据换了对象**：节流命中不再抛 WEB_SESSION_REBUILD_THROTTLED 让整轮
+// 失败（界面上是一条红色「本轮运行失败」），而是交回一条「网页会话已切换」提示。因此
+// ⑥ 现在断言三件事——① 这一轮成功且正文是提示；② 重放仍被挡在发送之前（只发 1 次）；
+// ③ 节流那一轮没有让发送游标前进（第三轮仍是整段重建）。第三件是新增的安全线：
+// 少了它，「不中断」会退化成「静默丢上下文」。反向验证见 doc/progress.md 0.16.6 段。
+//
 // ## 怎么跑这个文件
 //
 //   node --test --test-timeout=90000 test/session-continuity.test.mjs
@@ -350,10 +356,20 @@ test('④ 第二轮失败（WEB_NO_PROGRESS）后，第三轮仍必须 fresh=fal
   } finally { await bridge.close(); }
 });
 
-// ── ⑥ 重建节流：连续两次 WEB_SESSION_LOST 不许「重建→失败→再重建」─────────────
+// ── ⑥ 重建节流：连续两次 WEB_SESSION_LOST 不再中断会话，改交回「已切换会话」提示 ──
 
-test('⑥ 同一会话键连续两次 WEB_SESSION_LOST：第二次必须被节流成 WEB_SESSION_REBUILD_THROTTLED', async () => {
-  const driver = scriptedDriver({ script: [{ throw: 'WEB_SESSION_LOST' }] });
+test('⑥ 同一会话键连续两次 WEB_SESSION_LOST：第二次改交回「已切换会话」提示（不再整轮失败），重放依旧被挡在发送之前', async () => {
+  // 剧本按调用序：① 第一轮原发 ② 第一轮整段重放 —— 两次都丢；
+  //              ③ 第二轮原发（这一次丢 → 命中节流）④ 第三轮原发（成功）。
+  // 第四条存在的唯一理由：验证节流那一轮**没有让游标前进**（见下）。
+  const driver = scriptedDriver({
+    script: [
+      { throw: 'WEB_SESSION_LOST' },
+      { throw: 'WEB_SESSION_LOST' },
+      { throw: 'WEB_SESSION_LOST' },
+      { text: '重建后的答复', webSessionId: 'web-2' },
+    ],
+  });
   const sessionId = 'sess-throttle';
   const bridge = await openBridge({ driver });
   try {
@@ -370,14 +386,46 @@ test('⑥ 同一会话键连续两次 WEB_SESSION_LOST：第二次必须被节�
     const before2 = driver.calls.length;
     const r2 = await bridge.stream({ sessionId, messages: messagesAt(2) });
     const during2 = driver.calls.length - before2;
-    assert.equal(r2.ok, false, '第二次会话丢失同样应当失败——但**失败码必须变**');
-    assert.equal(r2.code, 'WEB_SESSION_REBUILD_THROTTLED',
-      '第二次同键会话丢失没有拿到 WEB_SESSION_REBUILD_THROTTLED（实际 ' + r2.code + '）：'
-      + '节流缺失 ⇒ 重建→失败→再重建的雪崩，每一轮重发四十万字符。'
-      + ' 报文：' + String(r2.error?.message || '').slice(0, 200));
+    // 0.16.6 的用户判据（用户原话：「改为只提示已经切换会话而不是打扰直接中断会话」）：
+    // 节流窗口内的第二次会话丢失**不再**把这一轮判死，而是交回一条提示正文。
+    // 旧判据断言的是 `r2.ok === false && r2.code === 'WEB_SESSION_REBUILD_THROTTLED'`，
+    // 那条红在界面上就是「本轮运行失败」——正是本轮要改掉的东西。
+    assert.equal(r2.ok, true,
+      '第二次会话丢失仍然让整轮失败（r2.code=' + r2.code + '）：'
+      + String(r2.error?.message || '').slice(0, 200));
+    assert.match(String(r2.text || ''), /SESSION_SWITCHED/,
+      '第二次这一轮没有交回「网页会话已切换」提示，实际正文 = '
+      + JSON.stringify(String(r2.text || '').slice(0, 200)));
+    assert.match(String(r2.text || ''), /已切换/,
+      '提示里没有「已切换」三个字（用户要的就是这句话），实际正文 = '
+      + JSON.stringify(String(r2.text || '').slice(0, 200)));
+    assert.ok(!/WEB_SESSION_REBUILD_THROTTLED/.test(String(r2.text || '')),
+      '提示正文里还留着内部失败码——用户看到的就是它，实际正文 = '
+      + JSON.stringify(String(r2.text || '').slice(0, 200)));
+    // 这条不是文风要求：提示会走与模型回复同一条解析链（工具协议锚点扫描），
+    // 带角度括号或 JSON 的正文会被当成调用去执行。
+    assert.ok(!/[<>{]/.test(String(r2.text || '')),
+      '提示正文含角度括号或大括号，会被工具协议解析器当成调用：'
+      + JSON.stringify(String(r2.text || '').slice(0, 200)));
     assert.equal(during2, 1,
       '第二次会话丢失这一轮发了 ' + during2 + ' 次（应为 1 = 只发了原轮，重放被节流挡在发送之前）：'
       + '多出来的每一次都是四十万字符的白跑');
+
+    // 节流那一轮**不许让游标前进**：它的正文一个字节都没进网页会话，游标前进了，
+    // 下一轮就只会发「增量」——网页侧于是永久缺一段前文（静默丢上下文）。
+    // 判据因此只能是「第三轮仍是整段重建」，而不是「第三轮很便宜」。
+    const before3 = driver.calls.length;
+    const r3 = await bridge.stream({ sessionId, messages: messagesAt(3) });
+    const during3 = driver.calls.length - before3;
+    assert.equal(r3.ok, true, '第三轮不该失败：' + String(r3.error?.message || '').slice(0, 200));
+    assert.equal(during3, 1, '第三轮发了 ' + during3 + ' 次（应为 1）');
+    const third = driver.calls[driver.calls.length - 1];
+    assert.equal(third.fresh, true,
+      '节流那一轮让游标前进了：第三轮不是整段重建（fresh=' + third.fresh
+      + '，字符数 ' + third.messageChars + '），网页侧永久缺一段前文。'
+      + ' 三轮 (fresh, chars) = ' + JSON.stringify(driver.calls.map((c) => [c.fresh, c.messageChars])));
+    assert.ok(third.messageChars > 100_000,
+      '第三轮 messageChars = ' + third.messageChars + '，不足 10 万：整段首轮提示词没有真的重放');
   } finally { await bridge.close(); }
 });
 

@@ -20,17 +20,17 @@
 
 | 项 | 值 |
 | --- | --- |
-| 工作树版本 | **0.16.5** |
-| 已装版本（profile） | **0.16.4**（web + headless 均已装；`verify-pack` 36/36 逐字相同、8 个改动文件 sha256 与工作树逐一相同。已在 web profile 摘掉第三方 `@nanmicoder/dsh-agent-teams`。**待重启生效**） |
-| 运行中的进程 | **0.16.3**（2026-09-17 重启后实测：`/__webcode/status` → `version=0.16.3 hash=412c7c099919`；0.16.4 已装机，**重启后**才加载） |
-| 上游 | `origin/main` = `6b836d2`；**0.16.x 五轮改动全部未提交、未推送**（59 项：19 改 + 40 新，2026-09-17 实测） |
-| 单测基线 | **57/57 测试文件**（本轮新增 5 个：`session-continuity` 11 项、`marker-typo` 10 项、`markdown-block-integrity` 5 项、`attach-probe-contract` 5 项、`settings-transport` 6 项；本轮读数为「逐文件跑」的结果，见下节「本轮验证读数」） |
-| 注释闸门 | **error 0 / warn 0，退出码 0**（109 个文件，2026-09-17 实跑） |
-| 文件规范闸门 | `check-repo-hygiene.mjs` **PASS**（无 BOM + 索引无死链 + CI/engines Node 版本相容；本轮新增 5 份文档索引行后实跑） |
-| 发布闸门 | `verify-pack` **35/35 逐字相同 + 接线完好**，退出 0（0.16.2 打包后实跑；**0.16.4 尚未打包**） |
-| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.4 / testFiles 57/57，2026-09-17 实跑） |
-| 已装包核对 | **已装的是 0.16.3**：4 个改动文件 sha256 与当时工作树**逐一相同**（0.16.2 打包后的读数）。工作树现在已是 0.16.4（T1–T3 三条根因修复 + 本轮护栏/文档），**必须重新打包**后再核对一次 |
-| 下一阶段 | 按 [`ROADMAP.md`](ROADMAP.md) **P0**：打包 0.16.4 → `verify-pack` → 装两个 profile → 重启 → 重新读 `/__webcode/status` 的版本；然后 P1 把三条根因的真机读数取回来。本轮两条**未修完**的判据见下节「仍未修完」 |
+| 工作树版本 | **0.16.6** |
+| 已装版本（profile） | **0.16.6**（`scripts/install-profiles.mjs` 装入 web + headless；`verify-pack` **37/37 逐字相同 + 接线完好**、退出 0；两个 profile 的 `lib/index.js` sha256 前 12 位都是 `C9D096EBF8AB`，与工作树**逐一相同**。**待重启生效**） |
+| 运行中的进程 | **0.16.5**（2026-09-18 实测：`GET /__webcode/status` → `build.version=0.16.5 hash=25effcbe0096`；0.16.6 已装机，**重启后**才加载） |
+| 上游 | `origin/main` = 本文件所在提交（2026-09-18 推送 0.16.5 + 0.16.6 两笔；0.16.0–0.16.4 五轮的历史欠账随之一并入库） |
+| 单测基线 | **57/57 测试文件**（逐文件 `node --test --test-isolation=none <file>`，2026-09-18 实跑：**0 个失败文件**；`session-continuity` **11/11**，本轮新判据是 ⑥） |
+| 注释闸门 | **error 0 / warn 0，退出码 0**（111 个文件，2026-09-18 实跑） |
+| 文件规范闸门 | `check-repo-hygiene.mjs` **PASS**（无 BOM + 索引无死链 + CI/engines Node 版本相容，2026-09-18 实跑） |
+| 发布闸门 | `verify-pack` **37/37 逐字相同 + 接线完好**，退出 0（0.16.6 打包后实跑） |
+| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.6 / testFiles 57/57，2026-09-18 实跑） |
+| 已装包核对 | 两个 profile 都是 **0.16.6**，`lib/index.js` sha256 前 12 位 `C9D096EBF8AB` 与工作树**逐一相同**（`verify-pack` 之外的独立第二次核对） |
+| 下一阶段 | ① **重启 `dsh web` 让 0.16.6 生效**，然后真机再触发一次会话切换：判据是界面上出现「网页会话已切换」提示而**不是**「本轮运行失败」，且 `GET /__webcode/status` 的 `driver.sessionSwitchNotices` > 0（见下节 0.16.6）；② 按 [`ROADMAP.md`](ROADMAP.md) P1 取回 0.16.4 / 0.16.5 的真机读数 |
 
 ## 未提交改动与运行进程（2026-09-17 文档/结构整理轮）
 
@@ -60,6 +60,70 @@
 > **2026-09-17 晚（0.16.4 轮）补充读数**：上表的「44 项未提交」已是**上一轮的读数**；
 > 本轮结束后实测为 **59 项（19 改 + 40 新）**，`origin/main` 仍停在 `6b836d2`。
 > 上游那一行与 `git status` 的口径不变，只是数字长大了——**这不是漂移，是同一笔欠账在变厚**。
+
+## 0.16.6（已打包 / 已装 / 待重启）—— 会话重建节流不再中断会话：改交回「已切换会话」提示
+
+**用户原话**（逐字）：切换会话时出现
+「本轮运行失败 WEB_SESSION_REBUILD_THROTTLED: 30s 内已经整段重建过一次，本次不再重放
+（sessionKey=session-63bd1b99-…，上次重建在 30s 前、重放了 127895 字符）— 请等窗口过去后
+用「继续」重试，或先在 GUI 里压缩上下文再重试」，要求
+「**改为只提示已经切换会话而不是打扰直接中断会话**」。
+
+### 一、要改的是表现形式，不是刹车
+
+0.16.4 的节流（同一 `sessionKey` 在窗口内只允许**整段重建**一次）修的是雪崩：会话槽一旦
+为空，每一轮都会走 `WEB_SESSION_LOST` → 重放四十万字符 → 又失败 → 下一轮再重放。这条
+判据一个字都不用改；错的是它**把「这一轮没有内容可交」说成了「这一轮失败」**——
+`throw WEB_SESSION_REBUILD_THROTTLED` 到了 DSH 界面上就是一条红色「本轮运行失败」，
+会话当场断链。
+
+用户那条报文里的两个 30s 是同一枚数字的两面（**取证**：`lib/index.js` 的 executor 里
+`waitMs = SESSION_REBUILD_THROTTLE_MS - (now - prev.at)`）：窗口 60s、距上次重建 30s ⇒
+`waitMs = 30s`；旧文案把「还剩多久」写成了「多久内已经重建过一次」，又原样打出
+`上次重建在 30s 前`。因此本轮**把两个数分开写**（`sinceLastMs` / `waitLeftMs`），
+不再让同一个数字在一句话里承担两种含义。
+
+### 二、改法（三件事，缺一件就会从「一次提示」退化成「静默丢上下文」）
+
+| # | 动作 | 位置 |
+| --- | --- | --- |
+| 1 | 节流命中时**不再抛错**，改为 `return { text: sessionSwitchedNotice(...) }`——与 `TOOL_UNKNOWN` / `thinkingOnlyNotice` / `unparsedCallNotice` 同型：把带现场与下一步的提示当本轮正文交回会话 | `lib/index.js` executor 的 `WEB_SESSION_LOST` 分支 |
+| 2 | 这一轮的正文一个字节都没进网页会话 ⇒ 收尾处 `turn.commit()` **不许让游标前进**（新标记 `cededCursorKeys`，`commit()` 消费、`invalidate()` 清理） | `lib/index.js` 的 `buildTurn.commit()` / `invalidate()` |
+| 3 | 会话槽**刻意不重置**、游标**刻意不删**：下一轮仍是增量（几千字符）并把这一轮没发出去的消息一并带上，由驱动按老规矩续聊或重开；万一网页其实还停在那个会话上（驱动的 URL 自愈），这一轮的增量直接落对地方 | 同 #1；窗口过期后的整段重建照旧由 `m.rebuild()` 分支放行 |
+
+配套两处可核对读数：
+`/__webcode/status` 的 `driver.sessionSwitchNotices`（本次进程里提示过几次，**新**）与
+`sessionCursorInvalidations`（作废游标几次，0.16.4 已有）。两者分开记，是因为它们指向
+完全不同的排查路径。同时把 `WEB_SESSION_REBUILD_THROTTLED` 从 `CURSOR_INVALIDATING_CODES`
+里删掉——它现在是一条永不命中的孤儿规则（抛错路径已经不存在）。
+
+### 三、护栏与反向验证
+
+护栏：`test/session-continuity.test.mjs` **⑥**（同一段剧本，判据换对象）。它现在断言三件事：
+① 第二次会话丢失这一轮 `ok:true` 且正文是 `SESSION_SWITCHED` 提示（不含内部失败码、
+不含角度括号/大括号——正文会走工具协议锚点扫描）；② 重放仍被挡在发送之前（`during2 === 1`）；
+③ 节流那一轮**没有让游标前进**（第三轮仍是 `fresh:true`、`messageChars > 10 万`）。
+
+反向验证（**`.tmp/revverify` 等价拷贝**，工作区 `lib/` 不留任何改动，2026-09-18 实跑）：
+
+| 改动 | 结果 |
+| --- | --- |
+| A：把 #1 改回 `throw new Error('WEB_SESSION_REBUILD_THROTTLED')` | ⑥ **变红**：`AssertionError: 第二次会话丢失仍然让整轮失败（r2.code=WEB_SESSION_REBUILD_THROTTLED）` |
+| B：删掉 `commit()` 里的 `if (cededCursorKeys.delete(keyPath)) return;` | ⑥ **变红**：`AssertionError: 节流那一轮让游标前进了：第三轮不是整段重建（fresh=false，字符数 8）`——三轮 `(fresh, chars) = [[true,150008],[true,150008],[true,150040],[false,8]]` |
+
+B 那条正是本轮新增的安全线：少了它，「不中断」会退化成「静默丢上下文」（本仓库三条
+不可越界约束之一）。
+
+### 四、仍未做（不假装完成）
+
+1. **未重启**：0.16.6 已装机，但运行中的进程仍是 0.16.5，所以本轮的读数全部是**离线**读数；
+   真机判据是「再触发一次会话切换 → 出现提示而**不是**本轮运行失败」，取法
+   `GET /__webcode/status` 的 `driver.sessionSwitchNotices`（>0）与界面上那条提示正文。
+2. **`landed`/fresh 路径的节流仍未统一**：DSH 侧游标被作废后的整段重建（`fresh:true`）
+   **不经过**本节流；也就是说「提示 → 下一轮」那一轮仍会真的整段重放（这正是它保住上下文的
+   原因）。代价是：若网页槽持续不可用，用户每发一条消息就付一次四十万字符。真机读数
+   （`sessionLostCount` / `sessionSlot` / `sessionSwitchNotices` 三者随时间的变化）拿到之前，
+   不把它改成「统一节流」——那会把一次合法重试也挡在外面。
 
 ## 0.16.4（只打代码 / 未打包 / 未安装）—— 四条根因：会话槽、标记畸变、附件未确认、块内容不一致
 
