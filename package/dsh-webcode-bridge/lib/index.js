@@ -1151,8 +1151,31 @@ export function apply(ctx, config = {}) {
           // 旧字符类把它和全角 U+FF5C 一起当成「标签族」，于是表格的每一个 `|` 都被当
           // 残渣吃掉：`| 列 A | 列 B |` 变成 ` 列 A  列 B `，整张表塌成一行文本。
           // 全角 U+FF5C 才是 DSML 标记真身，保留；ASCII `|` 从本类里剔除。
+          //
+          // 0.16.10 第三层：**孤立的 `<` 不是残渣**，与 0.16.8 修掉的「纯空白」同型。
+          // `tagOnly` 判的是「只由标签字符组成」，而单独一个 `<` 恰好满足它，于是被这条
+          // 判据静默推进游标吃掉：`textSent` 前进到 `<` 之后，`proseSent` 却一个字节都
+          // 没收到——**这个字符永久丢失**，因为收尾的 `proseSent.slice(proseBlockStart)
+          // + tail` 里 tail 从 `textSent.length` 起算，已经越过它了。
+          //
+          // 为什么单独一个 `<` 必然出现（不是理论风险）：上面 `proseLimit` 的
+          // `markerAt >= 0 ? markerAt : …` 那一支会在尾部出现半成品标记候选时把外发
+          // 边界停在那个 `<` 上，而 `partialProtocolAt` 对 `<` + 任意已知标记名前缀
+          // （`<b` `<c` `<f` `<i` `<s` `<t` `<a` `<T` …）都返回该 `<` 的下标。于是
+          // 「增量恰好切在 `<` 之后」时，下一次增量的 `proseChunk` 就是这一个 `<`。
+          // 这在真实网页流里很常见：HTML 片段、`Array<T>` 这类泛型、以及正文里解释
+          // `<tool_call>` 形状的示例，任何一个被增量边界切开都会命中。
+          //
+          // 真机复现（.tmp-probe/probe-tail-loss.mjs，逐字驱动真实 adapter.stream）：
+          //   deltas ['函数 <f','oo> 定义。'] ⇒ 权威 '函数 <foo> 定义。'(12)
+          //     实际送达 '函数 foo> 定义。'(11) —— `<` 被吞。
+          //
+          // 判据修正：残渣只保留「闭合/结构片段」。**光秃秃一个 `<` 是正文，照常外发**；
+          // `</` 这类调用标签残尸（真机 2026-09-14 会话 c7c7a03c step69 的 `</</`）
+          // 仍按残渣静默处理。取向与 0.16.8 一致：宁可多发一个字符，不可静默吞掉
+          // 用户可见的正文。护栏：test/stream-tail.test.mjs 的「孤立 `<`」两条。
           const hasTagChar = /[<>\/\uFF5C]/.test(proseChunk);
-          const tagDebris = tagOnly && hasTagChar;
+          const tagDebris = tagOnly && hasTagChar && proseChunk !== '<';
           if (proseChunk && !tagDebris && (pendingCalls.length === 0 || proseChunk.trim())) {
             yield* openText();
             textSent = acc.slice(0, safeEnd);
