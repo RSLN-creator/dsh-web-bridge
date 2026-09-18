@@ -241,7 +241,7 @@ export function composerWritePlan({ length = 0, chunkChars = 20_000, kind = 'fie
  * `attach-disabled`：那句话在面板上会被读成「附件功能被关掉了」，而用户只是选了纯文本。
  *
  * @param {{chars?: number, inlineLimit?: number, attachSupported?: boolean, attachEnabled?: boolean,
- *   maxChars?: number, transport?: 'attach'|'inline'}} o
+ *   maxChars?: number, transport?: 'attach'|'inline', attachForbidden?: boolean}} o
  * @returns {{mode: 'inline'|'attach', reason: string, total: number, limit: number,
  *   payloadChars: number, truncate: boolean, kept: number|null, maxChars: number|null}}
  */
@@ -275,12 +275,37 @@ export function promptTransportPlan(o = {}) {
     };
   };
   if (o.transport === 'inline') return cap('inline', 'transport-inline');
+  // 站点级禁令优先于阈值（0.16.7）：DeepSeek 的网页**收得下附件但不读它**——真机
+  // 2026-09-18 实测「附件投递（over-limit, 71994 字符, webcode-context.md）」那一轮
+  // 零回复、页面退回根地址、domChars=0；同一份设置改回纯文本就正常。因此该站点
+  // 无论多长都只走输入框：宁可慢，也不要「网页收下了、什么都不回」。
+  // 判据是**站点声明**（ATTACH_FORBIDDEN_SITES），不是调用方每次都记得传的开关——
+  // 这条知识属于站点契约，写在别处必然漂移。
+  if (o.attachForbidden) return cap('inline', 'site-no-attach');
   if (!o.attachEnabled) return cap('inline', 'attach-disabled');
   if (!o.attachSupported) return cap('inline', 'no-attach-input');
   if (limit <= 0) return cap('inline', 'no-limit');
   if (total <= limit) return cap('inline', 'under-limit');
   return cap('attach', 'over-limit');
 }
+
+/**
+ * 哪些站点的网页**能上传附件但不读附件**，因此永远不许走附件投递（0.16.7）。
+ *
+ * 真机读数（2026-09-18，DeepSeek，用户报障原文「deepseek以附件投递会出问题！不能回复！
+ * 前面时候改为输入框还行！」）：`/__webcode/status` 的
+ * `attachTransport = { transport:'attach', reason:'over-limit', name:'webcode-context.md',
+ * total:71994, evidence:'text:webcode-context.md' }` —— 附件确实传上去了、页面上也出现了，
+ * 但这一轮**没有任何回复**：`lastEndReason` 空、`domChars:0`、`lastRate:null`，
+ * 页面退回 `https://chat.deepseek.com/` 根地址，navTrace 里连 `landed:after-submit` 都没有。
+ * 同一账号改回纯文本投递后恢复正常。
+ *
+ * 这是**站点契约**（哪一家的附件真的能被模型读到），不是用户偏好，因此不放进设置面：
+ * 放进设置面等于把「哪家能用附件」这个事实交给每个用户各猜一次。
+ * 反向要求同样成立：GLM 的输入框装不下长文（用户原话「他在附件可以，输入框过长」），
+ * 所以它必须留在附件路径上——本表只排除，不改变其它站点的既有行为。
+ */
+export const ATTACH_FORBIDDEN_SITES = Object.freeze(new Set(['deepseek']));
 
 /**
  * 停滞判定（纯函数）：块间回读长度不增长即计入停滞，连续两块即判死。
@@ -2109,6 +2134,9 @@ export function createBrowserDriver(options = {}) {
           inlineLimit: cfg.attachInlineLimitChars,
           attachEnabled: cfg.attachInlineLimitChars > 0,
           attachSupported: true,
+          // 站点级禁令（0.16.7）：DeepSeek 收得下附件但读不到它（真机实测零回复），
+          // 因此该站点永远走输入框，与阈值无关。见 ATTACH_FORBIDDEN_SITES。
+          attachForbidden: ATTACH_FORBIDDEN_SITES.has(siteId),
           // 设置面的「投递形态」开关（0.16.3）：'inline' = 用户显式要求纯文本，
           // 逐字回到旧行为；其余一律 'attach'（是否真的走附件仍由上面的阈值决定）。
           // 现读而不是取构造函数快照，理由见 promptTransportNow。

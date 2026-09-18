@@ -27,7 +27,7 @@
 // ①②③ 是正向判据；④⑤⑥⑦⑧ 是反向安全线（默认关、阈值失效、入口缺失都要回落）。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { promptTransportPlan } from '../lib/browser-driver.js';
+import { promptTransportPlan, ATTACH_FORBIDDEN_SITES } from '../lib/browser-driver.js';
 
 /** 真机读数：这一轮实际发出去的首轮提示词长度。 */
 const REAL_PROMPT_CHARS = 409_555;
@@ -103,4 +103,34 @@ test('⑧ 小数阈值向下取整；小数长度也取整', () => {
   assert.equal(plan.limit, 1000);
   assert.equal(plan.total, 1000);
   assert.equal(plan.mode, 'inline');
+});
+
+// ── ⑨ 站点级禁令（0.16.7）：DeepSeek 收得下附件但读不到它，必须永远走输入框 ──────
+
+test('⑨ attachForbidden ⇒ 无论多长都 inline（DeepSeek 附件投递零回复的直接修法）', () => {
+  // 真机 2026-09-18：71994 字符走附件（reason=over-limit）那一轮零回复。用户原话
+  // 「deepseek以附件投递会出问题！不能回复！前面时候改为输入框还行！」。
+  const plan = promptTransportPlan({
+    chars: 71_994, inlineLimit: 60_000, attachEnabled: true, attachSupported: true, attachForbidden: true,
+  });
+  assert.equal(plan.mode, 'inline',
+    '站点禁令没生效：' + plan.mode + '/' + plan.reason + '（DeepSeek 会走附件 ⇒ 用户报的零回复）');
+  assert.equal(plan.reason, 'site-no-attach');
+  assert.equal(plan.total, 71_994, 'inline 必须原样发全部字符（不能截断）');
+  assert.equal(plan.payloadChars, 71_994);
+  assert.equal(plan.truncate, false);
+  // 更长的也一样：禁令与长度无关。
+  const big = promptTransportPlan({ chars: 409_555, inlineLimit: 60_000, attachEnabled: true, attachSupported: true, attachForbidden: true });
+  assert.equal(big.mode, 'inline');
+});
+
+test('⑨b 站点禁令不误伤别的站点：GLM 超阈值仍走附件（输入框装不下长文）', () => {
+  const plan = promptTransportPlan({
+    chars: 71_994, inlineLimit: 60_000, attachEnabled: true, attachSupported: true, attachForbidden: false,
+  });
+  assert.equal(plan.mode, 'attach');
+  assert.equal(plan.reason, 'over-limit');
+  // 集合本身是站点契约的唯一出处：deepseek 在内，glm 不在。
+  assert.equal(ATTACH_FORBIDDEN_SITES.has('deepseek'), true);
+  assert.equal(ATTACH_FORBIDDEN_SITES.has('glm'), false);
 });
