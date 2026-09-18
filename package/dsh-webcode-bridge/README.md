@@ -1,6 +1,6 @@
 # Harness Web Bridge
 
-已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.16.7。
+已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.16.9。
 
 安装（本包**不发 npm registry**，只以 `.tgz` 交付）：
 
@@ -14,6 +14,44 @@
 > 0.14.5 起发布流程收进仓库：`scripts/verify-pack.mjs` 逐文件核对 tarball 与工作树
 > （改完代码忘了重新 pack 时直接报错），`scripts/install-profiles.mjs` 先删旧目录再解包
 > （绕开 pnpm 对同版本 tarball「Already up to date」不重解的坑）。两条都是真实踩过的坑。
+
+## 0.16.9
+
+**三件事：Harness 侧 markdown 逐字保真、站点禁令可核对、`pnpm test` 死锁解除。**
+
+### 一、`## 标题` 变 `##标题`、表格塌成一行（真因与修法）
+
+用户原话：「好像零点九几的时候，harness 显示的 Markdown 是没问题的，但现在渲染到 harness
+就会格式错乱」「#后面没有空格？代码块包裹没有换行？导致没有闭合？」
+
+真因不是渲染，是**字节在桥里被吃掉了**：流式正文外发处的 `tagDebris` 判据把**纯空白**和
+**ASCII 竖线 `|`** 都当成「标签残渣」，命中后静默推进游标、一个字节都不发；而
+`PROSE_TAIL_CHARS = 8` 的滞后让「本片放行区间恰好是一个空格或换行」成为必然。于是
+`## 标题` 丢空格、空行消失、围栏不闭合、`| 列 A | 列 B |` 塌成 ` 列 A  列 B `。
+
+回归窗口自 **0.14.2**（那次为修「回复夹杂错误调用」加了这个判据），0.9.x 没有这条分支——
+所以用户「零点九几是好的」这个观察是准确的。
+
+修法：判据拆成 `tagOnly`（只由标签字符组成）**且** `hasTagChar`（至少含一个真标签字符），
+纯空白因此照常外发，ASCII 竖线从「标签族」里剔除（它是 markdown 表格分隔符）。
+护栏 `test/markdown-whitespace.test.mjs`（8/8）**逐字符驱动**——只有逐字符喂进去，释放边界
+才会落在每个字符上；既有的 `markdown-block-integrity` 抓不住它，因为它只断言「块内容 ≡
+Σ增量」，而本缺陷里**两条通道一起**少同一个字节。
+
+### 二、DeepSeek 禁令现在**看得见**
+
+0.16.7 加了站点禁令，但它只存在于代码里：`site-no-attach` 分支不写读数、`status()` 不投影
+这个布尔量，`GET attach-status` 反而还在承诺「超过 60000 字符时改走附件」（对该站点已不成立）。
+用户因此**无法核对修复是否生效**。本轮补齐 `SITE_NO_ATTACH` 读数、`status()` 的
+`attachForbidden` + `siteId` 投影，以及面板上的「本站点永不使用附件投递」。护栏 ⑩（11/11）。
+
+### 三、`pnpm test` 曾连**启动**都做不到
+
+lockfile 把**可选** peerDep 记成普通依赖且 `specifier: '*'` 对 `version: 0.1.5-alpha.1`
+自相矛盾，pnpm 的前置检查（`install --frozen-lockfile`）必然失败——**CI 下它会先删
+`node_modules` 再报错**，实测真删过一次。修法是把 specifier 收紧为 `^0.1.5-alpha.1`。
+顺带修了 `control-routes` 夹具在并行负载下读端口为 `null` 的既有 flake（用 HEAD 版本同样会红，
+已确认与本轮改动无关）。
 
 ## 0.16.7
 

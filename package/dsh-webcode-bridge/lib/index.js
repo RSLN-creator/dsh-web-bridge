@@ -1138,7 +1138,21 @@ export function apply(ctx, config = {}) {
           // "</</" 文本块，用户看到「回复夹杂错误调用」）：不含任何字母数字的纯标签
           // 碎片不是内容，按调用间隙的空白同型处理——静默推进游标，不开文本块。
           // 带字母数字的（如 "</div>"、代码示例）照常外发，不受影响。
-          const tagDebris = /^[\s<>\/|\uFF5C]+$/.test(proseChunk);
+          // 0.16.8：纯空白**不是**标签残渣。旧判据把空白也归进残渣，命中后静默推进游标、
+          // 一个字节都不发；而 PROSE_TAIL_CHARS=8 的滞后让「释放边界恰好切到一个空格或换行」
+          // 必然发生。Markdown 是空白敏感的格式，症状正是用户报的「harness 显示格式错乱、
+          // web 端正常」：`## 标题` 变 `##标题`、空行消失、围栏缺换行而不闭合。
+          // 回归窗口自 0.14.2（引入本判据）；0.9.x 无此分支所以正常。
+          // 判据必须**同时**要求「只由标签字符组成」与「至少含一个真标签字符」：
+          // 前者排除普通文本，后者排除纯空白。
+          // 护栏：test/markdown-block-integrity.test.mjs ⑥（逐字符驱动）。
+          const tagOnly = /^[\s<>\/|\uFF5C]+$/.test(proseChunk);
+          // 0.16.8 第二层：ASCII 竖线 `|` **不是**标签字符——它是 markdown 表格的分隔符。
+          // 旧字符类把它和全角 U+FF5C 一起当成「标签族」，于是表格的每一个 `|` 都被当
+          // 残渣吃掉：`| 列 A | 列 B |` 变成 ` 列 A  列 B `，整张表塌成一行文本。
+          // 全角 U+FF5C 才是 DSML 标记真身，保留；ASCII `|` 从本类里剔除。
+          const hasTagChar = /[<>\/\uFF5C]/.test(proseChunk);
+          const tagDebris = tagOnly && hasTagChar;
           if (proseChunk && !tagDebris && (pendingCalls.length === 0 || proseChunk.trim())) {
             yield* openText();
             textSent = acc.slice(0, safeEnd);

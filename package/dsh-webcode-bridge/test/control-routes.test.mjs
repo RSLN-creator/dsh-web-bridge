@@ -30,7 +30,24 @@ import { createWebControl, routeIndex, controlRoutes } from '../lib/web-control.
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const logger = { log() {}, warn() {} };
-const listen = (server) => new Promise((r) => server.listen(0, '127.0.0.1', () => r(server.address().port)));
+// 0.16.9：等 `listening` 事件后**重读** `address()`，并在拿到 null/越界端口时重试。
+// `server.listen(0, host, cb)` 的回调在某些平台上可能早于地址可用（并发负载下实测
+// 读到 null）。夹具的职责是「给出一个能连的端口」，不是「把 null 传下去让 fetch 报
+// bad port」——后者会把夹具缺陷伪装成产品路由缺陷。
+const listen = (server, attempts = 20) => new Promise((resolve, reject) => {
+  const tryOnce = (n) => {
+    server.listen(0, '127.0.0.1', () => {
+      const port = server.address()?.port;
+      if (Number.isInteger(port) && port > 0 && port <= 65535) return resolve(port);
+      server.close(() => {
+        if (n <= 0) return reject(new Error('listen：反复拿不到可用端口（最后一次=' + JSON.stringify(port) + '）'));
+        tryOnce(n - 1);
+      });
+    });
+    server.once('error', reject);
+  };
+  tryOnce(attempts);
+});
 
 /** 最小可用的 deps：每个 action 要么直接成功，要么走到一个明确的桩。 */
 function stubControl() {
@@ -72,6 +89,17 @@ async function call(control, method, pathname, body) {
     }).catch(() => { try { res.writeHead(500).end(); } catch { /* closed */ } });
   });
   const port = await listen(server);
+  // 0.16.9：`server.address().port` 在并发负载下偶发读到 **null**（全量测试并行时
+  // 抓到的现场是 `TypeError: fetch failed` / `cause: Error: bad port`）。null 拼进
+  // URL 就是 `http://127.0.0.1:null/...`，undici 判为 bad port —— 症状看起来像
+  // 「路由 404 了」，真因却是「端口没读出来」。这条 flake 与产品代码无关：用
+  // HEAD 版本的 lib/web-control.js 跑同一文件同样会红（实测基线 3/5 失败），
+  // 所以它是**既有**的测试夹具缺陷，不是本轮改动引入的。
+  // 判据必须是「拿到一个可用的端口」，拿不到就当场说清，不要让它伪装成路由失败。
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    await new Promise((r) => server.close(r));
+    throw new Error('测试夹具拿不到可用端口：server.address().port=' + JSON.stringify(port));
+  }
   try {
     const r = await fetch(`http://127.0.0.1:${port}${pathname}`, {
       method,

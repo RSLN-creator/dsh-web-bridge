@@ -551,14 +551,26 @@ export function createWebControl(deps = {}) {
       const st = (relay?.config?.driverStatus?.() ?? (typeof driver?.status === 'function' ? driver.status() : null)) || {};
       const last = st.attachTransport || null;
       const probe = st.attachProbe || null;
-      const transportLine = chosen === 'inline'
-        ? '纯文本：永远把正文写进输入框（附件投递已关闭）'
-        : (limit > 0
-          ? '附件投递（默认）：正文超过 ' + limit + ' 字符时改走附件，失败自动回落纯文本'
-          : '纯文本：附件阈值 0（附件投递已关闭）');
+      // 0.16.9：站点禁令必须在这里**说清楚**。0.16.7 让 DeepSeek 永不走附件，但本行
+      // 与 lastLine 都还在按全局开关描述，于是面板对一个已经不再走附件的站点继续承诺
+      // 「超过 60000 字符改走附件」——用户只能看到「附件怎么不好使了」，看不到「这里
+      // 就不再走附件了」。判据取自驱动的实际站点，不重复写死站点名单。
+      const siteId = st.siteId || null;
+      const attachForbidden = st.attachForbidden === true;
+      const transportLine = attachForbidden
+        ? '纯文本：本站点（' + siteId + '）**永不使用附件投递**——网页收得下附件但读不到内容'
+          + '（真机证据：零回复、页面退回根地址），所以无论多长都写输入框。'
+          + '附件阈值 ' + limit + ' 在本站点不适用。'
+        : (chosen === 'inline'
+          ? '纯文本：永远把正文写进输入框（附件投递已关闭）'
+          : (limit > 0
+            ? '附件投递（默认）：正文超过 ' + limit + ' 字符时改走附件，失败自动回落纯文本'
+            : '纯文本：附件阈值 0（附件投递已关闭）'));
       let lastLine;
       if (!last) lastLine = '本会话还没触发过附件投递（正文未超过阈值）。';
-      else if (last.code === 'TRANSPORT_INLINE') {
+      else if (last.code === 'SITE_NO_ATTACH') {
+        lastLine = '纯文本（站点禁令：' + (last.siteId || siteId) + ' 不走附件，原始 ' + last.total + ' 字符全量写入输入框）。';
+      } else if (last.code === 'TRANSPORT_INLINE') {
         lastLine = '纯文本（设置面选择「纯文本」，原始 ' + last.total + ' 字符）。';
       } else if (last.fallback) {
         // 回落原因必须打到面板（0.16.3 要求）：命中数与 DOM 片段是用户唯一能拿到的现场，

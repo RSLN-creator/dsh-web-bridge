@@ -20,17 +20,25 @@
 
 | 项 | 值 |
 | --- | --- |
-| 工作树版本 | **0.16.7** |
-| 已装版本（profile） | **0.16.7**（web + headless 两个 profile 的 `package.json` 实测均为 0.16.7；`verify-pack` **37/37 逐字相同 + 接线完好**、退出 0；两个 profile 的 `lib/index.js` sha256 前 12 位都是 `C9D096EBF8AB`，与工作树**逐一相同**。**已重启，运行进程亦为 0.16.7**） |
-| 运行中的进程 | **0.16.7**（2026-09-18 实测：`GET /__webcode/status` → `build.version=0.16.7 hash=54b59d39c9d7`；与工作树同版本，**无需再重启**） |
-| 上游 | `origin/main` = `45adddd`（2026-09-18 推送 0.16.7；同日已打 tag **v0.16.7** 并触发 Release 工作流，`dsh-webcode-bridge-0.16.7.tgz` 已挂上 GitHub Release，sha256 `fdd8d79e9df2…`） |
-| 单测基线 | **57/57 测试文件**（逐文件 `node --test --test-isolation=none <file>`，2026-09-18 实跑：**0 个失败文件**；`session-continuity` **11/11**，本轮新判据是 ⑥） |
-| 注释闸门 | **error 0 / warn 0，退出码 0**（111 个文件，2026-09-18 实跑） |
-| 文件规范闸门 | `check-repo-hygiene.mjs` **PASS**（无 BOM + 索引无死链 + CI/engines Node 版本相容，2026-09-18 实跑） |
-| 发布闸门 | `verify-pack` **37/37 逐字相同 + 接线完好**，退出 0（0.16.7 打包后实跑） |
-| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.7 / testFiles 57/57，2026-09-18 实跑） |
-| 已装包核对 | 两个 profile 都是 **0.16.7**，`lib/index.js` sha256 前 12 位 `C9D096EBF8AB` 与工作树**逐一相同**（`verify-pack` 之外的独立第二次核对） |
-| 下一阶段 | ① 按 [`ROADMAP.md`](ROADMAP.md) P1 取回 0.16.4 / 0.16.5 的真机读数；② 0.16.7 的站点禁令已装机并生效，真机复验判据是：DeepSeek 站点发超阈值长文时 `/__webcode/status` 的 `attachTransport.transport` 为 `inline`（`reason='site-no-attach'`）且本轮**有回复** |
+| 工作树版本 | **0.16.9** |
+| 已装版本（profile） | **0.16.9**（web + headless 两个 profile **实测均为 0.16.9**；`verify-pack` **37/37 逐字相同 + 接线完好**、退出 0；两个 profile 的 `lib/index.js` sha256 与工作树**逐一相同**。⚠ **装入 ≠ 生效：必须重启 `dsh web`**） |
+| 运行中的进程 | **0.16.5**（2026-09-18 实测 `GET /__webcode/status` → `build.version=0.16.5 hash=25effcbe0096`。**这是本次事故的真身**：用户重启过，但重启当时 web profile 里装的仍是 0.16.5，0.16.8 的 tarball 是重启后 9 分钟才打出来的。**重启本身是对的，错的是重启前没装**。重启后应变为 `hash=4d71c27b8bc8`） |
+| 上游 | `origin/main` = `50e17f5`（2026-09-18；0.16.7 已推送并打 tag **v0.16.7**，`dsh-webcode-bridge-0.16.7.tgz` 已挂 GitHub Release。0.16.8/0.16.9 尚未提交） |
+| 单测基线 | **58/58 测试文件**（逐文件 `node --test --test-isolation=none <file>`；`prompt-transport` **11/11**，新增 ⑩；`markdown-whitespace` **8/8**） |
+| 注释闸门 | **error 0 / warn 0，退出码 0**（2026-09-19 实跑） |
+| 文件规范闸门 | `check-repo-hygiene.mjs` **PASS**（无 BOM + 索引无死链 + CI/engines Node 版本相容） |
+| 发布闸门 | `verify-pack` **37/37 逐字相同 + 接线完好**，退出 0（0.16.8 打包后实跑；0.16.9 打包后重跑） |
+| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.9 / testFiles 58/58） |
+| 已装包核对 | 两个 profile 都是 **0.16.9**，`lib/index.js` sha256 与工作树**逐一相同**（`verify-pack` 之外的独立第二次核对） |
+| 下一阶段 | ① **重启 `dsh web`**——0.16.9 已装机但未加载，这是当前唯一挡住用户的动作；② 重启后按 §0.16.8/0.16.9 的真机判据复验 |
+
+> **⚠ 台账更正（2026-09-19）**：本表此前一行写着「已装版本（profile）**0.16.7**（web + headless
+> 两个 profile 的 `package.json` 实测均为 0.16.7）」与「运行中的进程 **0.16.7**」。**这两条对 `web`
+> 是错的**：审计实测 web profile 当时是 **0.16.5**（`lib/index.js` sha256 `14A87102DAFB…`），
+> 只有 headless 是 0.16.7（`C9D096EBF8AB…`）。台账把两个 profile 混成了一句，于是「已装 0.16.7」
+> 掩盖了「web 落后两个版本」这个真因，直接导致用户按台账以为装好了、重启后仍然不变。
+> **教训记在这里而不是删掉**：凡是「已装/已重启/已验证」这类状态行，**必须逐 profile 写、并附
+> sha256 前 12 位**，否则它会把「一个 profile 装了」读成「都装了」。 |
 
 ## 未提交改动与运行进程（2026-09-17 文档/结构整理轮）
 
@@ -60,6 +68,126 @@
 > **2026-09-17 晚（0.16.4 轮）补充读数**：上表的「44 项未提交」已是**上一轮的读数**；
 > 本轮结束后实测为 **59 项（19 改 + 40 新）**，`origin/main` 仍停在 `6b836d2`。
 > 上游那一行与 `git status` 的口径不变，只是数字长大了——**这不是漂移，是同一笔欠账在变厚**。
+
+## 0.16.9（已打包 / 已装 / **待重启**）—— 三件事：markdown 逐字保真、禁令可核对、`pnpm test` 死锁解除
+
+本轮把**两个用户会话的未完成工作**收口，并修掉一个挡住用户的运维真因。全部读数实测。
+
+### 一、markdown「格式错乱」的真因（用户会话二）
+
+**用户原话**：「好像零点九几的时候，harness 显示的 Markdown 是没问题的，但现在渲染到
+harness 就会格式错乱」「#后面没有空格？代码块包裹没有换行？导致没有闭合？」
+
+**根因**：`lib/index.js` 流式正文外发处的 `tagDebris` 判据把**纯空白**与 **ASCII 竖线 `|`**
+都归进了「标签残渣」，命中后静默推进游标、**一个字节都不发**。而 `PROSE_TAIL_CHARS = 8`
+的滞后让「本片放行区间恰好是一个空格或换行」成为必然。后果逐条对应症状：
+
+- `## 标题` → `##标题`（标题级别丢失）
+- 空行消失 → 段落与围栏不再分隔
+- 围栏缺换行 → 代码块不闭合
+- `| 列 A | 列 B |` → ` 列 A  列 B `（表格塌成一行）
+
+**回归窗口自 0.14.2**（引入该判据那次为修「回复夹杂错误调用」而加），0.9.x 无此分支，
+所以用户「零点九几没问题」的观察**是准确的**。
+
+**修法**：判据拆成两条必须同时成立——`tagOnly`（只由标签字符组成）**且** `hasTagChar`
+（至少含一个真标签字符 `<>` `/` 或全角 `\uFF5C`）。纯空白因此照常外发；ASCII `|` 从
+「标签族」里剔除，因为它是 markdown 表格的分隔符。
+
+**护栏**：`test/markdown-whitespace.test.mjs`（新，**8/8**），**逐字符驱动**——只有把每个
+字符单独喂进去，释放边界才会落在每个字符上。既有 `markdown-block-integrity` 抓不住它
+（它只断言「块内容 ≡ Σ增量」，而本缺陷里**两条通道一起**少同一个字节，所以那条判据全绿；
+且既有用例的 `deltas` 全是粗粒度整块）。
+
+**反向验证**（独立同事实跑，非自证）：把判据改回 0.14.2 形态 → **7/8 变红**，逐字：
+`① 标题：Σ text-delta 与网页原文**不逐字相等**——外发途中被吃掉了字符`、
+`原文 = "## 标题\n\n正文。\n"` / `外发 = "##标题\n\n正文。\n"`；
+`⑤ 表格：原文 = "| 列 A | 列 B |\n..."` / `外发 = "|列A|列B||---|---||1 | 2 |\n"`。
+另有对照②，外发 `"##结论第一段正文，带一个行内\`code\`。\`\`\`jsconsta=1;..."` —— 正是用户描述的症状。
+⑧（0.14.2 的反向保护）实测**仍绿**，且对 ‵tagDebris = false′ 反证**会红**，证明它不是空判据。
+
+> **一处如实说明**：同事用隔离实验证明**「剔除 ASCII 竖线」这一刀是冗余的**——只回退它
+> 时 8/8 全绿，全部保护都来自 `hasTagChar`。代码注释里把竖线写成「第二层」**没有测试支撑**；
+> 保留它是为了语义正确（竖线本就不是标签字符），但不能声称它是被独立验证过的一层。
+
+### 二、DeepSeek 站点禁令现在**可核对**（用户会话一的收口）
+
+0.16.7 加了 `ATTACH_FORBIDDEN_SITES = {deepseek}`（DeepSeek 收得下附件但读不到 →
+零回复），但审计实测发现禁令**只存在于代码里**：
+
+- `site-no-attach` 分支**不写 `attachTransport` 读数**（`if (mode==='attach')` …
+  `else if (reason==='transport-inline')` 之间没有它的 else）⇒ 界面上读数停在上一轮旧值；
+- `status()` **不投影**这个布尔量 ⇒ 用户无法核对禁令是否生效；
+- `GET attach-status` 反而继续承诺「正文超过 60000 字符时改走附件」——**对 DeepSeek 已不成立**。
+
+本轮补齐：新增 `SITE_NO_ATTACH` 读数、`status()` 投影 `attachForbidden` + `siteId`、
+面板改为「本站点（deepseek）**永不使用附件投递**」。护栏 `prompt-transport` ⑩（**11/11**），
+三条腿各自反证过会红（抽掉投影 / 抽掉读数 / 面板改回承诺附件）。
+
+**优先级实测**（同事独立探针）：`transport:'inline'` → `attachForbidden` → `!attachEnabled`
+→ `!attachSupported` → `limit<=0` → `total<=limit` → `attach`。结论：**设置页无法把 DeepSeek
+强制拉回附件**，禁令在所有涉及附件的分支之上。
+
+### 三、两个挡住用户的**运维**真因（不是代码 bug，但正是「重启了还是没用」的答案）
+
+1. **web profile 从未装过 0.16.7/0.16.8**。审计逐字节证明：运行中进程（PID 3832，18:42:38 启动）
+   加载的是 `profiles/web/.../lib/index.js` sha256 `14A87102DAFB…` = **0.16.5**；而 `0.16.8.tgz`
+   是 **18:51:34** 才打出来的——**重启发生在打包之前 9 分钟**。重启本身没错，错的是重启前没装。
+   `profiles/web/package.json` 还钉在 `file:…/.tmp/dsh-webcode-bridge-0.16.5.tgz`。
+   ⇒ **本轮已装机**：两个 profile 均为 **0.16.9**，`lib/index.js` sha256 `CD88FED3CDE6…`、
+   `lib/browser-driver.js` `27E80B99639F…`，与工作树**逐一相同**。
+2. **台账曾把两个 profile 混成一句**（见上方「⚠ 台账更正」），掩盖了这个真因。
+
+### 四、`pnpm test` 死锁（既有欠账，本轮顺带修掉）
+
+`pnpm test` 的**前置依赖检查**会先跑一次 `install --frozen-lockfile`，而 lockfile 里
+`@deepseek-ai/dsh-client-ui-sidebar-right`（**可选** peerDep，`peerDependenciesMeta.optional=true`）
+被 `autoInstallPeers` 写成了普通依赖，`specifier: '*'` 对 `version: 0.1.5-alpha.1` **自相矛盾**：
+
+```
+[ERR_PNPM_OUTDATED_LOCKFILE] The importer resolution is broken at dependency
+"@deepseek-ai/dsh-client-ui-sidebar-right": version "0.1.5-alpha.1" doesn't satisfy range "*"
+```
+
+危害比「一条测试红」大得多：pnpm 在 CI 下会**先删 `node_modules` 再报错**，实测真删过一次，
+随后 `import('./lib/index.js')` 直接 MODULE_NOT_FOUND——**全量测试连启动都做不到**。
+
+**修法**：把 peer 的 specifier 从 `*` 收紧为 `^0.1.5-alpha.1`，使 specifier 与解析版本一致。
+（先试过 `.npmrc` 写 `auto-install-peers=false`，实测**本机 pnpm 不读包级 .npmrc**，
+且与 lockfile 记录的 setting 冲突时会报 `LOCKFILE_CONFIG_MISMATCH`，故放弃该路。）
+
+**顺带修的既有 flake**：`test/control-routes.test.mjs` 的夹具在并行负载下偶发读到
+`server.address().port === null`，拼进 URL 变成 `bad port`，**看起来像路由 404、真因是端口没读出来**。
+用 **HEAD 版本的 `lib/web-control.js`** 跑同一文件同样会红（基线 3/5 失败）⇒ **既有夹具缺陷，
+与本轮改动无关**。已改为等 `listening` 后重读端口、拿到不可用端口就重试、拿不到则明确报错。
+
+**读数**：`pnpm test` **退出码 0**（此前连启动都不能）；逐文件 **58/58 文件、0 个失败文件**。
+
+### 本轮闸门（全部实跑）
+
+| 闸门 | 读数 |
+| --- | --- |
+| `pnpm test` | **退出码 0**（修复前：连启动都失败） |
+| 逐文件单测 | **58/58 文件、0 失败**（`markdown-whitespace` 8/8、`prompt-transport` 11/11） |
+| `lint-comments` | 112 个文件，**error 0 / warn 0**，退出 0 |
+| `check-repo-hygiene` | **PASS**（无 BOM + 索引无死链 + Node 版本） |
+| `check-ledger` | **PASS**（version 0.16.9 / testFiles 58/58） |
+| `verify-pack` | **37/37 逐字相同 + 接线完好**，退出 0 |
+| 装机核对 | web + headless 均 **0.16.9**，两个关键文件 sha256 与工作树逐一相同 |
+
+### 下一步（唯一挡住用户的动作）
+
+**重启 `dsh web`**。判据是 `GET http://127.0.0.1:3080/__webcode/status` 的
+`build.version` 从 `0.16.5` 变为 `0.16.9`、`build.hash` 变为 **`a230270c3213`**；
+重启后 `driver.attachForbidden` 应为 `true`，超阈值长文那一轮 `attachTransport.transport`
+应为 `inline`（`reason='site-no-attach'`）。
+
+> **仍然欠着的一条**（本轮只做了可核对，没做闸门）：DeepSeek 走 inline 时**没有任何按长度
+> 的发送前闸门**——`assertContextBudget` 的窗口是 1,000,000 tokens（72,010 字符折算 0.055、
+> 151,267 字符折算 0.116，**两次真机失败都顺利通过**），400,000 字符以下连 warn 都没有，
+> 唯一的截断校验在 `readComposer` 返回 null 时被静默跳过。它不会「静默空回复」
+> （`empty response from web AI` 与超时兜底会报错），但**会把超长正文盲发并烧完整个超时**。
+> 真机复验拿到有回复的读数之前，不把它改成硬闸门。
 
 ## 0.16.7（已打包 / 已装 / 已重启 / 已发布）—— DeepSeek 站点禁用附件投递：收得下但读不到
 

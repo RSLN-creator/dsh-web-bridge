@@ -824,6 +824,11 @@ export function createBrowserDriver(options = {}) {
       // 放在 status 上，是因为设置面要显示「生效值」——只显示用户选了什么，
       // 会出现「设置页写纯文本、实际走附件」这种无从发现的偏差。
       promptTransport: promptTransportNow(),
+      // 0.16.9：站点附件禁令的**可核对读数**。0.16.7 加了禁令却没在任何投影里出现，
+      // 于是「修复生效没有」在面板与 /status 上都看不出来（attach-status 反而还在
+      // 承诺超阈值走附件）。读数是站点事实，放在 status 上与 promptTransport 并列。
+      attachForbidden: ATTACH_FORBIDDEN_SITES.has(siteId),
+      siteId,
       // 0.16.3：探针最近一次读数（见 attachProbe 声明处）。
       attachProbe,
       conversations: Object.fromEntries(conversations),
@@ -2197,6 +2202,17 @@ export function createBrowserDriver(options = {}) {
           attachTransport = { at: Date.now(), fallback: true, code: 'TRANSPORT_INLINE', total: String(message).length,
             transport: 'inline', reason: plan.reason };
           log('prompt transport forced inline by settings (promptTransport=inline), chars=' + plan.total);
+        } else if (plan.reason === 'site-no-attach') {
+          // 0.16.9：站点禁令生效时也**必须落读数**。0.16.7 加了 ATTACH_FORBIDDEN_SITES
+          // 却漏了这里，于是 DeepSeek 上「禁令已生效」在界面上完全看不出来：读数停在
+          // 上一轮的旧值，面板反而还在承诺「超 60000 字符改走附件」。用户没法核对
+          // 自己的修复到底生效没有——这正是本仓库反复记下的那条纪律：
+          // 「只 warn 到控制台等于没有读数」。
+          // 与 TRANSPORT_INLINE 同型：这是站点事实，不是故障，所以用 code 而不是 error。
+          attachTransport = { at: Date.now(), fallback: true, code: 'SITE_NO_ATTACH', total: String(message).length,
+            transport: 'inline', reason: plan.reason, siteId };
+          log('prompt transport forced inline by site policy (ATTACH_FORBIDDEN_SITES), site=' + siteId
+            + ' chars=' + plan.total);
         }
       }
       const input = page.locator(SEL.input).first();

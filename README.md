@@ -122,6 +122,18 @@
   不会静默丢上下文。本进程提示过几次可在 `/__webcode/status` 的
   `driver.sessionSwitchNotices` 核对。
 - 2026-09-10 新版 UI（无模型 pill、只剩深度思考开关）已适配：驱动按 UI 代际自动选择操作路径，`pnpm doctor` 在新版真机 8/8 通过；取证见 [新版 UI 取证](doc/research/deepseek-newui-2026-09-10.md)。
+- **Harness 侧 markdown 逐字保真**（0.16.9）：`## 标题` 变 `##标题`、空行消失、代码围栏不闭合、
+  表格塌成一行——这些「格式错乱」的真因**不是渲染，是字节在桥里被吃掉**。流式正文外发处的
+  残渣判据把**纯空白**和 **ASCII 竖线 `|`** 当成标签碎片静默丢弃，而 `PROSE_TAIL_CHARS = 8`
+  的滞后让「放行区间恰好是一个空格」成为必然。回归窗口自 0.14.2（0.9.x 无此分支，所以那时正常）。
+  现在判据要求「只由标签字符组成」**且**「至少含一个真标签字符」，纯空白与表格竖线照常外发；
+  护栏 `test/markdown-whitespace.test.mjs` 用**逐字符驱动**钉住逐字相等。
+- **DeepSeek 附件禁令可核对**（0.16.9）：站点禁令（0.16.7）此前只写在代码里——读数不记、
+  `/__webcode/status` 不投影、面板还在承诺「超阈值改走附件」。现在有 `SITE_NO_ATTACH` 读数、
+  `driver.attachForbidden` 投影，面板也按站点如实说明。
+- **`pnpm test` 恢复可跑**（0.16.9）：lockfile 曾把可选 peerDep 记为 `specifier:'*'` 对
+  `version:0.1.5-alpha.1`，pnpm 的前置检查必然失败，且在 CI 下**会先删 `node_modules` 再报错**——
+  全量测试连启动都做不到。已把 specifier 收紧为 `^0.1.5-alpha.1`。
 
 [进度台账](doc/progress.md)记录当前走到哪与下一步；[长期问题](doc/long-term-issues.md)记录已知缺陷与「为什么不现在修」；[全局诊断](doc/diagnosis-2026-09-16.md)给出一次完整的进度/缺陷/质量/框架评估；[安全审查](doc/security-review.md)记录实际防护及剩余限制；[审查入口](doc/review-guide.md)给出代码地图与探针清单。
 

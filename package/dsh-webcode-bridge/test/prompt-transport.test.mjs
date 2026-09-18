@@ -134,3 +134,26 @@ test('⑨b 站点禁令不误伤别的站点：GLM 超阈值仍走附件（输�
   assert.equal(ATTACH_FORBIDDEN_SITES.has('deepseek'), true);
   assert.equal(ATTACH_FORBIDDEN_SITES.has('glm'), false);
 });
+
+// ── ⑩ 禁令必须**可核对**（0.16.9）：站点禁令不能只存在于代码里 ──────────────────
+//
+// 0.16.7 加了 ATTACH_FORBIDDEN_SITES，但 `site-no-attach` 分支不写 attachTransport
+// 读数、status 也不投影这个布尔量。后果是真机上「禁令生效没有」完全看不出来：
+// 读数停在上一轮的旧值，而 attach-status 还在承诺「超 60000 字符改走附件」。
+// 这条钉的是「禁令必须能从读数里看见」——只 warn 到控制台等于没有读数。
+test('⑩ 站点禁令必须可核对：status 投影带 attachForbidden，且 site-no-attach 会落读数', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const pkg = path.dirname(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')));
+  const src = fs.readFileSync(path.join(pkg, 'lib', 'browser-driver.js'), 'utf8');
+  // ① status 投影里必须有 attachForbidden（面板与 /status 靠它显示站点事实）。
+  assert.match(src, /attachForbidden:\s*ATTACH_FORBIDDEN_SITES\.has\(siteId\)/,
+    'status 没投影站点禁令 ⇒ 用户无法核对禁令是否生效');
+  // ② site-no-attach 分支必须写 attachTransport 读数，且带独立 code。
+  assert.match(src, /SITE_NO_ATTACH/,
+    'site-no-attach 分支没落读数 ⇒ 读数停在上一轮旧值，看不出这一轮走了禁令');
+  // ③ 面板文案必须停止在禁站点上承诺附件投递。
+  const wc = fs.readFileSync(path.join(pkg, 'lib', 'web-control.js'), 'utf8');
+  assert.match(wc, /永不使用附件投递/,
+    'attach-status 仍在禁站点上承诺「超阈值改走附件」⇒ 面板与驱动互相矛盾');
+});

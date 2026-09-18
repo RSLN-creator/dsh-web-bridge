@@ -9,7 +9,7 @@ importers:
   .:
     dependencies:
       '@deepseek-ai/dsh-client-ui-sidebar-right':
-        specifier: '*'
+        specifier: ^0.1.5-alpha.1
         version: 0.1.5-alpha.1(@deepseek-ai/cordis@4.0.2)
       playwright-core:
         specifier: ^1.63.0
