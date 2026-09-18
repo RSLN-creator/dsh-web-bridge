@@ -65,6 +65,7 @@ node scripts\gen-reference-index.mjs --missing  # 只列「不是 clone」的条
 | `claude-code-reverse` | https://ghfast.top/https://github.com/ghboke/claude-code-reverse.git ⚠️镜像 | `570324dac73ef43bdcd36660188f3cb66524e572` | 95.3 MB |
 | `cursor-2api` | https://github.com/lza6/cursor-2api.git | `70c6af8b74eea1683f02462a90d458781eccc18d` | 0.1 MB |
 | `deepseek-free-api` | https://ghfast.top/https://github.com/Httyhu1314/deepseek-free-api.git ⚠️镜像 | `989c7a9049f8083d8763d4af0ce7869132c245f9` | 0.5 MB |
+| `deepseek-harness` | https://github.com/deepseek-ai/deepseek-harness.git | `ddefc45fbc7f8e46dd73185e68295696d1297887` | 307.1 MB |
 | `deepseek-reverse-api` | https://github.com/Wu-jiyan/deepseek-reverse-api.git | `1ffacb796e545393615c4b7db0467befcf22bc42` | 1.4 MB |
 | `deepseek-web-api` | https://github.com/kittors/deepseek-web-api.git | `9b62d6a17ba502fa6aefa2dceb527d1e925aa6ce` | 0.5 MB |
 | `deepseek-web-import` | https://github.com/wpc0323/deepseek-web-import | `8780b8c80addf9f6519a02106f6a28d2ebaedb99` | 0.1 MB |
@@ -81,7 +82,7 @@ node scripts\gen-reference-index.mjs --missing  # 只列「不是 clone」的条
 | `kimi-code` | https://ghfast.top/https://github.com/MoonshotAI/kimi-code.git ⚠️镜像 | `f12d59e089e2531a33fbca30b26ffeabd5862b45` | 93.1 MB |
 | `Kimi-Free-API` | https://ghfast.top/https://github.com/xiaoY233/Kimi-Free-API.git ⚠️镜像 | `04fe21fee63c843caedff12a2b6e6b07a7a844a6` | 3.6 MB |
 | `LLMs2API` | https://github.com/Kirazul/LLMs2API.git | `cc0e1b4d0bf7d1c426567bf9bb860afa46ef7287` | 0.3 MB |
-| `local-refs` | **不是 clone**（见 §6「约定违例」） | — | 1.4 MB |
+| `local-refs` | **不是 clone**（见 §6「约定违例」） | — | 1.5 MB |
 | `node-http-proxy` | https://github.com/http-party/node-http-proxy.git | `9b96cd725127a024dabebec6c7ea8c807272223d` | 0.7 MB |
 | `openai-stream-parser` | https://github.com/jy02140251/openai-stream-parser.git | `3f4ee58d4310de93b02182fee84e775cc2c51367` | 0 MB |
 | `opencode2dsh` | https://github.com/FishBottle7/opencode2dsh.git | `dd8d0b1f06c55723928e535c853d20a4100bd970` | 1.2 MB |
@@ -89,12 +90,11 @@ node scripts\gen-reference-index.mjs --missing  # 只列「不是 clone」的条
 | `qwen-free-api` | https://ghfast.top/https://github.com/LNpks/qwen-free-api.git ⚠️镜像 | `bf42bce60f2b1eea3801f9f6f3277ebf64226816` | 3.8 MB |
 | `steel-browser-npm` | **不是 clone**（见 §6「约定违例」） | — | 0 MB |
 | `wabac.js` | https://github.com/webrecorder/wabac.js.git | `281e9bc7affba4ce520301b10723b01f661aa7e5` | 2.8 MB |
+| `web-login` | **不是 clone**（npm 包解包，见 `local-refs/web-login-notes.md`）：`dsh-login@0.1.1` / `@islibaodong/dsh-login@0.2.1` / `dsh-auth-gate@0.13.0` | — | 1.4 MB |
 | `WebBridge` | https://github.com/kxdds/WebBridge.git | `0256c4590846e4e5d67bbe50283df8c2f18dd229` | 0.4 MB |
 | `WebChat2Api` | https://github.com/MOSSVENC/WebChat2Api.git | `57fc2c2e6840c1f68d3e81adb8fc00250feca279` | 0.3 MB |
-| `web-login` | **不是 clone**（npm 包解包，见 `local-refs/web-login-notes.md`）：`dsh-login@0.1.1` / `@islibaodong/dsh-login@0.2.1` / `dsh-auth-gate@0.13.0` | — | 0.4 MB |
 | `webcode` | https://github.com/three-water666/webcode.git | `2f32151bc021204575e726578813f83a4c1e117c` | 6.5 MB |
 | `zai-copilot-chat` | https://github.com/ltmoerdani/zai-copilot-chat.git | `d56b81ef2911b864677b476e2bc5b27f041133f1` | 1.2 MB |
-
 ### 怎么把某个条目拿回来
 
 ```powershell
