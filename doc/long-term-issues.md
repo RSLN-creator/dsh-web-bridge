@@ -36,6 +36,8 @@
 | 23 | **缺 `name` 字段的调用被静默丢弃**（0.15.9 新发现，**已修**） | 高 | 否 | `lib/agent-preset.js`（`inferToolNameFromArgs`）、`lib/index.js`、`test/nameless-call.test.mjs` |
 | 10b | 本机 `%TEMP%` 受限导致 3 个测试文件假失败（2026-09-16 实测）——**#10 的子条目**，正文见 §10 的「10b」小节 | 低 | 否 | `package.json`、`test/*.test.mjs`、`doc/progress.md` |
 | 24 | **网页侧回复被时间窗判死 / 超长纯文本投递**（0.16.3 部分解决：首字节相位已分） | 高 | 否 | `lib/idle-window.js`、`lib/index.js`、`lib/browser-driver.js`、`test/watchdog-first-byte.test.mjs` |
+| 25 | **TOOL_CALL_UNPARSED 两类残根：缺 `name` 的流式块 / 断流截断的参数**（0.16.10 定性，**未修**） | 高 | 否 | `lib/agent-preset.js`、`lib/index.js`、`test/fixtures/unparsed-notice-*.txt` |
+| 26 | **`empty response from web AI`：思考-only 流走硬失败**（2026-09-19 新登记，**未修**） | 高 | 否 | `lib/index.js`、`lib/browser-driver.js`；与 #22 同族 |
 
 > **一览表完整性（2026-09-16 修正）**：本表此前**漏登记 #19 与 #20**（正文有、表里没有）。
 > 这两条都是可机检的登记错误，而当时没有任何闸门覆盖「正文条目 ↔ 表格条目」的一致性。
@@ -1367,3 +1369,85 @@ if (!isCall) return;      // ← JSON 合法、只是没写 name ⇒ 静默丢�
 ---
 
 本文件是维护台账，不是发布阻塞清单。
+## 25. **TOOL_CALL_UNPARSED 两类残根：缺 `name` 的流式块 / 断流截断的参数**（0.16.10 定性，**未修**）
+
+### 现象
+
+用户在多轮里反复收到 `TOOL_CALL_UNPARSED: …（已扣留 N 字符协议原文）`，并直接质疑
+「你到底什么问题？还是规则设置错误？？」。0.16.10 节六已收 15 份真夹具
+（`test/fixtures/unparsed-notice-*.txt`，逐字摘自会话 `9e00e0b7`/`d795cf0f`/`8e8b7eae`，
+扣留量 99–1022 字符）证明提示**不是误报**：网页发了调用、桥没认出。
+
+### 定性（0.16.10 六 + 2026-09-19 会话取证）
+
+两类根因各有独立成因（见 [`diagnosis-2026-09-19.md`](diagnosis-2026-09-19.md) §二问题 1）：
+
+1. **缺 `name` 的流式块**：#23 的 `inferToolNameFromArgs` 已修 parse 层
+   （`parseAgentReply`），但流式路径仍有漏网——推断需要参数 JSON 可解析；
+   候选不唯一时按设计返回 `null`（不许猜），这类调用落到 UNPARSED。
+2. **断流截断的参数**：网页流把调用 JSON 切在半截，收束后全文重parse 也配不平；
+   这类调用**不可修复地丢**，只能靠提示让模型重发。
+
+### 2026-09-18 晚新增实测
+
+会话 `d5fd2e11`（0.16.10 运行中）单会话复发 4 次（扣留 868/2193/245/541 字符），
+最后一次嵌进最终助手正文，导致「CI 四条腿 + CodeQL」核实步骤被吞。
+
+### 影响
+
+长跑会话的高频阻断项：每次命中都要多花一轮重发，命中在收尾时还可能静默丢步骤。
+
+### 为什么 0.16.10 没修
+
+该轮只修孤立 `<`（同族「字符被静默吃掉」的一条），两类残根各有独立成因，
+需要单独的修法与护栏（见 `progress.md` §0.16.10 六的原话）。
+
+### 若要修，从哪下手
+
+1. 流式开块/收口路径复用 #23 的同一份判据：参数可解析且候选唯一时补 `name`
+   再派发，推断成功带 `nameInferred: true` 留痕；
+2. 断流截断类：收束后用权威 `end.text` 全文重parse 一遍（现有 mismatch 配对只覆盖
+   「流式块 ↔ 权威调用」同名配对，不覆盖「流式丢块」）；仍不可救时，UNPARSED 提示
+   带上被扣块的**头部片段**（工具名可辨的前 N 字符），让模型精确重发哪一条；
+3. 护栏用 15 份真夹具 + `d5fd2e11` 新形状，先红后绿。
+
+### 安全边界
+
+「不许猜名字」的红线不放宽：候选不唯一仍返回 `null`（#23 护栏 ⑦：`{file_path}`
+不得被认成 `write`）。
+
+---
+
+## 26. **`empty response from web AI`：思考-only 流走硬失败**（2026-09-19 新登记，**未修**）
+
+### 现象（取证）
+
+会话 `d5fd2e11` turn 8（22:46:59–22:48:00）整轮失败：
+
+```
+turn/end reason = {"kind":"error","error":{"message":"empty response from web AI","code":"UNKNOWN"}}
+```
+
+该轮 `assistant/attempt` 的 stream：`block-start (reasoning)` + `reasoning-chunks` +
+`finish`——**只有思维链，没有正文块、没有调用块**。取证全文见
+[`diagnosis-2026-09-19.md`](diagnosis-2026-09-19.md) §二问题 2。
+
+### 定性
+
+与 #22「只出思考不出正文」同族（网页只产出了思考就收束），但**没走**
+`thinkingOnlyNotice` 软提示路径，而是以 UNKNOWN 硬错误终局。两条路径为何分岔
+（哪个分支漏接）未归因。
+
+### 影响
+
+硬失败打断长跑（该轮之后用户必须手动补一句才能继续）；
+且报错不带任何现场（思考长度、finish 相位），与「报错必须自带取证」的纪律不符。
+
+### 若要修，从哪下手
+
+1. 找到 `empty response from web AI` 的抛出点（先 grep 桥与驱动，
+   区分是桥自己抛还是宿主 DSH 报的），确认它为什么绕过了 thinking-only 判定；
+2. 思考-only 且 `finished` 收束的轮次应交回 `thinkingOnlyNotice` 同型的
+   软提示（把现场与下一步交给模型），不整轮作废；
+3. 报错文本带现场：思考字符数、`lastEndReason`、`domReplyChars`；
+4. 护栏：构造 reasoning-only 流夹具，断言「不抛 UNKNOWN、交回提示正文」。
