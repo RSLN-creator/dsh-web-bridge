@@ -36,6 +36,7 @@ import { projectRoster } from './roster.js';
 import { estimateTokens, computeSendGap, checkContextBudget } from './metrics.js';
 import { accumulateWait, sanitizeWaitStats, emptyWaitStats, composerWaitLine, waitStatRows, formatDuration } from './wait-stats.js';
 import { renderSettingsPage } from './settings-page.js';
+import { renderComparisonView } from './comparison-view.js';
 
 export const name = 'webcode-bridge';
 
@@ -58,8 +59,16 @@ export const name = 'webcode-bridge';
 // profile 上卡在 waiting——症状是「桥整个不见了」，比花名册少一块严重得多。
 // 它继续走 serviceOf 的可选读取 + 独立降级（teamError 如实说明原因）。
 //
+//
+// **webServer 不在这个列表里**（0.16.5，真机 2026-09-18）。它只有 web 应用提供；
+// 写进 inject 会让没有 webServer 的 profile（headless）整条 entry pending——
+// 真机复现：`dsh --profile headless "回复两个字：收到"` →
+// `webcode-bridge: pending (waiting for service: webServer)`，退出 1。
+// 而「无外部干扰长跑」正要用 headless 这类没有 webServer 的 profile 驱动，
+// 所以它必须是**可选**依赖：路由挂载改走 apply() 里的嵌套 ctx.inject(['webServer'], …)。
+// 同一份纪律也适用于 agentTeams（见下）。
 // 兜底路径保留：serviceOf 仍同时试 ctx[name] 与 ctx.get(name)。
-export const inject = ['llm', 'webServer', 'agents', 'sessions', 'sessionProjections', 'subagents'];
+export const inject = ['llm', 'agents', 'sessions', 'sessionProjections', 'subagents'];
 
 /**
  * 哪些失败码才有资格**作废发送游标**（`sessionState.delete(keyPath)`）。
@@ -2388,25 +2397,28 @@ function imageMarkdown(images) {
   };
 
   // Same-origin primary mount on the DSH web server (no CORS, no cross-site
-  // surface at all) — same pattern deepseek-web-import uses. cordis exposes
-  // Service instances as context properties, so try ctx.webServer before the
-  // string-keyed ctx.get fallback.
-  const webServer = (() => {
-    for (const attempt of [() => ctx.webServer, () => ctx.get('webServer')]) {
-      try {
-        const w = attempt();
-        if (w && typeof w.register === 'function') return w;
-      } catch { /* next */ }
-    }
-    return null;
-  })();
+  // surface at all) — same pattern deepseek-web-import uses.
+  //
+  // 0.16.5（真机 2026-09-18）：这一段**不再**写进模块级 inject。`webServer` 只有
+  // web 应用才提供，把它声明成硬依赖会让 `dsh --profile headless` 直接
+  // pending (waiting for service: webServer) → 整个 profile 一条 entry 都起不来
+  // （真机复现：`dsh --profile headless "回复两个字：收到"` 退出 1）。而**无人值守
+  // 长跑**恰恰要靠没有 webServer 的 profile 驱动，所以这条依赖必须可选。
+  //
+  // 改成嵌套 `ctx.inject(['webServer'], …)` 后两种形态都对：
+  //   · 有 webServer（web profile）→ 路由照旧挂在同源 /__webcode/* 上；
+  //   · 没有（headless / 测试注入）→ 插件本体照常激活，控制面由 relay 自己的
+  //     HTTP 监听兜底——onHttp 里的 web-side fallbacks 那条路径**早就存在**，
+  //     不是为这次改动新加的。
+  // 挂载清单仍从控制面 action 表**派生**（webControl.routes），不手写第二份；
+  // 真机 2026-09-13 的教训：手写数组漏掉了 verify-login / site-probe /
+  // session-import 三个 action，设置面板的「检测」按钮全部落到宿主未知 POST
+  // 兜底（405 + 空 body），客户端 JSON.parse 抛 “unexpected end of JSON data”。
   const routeDisposers = [];
-  if (webServer && typeof webServer.register === 'function') {
-    // 挂载清单从控制面 action 表**派生**（webControl.routes），不再手写第二份。
-    // 真机 2026-09-13 的教训：手写数组漏掉了 verify-login / site-probe /
-    // session-import 三个 action，设置面板的「检测」按钮全部落到宿主未知 POST
-    // 兜底（405 + 空 body），客户端 JSON.parse 抛 “unexpected end of JSON data”。
-    // 派生之后这类漏挂载在结构上不可能发生。
+  // 挂载动作本身抽成函数，只为了下面那条「没有 ctx.inject 时同步走一遍」的
+  // 兜底能复用同一份实现——两种入口的挂载结果必须逐字相同，不能各写一套。
+  const mountWebServerRoutes = (webServer) => {
+    if (!webServer || typeof webServer.register !== 'function') return;
     for (const suffix of webControl.routes) {
       try {
         routeDisposers.push(webServer.register({
@@ -2457,6 +2469,68 @@ function imageMarkdown(images) {
     } catch (e) {
       warn('webServer settings-page route failed:', e?.message);
     }
+
+    // 对比视图页面 (HTML) - 2026-09-18
+    try {
+      // 辅助函数：获取某个站点的所有已登录槽位
+      const slotsForSite = (siteId) => {
+        try {
+          const status = relay?.config?.driverStatus?.();
+          if (!status || !Array.isArray(status.sites)) return [];
+
+          return status.sites
+            .filter(s => s.siteId === siteId && s.loggedIn === true)
+            .map(s => ({
+              slot: s.slot || '1',
+              label: s.displayName || s.siteName || siteId,
+              accountKey: s.accountKey || siteId,
+            }));
+        } catch (err) {
+          warn('slotsForSite error:', err?.message);
+          return [];
+        }
+      };
+
+      routeDisposers.push(webServer.register({
+        kind: 'exact',
+        path: '/__webcode/comparison',
+        handler: (req, res) => {
+          // 收集所有已登录账号
+          const allSlots = new Map();
+          for (const site of SITES) {
+            const slots = slotsForSite(site.id);
+            if (slots.length > 0) {
+              allSlots.set(site.id, slots);
+            }
+          }
+          const html = renderComparisonView({ allSlots });
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(html);
+        }
+      }));
+      log('comparison-view route mounted');
+    } catch (e) {
+      warn('webServer comparison-view route failed:', e?.message);
+    }
+
+  };
+  // cordis 的 ctx.inject 会等服务出现后回调、服务消失后自动卸载（web profile 走这条）；
+  // 测试里注入的假 ctx 没有这个方法，就同步试一遍——否则单测会直接抛
+  // "ctx.inject is not a function" 而不是验证行为。
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['webServer'], (wctx) => {
+      mountWebServerRoutes(wctx.webServer);
+      // webServer 服务消失时这三组路由要跟着撤掉，否则会留下指向已卸服务的句柄。
+      return () => {
+        for (const dispose of routeDisposers.splice(0)) if (typeof dispose === 'function') dispose();
+      };
+    });
+  } else {
+    let ws = null;
+    for (const attempt of [() => ctx.webServer, () => ctx.get('webServer')]) {
+      try { const w = attempt(); if (w && typeof w.register === 'function') { ws = w; break; } } catch { /* next */ }
+    }
+    mountWebServerRoutes(ws);
   }
   front = createOpenAiFront(relay, {
     ...cfg,

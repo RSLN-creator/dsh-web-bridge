@@ -2,17 +2,51 @@
 
 将已登录的网页 AI 接入 DeepSeek Harness：网页模型产生工具调用，由 Harness 原生权限系统执行本地工具，结果回传同一网页会话。包名 `dsh-webcode-bridge` 与 provider `webcode` 保留兼容。
 
-## 使用
+## 安装
 
-1. 在 `package/dsh-webcode-bridge` 执行 `pnpm install --frozen-lockfile`、`pnpm pack`。
-2. 执行 `dsh plugin --profile web add ./dsh-webcode-bridge-<版本>.tgz`，重启 Harness。
-3. 原生「设置 > 网页桥接」管理登录和自动化开关。默认复用 `~/.dsh/webcode-edge-profile`。
-4. 模型选择器的 Harness Web Bridge 分组按站点提供模型（DeepSeek / GLM / Kimi /
+本插件**不发 npm registry**，唯一交付物是打包好的 `.tgz`。两条路二选一。
+
+### 方式 A — 下载已打包的安装包（推荐，不用本地构建）
+
+1. 打开 [Releases](https://github.com/RSLN-creator/dsh-web-bridge/releases)，下载最新一版的
+   `dsh-webcode-bridge-<版本>.tgz`。
+2. 装进 DSH 的 `web` profile：
+
+   ```powershell
+   dsh plugin --profile web add C:\下载路径\dsh-webcode-bridge-<版本>.tgz
+   ```
+
+3. **重启 `dsh web`。** 这一步不能省：安装只换了磁盘上的文件，正在跑的进程里还是旧代码。
+4. 重启后打开 http://127.0.0.1:3080，按下面的「初次启动」走一遍。
+
+### 方式 B — 从源码打包
+
+1. `cd package/dsh-webcode-bridge`
+2. `pnpm install`。**不要加 `--frozen-lockfile`**——本仓库的 lockfile 对干净安装不成立
+   （`ERR_PNPM_OUTDATED_LOCKFILE`，实测直接退出 1），理由见 [doc/ci-cd.md](doc/ci-cd.md)。
+3. `pnpm pack` → 在 `package/dsh-webcode-bridge/` 下产出 `dsh-webcode-bridge-<版本>.tgz`。
+4. 回到方式 A 的第 2–4 步。
+
+> 仓库里另有两个打包辅助脚本，只在本地排查时用得上：`scripts/verify-pack.mjs`
+> 逐文件核对 tarball 与工作树（改完代码忘了重新 pack 时直接报错），
+> `scripts/install-profiles.mjs` 先删旧目录再解包（绕开 pnpm 对同版本 tarball
+> 「Already up to date」不重解的坑）。两条都是真实踩过的坑。
+
+## 初次启动
+
+1. **确认依赖**：Node.js 22.13+ 与 Microsoft Edge。无需安装任何浏览器扩展。
+2. **启动**：`dsh web`，浏览器打开 http://127.0.0.1:3080。
+3. **登录网页站点**：原生「设置 > 网页桥接」里点「登录」——会打开一个真实 Edge 窗口，
+   完成后自动切回无头。登录态按站点各自持久化，默认目录 `~/.dsh/webcode-edge-profile`。
+4. **选模型**：模型选择器的 **Harness Web Bridge** 分组按站点列出模型（DeepSeek / GLM / Kimi /
    通义千问 / 豆包…）；新建会话的默认模型在设置页选择。
-5. 右侧网页面板使用 **DSH 官方右侧栏**（`@deepseek-ai/dsh-client-ui-sidebar-right`）的标签页；
-   与会话头右上角的 Web Bridge 按钮互为一对（点击展开/收起）。**不依赖任何第三方侧栏插件。**
+5. **用起来**：右侧网页面板使用 **DSH 官方右侧栏**（`@deepseek-ai/dsh-client-ui-sidebar-right`）
+   的标签页，与会话头右上角的 Web Bridge 按钮互为一对（点击展开/收起）。
+   **不依赖任何第三方侧栏插件。**
 
-系统需要 Node.js 22.13+ 和 Microsoft Edge，无需另外加载浏览器扩展。当前本机运行入口为 http://127.0.0.1:3080。
+网页模型产生的工具调用由 DSH 原生权限系统执行本地工具，结果回传同一网页会话——
+权限与审批仍是 DSH 那一套，不会被桥绕过。**装完不重启 = 等于没装**，这是本项目
+反复踩到的一条。
 
 ## 当前能力
 
