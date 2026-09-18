@@ -388,7 +388,9 @@ export function buildPreset(options = {}) {
 export function serializeFirstTurn(options = {}) {
   const messages = Array.isArray(options.messages) ? options.messages : [];
   const names = toolNames(messages);
-  const text = messages.filter(Boolean).map(m => {
+  // 每条消息先序列化成独立段：默认路径 join 结果与旧实现逐字节相同；
+  // 预算路径按「保留最新后缀」从中挑段，绝不改写任何一段的内容。
+  const segments = messages.filter(Boolean).map(m => {
     if (m.role === 'assistant') return '[assistant] ' + textOfBlocks(m.content) + '\n' + (Array.isArray(m.content) ? m.content.filter(b => b.type === 'tool-call').map(b => JSON.stringify(b)).join('\n') : '');
     if (m.role === 'system') return '[system] ' + textOfBlocks(m.content);
     if (m.role === 'user') {
@@ -397,7 +399,8 @@ export function serializeFirstTurn(options = {}) {
       return directive || serializeDelta([m], 0, 0, names, trainNoteFor(options.siteId)).text;
     }
     return serializeDelta([m], 0, 0, names, trainNoteFor(options.siteId)).text;
-  }).join('\n\n');
+  });
+  const text = segments.join('\n\n');
   const preset = buildPreset(options);
   // 传输协议按站点分立场：glm 网页会拦截正文里的调用标签（原生执行器只认
   // search/open/click/find），必须只教代码块形状并明说标签会被吃；其它站点
@@ -410,7 +413,26 @@ export function serializeFirstTurn(options = {}) {
       // 那一族漂移的直接对策，而模型在收尾那一刻最容易忘。
       ? "\n[本地工具传输协议]\n用本网页原生的 DSML 发起工具调用，形状：" + DSML_ONE_LINE + "。标记必须完整写成 " + DSML_BAR + "DSML" + DSML_BAR + "（四个字母，不要缩写成 DSH）。开标签写了 name，闭合标签必须写同一个 name，不要用省略名字的闭合写法。" + "工具名和参数必须严格匹配上面的 schema。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。" + presentTransportNote(options.tools)
     : '\n[本地工具传输协议]\n必须使用 <tool_call>{"mcp_action":"call","name":"实际工具名","arguments":{}}</tool_call> 发起工具调用。工具名和参数必须严格匹配上面的 schema。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。' + presentTransportNote(options.tools);
-  return [preset, '[会话开始]', text || '（用户未提供文字）', transport].filter(Boolean).join('\n\n');
+  const budget = Number(options.maxPromptChars);
+  if (!Number.isFinite(budget) || budget <= 0) {
+    return [preset, '[会话开始]', text || '（用户未提供文字）', transport].filter(Boolean).join('\n\n');
+  }
+  // 预算路径（0.16.11）：PROMPT_TRUNCATED 的压缩重试。丢最旧的消息段、保留最新
+  // 后缀与全部教学/协议头，插入显式省略标记——绝不静默截断字符串（截在 JSON
+  // 中间会让模型看到坏掉的结构）。哪怕一个段都装不下也保底保留最后一段，
+  // 装不下的部分由驱动 PROMPT_TRUNCATED 回读校验如实报错，不在这里掩盖。
+  const parts = [preset, '[会话开始]'].filter(Boolean);
+  const tailParts = [transport].filter(Boolean);
+  let keep = segments.length;
+  let compacted = '';
+  for (; keep >= 1; keep--) {
+    const body = segments.slice(segments.length - keep).join('\n\n');
+    const dropped = segments.length - keep;
+    const marker = dropped > 0 ? `[系统] （早期上下文已省略 ${dropped} 条消息以适配网页输入上限；最新上下文完整保留）` : '';
+    compacted = [...parts, marker, body, ...tailParts].filter(Boolean).join('\n\n');
+    if (compacted.length <= budget) return compacted;
+  }
+  return compacted;
 }
 
 /** Preserve DSH slash-command intent across the web model boundary. */

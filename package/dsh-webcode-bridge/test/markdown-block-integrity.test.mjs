@@ -263,6 +263,10 @@ test('⑤ 断流轮（协议只到一半、无完整调用）：块内容与增�
 /**
  * 只查「块内容 === Σ 增量」这一条（②③④ 的三条判据在 ⑤ 里不适用：断流轮的权威散文
  * 无法在用例里手写，而手写它等于替实现断言「它该发哪一段」）。
+ *
+ * 0.16.11（#25）契约更新：UNPARSED 提示**有意引用**被扣原文的开头（模型精确重发的
+ * 唯一安全出路），因此「含 BAR+BAR」不再等于泄漏——协议禁令只约束**提示之外**的部分；
+ * 截断调用不得被派发成可执行调用块这一条不变。
  */
 function assertIntegrityOnly(r, label) {
   assert.equal(r.ok, true, label + '：本轮不该失败——' + (r.ok ? '' : r.error?.message));
@@ -273,9 +277,15 @@ function assertIntegrityOnly(r, label) {
       label + '：下标 ' + end.index + ' 的块内容与 Σ text-delta 不逐字一致\n'
       + '  块内容 = ' + JSON.stringify(end.text) + '\n   Σ 增量 = ' + JSON.stringify(deltas.get(end.index) ?? ''));
   }
+  const outsideNotice = (t) => {
+    const at = t.indexOf('TOOL_CALL_UNPARSED');
+    return at >= 0 ? t.slice(0, at) : t;
+  };
   for (const c of r.chunks) {
-    if (c.type === 'text-delta') assert.ok(!c.text.includes(BAR + BAR), label + '：增量里出现协议标记');
-    if (c.type === 'block-end' && c.block?.type === 'text') assert.ok(!c.block.text.includes(BAR + BAR), label + '：块内容里出现协议标记');
+    if (c.type === 'text-delta') assert.ok(!outsideNotice(c.text).includes(BAR + BAR), label + '：增量（提示之外）出现协议标记');
+    if (c.type === 'block-end' && c.block?.type === 'text') assert.ok(!outsideNotice(c.block.text).includes(BAR + BAR), label + '：块内容（提示之外）出现协议标记');
   }
+  assert.ok(!r.chunks.some((c) => c.type === 'block-end' && c.block?.type === 'tool-call'),
+    label + '：截断调用不得被派发成可执行调用块');
   return r.chunks;
 }

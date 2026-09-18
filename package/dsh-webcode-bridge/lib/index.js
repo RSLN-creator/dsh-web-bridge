@@ -1438,7 +1438,7 @@ export function apply(ctx, config = {}) {
         // protocol-withheld 直接静默收束（界面上一片空白）。第 4 种事实是
         // 「网页发了调用、桥没认出来」，它有自己的提示与自我改正路径。
         if (withheld > 0 && !calls.length) {
-          const notice = unparsedCallNotice({ thinkAcc, tools, scene: idleScene(), withheld });
+          const notice = unparsedCallNotice({ thinkAcc, tools, scene: idleScene(), withheld, head: finalText.slice(safe, safe + 200) });
           warn(notice);
           yield* emitText(out ? `${out}\n\n${notice}` : notice, turn, nextIndex);
           return;
@@ -1479,7 +1479,7 @@ export function apply(ctx, config = {}) {
       // 个文本块里——tail 同时用于 text-delta 与 block-end 的块内容，接在这里
       // 两处逐字一致，不会出现「块内容比外发的 delta 多一段」的错位。
       if (withheld > 0 && !calls.length) {
-        const notice = unparsedCallNotice({ thinkAcc, tools, scene: idleScene(), withheld });
+        const notice = unparsedCallNotice({ thinkAcc, tools, scene: idleScene(), withheld, head: finalText.slice(proseLimit, proseLimit + 200) });
         warn(notice);
         tail = tail ? `${tail}\n\n${notice}` : notice;
       }
@@ -1579,14 +1579,20 @@ function thinkingOnlyNotice(thinkAcc, scene) {
  * 与 `TOOL_UNKNOWN` / `thinkingOnlyNotice` 同型：不抛错，把提示作为本轮回复交回
  * 会话——抛错会让整轮作废（界面上只看到一次失败），而这条提示能让模型**自我改正**。
  *
- * @param {{thinkAcc?: string, tools?: Array<{name?: string}>, scene?: object|null, withheld?: number}} v 本轮现场
+ * @param {{thinkAcc?: string, tools?: Array<{name?: string}>, scene?: object|null, withheld?: number, head?: string}} v 本轮现场
  * @returns {string} 作为助手回复交回会话的提示文本
  */
-function unparsedCallNotice({ thinkAcc = '', tools = [], scene = null, withheld = 0 } = {}) {
+function unparsedCallNotice({ thinkAcc = '', tools = [], scene = null, withheld = 0, head = '' } = {}) {
   const available = (Array.isArray(tools) ? tools : []).map((t) => t?.name).filter(Boolean);
   const list = available.length > 24 ? available.slice(0, 24).join(', ') + ' …' : available.join(', ');
   const think = String(thinkAcc || '');
   const tail = think.length > 200 ? '…' + think.slice(-200) : think;
+  // 0.16.11（#25）：被扣内容开头必须原样交回。真机 d5fd2e11 单会话复发 4 次
+  // （扣留 868/2193/245/541 字符），旧提示只报字数——模型看不见被扣的是哪条调用，
+  // 只能整段重猜。「缺 name 且候选不唯一」「参数截断」两类都按红线不许桥侧代猜代拼
+  // （PROMPT-ENGINEERING.md §二：截半的调用块不得被拼成完整调用），
+  // 唯一安全的出路是让模型看着原文头精确重发。
+  const headText = String(head || '').slice(0, 200);
   const bits = [];
   if (withheld > 0) bits.push(`已扣留 ${withheld} 字符协议原文`);
   if (scene?.lastEndReason) bits.push(`本轮收束原因 ${scene.lastEndReason}`);
@@ -1596,7 +1602,8 @@ function unparsedCallNotice({ thinkAcc = '', tools = [], scene = null, withheld 
     + `请按要求重发：<tool_call>{"mcp_action":"call","name":"工具名","arguments":{…}}</tool_call>`
     + '——name 不能省；如果任务不需要工具，请直接给出结论。'
     + (bits.length ? `（${bits.join('，')}）` : '')
-    + (tail ? `思考末尾：${tail}。` : '');
+    + (headText ? `\n被扣协议原文开头：${headText}` : '')
+    + (tail ? `\n思考末尾：${tail}。` : '');
 }
 
 /**
@@ -2085,20 +2092,45 @@ function imageMarkdown(images) {
       try {
         let result = null;
         let retries = 0;
+        let compactRetried = false;
         for (;;) {
           markSent();
           try { result = await attempt(m?.fresh === true); break; }
           catch (err) {
             // 站点限流（DeepSeek hint rate_limited）：消息已被服务端撤回，重发
             // 安全；按退避序列重试同一轮，而不是把失败甩回 DSH 让长任务断链。
-            if (err?.code !== 'RATE_LIMITED' || opts.signal?.aborted || retries >= RATE_LIMIT_RETRIES) throw err;
-            retries += 1;
-            // 10s 下限：限流滑窗以十秒计，几十毫秒的短间隔重试只会再次撞墙。
-            // （rateLimitBackoffMinMs 仅供离线测试调小；真实运行缺省 10_000。）
-            const backoff = Math.max(sendGapMs, cfg.rateLimitBackoffMinMs ?? 10_000) * retries;
-            waitedMs += backoff;
-            warn(`rate limited — retry ${retries}/${RATE_LIMIT_RETRIES} after ${Math.round(backoff / 1000)}s (${accountKey})`);
-            await sleepSignal(backoff, opts.signal);
+            if (err?.code === 'RATE_LIMITED' && !opts.signal?.aborted && retries < RATE_LIMIT_RETRIES) {
+              retries += 1;
+              // 10s 下限：限流滑窗以十秒计，几十毫秒的短间隔重试只会再次撞墙。
+              // （rateLimitBackoffMinMs 仅供离线测试调小；真实运行缺省 10_000。）
+              const backoff = Math.max(sendGapMs, cfg.rateLimitBackoffMinMs ?? 10_000) * retries;
+              waitedMs += backoff;
+              warn(`rate limited — retry ${retries}/${RATE_LIMIT_RETRIES} after ${Math.round(backoff / 1000)}s (${accountKey})`);
+              await sleepSignal(backoff, opts.signal);
+              continue;
+            }
+            // PROMPT_TRUNCATED 自动压缩重试（0.16.11）：真机 0a62dbb8 首轮 72,980 字符
+            // 只被网页收下 72,969——差 11 个字符整轮作废，模型一个字都没回。0.16.7 起
+            // DeepSeek 禁用附件投递，长文本只能 inline，长跑里必然复发。修法：fresh
+            // 首轮按 accepted 预算重新序列化（丢最旧消息段、留显式标记），只重试一次。
+            // 增量轮/无会话轮不重试——增量重放会丢本轮新消息，语义不对。
+            if (err?.code === 'PROMPT_TRUNCATED' && m?.fresh === true && !compactRetried
+              && typeof m.rebuild === 'function' && !opts.signal?.aborted) {
+              compactRetried = true;
+              const accepted = Number(err.accepted) || 0;
+              // 2KB 余量：回读长度与 DOM 文本长度有细微出入，贴着 accepted 重试可能再撞一次。
+              const target = Math.max(4096, accepted - 2048);
+              let compacted = '';
+              try { compacted = String(m.rebuild({ maxPromptChars: target }) ?? ''); } catch { compacted = ''; }
+              if (compacted && compacted.length < String(prompt).length) {
+                warn(`PROMPT_TRUNCATED — 一次性压缩重试（${String(prompt).length} → ${compacted.length} 字符，目标 ≤ ${target}）`);
+                // 重发用的是压缩后的首轮全文；下游游标/指纹仍按完整 messages 记账
+                // （与 WEB_SESSION_LOST 整段重放同一语义）。
+                prompt = compacted;
+                continue;
+              }
+            }
+            throw err;
           }
         }
         if (result && typeof result === 'object') {
@@ -2106,6 +2138,7 @@ function imageMarkdown(images) {
             ...(result.metrics || {}),
             sendWaitMs: Math.round(waitedMs),
             rateLimitRetries: retries,
+            promptCompactRetries: compactRetried ? 1 : 0,
             // 三个可核对字段（右栏与 /status 都透出）：本轮生效的目标值、
             // 距上次发出的实际间隔、以及实际等待。用户「设了 10s 却看不到」
             // 的症结正是旧实现只在**等待过**时才显示，这些字段让它恒可核对。
@@ -2480,8 +2513,13 @@ function imageMarkdown(images) {
         // 发送间隔（设置页）：executor 在发送前按它节流，限流退避也以它为基数。
         // 0.14.7 起按槽取——同一站点两个账户是两份独立的风控窗口。
         sendGapMs: clampSendGapMs(sendGapForSlot(settings, accountKey, siteId)),
-        // 网页会话丢失时的整段重放文本（见 executor 的 WEB_SESSION_LOST 分支）
-        rebuild: () => serializeFirstTurn({ ...options, extraPrompt, siteId }),
+        // 网页会话丢失时的整段重放文本（见 executor 的 WEB_SESSION_LOST 分支）。
+        // 0.16.11：接受 { maxPromptChars } —— PROMPT_TRUNCATED 压缩重试从这条路取
+        // 压缩后的首轮全文；无参调用（WEB_SESSION_LOST 重放）行为逐字不变。
+        rebuild: (hint) => serializeFirstTurn({
+          ...options, extraPrompt, siteId,
+          ...(hint && Number.isFinite(hint?.maxPromptChars) ? { maxPromptChars: hint.maxPromptChars } : {}),
+        }),
       },
       invalidate: () => {
         // 失败的一轮同样要把节流那枚标记清掉：留着它会吃掉后面某一轮**正常**的提交，

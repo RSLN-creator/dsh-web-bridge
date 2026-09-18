@@ -17,6 +17,7 @@ import { getSite, getContract, resolveWebModel, conversationNav, conversationIdF
 import { DEFAULT_SLOT, normalizeSlot } from './accounts.js';
 import { selectWebModel, pickerUsable } from './model-picker.js';
 import { deriveLastRate, shouldSettleWip, shouldSettleStalledThinking, answerDomLength } from './metrics.js';
+import { emptyWebResponseError } from './zero-progress.js';
 import child_process from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -2229,6 +2230,10 @@ export function createBrowserDriver(options = {}) {
       if (typeof echoed === 'string' && echoed.length < String(message).length - 8) {
         const err = new Error(`PROMPT_TRUNCATED: 网页输入框只接收了 ${echoed.length}/${String(message).length} 字符（网页端长度上限）— 请缩短上下文或先压缩历史再重试`);
         err.code = 'PROMPT_TRUNCATED';
+        // accepted/total 供 executor 的自动压缩重试取数（0.16.11）：真机 0a62dbb8
+        // 整轮差 11 个字符就作废——这种轮次必须能按已接受长度自动压缩重试一次。
+        err.accepted = echoed.length;
+        err.total = String(message).length;
         throw err;
       }
       throwIfAborted();
@@ -2321,7 +2326,11 @@ export function createBrowserDriver(options = {}) {
         const head = lastFinished?.rawHead ? ' | 流首段: ' + String(lastFinished.rawHead).slice(0, 200) : '';
         throw new Error('web capture ended incomplete: ' + (result.reason || 'unknown') + head);
       }
-      if (!result.text?.trim()) throw new Error('empty response from web AI');
+      // 0.16.11（#26）：只看 text 会把「只有思考」的轮次整轮作废（真机 d5fd2e11
+      // turn 8：reasoning 块 + finish、正文/调用为零 → UNKNOWN 硬失败，任务断链）。
+      // 思考-only 由适配器的 thinkingOnlyNotice 路径交回提示继续任务；这里只拦全空。
+      const emptyErr = emptyWebResponseError(result, { lastEndReason, rawHead: lastFinished?.rawHead });
+      if (emptyErr) throw emptyErr;
       if (!result.complete) {
         // 部分流：正文/思考/图片已拿到，但网页没发 FINISHED/close。把已有内容当
         // 本轮结果交出去（上层会解析工具协议、执行、回填），下一轮再让模型续写。

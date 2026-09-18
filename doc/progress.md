@@ -20,18 +20,17 @@
 
 | 项 | 值 |
 | --- | --- |
-| 工作树版本 | **0.16.10** |
-| 已装版本（profile） | **0.16.10**（web + headless 两个 profile **逐 profile 实测均为 0.16.10**，`lib/index.js` sha256 前 12 位均 `91C212DEDAF4`，与工作树**逐一相同**；`verify-pack` **37/37 逐字相同 + 接线完好**、退出 0） |
-| 运行中的进程 | **0.16.10**（2026-09-18 实测 `GET /__webcode/status` → `build.version=0.16.10 hash=0f5625187573`，监听 PID 14052。**上一轮的「重启无效」已确认解决**：那次重启发生在 0.16.8 打包之前，装的是 0.16.5） |
-| **装载持久性** | **本次已修**：`profiles/web` 的**声明**（`package.json` / `pnpm-lock.yaml` / `.modules.yaml`）原先钉着 `.tmp/…0.16.5.tgz`，任何一次 pnpm 通道都会把 `node_modules` 重建回 0.16.5 —— 这是「装好又变回去」的真因。现已改为 `package/…0.16.10.tgz`，重启后声明未被改动（见 §0.16.10 七、） |
-| 上游 | `origin/main` = `4f24fd1`（2026-09-18；0.16.7 已推送并打 tag **v0.16.7**。0.16.8/0.16.9/0.16.10 均已提交本地，**本轮推送**） |
-| 单测基线 | **58/58 测试文件**；**全量 729/729 通过、0 失败**（0.16.10 实跑，逐文件 `node --test test/*.test.mjs`；`stream-tail` 由 10 → **9 条**（删掉 1 条重复覆盖），新增 2 条 0.16.10 护栏） |
+| 工作树版本 | **0.16.11** |
+| 已装版本（profile） | **待装机**（0.16.11 打包后按「声明才是持久层」用 `dsh plugin --profile <name> add` 装进 web + headless；**headless 的声明在 2026-09-19 审计发现仍钉着 `0.14.6.tgz`**——0.16.10 那次对 headless 走的是绕开声明的直解包，声明从未更新，任何 pnpm 通道都会把 headless 打回 0.14.6。本轮装机同时修掉这笔） |
+| 运行中的进程 | **待重启核对**（2026-09-19 上午 3080 无监听，DSH web 未运行；最后一次已验证读数是 2026-09-18 晚 `build.version=0.16.10`） |
+| 上游 | `origin/main` = `9d4c61a`（0.16.10 台账推送） |
+| 单测基线 | **61/61 测试文件**；全量 **741 条**（0.16.10 的 729 + 本轮 3 份新护栏 12 条：`empty-response` 5、`unparsed-notice-head` 2、`prompt-compact` 5；`stream-tail` ⑤契约随 #25 更新；`markdown-block-integrity` 的 `assertIntegrityOnly` 同步更新） |
 | 注释闸门 | **error 0 / warn 0，退出码 0**（2026-09-19 实跑） |
 | 文件规范闸门 | `check-repo-hygiene.mjs` **PASS**（无 BOM + 索引无死链 + CI/engines Node 版本相容） |
-| 发布闸门 | `verify-pack` **37/37 逐字相同 + 接线完好**，退出 0（0.16.10 实跑） |
-| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.10 / testFiles 58/58） |
-| 已装包核对 | 两个 profile 都是 **0.16.10**，`lib/index.js` sha256 与工作树**逐一相同**（`verify-pack` 之外的独立第二次核对，0.16.10 实做） |
-| 下一阶段 | ① 按 §0.16.10 的**真机判据**复验正文逐字保真（重启已完成，护栏 9/9 + 8/8 已绿；真机那一步仍待用户发言时验证）；② 视情况补 `long-term-issues.md` 的「声明才是持久层」一条 |
+| 发布闸门 | `verify-pack` 逐文件 sha256 相同 + 接线完好，退出 0（0.16.11 实跑，见 §0.16.11） |
+| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.11 / testFiles 61/61） |
+| 已装包核对 | 待 0.16.11 装机后逐 profile 核对（`package.json` 声明 + `lib/index.js` sha256） |
+| 下一阶段 | ① **0.16.11 真机长跑验收**（判据见 §0.16.11 六：≥30 分钟、≥50 轮工具、同一网页会话、无 UNPARSED/empty-response 类提醒、最佳工程提示词、真任务）；② headless 声明欠账随本轮装机清掉 |
 
 > **§0.16.10 真机判据（重启后逐条核）**：① `GET /__webcode/status` 的 `build.version` = **0.16.10**；
 > ② 让模型回复一段含 `<b>`、`<foo>`、`Array<T>` 或字面 `<tool_call>` 示例的正文，**逐字对比** harness
@@ -44,6 +43,65 @@
 > 掩盖了「web 落后两个版本」这个真因，直接导致用户按台账以为装好了、重启后仍然不变。
 > **教训记在这里而不是删掉**：凡是「已装/已重启/已验证」这类状态行，**必须逐 profile 写、并附
 > sha256 前 12 位**，否则它会把「一个 profile 装了」读成「都装了」。 |
+
+## 0.16.11（本轮）—— 长跑会话四类阻断点的修复（真机读数待补）
+
+**用户指令（逐字）**：「把我提到的这些写入doc/，然后开始修复长跑会话问题，真机实际长时间
+会话验证（30分钟+50轮无外部提醒工具调用+最佳工程提示词）」「然后等我验收，版本号保持0.16.x」
+「其他不要动」。
+
+本轮只动长跑链路；取证见 [`diagnosis-2026-09-19.md`](diagnosis-2026-09-19.md)，
+缺陷立条 #25/#26 见 [`long-term-issues.md`](long-term-issues.md)。
+
+### 一、修了什么（四类，全部最小改动）
+
+| # | 缺陷 | 修法 | 落点 |
+| --- | --- | --- | --- |
+| ① | `empty response from web AI` 硬失败（#26）：只看 `result.text`，思考-only 轮整轮作废（真机 d5fd2e11 turn 8） | 判定抽成纯函数 `emptyWebResponseError`：正文/思考/图片**全空**才判空，报错带收束原因与流首段；思考-only 交回适配器走 `thinkingOnlyNotice` | `lib/zero-progress.js`、`lib/browser-driver.js` |
+| ② | TOOL_CALL_UNPARSED 提示只报字数（#25）：模型看不见被扣的是哪条调用，无法精确重发 | 提示新增「被扣协议原文开头」（≤200 字符原样引用）；**两类残根仍不许桥侧代猜代拼**（PROMPT-ENGINEERING.md §二红线） | `lib/index.js`（`unparsedCallNotice` + 两处调用点） |
+| ③ | PROMPT_TRUNCATED 无退路：真机 0a62dbb8 差 **11 个字符**整轮作废、模型零回复 | 驱动报错带 `accepted/total`；executor 对 **fresh 首轮**按 `accepted−2KB` 预算自动压缩重试**一次**；`serializeFirstTurn` 支持 `maxPromptChars`（丢最旧消息段、留显式省略标记、最新任务与全部教学保底保留）；增量轮不重试（重放会丢本轮新消息，语义不对） | `lib/browser-driver.js`、`lib/index.js`（executor）、`lib/agent-preset.js` |
+| ④ | headless 声明欠账（连带发现）：`profiles/headless/package.json` 仍钉 `0.14.6.tgz`，node_modules 是 0.16.10 但声明从未更新——任何 pnpm 通道会把 headless 打回 0.14.6 | 本轮装机用 `dsh plugin --profile headless add` 让声明指向 0.16.11 | 装机步骤（§六） |
+
+**「最佳工程提示词」的口径**：默认教学路径被 `test/prompt-variants.test.mjs` 逐字基线锁死
+（PROMPT-ENGINEERING.md §1.3 零位移纪律），本轮**不动教学模板**；「最佳工程提示词」落在
+长跑验收用的**任务提示词**上（真任务、只读工具、按既有证据写成：要真实数据立即调用、
+等真实结果、不虚构、有可验证交付物）。
+
+### 二、护栏与反向验证（全部实跑）
+
+| 护栏 | 内容 | 反向验证 |
+| --- | --- | --- |
+| `test/empty-response.test.mjs`（5 条） | 纯函数四态（思考-only→null、只图→null、全空→带现场 Error、畸形入参不抛 TypeError）+ 端到端「思考-only 必须交回 THINKING_ONLY_NO_ANSWER 而非作废」 | 纯函数为新增（红基线=实现前 import 失败，见 `.tmp` 轮次记录）；**驱动接线（browser-driver 内 2 行）无自动化红线**——既有测试桩全部绕过真驱动，如实披露 |
+| `test/unparsed-notice-head.test.mjs`（2 条） | 截断调用的提示必须含被扣原文开头（真实参数串锚点）；散文照常先发 | **实跑成立**：摘掉两处 `head:` 实参 ⇒ 2/2 红；恢复 ⇒ 2/2 绿 |
+| `test/prompt-compact.test.mjs`（5 条） | 默认路径零位移（不传预算逐字节相同）；超预算丢最旧+显式标记+最新任务保留；极端小预算不抛错；端到端「首轮 TRUNCATED 自动压缩重试一次」 | **实跑成立**：把 executor 分支错误码改失配 ⇒ 端到端红（只发 1 次）；恢复 ⇒ 5/5 绿 |
+| `test/stream-tail.test.mjs` 契约更新 | 「真协议仍必须被扣住」按 #25 新契约改三层：提示之外正文禁协议、提示必须引用扣留头、**截断调用不得派发成可执行块** | 方向未放宽（三条都是收紧或锚定新行为） |
+| `test/markdown-block-integrity.test.mjs` `assertIntegrityOnly` 更新 | 同上三层契约（提示之外禁 BAR+BAR + 截断调用不得派发） | 同上 |
+
+### 三、离线验收读数（全部实跑，2026-09-19）
+
+| 项 | 读数 |
+| --- | --- |
+| 全量单测 | `node --test test/*.test.mjs` → **741/741 通过、0 失败**（基线 729 + 新增 12；首轮 740/741 的 1 失败即上文契约更新点，更新后全绿） |
+| `prompt-variants`（默认路径零位移） | 全绿——`serializeFirstTurn` 重构未位移默认输出 |
+| `unparsed-notice-head` / `prompt-compact` / `empty-response` | 2/2、5/5、5/5（见上表） |
+
+### 四、装机持久性（「声明才是持久层」的第二次执行）
+
+本轮装机**只走声明通道**：`dsh plugin --profile web add` + `dsh plugin --profile headless add`
+（同时修掉 ④ 的 headless 0.14.6 声明欠账）。装后核对判据：两 profile 的
+`package.json` 声明、`pnpm-lock.yaml`、`node_modules/dsh-webcode-bridge/package.json`
+三处一致指向 **0.16.11**，`lib/index.js` sha256 与工作树逐一相同。
+
+### 五、真机长跑验收（判据先立，读数跑完补）
+
+| # | 判据 | 取法 | 读数 |
+| --- | --- | --- | --- |
+| 1 | 单次连续运行 **≥30 分钟** | headless 会话存档首末事件时间差 | 待补 |
+| 2 | **≥50 轮工具调用**全部成功 | 会话存档 `tool/call` 计数、`tool/result` isError=0 | 待补 |
+| 3 | 全程**同一网页会话** | `navTrace` 的 `requestedFresh` 全 false（首条除外） | 待补 |
+| 4 | **无外部提醒** | 会话内无 TOOL_CALL_UNPARSED / THINKING_ONLY / empty-response / RATE_LIMITED 注入 | 待补 |
+| 5 | **最佳工程提示词** | 任务提示词逐字存档（真任务+只读工具+交付物判据） | 待补 |
+| 6 | 0.16.10 遗留真机判据 | 含 `<` 正文逐字保真（顺带核） | 待补 |
 
 ## 未提交改动与运行进程（2026-09-17 文档/结构整理轮）
 

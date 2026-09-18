@@ -176,11 +176,13 @@ test('0.16.10 尾部滞后：HTML 标签/泛型切在增量边界上不得丢尾
 test('0.16.10 真协议仍必须被扣住（护栏方向不得被上面两条放宽）', async () => {
   // 正面：尾部确实是半截真协议标记 —— 必须仍然扣住、仍然发提示。
   //
-  // 断言必须避开提示模板本身：`unparsedCallNotice` 为了教模型怎么重发，**正文里
-  // 就带着一段字面的 `<tool_call>{"mcp_action":"call",…}</tool_call>`**。所以
-  // 「块内容含 mcp_action」不能当泄漏判据（那样测的是模板，不是泄漏）。真正的判据是
-  // **模型这一轮发出的那段协议头不得出现**——用它的独有前缀（真实工具名 read 与其
-  // 参数名）来认，提示模板里不含这些。
+  // 判据随 0.16.11（#25）更新：`unparsedCallNotice` 现在**有意引用被扣原文的开头**
+  // （模型精确重发的唯一安全出路；真机 d5fd2e11 单会话复发 4 次的教训是只报字数
+  // 没法重发）。因此「块内容含真实工具名」不再等于泄漏——真正的判据分三层：
+  //   ① 提示之外的部分（散文）不得出现半截协议原文（用独有前缀 read + 参数名认，
+  //     提示模板里是占位「工具名」）；
+  //   ② 提示必须引用被扣原文开头（新契约，反向锚定）；
+  //   ③ 不得产生任何可执行调用块（截断调用绝不派发）。
   const RAWHEAD = '{"mcp_action":"call","name":"read","argu';
   const { collect, dispose } = harness((opts) => {
     opts.onDelta?.('先看文件。<tool_call>{"mcp_action":"call","name":"read","argu');
@@ -193,12 +195,15 @@ test('0.16.10 真协议仍必须被扣住（护栏方向不得被上面两条放
     });
     const textEnd = chunks.find((c) => c.type === 'block-end' && c.block?.type === 'text');
     assert.ok(textEnd, '应有正文块');
-    assert.ok(!textEnd.block.text.includes(RAWHEAD),
-      '半截真协议原文绝不得进正文块');
-    assert.ok(!textEnd.block.text.includes('"name":"read"'),
-      '协议头不得进正文块（提示模板里是占位「工具名」，不含真实工具名 read）');
-    assert.ok(textEnd.block.text.includes('TOOL_CALL_UNPARSED'),
-      '真协议被扣住时仍必须给出归因提示');
+    const noticeAt = textEnd.block.text.indexOf('TOOL_CALL_UNPARSED');
+    assert.ok(noticeAt >= 0, '真协议被扣住时仍必须给出归因提示');
+    const prose = textEnd.block.text.slice(0, noticeAt);
+    assert.ok(!prose.includes(RAWHEAD), '半截真协议原文绝不得进提示之外的正文');
+    assert.ok(!prose.includes('"name":"read"'), '协议头不得进提示之外的正文');
+    assert.ok(textEnd.block.text.slice(noticeAt).includes(RAWHEAD),
+      '提示必须引用被扣原文开头（0.16.11 #25：模型据此精确重发）');
+    assert.ok(!chunks.some((c) => c.type === 'block-end' && c.block?.type === 'tool-call'),
+      '截断调用不得被派发成可执行调用块');
     assert.ok(textEnd.block.text.includes('先看文件。'), '已外发的散文必须保留');
   } finally { await dispose(); }
 });

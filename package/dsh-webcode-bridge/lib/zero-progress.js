@@ -62,3 +62,32 @@ export function zeroProgressDecision(v) {
   if (withheld > 0) return 'protocol-withheld';
   return 'has-content';   // 全空 ⇒ 交给 assertNonEmpty 抛「空回复」，不在这里吞掉
 }
+
+/**
+ * 驱动侧「空回复」判定（0.16.11，缺陷 #26）。
+ *
+ * 真机取证（会话 `d5fd2e11` turn 8，2026-09-18 22:48，
+ * 见 `doc/diagnosis-2026-09-19.md` §二问题 2）：网页只送出 reasoning 块就收束，
+ * 旧判定只看 `result.text` —— 思考再多也抛 `empty response from web AI`，
+ * 整轮以 UNKNOWN 硬错误作废，任务断链、用户必须手动补一句才能继续。
+ *
+ * 思考-only 与只出图同属**合法**回复形态：前者由适配器的
+ * `zeroProgressDecision → thinkingOnlyNotice` 交回提示正文让任务继续；
+ * 后者是识图轮的正常样子。只有正文/思考/图片**全空**才是真的空回复。
+ *
+ * 报错必须自带现场（收束原因 / 流首段）——「报错不带取证」会让下一次归因从头再来。
+ *
+ * @param {{text?: string, thinking?: string, images?: Array}} result 驱动单轮结果
+ * @param {{lastEndReason?: string, rawHead?: string}} [scene] 收束现场
+ * @returns {Error|null} 全空时返回带现场的 Error；否则 null（思考-only 交回上层处理）
+ */
+export function emptyWebResponseError(result, scene = {}) {
+  const text = String(result?.text ?? '').trim();
+  const think = String(result?.thinking ?? '').trim();
+  const images = Array.isArray(result?.images) ? result.images.length : 0;
+  if (text || think || images) return null;
+  const bits = [];
+  if (scene?.lastEndReason) bits.push(`收束原因 ${scene.lastEndReason}`);
+  const head = scene?.rawHead ? ' | 流首段: ' + String(scene.rawHead).slice(0, 200) : '';
+  return new Error('empty response from web AI' + (bits.length ? `（${bits.join('，')}）` : '') + head);
+}
