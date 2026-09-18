@@ -10,6 +10,9 @@
 import { apply } from '../lib/index.js';
 import { parseAgentReply, buildPreset, serializeFirstTurn, serializeDelta, trainNoteFor, fillMissingRequired } from '../lib/agent-preset.js';
 
+// 官方 tool-call 模板的词间连接符（U+2581，0.16.18 教学/断言共用；源码不出现全角字符）。
+const S = String.fromCharCode(0x2581);
+
 // 会话 cacaba8c turn3 step1 的真实命令与真实 pwsh schema（截自 request/header）。
 const REAL_COMMAND = 'Get-Location; Get-ChildItem -Force | Select-Object Mode,Length,Name | Format-Table -AutoSize';
 const PWSH_SCHEMA = {
@@ -113,14 +116,16 @@ async function runTurn({ reply, tools, sessionId, message = '请你审查本地�
     glm.slice(0, 200));
   check('glm preset · 不再推荐标签格式 A', !glm.includes('格式 A（推荐，以标签包裹）'));
   check('glm preset · 点名 required 约束', glm.includes('required 列出的每一个字段') && glm.includes('不能替代任何必填参数'));
-  // deepseek 默认（siteId 缺省）0.16.2 起教**原生 DSML**：13/13 真机夹具里模型
-  // 用的都是它，旧的双形状教学等于让模型做一次格式翻译，漂移正是丢调用的来源。
-  // 必须显式传 siteId：不传等于「未知站点」，走的是通用双形状分支（既有行为）。
+  // deepseek 默认（siteId 缺省）0.16.18 起教**官方训练模板**（`<｜tool▁calls▁begin｜>`
+  // 家族：模型被训练时见过的形状；逐字依据见 lib/agent-preset.js OFFICIAL_BAR 注释）。
+  // 0.16.2–0.16.17 教的 DSML 保留为解析备案（normalizeDsml 继续认）、不再教。
+  // 必须显式传 siteId：不传等于「未知站点」，走的是通用双形状分支。
   // 真机路径上 index.js 会带上当前站点，因此这里要测的是带 siteId 的那一支。
+  const S = String.fromCharCode(0x2581);
   const ds = buildPreset({ tools: REAL_TOOLS, siteId: 'deepseek' });
-  check('deepseek preset · 教原生 DSML 骨架',
-    ds.includes('本网页原生的 DSML') && ds.includes('invoke name="工具名"')
-      && ds.includes('不要用省略名字的闭合写法'),
+  check('deepseek preset · 教官方 tool-call 模板',
+    ds.includes('官方工具调用格式') && ds.includes('tool' + S + 'calls' + S + 'begin')
+      && ds.includes('无参数的工具 arguments 写 {}'),
     ds.slice(0, 200));
   check('deepseek preset · 不再教被证伪的标签形状',
     !ds.includes('格式 A（推荐，以标签包裹）'));
@@ -132,14 +137,15 @@ async function runTurn({ reply, tools, sessionId, message = '请你审查本地�
     glmTurn.includes('必须使用 ```json 代码块发起工具调用') && glmTurn.includes('不要使用 <tool_call> 等标签包裹'),
     glmTurn.slice(-400));
   const dsTurn = serializeFirstTurn({ tools: REAL_TOOLS, siteId: 'deepseek', messages: [{ role: 'user', content: [{ type: 'text', text: '看时间' }] }] });
-  check('deepseek transport · 教原生 DSML 形状',
-    dsTurn.includes('用本网页原生的 DSML 发起工具调用') && dsTurn.includes('DSML'));
+  check('deepseek transport · 教官方 tool-call 模板',
+    dsTurn.includes('用官方工具调用格式（DeepSeek 原生模板）发起工具调用')
+      && dsTurn.includes('tool' + S + 'calls' + S + 'begin'));
 }
 {
   check('trainNote · 按站点取立场',
     trainNoteFor('glm').includes('```json') && trainNoteFor('glm').includes('不要用 <tool_call> 等标签包裹')
-      && trainNoteFor('deepseek').includes('请保持工具调用格式（本网页原生的 DSML）')
-      && trainNoteFor('deepseek').includes('不要用省略名字的闭合写法'),
+      && trainNoteFor('deepseek').includes('请保持工具调用的官方格式')
+      && trainNoteFor('deepseek').includes('tool' + S + 'call' + S + 'begin'),
     JSON.stringify([trainNoteFor('glm'), trainNoteFor('deepseek')]));
   const delta = serializeDelta([{ role: 'tool', name: 'pwsh', tool_call_id: 't1', content: 'ok' }], 0, 4, null, trainNoteFor('glm'));
   check('trainNote · 增量轮 system_note 用 glm 立场', delta.text.includes('先写一行 ```json') && !delta.text.includes('以 <tool_call> 开始'), delta.text);

@@ -20,17 +20,17 @@
 
 | 项 | 值 |
 | --- | --- |
-| 工作树版本 | **0.16.17** |
-| 已装版本（profile） | **0.16.17**（2026-09-19 实测：web + headless 逐 profile 核对，声明 `package.json`、`pnpm-lock.yaml`、`node_modules/dsh-webcode-bridge/package.json` 三处一致指向 `dsh-webcode-bridge-0.16.17.tgz`；`lib/index.js` sha256 前 12 位 `7EB80626953E` 与工作树一致。走 `dsh plugin --profile <name> add` 声明持久层通道，不会被 pnpm reconcile 回退） |
+| 工作树版本 | **0.16.18** |
+| 已装版本（profile） | **0.16.18**（2026-09-19 实测：web + headless 逐 profile 核对，声明 `package.json`、`pnpm-lock.yaml`、`node_modules/dsh-webcode-bridge/package.json` 三处一致指向 `dsh-webcode-bridge-0.16.18.tgz`；`lib/index.js` sha256 前 12 位 `BE40D5318E5B` 与工作树一致。走 `dsh plugin --profile <name> add` 声明持久层通道） |
 | 运行中的进程 | run-8 真机验收以 `dsh --profile headless` 进程级验证（0.16.16 时段）；DSH web（3080）2026-09-19 凌晨未运行 |
-| 上游 | `origin/main` = `9d4c61a`（0.16.10 台账推送）；0.16.11–0.16.17 本地已提交/待推 |
-| 单测基线 | **65/65 测试文件**；全量 **767 条**（0.16.16 为 763；0.16.17 新增：`reply-log` 4；真机夹具 `dsml-real-19/20` 已于 0.16.16 入档） |
+| 上游 | `origin/main` = `9d4c61a`（0.16.10 台账推送）；0.16.11–0.16.18 本地已提交/待推 |
+| 单测基线 | **66/66 测试文件**；全量 **774 条**（0.16.17 为 767；0.16.18 新增：`official-tool-calls` 7；`glm-session-replay` 的 deepseek 断言随教学切换同步更新） |
 | 注释闸门 | **error 0 / warn 0，退出码 0**（2026-09-19 实跑） |
 | 文件规范闸门 | `check-repo-hygiene.mjs` **PASS**（无 BOM + 索引无死链 + CI/engines Node 版本相容） |
 | 发布闸门 | `verify-pack` 逐文件 sha256 相同 + 接线完好，退出 0（0.16.16 实跑 37/37） |
-| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.17 / testFiles 65/65） |
-| 已装包核对 | 0.16.17 装机后逐 profile 核对（`package.json` 声明 + `lib/index.js` sha256，见当前状态表） |
-| 下一阶段 | **0.16.17 真机验收由用户执行**；下一版修漂移形状的前提已备齐——每轮原始回复全文落 `~/.dsh/logs/webcode-bridge-replies.log`，run-8 四种形状（§0.16.17 一）重跑后即可逐字取证 |
+| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.18 / testFiles 66/66） |
+| 已装包核对 | 0.16.18 已装机核对（见已装版本行） |
+| 下一阶段 | **0.16.18 真机验收由用户执行（战略实验）**：判据见 §0.16.18 四——官方模板下 UNPARSED/isError 应显著下降；reply-log 全文落盘继续反哺逐字夹具 |
 
 > **§0.16.10 真机判据（重启后逐条核）**：① `GET /__webcode/status` 的 `build.version` = **0.16.10**；
 > ② 让模型回复一段含 `<b>`、`<foo>`、`Array<T>` 或字面 `<tool_call>` 示例的正文，**逐字对比** harness
@@ -43,6 +43,42 @@
 > 掩盖了「web 落后两个版本」这个真因，直接导致用户按台账以为装好了、重启后仍然不变。
 > **教训记在这里而不是删掉**：凡是「已装/已重启/已验证」这类状态行，**必须逐 profile 写、并附
 > sha256 前 12 位**，否则它会把「一个 profile 装了」读成「都装了」。 |
+
+## 0.16.18（2026-09-19）—— 教学切官方 tool-call 训练模板（DSML 转备案），无参调用修复
+
+**用户指令（逐字）**：「战略实验：把教学格式换成/并测 DeepSeek 官方训练先验的 tool-call 模板
+（<｜tool calls begin｜> 家族），可能从根上止血——直接改复刻！这个保留成备案不删除
+只是现在新增官方做法优先」
+
+### 一、官方模板逐字依据（不是推测）
+
+HF `deepseek-ai/DeepSeek-V3.1` tokenizer_config.json 的 chat_template（2026-09-19 核对）：
+`<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>NAME<｜tool▁sep｜>{ARGS}<｜tool▁call▁end｜>…<｜tool▁calls▁end｜>`
+（连接符 U+2581 ▁、竖线 U+FF5C）。这是模型**被训练时见过的形状**；0.16.2 起教的 DSML
+在官方仓库 grep 全库 **0 命中**——模型对它无先验，长跑必然持续漂移。
+
+### 二、修了什么（DSML 全套宽容一字不动，教学改指官方形状）
+
+| 改动 | 落点 | 说明 |
+| --- | --- | --- |
+| 官方模板常量与示例（`officialToolCallSpecimen/Skeleton`） | `lib/agent-preset.js` | 教学与 UNPARSED 重发指引共用一份 |
+| 官方 → 规范 invoke 形改写 | `normalizeDsml` 首步 | 全调用段收编 + 孤立 calls 包裹映射；旧代空格词形、`function` 前缀、```json 围栏漂移都收；恢复层/流式探测三层受益 |
+| 协议锚点 + 流式前缀补官方家族 | `PROTOCOL_ANCHORS`、`partialProtocolAt` | 红基线：0.16.17 代码对官方模板 0 calls 且 proseSafeEnd=全长（整段漏正文）——锚点是先决条件 |
+| **无参调用不再整条丢弃** | 主解析 takeObj 条件 | run-8 FAIL#3/4/5 真机逐字形状（cordis_inspect_list，properties:{}）连续 3 次被丢；收紧条件=名字非空 + 非包装壳 + 体为空/完整 JSON |
+| deepseek 站点三处教学同形状 | buildPreset / serializeFirstTurn transport / TRAIN_NOTE | DSML 教学文本全部退役（git 历史留档），解析备案保留 |
+
+### 三、护栏（`test/official-tool-calls.test.mjs` 7 条全绿）
+
+官方单调用/多调用/旧词形+前缀+围栏/无参两种形态/教学骨架自洽/DSML 备案不回归/
+两种格式同轮混写；`glm-session-replay` 的 deepseek 三格断言同步切官方。
+
+### 四、装机与真机验收（用户执行）
+
+- 打包 `dsh-webcode-bridge-0.16.18.tgz`（verify-pack 39/39），走 `dsh plugin add`
+  声明持久层通道装 web + headless；逐 profile 核对三处声明 + sha256。
+- **验收判据（战略实验）**：同任务重跑，对比「UNPARSED/isError 次数」与 0.16.15–0.16.17
+  轮（每轮 4–9 条）——官方模板下漂移族应显著下降；`~/.dsh/logs/webcode-bridge-replies.log`
+  照常全文落盘，模型若仍回退 DSML 备案形状，逐字夹具继续反哺。
 
 ## 0.16.17（2026-09-19）—— 网页原始回复全文落盘：取证断链第三次后的补链
 

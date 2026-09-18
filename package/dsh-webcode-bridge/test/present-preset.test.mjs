@@ -74,8 +74,8 @@ test('present 提示不得破坏既有协议立场（glm 仍只教代码块、�
   // 教标签 + 裸 JSON 等于让模型做一次格式翻译，翻译中途的形态漂移正是「调用被丢」
   // 的来源）。这里断言的是「教了 DSML 骨架」，而不是「教了标签」。
   const dsText = serializeFirstTurn({ siteId: 'deepseek', tools: [pwshTool, presentTool], messages });
-  assert.match(dsText, /用本网页原生的 DSML 发起工具调用/);
-  assert.match(dsText, /invoke name="工具名"/);
+  assert.match(dsText, /用官方工具调用格式（DeepSeek 原生模板）发起工具调用/);
+  assert.match(dsText, new RegExp('tool' + String.fromCharCode(0x2581) + 'calls' + String.fromCharCode(0x2581) + 'begin'));
   // 反向：不得再教已被证明没人用的标签形状。
   assert.doesNotMatch(dsText, /必须使用 <tool_call>\{"mcp_action":"call"/);
   // 两个分支都必须仍然讲清 required 字段（既有约束不能被挤掉）

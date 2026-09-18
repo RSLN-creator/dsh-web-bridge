@@ -1434,6 +1434,11 @@ if (!isCall) return;      // ← JSON 合法、只是没写 name ⇒ 静默丢�
   `normalizeDsml` 熔接改写已修（0.16.16，夹具 19/20；红基线污染值与真机 `tool/call`
   存档逐字复现）。本形解析**成功**、参数脏，不走 UNPARSED——后果是
   `missing required property` / `not found` 类 isError 回流（台账同族归因落定）；
+- **0.16.18（战略实验，用户拍板）**：教学切**官方 tool-call 训练模板**（HF DeepSeek-V3.1
+  chat_template 逐字：`<｜tool▁calls▁begin｜>…<｜tool▁sep｜>{ARGS}…`，模型被训练时见过的
+  形状）；DSML 全套解析宽容**保留为备案不删**、只是不再教。同轮修复无参调用整条丢弃
+  （run-8 FAIL#3/4/5 根因：cordis_inspect_list 空参数 invoke 被丢）。验收判据：官方模板下
+  UNPARSED/isError 显著下降；
 - **残余风险**：漂移形状持续翻新（run-8 一轮 4 种：693/1003/1470/1474 字符，
   `session-0fd32761` 2026-09-19 04:24–04:56，含简写+参数名拼错 `olds_string`、
   参数名写成工具名 `parameter name="pwsh"` 等；畸形全部在提示头 200 字符之外，

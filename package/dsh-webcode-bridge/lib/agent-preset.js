@@ -46,6 +46,46 @@ const DSML_CLOSE = (name) => '</' + DSML_BAR + 'DSML' + DSML_BAR + ' ' + name + 
 const DSML_ONE_LINE = DSML_OPEN('calls') + ' ' + DSML_OPEN('invoke name="工具名"') + ' '
   + DSML_OPEN('parameter name="参数名"') + '值' + DSML_CLOSE('parameter') + ' '
   + DSML_CLOSE('invoke') + ' ' + DSML_CLOSE('calls');
+
+/**
+ * 官方 tool-call 训练模板（0.16.18，**教学优先形状**；DSML 全套保留为兼容备案）。
+ *
+ * ## 为什么换成它（逐字依据，不是推测）
+ *
+ * DeepSeek 官方训练模板（HF `deepseek-ai/DeepSeek-V3.1` tokenizer_config.json 的
+ * chat_template 字段，2026-09-19 逐字核对）里，assistant 的工具调用段是：
+ *
+ *   <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>NAME<｜tool▁sep｜>{ARGS}<｜tool▁call▁end｜>…<｜tool▁calls▁end｜>
+ *
+ * 词间连接符是 U+2581（▁）、包裹竖线是 U+FF5C（与 DSML 标记同一族码点）——
+ * **这正是模型被训练时见过的形状**。0.16.2 起我们教的 DSML 是网页端自带的另一族
+ * 标记（官方仓库 grep 全库 0 命中），模型对它没有稳定先验，长跑必然持续漂移
+ * （夹具 15–20 + run-8 四种形状 + reply-log 21 份失败原文，见
+ * doc/progress.md §0.16.17/§0.16.18）。改教训练先验形状是从根上止血的实验方向，
+ * 用户拍板「官方做法优先，DSML 保留成备案不删除」——所以解析层的 DSML 全套
+ * 宽容与修复**一字不动**，只是教学改指官方形状。
+ *
+ * 旧代模板（2024 V3/R1）词形用空格不用 ▁，且有 `function` 前缀（`<｜tool call begin｜>
+ * function<｜tool sep｜>`）；解析侧两族都收（见 RE_OFFICIAL_CALL），教学只教 V3.1 形状。
+ */
+const OFFICIAL_BAR = String.fromCharCode(0xFF5C);
+const OFFICIAL_SEP = String.fromCharCode(0x2581);
+const OFFICIAL_TOKEN = (words) => '<' + OFFICIAL_BAR + 'tool' + words.map((w) => OFFICIAL_SEP + w).join('') + OFFICIAL_BAR + '>';
+const OFFICIAL_CALLS_BEGIN = OFFICIAL_TOKEN(['calls', 'begin']);
+const OFFICIAL_CALL_BEGIN = OFFICIAL_TOKEN(['call', 'begin']);
+const OFFICIAL_SEP_TOKEN = OFFICIAL_TOKEN(['sep']);
+const OFFICIAL_CALL_END = OFFICIAL_TOKEN(['call', 'end']);
+const OFFICIAL_CALLS_END = OFFICIAL_TOKEN(['calls', 'end']);
+
+/** 官方格式的**单调用示例**（教学与 UNPARSED 重发指引共用同一份，两处漂移必翻车）。 */
+export function officialToolCallSpecimen(name = '工具名', args = '{"参数名": "值"}') {
+  return OFFICIAL_CALLS_BEGIN + OFFICIAL_CALL_BEGIN + name + OFFICIAL_SEP_TOKEN + args + OFFICIAL_CALL_END + OFFICIAL_CALLS_END;
+}
+/** 官方格式的多调用示例骨架：重复 call begin/…/call end 段。 */
+export function officialToolCallSkeleton() {
+  return OFFICIAL_CALLS_BEGIN + '\n' + OFFICIAL_CALL_BEGIN + '工具名' + OFFICIAL_SEP_TOKEN + '{"参数名": "值"}' + OFFICIAL_CALL_END
+    + '\n' + OFFICIAL_CALL_BEGIN + '工具名二' + OFFICIAL_SEP_TOKEN + '{"参数名": "值"}' + OFFICIAL_CALL_END + '\n' + OFFICIAL_CALLS_END;
+}
 /**
  * 解析侧的**词形宽容**（0.16.5）——与上面的教学常量刻意分开。
  *
@@ -176,6 +216,38 @@ const bareCloseReplacer = (m, name, gt) => (name ? '</' + name + (gt || '>') : '
  */
 const RE_DSML_BARE_OPEN = new RegExp(
   '(^|[^\\w<])' + DSML_MARK_SRC + '\\s*(?=' + DSML_KNOWN_TAG_SRC + '\\b)', 'gi');
+
+/**
+ * 官方 tool-call 模板 → 规范 invoke 形的改写（0.16.18）。词形源里连接符收
+ * U+2581（V3.1+ 训练模板）与空格（2024 V3/R1 旧模板）两族；旧模板的
+ * `function` 前缀在 replacer 里剥掉。参数体是**裸 JSON**（官方模板如此），
+ * 由主解析既有的「invoke 体即完整 JSON 对象」路径收编（jsonObjectIn），
+ * 模型漂移多包的 ```json 围栏在 replacer 里剥掉。
+ */
+const OFFICIAL_SEP_SRC = '[' + String.fromCharCode(0x2581) + '\\s]';
+const RE_OFFICIAL_CALL = new RegExp(
+  '<' + OFFICIAL_BAR + '\\s*tool(?:' + OFFICIAL_SEP_SRC + ')?call(?:s)?(?:' + OFFICIAL_SEP_SRC + ')?begin(?:' + OFFICIAL_SEP_SRC + ')?' + OFFICIAL_BAR + '>'
+  + '\\s*(?:function)?\\s*([^<' + OFFICIAL_BAR + ']*?)\\s*'
+  + '<' + OFFICIAL_BAR + '\\s*tool(?:' + OFFICIAL_SEP_SRC + ')?sep(?:' + OFFICIAL_SEP_SRC + ')?' + OFFICIAL_BAR + '>'
+  + '([\\s\\S]*?)'
+  + '<' + OFFICIAL_BAR + '\\s*tool(?:' + OFFICIAL_SEP_SRC + ')?calls?[\\s\\S]*?end(?:' + OFFICIAL_SEP_SRC + ')?' + OFFICIAL_BAR + '>', 'g');
+const RE_OFFICIAL_CALLS_BEGIN = new RegExp(
+  '<' + OFFICIAL_BAR + '\\s*tool' + OFFICIAL_SEP_SRC + 'calls' + OFFICIAL_SEP_SRC + 'begin(?:' + OFFICIAL_SEP_SRC + ')?' + OFFICIAL_BAR + '>', 'g');
+const RE_OFFICIAL_CALLS_END = new RegExp(
+  '<' + OFFICIAL_BAR + '\\s*tool' + OFFICIAL_SEP_SRC + 'calls' + OFFICIAL_SEP_SRC + 'end(?:' + OFFICIAL_SEP_SRC + ')?' + OFFICIAL_BAR + '>', 'g');
+
+function rewriteOfficialToolCalls(text) {
+  // 全调用段优先（连同 NAME / sep / 参数体一起收编），孤立的 calls 包裹 token
+  // （漂移产物）随后映射成规范外壳——这一步之后官方格式与 DSML 走同一条解析路。
+  return text.replace(RE_OFFICIAL_CALL, (m, name, args) => {
+    let a = args.trim();
+    const fence = a.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
+    if (fence) a = fence[1].trim();
+    return '<invoke name="' + name.trim() + '">' + a + '</invoke>';
+  }).replace(RE_OFFICIAL_CALLS_BEGIN, '<calls>')
+    .replace(RE_OFFICIAL_CALLS_END, '</calls>');
+}
+
 /**
  * 多行版 DSML 骨架（DeepSeek 网页**原生**格式）：首轮教学直接抄这一份。
  *
@@ -207,21 +279,21 @@ export function dsmlSkeleton() {
   ].join('\n');
 }
 /**
- * deepseek 站点的再教学提示（0.16.2）。四件事必须说破，各对应一族真机漂移：
- *   1) 开标签写了 name，闭合标签也要写同名（挡省略名字的闭合写法）；
- *   2) 每个 invoke 都要有开标签（挡「直接从参数标签起写」）；
- *   3) 参数值直接写、不要加引号；
- *   4) 标记的四个字母必须写全 `DSML`（0.16.5 加：真机会话 063b0a99 里模型把它
- *      缩写成 `DSH`，155 处畸形标记全是这一族，协议原文因此整段漏进助手正文）。
+ * deepseek 站点的再教学提示（0.16.18 起指官方模板）。与首轮教学同一条纪律：
+ * 增量轮的纠偏必须指向**同一个**形状，否则模型刚被纠回来、下一个工具结果又把它
+ * 教回去。0.16.2 的 DSML 版再教学保留在 git 历史与下方注释里（备案），
+ * TRAIN_NOTE_DSML 常量已由官方版取代。
+ *
+ * 旧 DSML 版（0.16.2–0.16.17）要点存档：① 开/闭标签同名；② 每个 invoke 要有
+ * 开标签；③ 参数值不加引号；④ 标记四字母写全 DSML。
  */
-const TRAIN_NOTE_DSML = '[系统提示] 请保持工具调用格式（本网页原生的 DSML）：'
-  + DSML_ONE_LINE
-  + '。标记必须完整写成 ' + DSML_BAR + 'DSML' + DSML_BAR + '（四个字母 DSML，不要缩写成 DSH / DS 或任何别的写法，'
-  + '缩写的标记不会被识别、整段调用会以源码形式漏进回复）；'
-  + '每个参数一个 parameter 标签；开标签写了 name，闭合标签也必须写同一个 name（不要用省略名字的闭合写法）；'
-  + '每个 invoke 都要有开标签与闭标签；参数值直接写，不要加引号。';
+const TRAIN_NOTE_OFFICIAL = '[系统提示] 请保持工具调用的官方格式：'
+  + officialToolCallSpecimen()
+  + '。标记必须逐字完整（含 ▁ 连接符，不要改成空格或省略）；sep 之后是完整 JSON 对象，'
+  + 'required 的每个必填参数都要在，无参数的工具 arguments 写 {}；不要加 ```json 围栏；'
+  + '多个调用重复 call begin / sep / call end 段。';
 /** 站点 → 再教学提示。未列出的站点保持 0.14.7 措辞逐字不变。 */
-const TRAIN_NOTES = Object.freeze({ glm: TRAIN_NOTE_GLM, deepseek: TRAIN_NOTE_DSML });
+const TRAIN_NOTES = Object.freeze({ glm: TRAIN_NOTE_GLM, deepseek: TRAIN_NOTE_OFFICIAL });
 /** 按站点取再教学提示——增量轮的 resultBlock 与首轮教学必须同一立场，否则
  *  模型刚被纠回一种形状，第 5 个工具结果又把它教回另一种。 */
 export function trainNoteFor(siteId, extra = '') {
@@ -330,14 +402,18 @@ export function buildPreset(options = {}) {
         '```',
         '警告：不要使用 <tool_call>…</tool_call> 或任何 XML/标签包裹调用——本网页会把这类标签当成它自己的内置工具抢走执行并报 unknown tool call，调用会静默丢失；只有 ```json 代码块能到达本地工具网关。',
       ] : options.siteId === 'deepseek' ? [
-        // 0.16.2：教**本网页原生**的 DSML。真机 13/13 份夹具里模型用的都是它，
-        // 旧提示词教标签 + 裸 JSON 等于让模型做一次格式翻译，翻译中途的形态漂移
-        // 正是「调用被丢」的来源（见 dsmlSkeleton 的注释）。
-        '需要调用工具时，用**本网页原生的 DSML** 格式输出（这是你在本网页里最自然的写法，不要改写成别的形状）：',
-        dsmlSkeleton(),
-        '标记必须完整写成 ' + DSML_BAR + 'DSML' + DSML_BAR + '（四个字母 DSML）——**不要**缩写成 DSH、DS 或别的写法：缩写的标记桥认不出来，整段调用会以源码形式出现在回复里。',
-        '每个参数一个 parameter 标签；开标签写了 name，闭合标签也必须写同一个 name——**不要用省略名字的闭合写法**（那会让调用无法解析）。',
-        '每个 invoke 都要有开标签与闭标签；参数值直接写，不要加引号。一次回复可以写多个 invoke。',
+        // 0.16.18：教**官方训练模板**（`<｜tool▁calls▁begin｜>` 家族，逐字依据见
+        // 常量区 OFFICIAL_BAR 注释）。0.16.2 教的 DSML 是网页端自带格式、官方仓库
+        // 零命中，模型对它无训练先验 → 长跑必然持续漂移（夹具 15–20 + run-8 四形状
+        // + reply-log 21 份失败原文）；官方模板是模型被训练时见过的形状，从根上
+        // 止血。DSML 全套解析宽容**保留为备案不删**（normalizeDsml 继续认），只是
+        // 不再教——教学只认一种形状，是防漂移的同一纪律。
+        '需要调用工具时，用下面的官方工具调用格式输出（DeepSeek 原生模板，唯一格式）：',
+        officialToolCallSkeleton(),
+        '标记必须逐字完整：竖线、词间连接符（▁）、begin/end 一个都不能少，不要改成空格、不要拆行、不要自创词形。',
+        'sep 之后是一个完整的 JSON 对象：required 里的每个必填参数都要在（purpose 不能替代任何必填参数）；无参数的工具 arguments 写 {}；不要加 ```json 围栏。',
+        '多个调用就在同一对 calls begin / calls end 里重复 call begin / sep / call end 段（见上面骨架的第二行）；一次回复可以写多个调用。',
+        '带属性的老写法（string="true" 等）与 ｜｜DSML｜｜ 标记写法已废弃，不要再用。',
       ] : [
         '需要调用工具时，任选下面一种格式输出（两种都能被识别，推荐格式 A）：',
         '格式 A（推荐，以标签包裹）：',
@@ -408,10 +484,10 @@ export function serializeFirstTurn(options = {}) {
   const transport = !options.tools?.length ? '' : options.siteId === 'glm'
     ? '\n[本地工具传输协议]\n必须使用 ```json 代码块发起工具调用：先写一行 ```json，下一行是单个 JSON 对象 {"mcp_action":"call","name":"实际工具名","purpose":"原因","arguments":{…}}，再以一行 ``` 结束。不要使用 <tool_call> 等标签包裹——本网页会把这些标签当成它自己的内置工具抢走执行并报 unknown tool call，调用会静默丢失。工具名和参数必须严格匹配上面的 schema（arguments 必须包含 required 里的每个字段，如 pwsh 的 description）。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。' + presentTransportNote(options.tools)
     : options.siteId === 'deepseek'
-      // 0.16.2：与首轮教学、增量轮再教学同源（DSML_ONE_LINE 是唯一骨架）。
-      // 「省略名字的闭合写法」这一句必须在传输协议里也出现一次——它是夹具 13
-      // 那一族漂移的直接对策，而模型在收尾那一刻最容易忘。
-      ? "\n[本地工具传输协议]\n用本网页原生的 DSML 发起工具调用，形状：" + DSML_ONE_LINE + "。标记必须完整写成 " + DSML_BAR + "DSML" + DSML_BAR + "（四个字母，不要缩写成 DSH）。开标签写了 name，闭合标签必须写同一个 name，不要用省略名字的闭合写法。" + "工具名和参数必须严格匹配上面的 schema。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。" + presentTransportNote(options.tools)
+      // 0.16.18：与首轮教学、增量轮再教学同源（官方训练模板是唯一骨架；
+      // officialToolCallSkeleton 与 buildPreset / TRAIN_NOTE_OFFICIAL 三处同一形状）。
+      // 「立即停止等待结果」这句行为约束保持逐字——它不属于格式、属于时序。
+      ? "\n[本地工具传输协议]\n用官方工具调用格式（DeepSeek 原生模板）发起工具调用，形状：" + officialToolCallSkeleton() + "。标记必须逐字完整：竖线、词间连接符（▁）、begin/end 一个都不能少，不要改成空格、不要拆行。sep 之后是完整 JSON 对象，required 的每个必填参数都要在；无参数的工具 arguments 写 {}；不要加 ```json 围栏。工具名和参数必须严格匹配上面的 schema。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。" + presentTransportNote(options.tools)
     : '\n[本地工具传输协议]\n必须使用 <tool_call>{"mcp_action":"call","name":"实际工具名","arguments":{}}</tool_call> 发起工具调用。工具名和参数必须严格匹配上面的 schema。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。' + presentTransportNote(options.tools);
   const budget = Number(options.maxPromptChars);
   if (!Number.isFinite(budget) || budget <= 0) {
@@ -828,18 +904,23 @@ function jsonObjectIn(text) {
  * 换行也吃掉，凭空把散文接成 `<hello` 这种假标签。
  */
 export function normalizeDsml(text) {
+  // 官方 tool-call 模板先行（0.16.18）：训练先验形状 → 规范 invoke 形。它必须在
+  // 下面所有规则之前——官方 token 与 DSML 标记同用 U+FF5C 竖线，先折成规范标签
+  // 后，DSML 规则对产物无副作用（规范标签不含 DSML 标记）；恢复层
+  // （recoverUnparsedCalls）与流式探测（partialProtocolAt）都走 normalizeDsml，
+  // 这里一改三层受益。
+  //
   // 先做无名闭合标签的栈式还原（0.16.2）：它必须在下面几条规则**之前**跑，
   // 因为那些规则会把标记剥掉、之后就再也认不出原本该闭合的是 parameter 还是
   // invoke。两个真机形态（夹具 13 的匿名闭合、夹具 7 的缺 invoke 开标签）
   // 都靠这一步救回。纯函数，见 lib/dsml-repair.js。
-  //
+  return repairNamelessClosers(rewriteOfficialToolCalls(String(text ?? '')))
   // ⚠ 0.16.5 词形宽容的**已知缺口**（照实写下，别当它不存在）：上面这步
   //   （lib/dsml-repair.js）的标记正则里 `DSML` 是字面量，所以 `｜｜DSH` 族的
   //   **无名闭合**（`/｜｜DSH｜>` 这种）救不回来。真机 063b 的 155 处畸形里
   //   无名闭合 **0** 处，缺口不落在已观测路径上；补它要把 dsml-repair 的正则
   //   也参数化，那是另一个改动单元，不在本次范围。
-  return repairNamelessClosers(String(text ?? ''))
-    // 带开头 `<`，且后面确实是已知标记名：连标记与标记后的空格一起吃掉。
+  // 带开头 `<`，且后面确实是已知标记名：连标记与标记后的空格一起吃掉。
     // 先写这条、再写不吃空格的兜底——正则按书写顺序执行，前者命中后后者不再有机会。
     // 0.16.5：词形放宽到 DSML|DSH|DS（真机 155/155 用的是 DSH，见常量区注释）。
     .replace(RE_DSML_OPEN, '<')
@@ -933,6 +1014,14 @@ const PROTOCOL_ANCHORS = [
   /```/,                                                           // ```json 围栏
   /\*\*Calling:/i,                                                 // 网页 Calling 渲染
   /(?:^|\n)[ \t]*\{/,                                              // 裸 JSON 对象行
+  // 官方 tool-call 训练模板 token（0.16.18）：`<｜tool▁…` 家族（U+FF5C + U+2581，
+  // 逐字模板见 RE_OFFICIAL_CALL 注释）。锚点职责只是「协议从这里开始」，与
+  // tool_result / 残片同纪律：**只进锚点，不进 transport**——是不是待执行的调用
+  // 由 parseAgentReply 按内容判定。宽松到 `<｜tool` 后跟 ▁ 或空白即命中：
+  // 断流轮的半截 token 也要扣住（findProtocolStart 命中后 normalizeDsml 才有机会
+  // 对协议区做官方→规范改写；没有这条锚点，官方格式整段漏成正文——红基线实测
+  // proseSafeEnd=全长、0 calls）。
+  new RegExp('<' + String.fromCharCode(0xFF5C) + '\\s*tool(?:' + String.fromCharCode(0x2581) + '|\\s)', 'i'),
 ];
 
 /**
@@ -1302,7 +1391,18 @@ export function partialProtocolAt(text, scope = 24) {
   // 「标记 + 完整已知标记名」折叠成这里的标准前缀，所以 `<｜｜DSH invoke` 进到
   // 这张表时已经是 `<invoke`。标记名也写了一半的（`<｜｜DSH inv`）归一化不动它，
   // 由下面的 dsmlHead 判据兜住。
-  const prefixes = ['<tool_call', '<tool_calls', '<toolcall', '<toolcalls', '<call_call', '<call', '<invoke', '<parameter', '<function', '<stories', '**Calling:'];
+  // 官方 tool-call 模板家族（0.16.18）：流式半成品扣留。`<｜tool` 覆盖更短的
+  // 尾部前缀；五个完整 token（▁ 词形 + 旧代空格词形）覆盖切在词中间的尾部。
+  // 与上面 `<toolcall` 无下划线族同一教训：锚点/前缀表与被保护的正则共享同一个
+  // 盲区时，「没有泄漏告警」是假阴性——这里在 normalizeDsml 收官方词形之前，
+  // 流式第一道防线必须先认它。
+  const officialPrefix = '<' + String.fromCharCode(0xFF5C) + 'tool';
+  const officialSep = String.fromCharCode(0x2581);
+  const prefixes = ['<tool_call', '<tool_calls', '<toolcall', '<toolcalls', '<call_call', '<call', '<invoke', '<parameter', '<function', '<stories', '**Calling:',
+    officialPrefix,
+    officialPrefix + officialSep + 'calls' + officialSep + 'begin', officialPrefix + officialSep + 'call' + officialSep + 'begin',
+    officialPrefix + officialSep + 'call' + officialSep + 'end', officialPrefix + officialSep + 'calls' + officialSep + 'end', officialPrefix + officialSep + 'sep',
+    officialPrefix + ' calls begin', officialPrefix + ' call begin', officialPrefix + ' call end', officialPrefix + ' calls end', officialPrefix + ' sep'];
   // 半成品标记的起点下标（归一化串上算出来的，再映射回原串）。
   const locate = (n) => {
     const tail = s.slice(s.length - n);
@@ -1917,7 +2017,25 @@ export function parseAgentReply(text, options = {}) {
       if (obj) { salvaged++; takeObj(JSON.stringify({ mcp_action: 'call', name: sm[1], arguments: obj })); }
     }
     // 已抢救出真调用、外壳名只是 tool_call/function 包装名时，别再挂一个假调用。
-    if (n > 0 && !(salvaged > 0 && wrapperName)) takeObj(JSON.stringify({ mcp_action: 'call', name: m[1], arguments: args }));
+    // 0.16.18：无参调用不再按「空 invoke」整条丢弃。官方模板下无参工具的
+    // arguments 就是 {}（cordis_inspect_list 的 schema 是 properties:{}），DSML
+    // 形态下模型也会写出空 body 的 invoke——run-8 真机里它的合法调用连续 3 次
+    // 被丢成 UNPARSED（reply-log FAIL#3/4/5）。接受条件收紧到四条同时成立：
+    // 名字非空、不是参数形包装壳（tool_call/function 家族仍按上面分支处理）、
+    // 体为空或完整 JSON 对象（含 {}）、且 invoke 位于 `<calls>` 包裹内——最后
+    // 这条是回归护栏钉出来的安全线（test/regression.test.mjs）：散文里
+    // 「可以像 <invoke name="read"></invoke> 这样调用」的举例不得触发，
+    // 而真机的无参调用都在 calls 包裹内。空名字的补壳 invoke
+    // （repairNamelessClosers 家族，name=""）维持丢弃——那才是「壳在等参数」。
+    const before = s.slice(0, m.index);
+    const insideCalls = (() => {
+      const lastOpen = before.lastIndexOf('<calls>');
+      return lastOpen >= 0 && lastOpen > before.lastIndexOf('</calls>');
+    })();
+    const emptyArgsOk = n === 0 && !wrapperName && String(m[1] || '').trim().length > 0
+      && insideCalls
+      && (String(m[2]).trim() === '' || jsonObjectIn(m[2]) !== null);
+    if ((n > 0 || emptyArgsOk) && !(salvaged > 0 && wrapperName)) takeObj(JSON.stringify({ mcp_action: 'call', name: m[1], arguments: args }));
   }
   const bareObjRe = /(\{\s*"mcp_action"\s*:\s*"call"[\s\S]*?\})\s*(?=<|$)/gi;
   while ((m = bareObjRe.exec(s)) !== null) takeObj(m[1]);

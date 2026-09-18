@@ -22,7 +22,7 @@ import { createBrowserDriver } from './browser-driver.js';
 import { zeroProgressDecision } from './zero-progress.js';
 import { idleWindowDecision } from './idle-window.js';
 import { createWebControl, buildSessionEvents, mainLineOf } from './web-control.js';
-import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, stripProtocolRegions, proseSafeEnd, readCallAt, partialProtocolAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeDsml, normCallArgs, inferToolNameFromArgs, recoverUnparsedCalls } from './agent-preset.js';
+import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, stripProtocolRegions, proseSafeEnd, readCallAt, partialProtocolAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeDsml, normCallArgs, inferToolNameFromArgs, recoverUnparsedCalls, officialToolCallSpecimen } from './agent-preset.js';
 import { appendReplyLog } from './reply-log.js';
 import { createMirror } from './mirror.js';
 import { httpFetch } from './upstream.js';
@@ -1672,7 +1672,9 @@ function unparsedCallNotice({ thinkAcc = '', tools = [], scene = null, withheld 
   return 'TOOL_CALL_UNPARSED: 网页这一轮发出了工具调用，但桥没能把它变成可执行的调用'
     + '（最常见原因：JSON 里漏写 name 字段，或参数 JSON 不配平/被截断）。'
     + `本会话可用工具：${list || '（无）'}。`
-    + `请按要求重发：<tool_call>{"mcp_action":"call","name":"工具名","arguments":{…}}</tool_call>`
+    // 0.16.18：重发指引改指官方训练模板（与首轮教学/再教学同一个形状；旧
+    // <tool_call>{mcp_action} 形状是 0.16.2 之前的教学遗产，模型对它没有先验）。
+    + `请按要求重发：${officialToolCallSpecimen('工具名', '{"参数名": "值"}')}`
     + '——name 不能省；如果任务不需要工具，请直接给出结论。'
     + (bits.length ? `（${bits.join('，')}）` : '')
     + (headText ? `\n被扣协议原文开头：${headText}` : '')
