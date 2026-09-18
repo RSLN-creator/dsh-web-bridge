@@ -20,17 +20,17 @@
 
 | 项 | 值 |
 | --- | --- |
-| 工作树版本 | **0.16.16** |
-| 已装版本（profile） | **0.16.16**（2026-09-19 实测：web + headless 逐 profile 核对，声明 `package.json`、`pnpm-lock.yaml`、`node_modules/dsh-webcode-bridge/package.json` 三处一致指向 `dsh-webcode-bridge-0.16.16.tgz`；`lib/index.js` sha256 前 12 位 `4B3C10D9C594` 与工作树一致。走 `dsh plugin --profile <name> add` 声明持久层通道，不会被 pnpm reconcile 回退） |
-| 运行中的进程 | headless 长跑验证以 `dsh --profile headless` 进程级验证（每次真机长跑即运行版核对）；DSH web（3080）2026-09-19 凌晨未运行 |
-| 上游 | `origin/main` = `9d4c61a`（0.16.10 台账推送）；0.16.11–0.16.16 本地已提交/待推 |
-| 单测基线 | **64/64 测试文件**；全量 **763 条**（0.16.15 为 756；0.16.16 新增：`dsml-param-shorthand` +5（至 10）、`dsml-real-drift-2026-09-19` +2（至 7）；真机夹具 `dsml-real-19/20` 入档） |
+| 工作树版本 | **0.16.17** |
+| 已装版本（profile） | **0.16.17**（2026-09-19 实测：web + headless 逐 profile 核对，声明 `package.json`、`pnpm-lock.yaml`、`node_modules/dsh-webcode-bridge/package.json` 三处一致指向 `dsh-webcode-bridge-0.16.17.tgz`；`lib/index.js` sha256 前 12 位 `7EB80626953E` 与工作树一致。走 `dsh plugin --profile <name> add` 声明持久层通道，不会被 pnpm reconcile 回退） |
+| 运行中的进程 | run-8 真机验收以 `dsh --profile headless` 进程级验证（0.16.16 时段）；DSH web（3080）2026-09-19 凌晨未运行 |
+| 上游 | `origin/main` = `9d4c61a`（0.16.10 台账推送）；0.16.11–0.16.17 本地已提交/待推 |
+| 单测基线 | **65/65 测试文件**；全量 **767 条**（0.16.16 为 763；0.16.17 新增：`reply-log` 4；真机夹具 `dsml-real-19/20` 已于 0.16.16 入档） |
 | 注释闸门 | **error 0 / warn 0，退出码 0**（2026-09-19 实跑） |
 | 文件规范闸门 | `check-repo-hygiene.mjs` **PASS**（无 BOM + 索引无死链 + CI/engines Node 版本相容） |
-| 发布闸门 | `verify-pack` 逐文件 sha256 相同 + 接线完好，退出 0（0.16.11 实跑，见 §0.16.11） |
-| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.16 / testFiles 64/64） |
-| 已装包核对 | 待 0.16.16 装机后逐 profile 核对（`package.json` 声明 + `lib/index.js` sha256，判据见 §0.16.16 四） |
-| 下一阶段 | **0.16.16 真机验收由用户执行**（判据见 §0.16.16 四：同任务重跑，grep/read 熔接形不再产生 isError；`｜｜DSML｜｜` 残片入参值形是否复发出现在残留风险里） |
+| 发布闸门 | `verify-pack` 逐文件 sha256 相同 + 接线完好，退出 0（0.16.16 实跑 37/37） |
+| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.17 / testFiles 65/65） |
+| 已装包核对 | 0.16.17 装机后逐 profile 核对（`package.json` 声明 + `lib/index.js` sha256，见当前状态表） |
+| 下一阶段 | **0.16.17 真机验收由用户执行**；下一版修漂移形状的前提已备齐——每轮原始回复全文落 `~/.dsh/logs/webcode-bridge-replies.log`，run-8 四种形状（§0.16.17 一）重跑后即可逐字取证 |
 
 > **§0.16.10 真机判据（重启后逐条核）**：① `GET /__webcode/status` 的 `build.version` = **0.16.10**；
 > ② 让模型回复一段含 `<b>`、`<foo>`、`Array<T>` 或字面 `<tool_call>` 示例的正文，**逐字对比** harness
@@ -43,6 +43,50 @@
 > 掩盖了「web 落后两个版本」这个真因，直接导致用户按台账以为装好了、重启后仍然不变。
 > **教训记在这里而不是删掉**：凡是「已装/已重启/已验证」这类状态行，**必须逐 profile 写、并附
 > sha256 前 12 位**，否则它会把「一个 profile 装了」读成「都装了」。 |
+
+## 0.16.17（2026-09-19）—— 网页原始回复全文落盘：取证断链第三次后的补链
+
+**用户指令（逐字）**：「刚才这个又是怎么回事》？有无保留原接收内容日志？没有请你新增」
+
+### 一、run-8 取证（0.16.16 真机验收，`session-0fd32761`，04:08–04:56）
+
+99 次调用、2 isError、**4 次 TOOL_CALL_UNPARSED（扣留 693/1003/1470/1474 字符，
+四种形状全部不同）**、0 恢复派发：
+
+| 时间 | 扣留量 | 头 200 字符可见的形状 |
+| --- | --- | --- |
+| 04:24:01 | 693 | 读 `dsh-client-ui-conversation` 类型文件；畸形在 200 字符之外 |
+| 04:27:24 | 1003 | `client.cjs` 参数正常闭合、下一参数开标签正常起头；畸形在 200 之外 |
+| 04:28:08 | 1470 | `<invoke>` 后出现 `parameter name="pwsh">`（参数名写成工具名）再接 `command` |
+| 04:56:28 | 1474 | edit 调用：`file_path` 完全正常，其后 `<｜ olds_string`——简写漂移（夹具 15 同族）**且参数名拼错**、old_string 值是含 `<` 的代码（0.16.12 改写的安全线「值内不得再出现 `<`」在此拒绝改写） |
+
+2 条 isError 均 `missing required property "file_path"`（read 只带 limit/offset）——
+`TOOL_ARGS_MISSING_REQUIRED` 同族在 0.16.16 后仍以新形状复现。
+
+### 二、根因（运维侧，不是解析侧）
+
+**四种形状的 1474/1470/1003/693 字符全文在磁盘上都不存在**。0.16.13 的
+「扣留全文进日志」走 `console.warn`（lib/index.js `warn`）→ DSH 进程 stderr →
+运行时不持久化。会话存档只有提示里那 200 字符头。归因第三次断链
+（15/16 只存头 200 → 19/20 靠残片重构 → run-8 连重构依据都没有）。
+
+### 三、修法（`lib/reply-log.js` + `lib/index.js` 接线）
+
+- 每轮收尾（`parseAgentReply` 之后、分支之前）把**原始回复全文**（未归一化、未截断）
+  追加到 `~/.dsh/logs/webcode-bridge-replies.log`：头行定界 + 时间/会话/字符数/调用数，
+  尾行定界；超 10 MB 轮转一代 `.1`；
+- 写失败静默返回 null，绝不影响回合；测试进程（`NODE_TEST_CONTEXT`）守卫：
+  不写真实目录（`glm-session-replay`/`empty-response` 等真接线测试不再污染），
+  环境变量 `WEBCODE_REPLY_LOG_DIR` 可重定向；
+- 0.16.13 的 stderr 全文打印降级为指路（打印日志文件路径）；
+- **接线真实验证**：`WEBCODE_REPLY_LOG_DIR=$(mktemp -d) node --test test/empty-response.test.mjs`
+  产出真实日志记录（头行 + 原文 + 尾行）——桩驱动测试绕不过文件系统，这不算
+  「无自动化红线的接线披露」。
+
+### 四、下一版怎么用这份日志
+
+run-8 的四种形状重跑复现后，从 `webcode-bridge-replies.log` 按 session 与时间定位
+原文，逐字入夹具（15–20 的同一纪律），再谈改写规则——不再有「全文未落盘」这一步。
 
 ## 0.16.16（2026-09-19）—— 闭/开参数标记「熔接」宽容：run-7 isError 7 条的根因收口
 

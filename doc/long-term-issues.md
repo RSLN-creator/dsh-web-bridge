@@ -1434,9 +1434,14 @@ if (!isCall) return;      // ← JSON 合法、只是没写 name ⇒ 静默丢�
   `normalizeDsml` 熔接改写已修（0.16.16，夹具 19/20；红基线污染值与真机 `tool/call`
   存档逐字复现）。本形解析**成功**、参数脏，不走 UNPARSED——后果是
   `missing required property` / `not found` 类 isError 回流（台账同族归因落定）；
-- **残余风险**：漂移形状持续翻新（一晚 5 种），不可恢复形状仍走 UNPARSED 提示；
+- **残余风险**：漂移形状持续翻新（run-8 一轮 4 种：693/1003/1470/1474 字符，
+  `session-0fd32761` 2026-09-19 04:24–04:56，含简写+参数名拼错 `olds_string`、
+  参数名写成工具名 `parameter name="pwsh"` 等；畸形全部在提示头 200 字符之外，
+  全文当时未落盘、形状待取证）；0.16.17 起每轮原始回复全文落
+  `~/.dsh/logs/webcode-bridge-replies.log`（`lib/reply-log.js`），复现后即可逐字入夹具；
   `｜｜DSML｜｜` 残片入参数值形未修（保守原则：不剥参数值内部标记）；
-  0.16.14 起长跑实测 **0 UNPARSED**；
+  0.16.14 起 long-run 实测 **0 UNPARSED 的窗口已被 run-8 打破**（4 次，全部收束
+  原因 finished、循环存活但 edit/pwsh 步骤丢失需重发）；
 - 无人值守循环把纯文本提示轮当最终答案的终止问题，靠恢复派发使循环存活，
   DSH 侧循环语义未动（不属于本仓库）。
 

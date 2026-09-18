@@ -141,3 +141,18 @@ turn 按 `completed` 收束。**后果：CodeQL 与 CI 四条腿的结论在会�
 取证命令：python `zstandard` 解码后按 `data.message.content[].isError` 过滤，
 配对 `tool/call` 取 `arguments`；污染值与会话存档逐字一致，夹具 19/20 的红基线
 即以「0.16.15 代码复现存档污染值」为口径。
+
+## 七、后续补记（2026-09-19 上午）：run-8（0.16.16 验收轮）四次 UNPARSED 与「全文未落盘」断链
+
+会话 `session-0fd32761`（04:08–04:56）：99 次调用、2 isError
+（`missing required property "file_path"` ×2）、**4 次 TOOL_CALL_UNPARSED**
+（扣留 693 / 1003 / 1470 / 1474 字符，四种形状全部不同）、0 恢复派发（edit/pwsh
+均在写类白名单外，#23 红线正确拒绝）。04:56 那次的头 200 字符可见
+`<｜ olds_string`——简写漂移（夹具 15 同族）且参数名拼错、old_string 值是含 `<`
+的代码（0.16.12 改写安全线在此拒绝改写）；其余三次畸形全部在 200 字符之外。
+
+**运维断链（第三次）**：0.16.13 的「扣留全文进日志」走 `console.warn` → DSH 进程
+stderr → 运行时不持久化，四种形状全文在磁盘上都不存在。0.16.17 起每轮原始回复
+全文落 `~/.dsh/logs/webcode-bridge-replies.log`（`lib/reply-log.js`，头尾定界 +
+轮转 + 失败静默 + 测试进程守卫），接线用「环境变量重定向 + 既有桩驱动测试」
+做了真实验证。取证口径：按头行 `session=` 与时间定位记录，正文即网页原话逐字。

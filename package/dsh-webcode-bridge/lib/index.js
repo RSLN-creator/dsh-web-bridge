@@ -23,6 +23,7 @@ import { zeroProgressDecision } from './zero-progress.js';
 import { idleWindowDecision } from './idle-window.js';
 import { createWebControl, buildSessionEvents, mainLineOf } from './web-control.js';
 import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, stripProtocolRegions, proseSafeEnd, readCallAt, partialProtocolAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeDsml, normCallArgs, inferToolNameFromArgs, recoverUnparsedCalls } from './agent-preset.js';
+import { appendReplyLog } from './reply-log.js';
 import { createMirror } from './mirror.js';
 import { httpFetch } from './upstream.js';
 import { textOfBlocks } from './flatten.js';
@@ -1221,6 +1222,16 @@ export function apply(ctx, config = {}) {
       assertNonEmpty(finalText, thinkAcc, endImages);
 
       const { calls, diagnostics } = parseAgentReply(finalText, { tools });
+      // 0.16.17：每轮原始回复全文落盘（lib/reply-log.js）。0.16.13 的「扣留全文进
+      // 日志」走 console.warn，只到 DSH 进程 stderr、运行时不持久化——run-8 扣留
+      // 1474 字符后磁盘上只剩提示里的 200 字符头，归因第三次断链（用户明确要求
+      // 保留原接收内容日志）。写失败静默（模块内吞掉），绝不影响回合交付。
+      const replyLogPath = appendReplyLog(finalText, {
+        sessionId: options?.sessionId ?? null,
+        chars: finalText.length,
+        calls: calls.length,
+        note: 'raw reply, verbatim',
+      });
       // 0.15.6：**丢调用不再静默**。旧实现的 `takeObj` 把「看起来是调用、但解析
       // 不出来」和「这段本来就不是调用」压成同一个结果，一次丢调用在会话、在 UI、
       // 在日志里都不留痕——参数含 markdown 围栏的 write 调用被丢、报告从未落盘，
@@ -1440,7 +1451,11 @@ export function apply(ctx, config = {}) {
         if (withheld > 0 && !calls.length) {
           // 扣留全文进日志（只进日志、不进会话）：真机漂移每次形状不同且头部
           // 200 字符可能完全正常（run-3 实测），没有全量原文就无法离线归因。
-          warn(`withheld protocol text (log-only full copy): ${finalText.slice(safe)}`);
+          // 0.16.17 起全文随每轮原始回复落 `~/.dsh/logs/webcode-bridge-replies.log`
+          // （replyLogPath 在上方 parseAgentReply 之后已写入）；console 这条降级为
+          // 指路——旧实现把全文打到 stderr，DSH 运行时不持久化 stderr，等于没落盘
+          // （run-8 实证：1474 字符全文只剩 200 字符头）。
+          warn(`withheld protocol text (log-only full copy): ${replyLogPath || 'reply-log unavailable, see lib/reply-log.js'}`);
           // 0.16.12 恢复派发：无人值守循环把「纯文本提示轮」当最终答案收场
           // （长跑第 2/3 轮分别死在 13 分钟 / 8 分钟）。白名单只读工具且参数
           // 可读时，把模型本就打算发起的调用送达——循环靠工具结果存活；
