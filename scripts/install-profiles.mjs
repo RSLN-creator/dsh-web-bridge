@@ -28,6 +28,19 @@
 // 退出码：0 = 两个 profile 都装好且核对通过；1 = 任一步失败。
 //
 // ⚠ 装完不会自动生效：DSH 进程里已经加载的是旧代码，需要重启 DSH 才会加载新版本。
+//
+// ⚠⚠ **本脚本绕开 pnpm，因此它的装载不持久**（2026-09-18 真机确证，第三次踩同一族坑）。
+//   它只写 `node_modules`，**不改 profile 的声明**（`package.json` / `pnpm-lock.yaml` /
+//   `node_modules/.modules.yaml`）。若声明仍钉在旧 tarball 上，任何一次 pnpm 通道
+//   （`dsh plugin`、dshmarket 装插件、启动期 reconcile）都会按 lockfile 重建
+//   `node_modules`，把这里装好的版本**静默回退**成声明里那个版本。
+//   真机现场：22:16:38 用本脚本装好 0.16.10，22:21:32 一趟 pnpm 把它换回 0.16.5，
+//   22:21:40 启动的进程于是加载到 0.16.5 —— 用户看到的现象是「装好又变回去」，
+//   而两边的读数（磁盘 vs 进程）各自都是真的。
+//   因此：**要么用 `dsh plugin --profile <p> add <tgz>` 让 pnpm 自己更新声明**
+//   （推荐：声明与内容一起动，重启后不会被回退），**要么在跑完本脚本后手工把声明
+//   改成同一个 tarball**。判据永远是声明，不是 `node_modules` 里的文件。
+//   详见 `doc/progress.md` §0.16.10 七。
 
 import fs from 'node:fs';
 import os from 'node:os';

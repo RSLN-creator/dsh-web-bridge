@@ -21,16 +21,17 @@
 | 项 | 值 |
 | --- | --- |
 | 工作树版本 | **0.16.10** |
-| 已装版本（profile） | **0.16.9**（web + headless 两个 profile **实测均为 0.16.9**；`verify-pack` **37/37 逐字相同 + 接线完好**、退出 0；两个 profile 的 `lib/index.js` sha256 与工作树**逐一相同**。⚠ **0.16.10 尚未打包/装机/重启**） |
-| 运行中的进程 | **0.16.9**（2026-09-19 实测 `GET /__webcode/status` → `build.version=0.16.9 hash=a230270c3213`。**上一轮的「重启无效」已确认解决**：那次重启发生在 0.16.8 打包之前，装的是 0.16.5） |
-| 上游 | `origin/main` = `4f24fd1`（2026-09-18；0.16.7 已推送并打 tag **v0.16.7**。0.16.8/0.16.9 已提交本地；0.16.10 未提交） |
+| 已装版本（profile） | **0.16.10**（web + headless 两个 profile **逐 profile 实测均为 0.16.10**，`lib/index.js` sha256 前 12 位均 `91C212DEDAF4`，与工作树**逐一相同**；`verify-pack` **37/37 逐字相同 + 接线完好**、退出 0） |
+| 运行中的进程 | **0.16.10**（2026-09-18 实测 `GET /__webcode/status` → `build.version=0.16.10 hash=0f5625187573`，监听 PID 14052。**上一轮的「重启无效」已确认解决**：那次重启发生在 0.16.8 打包之前，装的是 0.16.5） |
+| **装载持久性** | **本次已修**：`profiles/web` 的**声明**（`package.json` / `pnpm-lock.yaml` / `.modules.yaml`）原先钉着 `.tmp/…0.16.5.tgz`，任何一次 pnpm 通道都会把 `node_modules` 重建回 0.16.5 —— 这是「装好又变回去」的真因。现已改为 `package/…0.16.10.tgz`，重启后声明未被改动（见 §0.16.10 七、） |
+| 上游 | `origin/main` = `4f24fd1`（2026-09-18；0.16.7 已推送并打 tag **v0.16.7**。0.16.8/0.16.9/0.16.10 均已提交本地，**本轮推送**） |
 | 单测基线 | **58/58 测试文件**；**全量 729/729 通过、0 失败**（0.16.10 实跑，逐文件 `node --test test/*.test.mjs`；`stream-tail` 由 10 → **9 条**（删掉 1 条重复覆盖），新增 2 条 0.16.10 护栏） |
 | 注释闸门 | **error 0 / warn 0，退出码 0**（2026-09-19 实跑） |
 | 文件规范闸门 | `check-repo-hygiene.mjs` **PASS**（无 BOM + 索引无死链 + CI/engines Node 版本相容） |
-| 发布闸门 | `verify-pack` **37/37 逐字相同 + 接线完好**，退出 0（0.16.9 时实跑；**0.16.10 待重跑**） |
+| 发布闸门 | `verify-pack` **37/37 逐字相同 + 接线完好**，退出 0（0.16.10 实跑） |
 | 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.10 / testFiles 58/58） |
-| 已装包核对 | 两个 profile 都是 **0.16.9**，`lib/index.js` sha256 与工作树**逐一相同**（`verify-pack` 之外的独立第二次核对；**0.16.10 待重做**） |
-| 下一阶段 | ① **重启 `dsh web`**（0.16.10 打包装机后）——0.16.10 修的是「正文静默丢字符」，重启前的进程仍带着该缺陷；② 重启后按 §0.16.10 的真机判据复验 |
+| 已装包核对 | 两个 profile 都是 **0.16.10**，`lib/index.js` sha256 与工作树**逐一相同**（`verify-pack` 之外的独立第二次核对，0.16.10 实做） |
+| 下一阶段 | ① 按 §0.16.10 的**真机判据**复验正文逐字保真（重启已完成，护栏 9/9 + 8/8 已绿；真机那一步仍待用户发言时验证）；② 视情况补 `long-term-issues.md` 的「声明才是持久层」一条 |
 
 > **§0.16.10 真机判据（重启后逐条核）**：① `GET /__webcode/status` 的 `build.version` = **0.16.10**；
 > ② 让模型回复一段含 `<b>`、`<foo>`、`Array<T>` 或字面 `<tool_call>` 示例的正文，**逐字对比** harness
@@ -73,7 +74,7 @@
 > 本轮结束后实测为 **59 项（19 改 + 40 新）**，`origin/main` 仍停在 `6b836d2`。
 > 上游那一行与 `git status` 的口径不变，只是数字长大了——**这不是漂移，是同一笔欠账在变厚**。
 
-## 0.16.10（已改动 / **待打包·装机·重启**）—— 流式正文里孤立的 `<` 被静默吞掉
+## 0.16.10（已打包 / 已装 / **已重启并生效**）—— 流式正文里孤立的 `<` 被静默吞掉
 
 **用户原话**（两轮，跨两个会话）：「partialProtocolAt 把孤立 `<` 当半截协议标记，围栏里
 `if (x < 10)` 会变 `if (x  10)` 这个不能就是外界包裹吗？」「你到底什么问题？还是规则设置错误？？」
@@ -170,7 +171,7 @@ const tagDebris = tagOnly && hasTagChar && proseChunk !== '<';
 | 注释闸门 | **error 0 / warn 0** |
 | 记账闸门 | **PASS**（version 0.16.10 / testFiles 58/58） |
 | 文件规范闸门 | **PASS** |
-| `ref-index` 闸门 | **FAIL —— 既有欠账，与本轮无关**（已用 `git stash` 在 HEAD 上复现同一失败：`reference/web-login` 本机目录与 README 表不一致，1/40 条） |
+| `ref-index` 闸门 | **本机 FAIL / CI PASS —— 环境差异，非本轮回归**。本机 `--check` 报 `web-login` 1/40 不一致（磁盘上是 npm 包解包、README 那行是人手写并记了具体包名）。`scripts/gen-reference-index.mjs:233-242` **只校验「本机确实存在」的条目**，干净检出里 `present.length === 0` 于是正常通过（:257）——所以 CI（含本轮推送）不会因此变红。想在本机消掉它，需人工对齐 `reference/README.md` 的 `web-login` 行 |
 
 ### 六、顺带记录：用户报的「错误提示反复出现」的真身
 
@@ -188,6 +189,56 @@ const tagDebris = tagOnly && hasTagChar && proseChunk !== '<';
 （模型发的是缺 `name` 的调用，或参数 JSON 被断流截断）。真正的问题是**根因未除**，
 而不是提示本身写错了。本轮修掉的孤立 `<` 是同一族「字符在桥里被静默吃掉」缺陷的一条，
 但**缺 `name` 的调用与断流截断仍各有独立成因**，见 `doc/bridge-failure-ledger.md`。
+
+### 七、装机持久性：「装好又变回去」的真因是**声明**没改（本轮最重要的一条）
+
+用户原话：「**装载 ≠ 生效**」——上一轮实测到进程曾跑到 `0.16.9 / a230270c3213`，但下一次
+查看又变回 `0.16.5 / 25effcbe0096`，而磁盘上 `package/` 已是 0.16.10。
+
+**根因（读三处声明 + 两条时间线确证）**：`profiles/web` 的**版本声明**一直钉在旧 tarball 上——
+
+| 位置 | 装载前的内容 |
+| --- | --- |
+| `profiles/web/package.json` | `"dsh-webcode-bridge": "file:…/.tmp/dsh-webcode-bridge-0.16.5.tgz"` |
+| `profiles/web/pnpm-lock.yaml:27/106` | 同一条 `.tmp/…0.16.5.tgz` |
+| `profiles/web/node_modules/.modules.yaml:28` | 同一条 `.tmp/…0.16.5.tgz` |
+
+而 `scripts/install-profiles.mjs` 走的是「**先删目录再解包**」，**绕开 pnpm、也绕开 `package.json`**
+（`scripts/install-profiles.mjs:79-92`）——这是它设计上的优点（免疫 pnpm 同版本
+「Already up to date」不重解），但代价是：**它写进去的东西不属于声明**。于是任何一次 pnpm
+通道（`dsh plugin`、dshmarket 装插件、启动期 reconcile）都会按 lockfile 重建 `node_modules`，
+把已装的 0.16.9/0.16.10 **打回 0.16.5**。
+
+**实测时间线**（同一轮内）：
+
+```
+22:16:22  0.16.10.tgz 打包（425,405 字节）
+22:16:38  装进 headless（只有 headless）
+22:21:32  web\node_modules、.pnpm\lock.yaml、.modules.yaml、
+          node_modules\dsh-webcode-bridge 四个路径同时被写（一趟 pnpm 重建）
+22:21:40  dsh web 进程启动 —— 迟 8 秒，于是加载到刚被换回去的 0.16.5
+```
+
+`node_modules\dsh-webcode-bridge\lib\index.js` 当时是 **pnpm store 的硬链接**
+（`fsutil hardlink list` 只有两个名字：profile 里这个 + `…\pnpm\store\v11\files\2c\56a6…`），
+所以那趟重建不是「多写了一份」，而是把唯一那份内容换掉了。
+
+**持久修法（本轮采用）**：不再往 `node_modules` 里塞文件，而是让 pnpm 自己把 0.16.10
+装成**声明的一部分**：
+
+```powershell
+dsh plugin --profile web add D:\…\package\dsh-webcode-bridge\dsh-webcode-bridge-0.16.10.tgz
+```
+
+它同时更新 `package.json` + `pnpm-lock.yaml` + `node_modules`，并跑
+`reconcilePlugins` 保住 bundle 层（`@deepseek-ai/dsh/lib/plugin-Ddi42qoW.js:101-128`）。
+装后三处声明均改为 `file:…/package/dsh-webcode-bridge/dsh-webcode-bridge-0.16.10.tgz`，
+**重启后声明未被改动**——这正是「这次不会再变回去」的判据。
+
+**教训（与 §「台账更正」同族）**：`install-profiles.mjs` 的注释值得补一条——
+「**绕过 pnpm 的装载不持久**：它只在声明也指向同一版本时才是终态，否则下一次 pnpm
+通道会静默回退」。凡是「装好了」的结论，**必须以声明（`package.json` / lockfile）为准，
+不能以 `node_modules` 里的文件为准**。
 
 ## 0.16.9（已打包 / 已装 / **已重启并生效**）—— 三件事：markdown 逐字保真、禁令可核对、`pnpm test` 死锁解除
 
