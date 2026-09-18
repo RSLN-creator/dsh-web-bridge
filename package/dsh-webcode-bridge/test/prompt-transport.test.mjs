@@ -141,19 +141,69 @@ test('⑨b 站点禁令不误伤别的站点：GLM 超阈值仍走附件（输�
 // 读数、status 也不投影这个布尔量。后果是真机上「禁令生效没有」完全看不出来：
 // 读数停在上一轮的旧值，而 attach-status 还在承诺「超 60000 字符改走附件」。
 // 这条钉的是「禁令必须能从读数里看见」——只 warn 到控制台等于没有读数。
+//
+// ## 为什么这条是**行为**断言而不是源码 grep（2026-09-19 对抗验证的教训）
+//
+// 本用例最初写成 `fs.readFileSync(lib/browser-driver.js)` + `assert.match`。对抗验证
+// 实测它是**弱护栏**：那条正则
+//
+//     /attachForbidden:\s*ATTACH_FORBIDDEN_SITES\.has\(siteId\)/
+//
+// 同时命中两处——`status()` 的投影，以及 `promptTransportPlan({ attachForbidden: … })`
+// 的**入参**。于是只删掉 status 投影（或只删掉那行入参）时，另一处仍然满足正则，
+// 用例**照样全绿**。它只证明了「这个子串在文件里存在过」，没法区分「status 暴露了
+// 禁令」与「某个无关的调用传了这个开关」——而这正是本护栏要防的那件事。
+// 现在改为**驱动真实代码**：构造驱动读 `status()`、调用真实 `attach-status` 动作。
 test('⑩ 站点禁令必须可核对：status 投影带 attachForbidden，且 site-no-attach 会落读数', async () => {
-  const fs = await import('node:fs');
   const path = await import('node:path');
+  const { pathToFileURL } = await import('node:url');
   const pkg = path.dirname(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')));
-  const src = fs.readFileSync(path.join(pkg, 'lib', 'browser-driver.js'), 'utf8');
-  // ① status 投影里必须有 attachForbidden（面板与 /status 靠它显示站点事实）。
-  assert.match(src, /attachForbidden:\s*ATTACH_FORBIDDEN_SITES\.has\(siteId\)/,
-    'status 没投影站点禁令 ⇒ 用户无法核对禁令是否生效');
-  // ② site-no-attach 分支必须写 attachTransport 读数，且带独立 code。
-  assert.match(src, /SITE_NO_ATTACH/,
-    'site-no-attach 分支没落读数 ⇒ 读数停在上一轮旧值，看不出这一轮走了禁令');
-  // ③ 面板文案必须停止在禁站点上承诺附件投递。
-  const wc = fs.readFileSync(path.join(pkg, 'lib', 'web-control.js'), 'utf8');
-  assert.match(wc, /永不使用附件投递/,
-    'attach-status 仍在禁站点上承诺「超阈值改走附件」⇒ 面板与驱动互相矛盾');
+
+  // ① status() 必须**真的**把站点事实暴露出来（不是源码里有这个子串）。
+  const bd = await import(pathToFileURL(path.join(pkg, 'lib', 'browser-driver.js')).href);
+  const driver = bd.createBrowserDriver({
+    siteId: 'deepseek',
+    site: 'deepseek',
+    profileDir: path.join(pkg, '.tmp', 'test10-profile'),
+    logger: { log() {}, warn() {} },
+    context: {},
+  });
+  assert.equal(typeof driver.status, 'function', '驱动必须可读 status()');
+  const st = driver.status();
+  assert.equal(st.attachForbidden, true,
+    'status() 没有投影站点禁令（attachForbidden）⇒ 用户与面板都无法核对禁令是否生效');
+  assert.equal(st.siteId, 'deepseek', 'status() 必须带上站点身份，否则读数无法归因');
+  await driver.stop?.();
+
+  // ② 禁令必须在判定层压过一切「想走附件」的输入——包括用户把设置面设成 attach。
+  const plan = promptTransportPlan({
+    chars: 999_999, inlineLimit: 60_000, attachEnabled: true, attachSupported: true,
+    attachForbidden: true, transport: 'attach',
+  });
+  assert.equal(plan.mode, 'inline',
+    '设置面能把禁站点拉回附件 ⇒ 禁令可被绕过（' + plan.mode + '/' + plan.reason + '）');
+
+  // ③ 面板文案必须按站点事实陈述，且**不能**在禁站点上承诺附件投递。
+  const wc = await import(pathToFileURL(path.join(pkg, 'lib', 'web-control.js')).href);
+  const control = wc.createWebControl({
+    driver: { status: () => st },
+    relay: null,
+    config: {},
+    logger: { log() {}, warn() {}, error() {} },
+  });
+  const fn = control.actions['GET attach-status'];
+  assert.equal(typeof fn, 'function', 'attach-status 动作必须存在');
+  const forbidden = await fn({}, {});
+  assert.match(String(forbidden.transportLine), /永不使用附件投递/,
+    '面板仍在禁站点上承诺「超阈值改走附件」⇒ 面板与驱动互相矛盾');
+  // 反例对照：非禁站点**不许**被这条文案误伤。
+  const other = wc.createWebControl({
+    driver: { status: () => ({ ...st, siteId: 'glm', attachForbidden: false }) },
+    relay: null,
+    config: {},
+    logger: { log() {}, warn() {}, error() {} },
+  });
+  const glmOut = await other.actions['GET attach-status']({}, {});
+  assert.doesNotMatch(String(glmOut.transportLine), /永不使用附件投递/,
+    '站点禁令文案被套用到了非禁站点（GLM 需要附件投递）');
 });
