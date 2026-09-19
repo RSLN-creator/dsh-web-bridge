@@ -17,7 +17,11 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseAgentReply, proseSafeEnd, normalizeDsml, officialToolCallSpecimen, officialToolCallSkeleton } from '../lib/agent-preset.js';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { parseAgentReply, proseSafeEnd, normalizeDsml, officialToolCallSpecimen, officialToolCallSkeletonFor, officialCallExampleFor } from '../lib/agent-preset.js';
+
+const f19echo = readFileSync(path.join(import.meta.dirname, 'fixtures', 'official-echo-1-run9-fenced-template.txt'), 'utf8');
 
 const B = String.fromCharCode(0xFF5C);
 const S = String.fromCharCode(0x2581);
@@ -86,12 +90,41 @@ test('反向安全线：无名字的壳 invoke 维持丢弃（repairNamelessClos
   assert.equal(nameless.length, 0, '空名字壳不得变成调用');
 });
 
-test('教学骨架：officialToolCallSpecimen/Skeleton 是官方逐字 token；normalizeDsml 能吃回自己教的形状', () => {
+test('教学骨架：officialToolCallSkeletonFor 用真实工具名（run-9 教训：占位符被照抄成真调用）', () => {
   const specimen = officialToolCallSpecimen();
   assert.ok(specimen.startsWith('<' + B + 'tool' + S + 'calls'), 'specimen 必须以官方 calls begin token 开头');
   assert.ok(specimen.endsWith('<' + B + 'tool' + S + 'calls' + S + 'end' + B + '>'), 'specimen 必须以官方 calls end token 结尾');
-  const r = parseAgentReply(officialToolCallSkeleton(), { tools: T });
-  assert.equal(r.calls.length, 2, '骨架占位名不是真实工具，但结构必须可解析为 2 条（随后被工具表过滤）');
+  // 无工具表（纯测试场景）退回占位符；结构可解析为 2 条（随后被工具表过滤）。
+  assert.equal(parseAgentReply(officialToolCallSkeletonFor([]), { tools: T }).calls.length, 1, '两条相同占位示例按内容签名去重合成 1 条（0.15.6 家族，按设计）');
+  // 有工具表时示例名必须是真实工具（0.16.19）——这是 run-9 TOOL_UNKNOWN 的直接对策。
+  const skeleton = officialToolCallSkeletonFor(T);
+  assert.ok(skeleton.includes('read'), '示例名必须是工具表里的真实工具');
+  assert.ok(!skeleton.includes('工具名二'), '不得再出现占位名（run-9 实证会照抄）');
+  const r = parseAgentReply(skeleton, { tools: T });
+  assert.equal(r.calls.length, 2);
+  assert.deepEqual(r.calls.map((c) => c.name), ['read', 'grep']);
+});
+
+test('run-9 围栏示例（真机逐字夹具）：代码块里的调用形状是示例，不得执行', () => {
+  const r = parseAgentReply(f19echo, { tools: T });
+  assert.equal(r.calls.length, 0, `围栏内的示例必须 0 calls，实际 ${JSON.stringify(r.calls.map((c) => c.name))}`);
+});
+
+test('围栏守卫边界：未配对 ``` 不吞真调用；参数值内嵌围栏不受影响', () => {
+  // 未配对 ```（模型写 ``` 没闭合）：围栏判据不生效，真调用照常解析
+  const unclosed = '说明：\n```\n<invoke name="read">\n<parameter name="file_path">a.js</parameter>\n</invoke>';
+  assert.equal(parseAgentReply(unclosed, { tools: T }).calls.length, 1,
+    '未配对围栏不守卫：invoke 体完整（有闭标签）照常解析');
+  const unclosedReal = '说明：\n```\n<invoke name="read">\n<parameter name="file_path">a.js</parameter>\n</invoke>\n</calls>';
+  const rUnclosed = parseAgentReply(unclosedReal, { tools: T });
+  // 未配对围栏按保守设计**不守卫**（宁可执行示例也不吞真调用）——真调用照常解析。
+  assert.equal(rUnclosed.calls.length, 1, '未配对围栏不启用守卫：真调用照常解析');
+  // 参数值内嵌 ``` 的 write 调用（fence-nested-call 家族）不受围栏守卫影响
+  const writeT = [{ name: 'write', parameters: { type: 'object', properties: { file_path: { type: 'string' }, content: { type: 'string' } } } }];
+  const nested = '<invoke name="write">\n<parameter name="file_path">out.md</parameter>\n<parameter name="content">标题\n```markdown\n# H\n```\n正文</parameter>\n</invoke>';
+  const rNested = parseAgentReply(nested, { tools: writeT });
+  assert.equal(rNested.calls.length, 1, 'invoke 起点在围栏外，参数体含 ``` 照常解析');
+  assert.ok(rNested.calls[0].arguments.content.includes('```markdown'), '参数值里的围栏内容逐字保留');
 });
 
 test('备案不回归：DSML 标记家族在官方改写加入后行为不变', () => {

@@ -81,10 +81,44 @@ const OFFICIAL_CALLS_END = OFFICIAL_TOKEN(['calls', 'end']);
 export function officialToolCallSpecimen(name = '工具名', args = '{"参数名": "值"}') {
   return OFFICIAL_CALLS_BEGIN + OFFICIAL_CALL_BEGIN + name + OFFICIAL_SEP_TOKEN + args + OFFICIAL_CALL_END + OFFICIAL_CALLS_END;
 }
-/** 官方格式的多调用示例骨架：重复 call begin/…/call end 段。 */
-export function officialToolCallSkeleton() {
-  return OFFICIAL_CALLS_BEGIN + '\n' + OFFICIAL_CALL_BEGIN + '工具名' + OFFICIAL_SEP_TOKEN + '{"参数名": "值"}' + OFFICIAL_CALL_END
-    + '\n' + OFFICIAL_CALL_BEGIN + '工具名二' + OFFICIAL_SEP_TOKEN + '{"参数名": "值"}' + OFFICIAL_CALL_END + '\n' + OFFICIAL_CALLS_END;
+
+/**
+ * 从会话真实工具表取一个**可照抄的真实调用示例**（0.16.19）。
+ *
+ * 为什么不能用占位符（真机 run-9，session-897d07bb 逐字取证）：0.16.18 的教学
+ * 骨架用「工具名 / 工具名二」当占位符，用户问「官方怎么做」时模型把骨架原样
+ * 写进 ``` 代码块举例，桥把围栏里的占位名当真执行 → TOOL_UNKNOWN。示例里的
+ * 名字必须是本会话真实存在的工具：参数样例按 schema 取（required 优先，最多
+ * 两个键；number→1、boolean→false、array→[]、其余→"…"）。无工具表时退回
+ * 占位符（纯测试场景），真机路径 tools 恒非空。
+ */
+export function officialCallExampleFor(tools) {
+  const list = (Array.isArray(tools) ? tools : []).filter((t) => t && typeof t.name === 'string' && t.name.trim());
+  if (!list.length) return { name: '工具名', args: '{"参数名": "值"}' };
+  const t = list[0];
+  const props = t.parameters && typeof t.parameters === 'object' ? t.parameters.properties : null;
+  const keys = props ? Object.keys(props) : [];
+  let args = '{}';
+  if (keys.length) {
+    const req = Array.isArray(t.parameters?.required) ? t.parameters.required : [];
+    const pick = (req.length ? req : keys).slice(0, 2);
+    const o = {};
+    for (const k of pick) {
+      const ty = props[k] && props[k].type;
+      o[k] = ty === 'number' || ty === 'integer' ? 1 : ty === 'boolean' ? false : ty === 'array' ? [] : '…';
+    }
+    args = JSON.stringify(o);
+  }
+  return { name: t.name, args };
+}
+
+/** 多调用教学骨架：**真实工具名**（0.16.19 起；占位符骨架被模型照抄 → TOOL_UNKNOWN）。 */
+export function officialToolCallSkeletonFor(tools) {
+  const a = officialCallExampleFor(tools);
+  const list = (Array.isArray(tools) ? tools : []).filter((t) => t && typeof t.name === 'string' && t.name.trim());
+  const b = list[1] ? officialCallExampleFor([list[1]]) : a;
+  return OFFICIAL_CALLS_BEGIN + '\n' + OFFICIAL_CALL_BEGIN + a.name + OFFICIAL_SEP_TOKEN + a.args + OFFICIAL_CALL_END
+    + '\n' + OFFICIAL_CALL_BEGIN + b.name + OFFICIAL_SEP_TOKEN + b.args + OFFICIAL_CALL_END + '\n' + OFFICIAL_CALLS_END;
 }
 /**
  * 解析侧的**词形宽容**（0.16.5）——与上面的教学常量刻意分开。
@@ -286,19 +320,29 @@ export function dsmlSkeleton() {
  *
  * 旧 DSML 版（0.16.2–0.16.17）要点存档：① 开/闭标签同名；② 每个 invoke 要有
  * 开标签；③ 参数值不加引号；④ 标记四字母写全 DSML。
+ *
+ * 0.16.19：示例用**真实工具名**（占位符会被模型照抄 → TOOL_UNKNOWN，run-9
+ * 实证）。trainNoteFor 增加第三个可选参 tools；调用方有工具表就传（
+ * serializeFirstTurn / index.js 增量轮 / prompt-variants 变体构建都有），
+ * 没有时退回占位符（纯测试场景）。
  */
-const TRAIN_NOTE_OFFICIAL = '[系统提示] 请保持工具调用的官方格式：'
-  + officialToolCallSpecimen()
-  + '。标记必须逐字完整（含 ▁ 连接符，不要改成空格或省略）；sep 之后是完整 JSON 对象，'
+const TRAIN_NOTE_OFFICIAL_HEAD = '[系统提示] 请保持工具调用的官方格式：';
+const TRAIN_NOTE_OFFICIAL_TAIL = '。标记必须逐字完整（含 ▁ 连接符，不要改成空格或省略）；sep 之后是完整 JSON 对象，'
   + 'required 的每个必填参数都要在，无参数的工具 arguments 写 {}；不要加 ```json 围栏；'
-  + '多个调用重复 call begin / sep / call end 段。';
+  + '多个调用重复 call begin / sep / call end 段。骨架与文档里的「工具名」等只是占位符，示例形状不是调用。';
+function trainNoteOfficialFor(tools) {
+  const sample = officialCallExampleFor(tools);
+  return TRAIN_NOTE_OFFICIAL_HEAD + officialToolCallSpecimen(sample.name, sample.args) + TRAIN_NOTE_OFFICIAL_TAIL;
+}
 /** 站点 → 再教学提示。未列出的站点保持 0.14.7 措辞逐字不变。 */
-const TRAIN_NOTES = Object.freeze({ glm: TRAIN_NOTE_GLM, deepseek: TRAIN_NOTE_OFFICIAL });
+const TRAIN_NOTES = Object.freeze({ glm: TRAIN_NOTE_GLM });
 /** 按站点取再教学提示——增量轮的 resultBlock 与首轮教学必须同一立场，否则
  *  模型刚被纠回一种形状，第 5 个工具结果又把它教回另一种。 */
-export function trainNoteFor(siteId, extra = '') {
-  const base = TRAIN_NOTES[String(siteId || '').trim()] || TRAIN_NOTE;
-  // extra 只在实验变体里非空；默认路径（'' ）返回值与 0.14.7 逐字相同。
+export function trainNoteFor(siteId, extra = '', tools = null) {
+  const key = String(siteId || '').trim();
+  // deepseek（0.16.19）：示例用会话真实工具名（有工具表时）；glm 与未列出站点
+  // 保持既有措辞逐字不变。extra 只在实验变体里非空。
+  const base = key === 'deepseek' ? trainNoteOfficialFor(tools) : (TRAIN_NOTES[key] || TRAIN_NOTE);
   return extra ? base + extra : base;
 }
 
@@ -409,7 +453,7 @@ export function buildPreset(options = {}) {
         // 止血。DSML 全套解析宽容**保留为备案不删**（normalizeDsml 继续认），只是
         // 不再教——教学只认一种形状，是防漂移的同一纪律。
         '需要调用工具时，用下面的官方工具调用格式输出（DeepSeek 原生模板，唯一格式）：',
-        officialToolCallSkeleton(),
+        officialToolCallSkeletonFor(tools),
         '标记必须逐字完整：竖线、词间连接符（▁）、begin/end 一个都不能少，不要改成空格、不要拆行、不要自创词形。',
         'sep 之后是一个完整的 JSON 对象：required 里的每个必填参数都要在（purpose 不能替代任何必填参数）；无参数的工具 arguments 写 {}；不要加 ```json 围栏。',
         '多个调用就在同一对 calls begin / calls end 里重复 call begin / sep / call end 段（见上面骨架的第二行）；一次回复可以写多个调用。',
@@ -472,9 +516,9 @@ export function serializeFirstTurn(options = {}) {
     if (m.role === 'user') {
       const raw = textOfBlocks(m.content);
       const directive = normalizeHarnessDirective(raw);
-      return directive || serializeDelta([m], 0, 0, names, trainNoteFor(options.siteId)).text;
+      return directive || serializeDelta([m], 0, 0, names, trainNoteFor(options.siteId, '', options.tools)).text;
     }
-    return serializeDelta([m], 0, 0, names, trainNoteFor(options.siteId)).text;
+    return serializeDelta([m], 0, 0, names, trainNoteFor(options.siteId, '', options.tools)).text;
   });
   const text = segments.join('\n\n');
   const preset = buildPreset(options);
@@ -487,7 +531,7 @@ export function serializeFirstTurn(options = {}) {
       // 0.16.18：与首轮教学、增量轮再教学同源（官方训练模板是唯一骨架；
       // officialToolCallSkeleton 与 buildPreset / TRAIN_NOTE_OFFICIAL 三处同一形状）。
       // 「立即停止等待结果」这句行为约束保持逐字——它不属于格式、属于时序。
-      ? "\n[本地工具传输协议]\n用官方工具调用格式（DeepSeek 原生模板）发起工具调用，形状：" + officialToolCallSkeleton() + "。标记必须逐字完整：竖线、词间连接符（▁）、begin/end 一个都不能少，不要改成空格、不要拆行。sep 之后是完整 JSON 对象，required 的每个必填参数都要在；无参数的工具 arguments 写 {}；不要加 ```json 围栏。工具名和参数必须严格匹配上面的 schema。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。" + presentTransportNote(options.tools)
+      ? "\n[本地工具传输协议]\n用官方工具调用格式（DeepSeek 原生模板）发起工具调用，形状：" + officialToolCallSkeletonFor(options.tools) + "。标记必须逐字完整：竖线、词间连接符（▁）、begin/end 一个都不能少，不要改成空格、不要拆行。sep 之后是完整 JSON 对象，required 的每个必填参数都要在；无参数的工具 arguments 写 {}；不要加 ```json 围栏。工具名和参数必须严格匹配上面的 schema。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。" + presentTransportNote(options.tools)
     : '\n[本地工具传输协议]\n必须使用 <tool_call>{"mcp_action":"call","name":"实际工具名","arguments":{}}</tool_call> 发起工具调用。工具名和参数必须严格匹配上面的 schema。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。' + presentTransportNote(options.tools);
   const budget = Number(options.maxPromptChars);
   if (!Number.isFinite(budget) || budget <= 0) {
@@ -1960,8 +2004,26 @@ export function parseAgentReply(text, options = {}) {
   // 还存在「已开而未闭」的 <parameter>，就继续延伸到把它配平的位置。
   // 这样示例里的孤立 </invoke>（前面没有未闭的 parameter）不会造成截断，
   // 而真正的调用边界（parameter 已配平）依然精确。
+  // 0.16.19：markdown 代码围栏里的调用形状是**示例**，不是调用。真机 run-9
+  // （session-897d07bb，reply-log 逐字）：模型向用户解释官方格式时把教学骨架
+  // 原样写进 ``` 代码块，围栏内两个占位名「调用」被当真执行 → TOOL_UNKNOWN。
+  // 只把**已完成配对**的 ``` 区当围栏（未配对的 ``` 不动——宁可漏判也不吞
+  // 真调用）；判据只看 invoke **起点**是否落在围栏区内，参数体照常从原文
+  // 提取，所以 write 参数值内嵌 ``` 的形状（fence-nested-call 家族）不受影响。
+  // ```json + mcp_action 的 JSON 围栏是 webcode 协议的调用形状，走独立的
+  // JSON 路径，不经这里的 invoke 扫描，不受本守卫影响。
+  const fenceRegions = [];
+  {
+    const tripleRe = /```/g;
+    let fm;
+    const starts = [];
+    while ((fm = tripleRe.exec(s)) !== null) starts.push(fm.index);
+    for (let i = 0; i + 1 < starts.length; i += 2) fenceRegions.push([starts[i], starts[i + 1]]);
+  }
+  const inFence = (idx) => fenceRegions.some(([a, b]) => idx > a && idx < b);
   const invokeOpenRe = /<\s*invoke\s+name\s*=\s*"([^"]*)"\s*[^>]*>/gi;
   while ((m = invokeOpenRe.exec(s)) !== null) {
+    if (inFence(m.index)) continue; // 围栏内的 invoke 是示例（run-9 实证），不执行
     const bodyStart = m.index + m[0].length;
     const bodyEnd = invokeBodyEnd(s, bodyStart);
     if (bodyEnd < 0) continue; // 体未配平（流式半成品）：不算可执行调用

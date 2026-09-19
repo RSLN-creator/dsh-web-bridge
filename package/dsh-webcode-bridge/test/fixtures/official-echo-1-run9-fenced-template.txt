@@ -1,0 +1,30 @@
+## 版本
+
+**DSH `0.1.6-alpha.2`** —— 两个来源一致：
+
+- 本地安装的 CLI 包 `@deepseek-ai/dsh` 的 `package.json` 写的是 `0.1.6-alpha.2`
+- `dsh --version` 实际执行输出也是 `0.1.6-alpha.2`
+
+模型路由是 **`deepseek:deepseek`**（DeepSeek Harness 自带的 agent 运行时），你看到的就是运行在这个 CLI 上的会话。
+
+## 官方会话调用工具（工具调用格式）
+
+就是本会话正在用的 **DeepSeek 原生模板**，用专用控制标记包裹，不是 OpenAI 那种 `tool_calls` JSON，也不是旧的 `||DSML||` / 带属性写法：
+
+```
+<｜tool▁calls▁begin｜>
+<｜tool▁call▁begin｜>工具名<｜tool▁sep｜>{"参数名": "值"}<｜tool▁call▁end｜>
+<｜tool▁call▁begin｜>工具名二<｜tool▁sep｜>{"参数名": "值"}<｜tool▁call▁end｜>
+<｜tool▁calls▁end｜>
+```
+
+要点：
+
+1. **标记必须逐字完整**：竖线 `｜`、词间连接符 `▁`、`begin`/`end` 一个都不能少，不能替换成空格、不能拆行、不能自造词形。
+2. `sep` 后面跟一个**完整 JSON 对象**，required 里的每个必填参数都要有；无参数工具写 `{}`。
+3. **不加 ```json 围栏**。
+4. 一次回复可以在同一对 `calls begin`/`calls end` 里放**多个** `call begin`/`sep`/`call end` 段，按顺序执行。
+5. 工具结果以 `{"mcp_action":"result","name":"…","status":"success","output":"…"}`（失败为 `"status":"error"`）自动回填成下一条用户消息。
+6. 一旦判定需要真实数据就要**立即发起调用并停止输出**，等真实结果；失败时按错误修正参数重试，不要改用猜测。
+
+顺带一提，你上一个问题触发的这两次调用（`read` + `pwsh`）就是按上述格式发出并真实执行的——`pwsh` 也顺带列出了 `$env:DSH_HOME` 下的目录（`.agent-presets`、`profiles`、`sessions`、`logs`、`skin-center` 等）。

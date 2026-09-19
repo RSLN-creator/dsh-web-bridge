@@ -22,7 +22,7 @@ import { createBrowserDriver } from './browser-driver.js';
 import { zeroProgressDecision } from './zero-progress.js';
 import { idleWindowDecision } from './idle-window.js';
 import { createWebControl, buildSessionEvents, mainLineOf } from './web-control.js';
-import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, stripProtocolRegions, proseSafeEnd, readCallAt, partialProtocolAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeDsml, normCallArgs, inferToolNameFromArgs, recoverUnparsedCalls, officialToolCallSpecimen } from './agent-preset.js';
+import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, stripProtocolRegions, proseSafeEnd, readCallAt, partialProtocolAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeDsml, normCallArgs, inferToolNameFromArgs, recoverUnparsedCalls, officialToolCallSpecimen, officialCallExampleFor } from './agent-preset.js';
 import { appendReplyLog } from './reply-log.js';
 import { createMirror } from './mirror.js';
 import { httpFetch } from './upstream.js';
@@ -1264,9 +1264,16 @@ export function apply(ctx, config = {}) {
         turn.commit();
         yield* closeThink();
         const available = tools.map((t) => t?.name).filter(Boolean);
+        // 0.16.19：出现 TOOL_UNKNOWN 时自动带**官方格式再教学**（用户明确要求
+        // 「出现这个时候自动返回提示词，好让会话继续」）——示例用真实工具名，
+        // 并点名「骨架占位符/文档示例不是调用」（run-9：模型把教学骨架抄进
+        // 代码块举例，占位名被当真执行）。
+        const sample = officialCallExampleFor(tools);
         const notice = `TOOL_UNKNOWN: 网页发出了本会话不存在的工具调用（${[...new Set(unknownNames)].join(', ')}）。`
           + `本会话只有这些工具：${available.join(', ') || '（无）'}。`
-          + '请改用上面列出的工具名重新发起调用；如果任务不需要工具，请直接给出结论。';
+          + `请按官方模板改用真实工具名重新发起：${officialToolCallSpecimen(sample.name, sample.args)}`
+          + '——骨架与文档里的「工具名」等只是占位符，示例形状不是调用，只有真实工具名才会执行；'
+          + '如果任务不需要工具，请直接给出结论。';
         warn(notice);
         // index 传 nextIndex：上面 closeThink() 已经关掉了思考块（它占用 0），
         // 写死 0 会让正文块与已关闭的 reasoning 块撞下标。
@@ -1672,9 +1679,9 @@ function unparsedCallNotice({ thinkAcc = '', tools = [], scene = null, withheld 
   return 'TOOL_CALL_UNPARSED: 网页这一轮发出了工具调用，但桥没能把它变成可执行的调用'
     + '（最常见原因：JSON 里漏写 name 字段，或参数 JSON 不配平/被截断）。'
     + `本会话可用工具：${list || '（无）'}。`
-    // 0.16.18：重发指引改指官方训练模板（与首轮教学/再教学同一个形状；旧
-    // <tool_call>{mcp_action} 形状是 0.16.2 之前的教学遗产，模型对它没有先验）。
-    + `请按要求重发：${officialToolCallSpecimen('工具名', '{"参数名": "值"}')}`
+    // 0.16.18/0.16.19：重发指引改指官方训练模板（与首轮教学/再教学同一个形状），
+    // 且示例用**真实工具名**（占位符会被模型照抄 → TOOL_UNKNOWN，run-9 实证）。
+    + `请按要求重发：${(() => { const sample = officialCallExampleFor(tools); return officialToolCallSpecimen(sample.name, sample.args); })()}`
     + '——name 不能省；如果任务不需要工具，请直接给出结论。'
     + (bits.length ? `（${bits.join('，')}）` : '')
     + (headText ? `\n被扣协议原文开头：${headText}` : '')
@@ -2589,7 +2596,7 @@ function imageMarkdown(images) {
     const fresh = !st;
     st ||= { sent: 0, toolResults: 0, tokens: 0 };
     // 增量轮的再教学提示按站点取（glm 只教代码块形状，与首轮同一立场）。
-    const delta = serializeDelta(messages, st.sent, st.toolResults, undefined, trainNoteFor(siteId));
+    const delta = serializeDelta(messages, st.sent, st.toolResults, undefined, trainNoteFor(siteId, '', options.tools));
     let prompt;
     if (fresh) { prompt = serializeFirstTurn({ ...options, extraPrompt, siteId }); recordPreset(prompt); }
     else prompt = delta.text;

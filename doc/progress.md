@@ -20,17 +20,17 @@
 
 | 项 | 值 |
 | --- | --- |
-| 工作树版本 | **0.16.18** |
-| 已装版本（profile） | **0.16.18**（2026-09-19 实测：web + headless 逐 profile 核对，声明 `package.json`、`pnpm-lock.yaml`、`node_modules/dsh-webcode-bridge/package.json` 三处一致指向 `dsh-webcode-bridge-0.16.18.tgz`；`lib/index.js` sha256 前 12 位 `BE40D5318E5B` 与工作树一致。走 `dsh plugin --profile <name> add` 声明持久层通道） |
+| 工作树版本 | **0.16.19** |
+| 已装版本（profile） | **0.16.19**（2026-09-19 实测：web + headless 三处声明一致指向 `dsh-webcode-bridge-0.16.19.tgz`，`lib/index.js` sha256 前 12 位 `04C087741916` 与工作树一致；`dsh plugin add` 声明持久层通道） |
 | 运行中的进程 | run-8 真机验收以 `dsh --profile headless` 进程级验证（0.16.16 时段）；DSH web（3080）2026-09-19 凌晨未运行 |
-| 上游 | `origin/main` = `9d4c61a`（0.16.10 台账推送）；0.16.11–0.16.18 本地已提交/待推 |
-| 单测基线 | **66/66 测试文件**；全量 **774 条**（0.16.17 为 767；0.16.18 新增：`official-tool-calls` 7；`glm-session-replay` 的 deepseek 断言随教学切换同步更新） |
+| 上游 | `origin/main` = `9d4c61a`（0.16.10 台账推送）；0.16.11–0.16.19 本地已提交/待推 |
+| 单测基线 | **66/66 测试文件**；全量 **776 条**（0.16.18 为 774；0.16.19：`official-tool-calls` 扩至 9 条 + run-9 逐字夹具 `official-echo-1` 入档；`glm-session-replay` 断言随教学切换同步更新） |
 | 注释闸门 | **error 0 / warn 0，退出码 0**（2026-09-19 实跑） |
 | 文件规范闸门 | `check-repo-hygiene.mjs` **PASS**（无 BOM + 索引无死链 + CI/engines Node 版本相容） |
 | 发布闸门 | `verify-pack` 逐文件 sha256 相同 + 接线完好，退出 0（0.16.16 实跑 37/37） |
-| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.18 / testFiles 66/66） |
-| 已装包核对 | 0.16.18 已装机核对（见已装版本行） |
-| 下一阶段 | **0.16.18 真机验收由用户执行（战略实验）**：判据见 §0.16.18 四——官方模板下 UNPARSED/isError 应显著下降；reply-log 全文落盘继续反哺逐字夹具 |
+| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.19 / testFiles 66/66） |
+| 已装包核对 | 0.16.19 已装机核对（见已装版本行） |
+| 下一阶段 | **0.16.19 真机验收由用户执行**：§0.16.18 战略实验判据照旧（官方模板下 UNPARSED/isError 显著下降）+ §0.16.19 四（占位符照抄事故不再复现，触发即自动再教学） |
 
 > **§0.16.10 真机判据（重启后逐条核）**：① `GET /__webcode/status` 的 `build.version` = **0.16.10**；
 > ② 让模型回复一段含 `<b>`、`<foo>`、`Array<T>` 或字面 `<tool_call>` 示例的正文，**逐字对比** harness
@@ -43,6 +43,35 @@
 > 掩盖了「web 落后两个版本」这个真因，直接导致用户按台账以为装好了、重启后仍然不变。
 > **教训记在这里而不是删掉**：凡是「已装/已重启/已验证」这类状态行，**必须逐 profile 写、并附
 > sha256 前 12 位**，否则它会把「一个 profile 装了」读成「都装了」。 |
+
+## 0.16.19（2026-09-19）—— run-9 占位符照抄事故：教学示例改真实工具名 + 围栏示例守卫 + TOOL_UNKNOWN 自动再教学
+
+**用户指令（逐字）**：「？？？你提示词还没有改啊！我想要出现这个时候自动返回提示词！好让会话继续！」
+
+### 一、run-9 取证（0.16.18 验收轮，`session-897d07bb`，reply-log 逐字）
+
+用户问「官方怎么做」，模型回答时把 0.16.18 教学骨架**原样抄进 ``` 代码块**举例
+（骨架占位名是「工具名 / 工具名二」），桥把围栏里的占位名当真执行 → 2 次
+TOOL_UNKNOWN。模型下一轮自己道破：「占位符不是调用，只有真实工具名才会执行」，
+并学会用 `_` 代替 ▁ 自保——教学缺陷与解析缺陷各占一半。
+
+### 二、修了什么
+
+| 改动 | 落点 | 说明 |
+| --- | --- | --- |
+| 教学示例改**真实工具名** | `officialCallExampleFor(tools)` / `officialToolCallSkeletonFor(tools)`；buildPreset、serializeFirstTurn transport、trainNoteFor（新增第三参 tools，三个调用方都传入） | 示例名+参数样例取自会话工具表（required 优先，number→1/boolean→false/array→[]/其余→"…"）；占位符只在无工具表的纯测试场景兜底 |
+| **围栏示例守卫** | `parseAgentReply` invoke 扫描 | 已配对 ``` 区内的 invoke 一律视为示例不执行（真机逐字夹具 `official-echo-1-run9-fenced-template.txt` → 0 calls）；未配对 ``` 保守不守卫（宁可执行示例也不吞真调用）；参数值内嵌 ``` 的 write（fence-nested-call 家族）不受影响——判据只看 invoke 起点 |
+| **TOOL_UNKNOWN 自动再教学** | `lib/index.js` | 通知自动附官方模板示例（真实工具名）+ 点名「骨架占位符/文档示例不是调用」——用户要求「出现时自动返回提示词，好让会话继续」；UNPARSED 重发指引同步改真实工具名 |
+
+### 三、护栏
+
+`test/official-tool-calls.test.mjs` 9 条（新增 run-9 围栏夹具 0 calls、骨架真名、
+未配对围栏边界、参数内嵌围栏不受影响）；全量 774 条绿。
+
+### 四、装机与验收（用户执行）
+
+打包装机流程同前；验收判据：① 再问「官方怎么做」类问题不再触发 TOOL_UNKNOWN；
+② 万一触发，通知自动带正确格式示例、会话继续；③ reply-log 全文照常落盘。
 
 ## 0.16.18（2026-09-19）—— 教学切官方 tool-call 训练模板（DSML 转备案），无参调用修复
 

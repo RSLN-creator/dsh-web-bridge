@@ -116,7 +116,7 @@ export function buildPromptVariants({ tools, extraPrompt, system, lastPreset, ex
       ...(spec.slim ? { slim: true, toolDescLimit: SLIM_TOOL_DESC_LIMIT } : {}),
     }),
     // 再教学提示也一并露出——增量轮第 5 个工具结果会重贴它，立场必须与首轮一致。
-    trainNote: trainNoteFor(spec.siteId || 'default', trainExtraFor(spec.trainExtra, { hasPresent: toolList.some((t) => t && t.name === 'present') })),
+    trainNote: trainNoteFor(spec.siteId || 'default', trainExtraFor(spec.trainExtra, { hasPresent: toolList.some((t) => t && t.name === 'present') }), toolList),
   }));
   const active = lastPreset
     ? {
