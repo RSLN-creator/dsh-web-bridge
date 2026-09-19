@@ -118,7 +118,7 @@ async function runTurn({ reply, tools, sessionId, message = '请你审查本地�
   check('glm preset · 点名 required 约束', glm.includes('required 列出的每一个字段') && glm.includes('不能替代任何必填参数'));
   // deepseek 默认（siteId 缺省）0.16.18 起教**官方训练模板**（`<｜tool▁calls▁begin｜>`
   // 家族：模型被训练时见过的形状；逐字依据见 lib/agent-preset.js OFFICIAL_BAR 注释）。
-  // 0.16.2–0.16.17 教的 DSML 保留为解析备案（normalizeDsml 继续认）、不再教。
+  // 0.16.2–0.16.17 教的 DSML 保留为解析备案（normalizeOfficialToolCalls 继续认）、不再教。
   // 必须显式传 siteId：不传等于「未知站点」，走的是通用双形状分支。
   // 真机路径上 index.js 会带上当前站点，因此这里要测的是带 siteId 的那一支。
   const S = String.fromCharCode(0x2581);

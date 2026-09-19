@@ -7,7 +7,7 @@ import path from 'node:path';
 import { apply } from '../lib/index.js';
 import { estimateTokens } from '../lib/metrics.js';
 import { createWebControl } from '../lib/web-control.js';
-import { serializeFirstTurn, serializeDelta, parseAgentReply } from '../lib/agent-preset.js';
+import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, recoverUnparsedCalls } from '../lib/agent-preset.js';
 import '../lib/decoder.js';
 
 test('普通回复完成、模型传递、游标提交与同长度历史改写', async () => {
@@ -215,54 +215,46 @@ test('混合形状：<invoke> 壳 + 裸 JSON 参数（2026-09-10 probe-17 真机
   assert.deepEqual(parseAgentReply('<invoke name="shell" purpose="示例">{"command":"git status"}</invoke>').calls,
     [{ name: 'shell', arguments: { command: 'git status' } }]);
 });
-test('包装形状：<invoke name="tool_call"> 里装完整调用对象（2026-09-10 真机第 3 跑）', () => {
-  // 真机原文：DSML 外壳名写成 tool_call，壳内才是真调用；旧逻辑会把 read/grep
-  // 变成「名为 tool_call 的工具」的参数，每轮报一次未知工具（errRate 53%）。
-  const raw = '<\uFF5C\uFF5CDSML\uFF5C\uFF5C calls>\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C invoke name="tool_call">\n{"mcp_action": "call", "name": "read", "purpose": "read security doc", "arguments": {"path": "doc/security-review.md"}}\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter>\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C invoke>\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C calls>';
-  const calls = parseAgentReply(raw).calls;
-  assert.equal(calls.length, 1, '壳 + 壳内 JSON 只应记一个调用');
-  // purpose 自 0.12.7 起保留在调用对象上（供派发侧补缺失的 description 类必填参数）。
-  assert.deepEqual(calls, [{ name: 'read', arguments: { path: 'doc/security-review.md' }, purpose: 'read security doc' }]);
-});
-test('畸形属性抢救：调用 JSON 塞进 <invoke name=…（2026-09-10 真机第 6 跑）', () => {
-  // 真机原文：整段调用 JSON 落进了 invoke 的 name 属性区，标签本身没说清工具名。
-  const raw = '<\uFF5C\uFF5CDSML\uFF5C\uFF5C calls>\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C invoke name="mcp_action":"call","name":"read","arguments":{"path":"doc/security-review.md"}}\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter name="mcp_action":"call","name":"grep","arguments":{"query":"secret"}}\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter>\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C invoke>\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C calls>';
-  assert.deepEqual(parseAgentReply(raw).calls, [
-    { name: 'read', arguments: { path: 'doc/security-review.md' } },
-    { name: 'grep', arguments: { query: 'secret' } },
-  ]);
-});
-test('畸形标签抢救：JSON 漏进标签名的 `<parameter name="name": …`（2026-09-10 真机第 5 跑）', () => {
-  // 真机原文：三段调用对象被拼进 <parameter name=… 的标签名里（畸形），
-  // 但 \"name\"/\"arguments\" 片段完整——必须按片段配对还原，否则整轮丢 3 个调用。
-  const raw = '<\uFF5C\uFF5CDSML\uFF5C\uFF5C calls>\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C invoke name="tool_call">\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter name="description" string="true">读取 README 与 PLAN</\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter>\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter name="name": "read", "arguments": {"path": "README.md"}}\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter>\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter name="shell", "arguments": {"command": "git status"}}\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter>\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C invoke>\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C calls>';
-  assert.deepEqual(parseAgentReply(raw).calls, [
-    { name: 'read', arguments: { path: 'README.md' } },
-    { name: 'shell', arguments: { command: 'git status' } },
-  ]);
-});
-test('包装形状：<invoke name="tool_call"> + name/arguments 参数（2026-09-10 真机第 4 跑）', () => {
-  // 真机原文：外壳名 tool_call，真调用藏在 name/arguments 两个参数里。
-  const raw = '<\uFF5C\uFF5CDSML\uFF5C\uFF5C calls>\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C invoke name="tool_call">\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter name="arguments" string="false">{"command": "git status"}</\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter>\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter name="name" string="true">shell</\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter>\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter name="purpose" string="true">查看状态</\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter>\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C invoke>\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C calls>';
-  assert.deepEqual(parseAgentReply(raw).calls, [{ name: 'shell', arguments: { command: 'git status' } }]);
-});
-test('新版 DSML：带类型属性的 <parameter name="x" string="true">（2026-09-10 真机第 2 轮）', () => {
-  // 真机原文（新版 UI）：全角竖线 DSML 前缀 + 参数带 string="true" 属性。
-  // 旧 paramRe 要求 name 后直接跟 >，整段调用被判为空 → 工具循环静默中断。
-  const raw = '我需要更完整的文件清单与源码细节。\n\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C calls>\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C invoke name="shell">\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter name="command" string="true">git ls-files</\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter>\n<\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter name="purpose" string="true">列出代码文件</\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter>\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C invoke>\n</\uFF5C\uFF5CDSML\uFF5C\uFF5C calls>';
-  assert.deepEqual(parseAgentReply(raw).calls, [{ name: 'shell', arguments: { command: 'git ls-files', purpose: '列出代码文件' } }]);
-});
-test('DSML 全角/半角/丢开头形状归一为调用', () => {
-  // 马拉松终跑（2026-09-09）观察：网页流式把协议标记噪声化——竖线成对全角化
-  // （U+FF5C）或整段丢开头 <。reference/deepseek-free-api strip_dsml_markup 同源问题。
-  assert.deepEqual(parseAgentReply('<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name="shell">\n<｜｜DSML｜｜parameter name="command">git status</｜｜DSML｜｜parameter>\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>').calls,
-    [{ name: 'shell', arguments: { command: 'git status' } }]);
-  assert.deepEqual(parseAgentReply('<|DSML|tool_calls><|DSML|invoke name="read"><|DSML|parameter name="path">README.md</|DSML|parameter></|DSML|invoke></|DSML|tool_calls>').calls,
-    [{ name: 'read', arguments: { path: 'README.md' } }]);
-  assert.deepEqual(parseAgentReply('｜DSML｜invoke name="read"><｜DSML｜parameter name="path">PLAN.md</｜DSML｜parameter></｜DSML｜invoke>').calls,
-    [{ name: 'read', arguments: { path: 'PLAN.md' } }]);
-  // 散文提及 DSML 不触发
-  assert.equal(parseAgentReply('DSML 是协议名，不是调用').calls.length, 0);
+// ── DSML 退役钉子（0.16.23）────────────────────────────────────────────────
+// 2026-09-10 真机第 2–6 跑的六条 DSML 形状回归（包装形状×2、畸形属性抢救、畸形
+// 标签抢救、带类型参数、全角/半角/丢开头归一）原本钉「这些形状必须解析成功」；
+// 0.16.23 用户拍板「正式使用完全按照官方来，DSML 只备份」——宽容链整体退役，
+// 它们全部翻转为退役语义：0 calls + 锚点扣留。逐字原文与旧断言见分支
+// backup/dsml-protocol 的本文件；退役必须让漂移形状无收益（不得恢复派发），
+// 否则模型永远收敛不到官方格式。
+const DSML_BAR2 = String.fromCharCode(0xFF5C);
+const dsmlShape = (inner) => '<' + DSML_BAR2 + DSML_BAR2 + 'DSML' + DSML_BAR2 + DSML_BAR2 + ' calls>\n'
+  + inner + '\n</' + DSML_BAR2 + DSML_BAR2 + 'DSML' + DSML_BAR2 + DSML_BAR2 + ' calls>';
+const RETIRED_SHAPES = [
+  ['畸形属性抢救（真机第 6 跑：调用 JSON 塞进 invoke 属性区）',
+    dsmlShape('<' + DSML_BAR2 + DSML_BAR2 + 'DSML' + DSML_BAR2 + DSML_BAR2 + ' invoke name="mcp_action":"call","name":"read","arguments":{"path":"doc/security-review.md"}}\n</' + DSML_BAR2 + DSML_BAR2 + 'DSML' + DSML_BAR2 + DSML_BAR2 + ' invoke>')],
+  ['畸形标签抢救（真机第 5 跑：JSON 漏进 parameter 标签名）',
+    dsmlShape('<' + DSML_BAR2 + DSML_BAR2 + 'DSML' + DSML_BAR2 + DSML_BAR2 + ' parameter name="name": "read", "arguments": {"path": "README.md"}}\n</' + DSML_BAR2 + DSML_BAR2 + 'DSML' + DSML_BAR2 + DSML_BAR2 + ' parameter>')],
+  ['包装形状 + name/arguments 参数（真机第 4 跑）',
+    dsmlShape('<' + DSML_BAR2 + DSML_BAR2 + 'DSML' + DSML_BAR2 + DSML_BAR2 + ' invoke name="tool_call">\n<' + DSML_BAR2 + DSML_BAR2 + 'DSML' + DSML_BAR2 + DSML_BAR2 + ' parameter name="name" string="true">shell</' + DSML_BAR2 + DSML_BAR2 + 'DSML' + DSML_BAR2 + DSML_BAR2 + ' parameter>\n</' + DSML_BAR2 + DSML_BAR2 + 'DSML' + DSML_BAR2 + DSML_BAR2 + ' invoke>')],
+  ['新版 DSML 带类型属性（真机第 2 轮）',
+    dsmlShape('<' + DSML_BAR2 + DSML_BAR2 + 'DSML' + DSML_BAR2 + DSML_BAR2 + ' invoke name="shell">\n<' + DSML_BAR2 + DSML_BAR2 + 'DSML' + DSML_BAR2 + DSML_BAR2 + ' parameter name="command" string="true">git ls-files</' + DSML_BAR2 + DSML_BAR2 + 'DSML' + DSML_BAR2 + DSML_BAR2 + ' parameter>\n</' + DSML_BAR2 + DSML_BAR2 + 'DSML' + DSML_BAR2 + DSML_BAR2 + ' invoke>')],
+  ['全角/半角/丢开头形状',
+    '<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name="shell">\n<｜｜DSML｜｜parameter name="command">git status</｜｜DSML｜｜parameter>\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>'],
+];
+for (const [label, raw] of RETIRED_SHAPES) {
+  test('DSML 退役：' + label + ' → 0 calls 且被锚点扣留（0.16.23）', () => {
+    const r = parseAgentReply(raw);
+    assert.equal(r.calls.length, 0, '退役形状仍被解析（宽容链未删净）：' + JSON.stringify(r.calls));
+    assert.ok(findProtocolStart(raw).index >= 0, '退役形状必须被锚点扣住（防泄漏 + 再教学触发）');
+    // 退役形状不得被恢复派发——恢复层给漂移发「奖励」会让模型永远收敛不到官方格式。
+    assert.deepEqual(recoverUnparsedCalls(raw, [{ name: 'read', parameters: {} }]), [],
+      '退役形状被恢复派发了：' + label);
+  });
+}
+test('DSML 死壳内的在役内容仍收：壳内 mcp_action 裸 JSON 走在役路径，DSML 壳不加分（0.16.23）', () => {
+  // 真机第 3 跑：DSML 壳名 tool_call，壳内是**在役协议**的裸 JSON 调用。解析出的
+  // 1 条来自裸 JSON 对象路径（glm 会话同款，非 DSML 宽容）；DSML 标签结构不得再
+  // 从同一块里多解出任何调用（壳 + 壳内 JSON 恰好一条，不得重复计）。
+  const raw = dsmlShape('<' + DSML_BAR2 + DSML_BAR2 + 'DSML' + DSML_BAR2 + DSML_BAR2 + ' invoke name="tool_call">\n{"mcp_action": "call", "name": "read", "arguments": {"path": "doc/security-review.md"}}\n</' + DSML_BAR2 + DSML_BAR2 + 'DSML' + DSML_BAR2 + DSML_BAR2 + ' invoke>');
+  const r = parseAgentReply(raw);
+  assert.deepEqual(r.calls, [{ name: 'read', arguments: { path: 'doc/security-review.md' } }],
+    '壳内在役 JSON 的解析错了：' + JSON.stringify(r.calls));
 });
 test('SSE 支持 CRLF 分块和空 close 事件', () => {
   const decoder = new globalThis.WebCodeDeepSeekStreamDecoder();

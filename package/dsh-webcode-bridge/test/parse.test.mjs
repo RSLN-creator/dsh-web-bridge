@@ -1,7 +1,7 @@
 // parse.test.mjs — parseAgentReply gate. Real DeepSeek web output shape
 // (<tool_call> fences), legacy ```json fences, <function>, bare-object and the
 // legacy {"tool":...} whole-reply fallback. Run: node test/parse.test.mjs
-import { parseAgentReply, buildPreset, findProtocolStart, readCallAt, partialProtocolAt, normalizeDsml, coerceArguments } from '../lib/agent-preset.js';
+import { parseAgentReply, buildPreset, findProtocolStart, readCallAt, partialProtocolAt, normalizeOfficialToolCalls, coerceArguments } from '../lib/agent-preset.js';
 // DeepSeek 网页版与 OpenAI 一样常把 arguments 输出为转义 JSON 字符串；
 // 用 JSON.stringify 构造真实围栏，保证转义与真实模型输出一致。
 const strArgsFence = (name, args, opt = {}) => JSON.stringify({ mcp_action: 'call', name, purpose: 'x', arguments: JSON.stringify(args), ...opt });
@@ -99,11 +99,11 @@ const streamCases = [
       return partialProtocolAt('这是一段普通回复，没有协议。') === -1
         && partialProtocolAt('compare a < b and c > d') === -1;
     } },
-  { name: 'normalizeDsml 与 findProtocolStart 形态一致（全角 DSML 也算边界）',
+  { name: 'DSML 退役：normalizeOfficialToolCalls 逐字原样通过，findProtocolStart 仍认边界（0.16.23）',
     run() {
       const full = '正文\uFF5CDSML\uFF5Ctool_calls\uFF5E';
-      const norm = normalizeDsml(full);
-      return norm.includes('<') && findProtocolStart(full).index >= 0;
+      const norm = normalizeOfficialToolCalls(full);
+      return norm === full && findProtocolStart(full).index >= 0;
     } },
 ];
 for (const c of streamCases) {

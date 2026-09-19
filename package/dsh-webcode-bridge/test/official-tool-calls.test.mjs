@@ -1,25 +1,26 @@
 // official-tool-calls.test.mjs — 0.16.18 护栏：官方 tool-call 训练模板的解析与教学。
 //
-// ## 为什么（用户拍板「官方做法优先，DSML 保留成备案不删除」）
+// ## 为什么（0.16.18 用户拍板「官方做法优先」→ 0.16.23 拍板「DSML 退役，只留备份」）
 //
 // 官方模板逐字依据：HF deepseek-ai/DeepSeek-V3.1 tokenizer_config.json 的
 // chat_template（2026-09-19 核对）——assistant 工具调用段是
 // `<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>NAME<｜tool▁sep｜>{ARGS}<｜tool▁call▁end｜>…<｜tool▁calls▁end｜>`，
 // 连接符 U+2581（▁）、竖线 U+FF5C。这是模型被**训练时**见过的形状；DSML（0.16.2 起
 // 教学）在官方仓库零命中、无训练先验 → 长跑持续漂移（夹具 15–20、run-8 四形状、
-// reply-log 21 份失败原文）。
+// reply-log 21 份失败原文、0.16.22 取证 32/40 残余全为 DSML 斜杠闭家族）。
 //
 // 红基线（0.16.17 代码实测，.tmp/probe-official-template.txt）：官方模板 0 calls 且
 // proseSafeEnd=全长——整段漏成正文。本文件钉住：① 官方三词形（▁/空格/围栏漂移）
 // 全部可解析；② 锚点先于改写命中（散文不漏）；③ 无参调用不再整条丢弃（run-8
-// FAIL#3/4/5 真机逐字形状，cordis_inspect_list 是真实工具）；④ DSML 备案不回归。
-// 全部标记用 charCode 现造，源码里不出现全角字符（dsml-repair.js 同款纪律）。
+// FAIL#3/4/5 真机逐字形状，cordis_inspect_list 是真实工具）；④ DSML 形状退役为
+// 0 calls + 锚点扣留（0.16.23，备份见分支 backup/dsml-protocol）。
+// 全部标记用 charCode 现造，源码里不出现全角字符。
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { parseAgentReply, proseSafeEnd, normalizeDsml, officialToolCallSpecimen, officialToolCallSkeletonFor, officialCallExampleFor } from '../lib/agent-preset.js';
+import { parseAgentReply, proseSafeEnd, findProtocolStart, normalizeOfficialToolCalls, officialToolCallSpecimen, officialToolCallSkeletonFor, officialCallExampleFor } from '../lib/agent-preset.js';
 
 const f19echo = readFileSync(path.join(import.meta.dirname, 'fixtures', 'official-echo-1-run9-fenced-template.txt'), 'utf8');
 
@@ -68,17 +69,19 @@ test('旧代空格词形 + function 前缀 + ```json 围栏漂移均可解析', 
   assert.equal(r.calls[0].arguments.file_path, 'b.js', '围栏必须剥掉');
 });
 
-test('无参工具：官方模板下 arguments={} 与 DSML 空 body invoke 都收下（run-8 FAIL#3/4/5 根因）', () => {
+test('无参工具：官方模板下 arguments={} 收下；DSML 空 invoke 退役为 0 calls（0.16.23）', () => {
   const official = CALLS_BEGIN + CALL_BEGIN + 'cordis_inspect_list' + SEP + '{}' + CALL_END + CALLS_END;
   const r = parseAgentReply(official, { tools: T });
   assert.equal(r.calls.length, 1, '官方模板 {} 参数必须收下');
   assert.deepEqual(r.calls[0].arguments, {});
+  // run-8 FAIL#3/4/5 的 DSML 空 invoke 形状随 DSML 退役不再可执行（0.16.23）：
+  // 它被锚点扣住并触发 UNPARSED 再教学，而不是被解析。
   const M = '<' + B + B + 'DSML' + B + B + ' ';
   const C = '</' + B + B + 'DSML' + B + B + ' ';
   const dsmlEmpty = M + 'calls>\n' + M + 'invoke name="cordis_inspect_list">\n' + C + 'invoke>\n' + C + 'calls>\n';
   const r2 = parseAgentReply(dsmlEmpty, { tools: T });
-  assert.equal(r2.calls.length, 1, 'DSML 空 invoke 必须收下（真机逐字形状）');
-  assert.deepEqual(r2.calls[0].arguments, {});
+  assert.equal(r2.calls.length, 0, 'DSML 空 invoke 退役：不得再执行');
+  assert.ok(findProtocolStart(dsmlEmpty).index >= 0, '但仍必须被锚点扣住（防泄漏 + 再教学触发）');
 });
 
 test('反向安全线：无名字的壳 invoke 维持丢弃（repairNamelessClosers 家族不受影响）', () => {
@@ -127,16 +130,16 @@ test('围栏守卫边界：未配对 ``` 不吞真调用；参数值内嵌围栏
   assert.ok(rNested.calls[0].arguments.content.includes('```markdown'), '参数值里的围栏内容逐字保留');
 });
 
-test('备案不回归：DSML 标记家族在官方改写加入后行为不变', () => {
+test('退役不回归：DSML 标记家族 0 calls，官方 token 与 DSML 同轮混写只收官方（0.16.23）', () => {
   const M = '<' + B + B + 'DSML' + B + B + ' ';
   const C = '</' + B + B + 'DSML' + B + B + ' ';
   const dsml = M + 'calls>\n' + M + 'invoke name="grep">\n' + M + 'parameter name="pattern">x|y' + C + 'parameter>\n' + C + 'invoke>\n' + C + 'calls>\n';
   const r = parseAgentReply(dsml, { tools: T });
-  assert.equal(r.calls.length, 1, 'DSML 主路径不得被官方规则破坏');
-  assert.equal(r.calls[0].arguments.pattern, 'x|y');
-  // 官方 token 与 DSML 标记混写（模型漂移）也不互相污染
+  assert.equal(r.calls.length, 0, 'DSML 主路径已退役：不得再解析');
+  assert.ok(findProtocolStart(dsml).index >= 0, '但锚点必须扣住它（防泄漏 + 再教学触发）');
+  // 官方 token 与 DSML 标记混写（模型漂移）时只收官方那条——DSML 半边被扣住进再教学。
   const mixed = CALLS_BEGIN + CALL_BEGIN + 'read' + SEP + '{"file_path":"c.js"}' + CALL_END + CALLS_END
     + '\n' + M + 'invoke name="grep">\n' + M + 'parameter name="pattern">p' + C + 'parameter>\n' + C + 'invoke>';
   const r2 = parseAgentReply(mixed, { tools: T });
-  assert.deepEqual(r2.calls.map((c) => c.name).sort(), ['grep', 'read'], '两种格式同轮混写全部收下');
+  assert.deepEqual(r2.calls.map((c) => c.name), ['read'], '混写轮只执行官方形状');
 });

@@ -20,17 +20,17 @@
 
 | 项 | 值 |
 | --- | --- |
-| 工作树版本 | **0.16.22** |
+| 工作树版本 | **0.16.23** |
 | 已装版本（profile） | **0.16.21**（2026-09-19 实测：web + headless 两处声明一致指向 `dsh-webcode-bridge-0.16.21.tgz`，`node_modules` 内 `package.json` = 0.16.21 且 `lib/client.cjs` 含本版 token 与 page 契约；`dsh plugin add` 声明持久层通道）。**0.16.22 未打包未装**，需走 `dsh plugin add` |
 | 运行中的进程 | run-8 真机验收以 `dsh --profile headless` 进程级验证（0.16.16 时段）；DSH web（3080）2026-09-19 凌晨未运行 |
 | 上游 | `origin/main` = `9d4c61a`（0.16.10 台账推送）；0.16.11–0.16.22 本地已提交/待推 |
-| 单测基线 | **67/67 测试文件**；全量 **785 条**（0.16.21 为 784；0.16.22：`context-budget` 改按 estimateTokens 真实口径重写并新增 ASCII 密度钉子，`regression` 累计口径断言补助手输出项） |
+| 单测基线 | **63/63 测试文件**；全量 **736 条**（0.16.22 为 785/67 文件；0.16.23 删 4 个 DSML 宽容回归文件、新增 6 条退役钉子 + 2 条站点图标钉子） |
 | 注释闸门 | **error 0 / warn 0，退出码 0**（2026-09-19 实跑） |
 | 文件规范闸门 | `check-repo-hygiene.mjs` **PASS**（无 BOM + 索引无死链 + CI/engines Node 版本相容） |
 | 发布闸门 | `verify-pack` 逐文件 sha256 相同 + 接线完好，退出 0（0.16.16 实跑 37/37） |
-| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.22 / testFiles 67/67） |
+| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.23 / testFiles 63/63） |
 | 已装包核对 | 0.16.21 已装机核对（见已装版本行） |
-| 下一阶段 | **0.16.22 需打包安装并重启 DSH 后生效**；第三步（站点选择框 + 官方矢量品牌图标）只出调研结论，见 [doc/brand-icons-research.md](brand-icons-research.md)；工具调用残余失败（DSML 斜杠闭家族 32/40）待下一版加容错，取证见 §0.16.22 |
+| 下一阶段 | **0.16.23 需打包安装并重启 DSH 后生效**；DSML 退役后漂移形状全部走 UNPARSED 再教学（预期 UNPARSED 通知短暂上升、官方形状占比收敛——真机判据见 §0.16.23 六）；站点图标半成品已接手做绿，待真机看效果 |
 
 > **§0.16.10 真机判据（重启后逐条核）**：① `GET /__webcode/status` 的 `build.version` = **0.16.10**；
 > ② 让模型回复一段含 `<b>`、`<foo>`、`Array<T>` 或字面 `<tool_call>` 示例的正文，**逐字对比** harness
@@ -43,6 +43,75 @@
 > 掩盖了「web 落后两个版本」这个真因，直接导致用户按台账以为装好了、重启后仍然不变。
 > **教训记在这里而不是删掉**：凡是「已装/已重启/已验证」这类状态行，**必须逐 profile 写、并附
 > sha256 前 12 位**，否则它会把「一个 profile 装了」读成「都装了」。 |
+
+## 0.16.23（2026-09-19）—— DSML 协议退役（只留备份）+ 站点图标半成品接手做绿
+
+**用户指令（逐字）**：「请你查看git分支意图！然后继续！删除dsml，这个协议只备份！然后记录！正式使用完全按照官方来！！」「确保是全面去除影响，全面实现官方适配deepseek以及harness！一定再检查是否根处解决！」
+
+### 一、DSML 退役（根处方案，不是再加容错）
+
+战略转向：0.16.18–0.16.22 追形状式宽容（官方 token 容错 + DSML 词形链）在 0.16.22 取证
+证明**追不完**（40 条失败中 32 条是新一代 DSML 斜杠闭家族）。0.16.23 起：
+
+| 环节 | 0.16.22 | 0.16.23 |
+| --- | --- | --- |
+| 教学 | 官方模板（0.16.18 已切） | 官方模板（不变，唯一格式） |
+| 解析 | 官方改写 + DSML 词形链（剥标记/补括号/参数简写/熔接标签六条 replace） | **只保留官方改写**（`normalizeDsml` 收缩改名 `normalizeOfficialToolCalls`） |
+| 修复 | `lib/dsml-repair.js` 无名闭合/缺开标签栈式还原 | **删除文件**（两个真机形态都是 DSML 教学时代产物；官方模板参数体是裸 JSON，无 parameter 可闭合） |
+| DSML 教学常量 | `dsmlSkeleton`/`DSML_ONE_LINE` 留而未用 | **删除** |
+| 锚点/扣留 | DSML 锚供改写 | **保留**——退役 ≠ 撤哨：DSML 词形唯一入口变成「扣留防泄漏」，0 calls 走 TOOL_CALL_UNPARSED 自动再教官方格式（0.16.19 机制） |
+| 恢复派发 | DSML 块里能读出只读调用就代派发 | **DSML 形状不恢复**——恢复派发给漂移形状发「奖励」，模型永远收敛不到官方格式；恢复层继续服务在役形状（半角 invoke 残片、mcp_action 围栏、glm 协议） |
+
+**备份**：分支 `backup/dsml-protocol`（= 0.16.22 逐字）+ git 历史；退役前的词形链证据
+（063b0a99 155 处 DSH 畸形逐码点读数、probe-marker-variants 枚举、夹具 13/7）都在其中。
+
+**为什么这是根处解决**：漂移被奖励（宽容解析成功/恢复派发成功）→ 模型没有信号要改；
+退役后 DSML 形状**零收益**（扣住不执行 + 自动再教官方）→ 唯一出路是官方格式。预期真机
+表现：切换初期 UNPARSED 通知上升（模型还在漂），随后官方形状占比收敛。
+
+### 二、站点图标 + 一级选择框（接手 15:00 网页会话半成品，分支意图）
+
+wip/web-session-site-picker 的意图（ SITE_ICON_TIER 档位表 + SitePicker）：
+DeepSeek 用官方 FishLogo 矢量（primitives 自带，零新增资产）；其余站点如实标
+「官方矢量未找到」画文字标记（**不用第三方图集冒充官方**，brand-icons-research §4.1
+B 档留补件入口）；站点栏 tab 加图标 + Ctrl/⌘ 点击分屏交接 sid（修「分屏得到两个
+DeepSeek」）；未初始化首屏加 SitePicker。
+
+接手时它还差三块（0.16.21 误打包事故的后半段）：
+1. **防御回退解构**：网页会话 15:16 那条「defensive fallbacks」edit 恰好解析失败没执行，
+   无回退解构 + 测试桩缺导出 → 6 条 client-render 崩。本版补上（回退语义 = 降级不白屏：
+   缺图标导出 → 空组件/官方真实 viewBox/no-op，旧版 primitives < 0.1.6 也可用）。
+2. **测试桩补齐**：primitives 桩按真机 0.1.6-alpha.2 契约补齐五个导出。
+3. **两条新钉子**：档位说明进 title（official/missing 如实）+ 缺导出降级不白屏。
+
+### 三、测试
+
+- 删 4 个 DSML 宽容回归文件：`dsml-native-close`、`dsml-param-shorthand`、
+  `dsml-real-drift-2026-09-19`、`dsml-real-reply-regression`（夹具与逐字断言都在备份分支）。
+- 退役钉子：`regression`（2026-09-10 真机第 2–6 跑六形状 0 calls + 扣留 + 不恢复派发；
+  死壳内在役 mcp_action JSON 仍收——壳不加分）、`marker-typo`（整文件翻转为退役语义，
+  反向安全线逐字保留）、`protocol-leak`（SHAPES 分在役/退役两组）、`official-tool-calls`
+  （备案不回归 → 退役不回归）、`recovered-dispatch`（夹具换半角在役形状 + DSML 不恢复钉子）、
+  `parse`（形态一致断言 → 逐字原样通过 + 锚点仍认）。
+- 夹具换在役形状：`markdown-block-integrity` / `markdown-whitespace` 的调用素材从 DSML
+  换官方 token（这两个文件测块完整性/空白保真，与协议形状无关）。
+- `client-render` +2 钉子（档位说明、缺导出降级），桩补齐导出。
+- `markdown-whitespace`/`markdown-block-integrity` 不再引用 `MARK` 常量者已清理。
+
+### 四、连带修正
+
+- `findProtocolStart` 的 markdown 敏感锚点排除从**下标**（`i !== 3 && i !== 5`）改为
+  **按 source** 判断——锚点数组增删条目时下标是隐形耦合（删一条 DSML 锚就会错位漏过围栏）。
+- `normalizeDsml` 全部 21 处引用（lib 2 处 + test 若干）改名为 `normalizeOfficialToolCalls`。
+
+### 五、真机验收判据（重启后）
+
+1. `GET /__webcode/preset` 教的仍是官方模板（DSML 零提及）；
+2. 让模型复述一个 DSML 形状示例（散文）→ 不执行、正文外发长度停在锚点、
+   下一轮收到 TOOL_CALL_UNPARSED + 官方格式再教学；
+3. 官方格式调用照常执行（回归）；
+4. 右栏站点栏出现图标（DeepSeek 官方鲸鱼、其余文字标记），title 有档位说明；
+5. 未初始化首屏出现站点选择框；Ctrl/⌘+点击站点 tab 新分屏落在被点的站点。
 
 ## 0.16.22（2026-09-19）—— 上下文计算三修 + 工具调用残余失败取证（reply-log 全量重放）
 

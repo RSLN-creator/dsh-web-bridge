@@ -191,13 +191,14 @@ const DOC = [
 ].join('\n');
 
 const BAR = String.fromCharCode(0xFF5C);
-const MARK = BAR + BAR + 'DSML' + BAR + BAR;
+// 0.16.23：调用素材从 DSML 形状换成官方 token 形状（DSML 已退役，本文件测的是
+// markdown 空白保真，需要的是在役调用形状）。官方 token 用码位现造。
+const SPC = String.fromCharCode(0x2581);
+const otok = (w) => '<' + BAR + 'tool' + w.map((x) => SPC + x).join('') + BAR + '>';
 const CALL = [
-  '<' + MARK + ' calls>',
-  '<' + MARK + ' invoke name="read">',
-  '<' + MARK + ' parameter name="file_path" string="true">doc/progress.md</' + MARK + ' parameter>',
-  '</' + MARK + ' invoke>',
-  '</' + MARK + ' calls>',
+  otok(['calls', 'begin']),
+  otok(['call', 'begin']) + 'read' + otok(['sep']) + '{"file_path":"doc/progress.md"}' + otok(['call', 'end']),
+  otok(['calls', 'end']),
 ].join('\n');
 
 // ── ① 标题级别：`## ` 的空格不能被吃 ──────────────────────────────────────

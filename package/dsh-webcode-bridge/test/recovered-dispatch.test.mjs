@@ -46,10 +46,11 @@ function harness(sendTurnImpl) {
   return { collect, dispose };
 }
 
-// 真机漂移形状（run-2 会话 7e16d083 的扣留头逐字 + 最小闭合补全；畸变点=参数开标记简写，
-// 本用例在「宽容层已修」之前的老文本上构造另一种畸变：参数体未闭合）。
-const DRIFT_READ = '先看这个文件。\n' + MARK + 'calls>\n' + MARK + 'invoke name="read">\n'
-  + MARK + 'parameter name="file_path" string="true">lib/openai.js</' + B + 'DSML' + B + ' param\n';
+// 恢复层的在役形状（0.16.23）：**半角规范 invoke 形**的畸形——参数体未闭合。
+// 历史夹具（run-2 会话 7e16d083 的 DSML 简写形状）随 DSML 退役换成在役形状：
+// 恢复层继续服务在役协议的畸形（半角 <invoke>/<parameter> 残片、mcp_action 围栏），
+// DSML 形状的扣留块一律走 UNPARSED 再教学——恢复派发不得给漂移形状发「奖励」。
+const DRIFT_READ = '先看这个文件。\n<invoke name="read">\n<parameter name="file_path" string="true">lib/openai.js</param\n';
 
 test('纯函数：从畸变块恢复出白名单只读工具的调用', () => {
   const rec = recoverUnparsedCalls(DRIFT_READ, TOOLS);
@@ -59,13 +60,23 @@ test('纯函数：从畸变块恢复出白名单只读工具的调用', () => {
 });
 
 test('纯函数：白名单外（pwsh）的同形畸变不恢复', () => {
-  const drift = MARK + 'invoke name="pwsh">\n' + MARK + 'parameter name="command" string="true">ls</' + B + 'DSML' + B + ' param';
+  const drift = '<invoke name="pwsh">\n<parameter name="command" string="true">ls</param';
   assert.deepEqual(recoverUnparsedCalls(drift, TOOLS), [], '有副作用的工具绝不代为派发');
 });
 
 test('纯函数：一个可读参数都没有时不恢复（留给 UNPARSED 提示）', () => {
-  const drift = MARK + 'invoke name="read">\n' + MARK + 'file_path="lib/openai.js</' + B + 'DSML' + B + ' param';
+  const drift = '<invoke name="read">\nfile_path="lib/openai.js</param';
   assert.deepEqual(recoverUnparsedCalls(drift, TOOLS), []);
+});
+
+test('纯函数：DSML 形状退役——扣留块里的 DSML 调用不得再被恢复派发（0.16.23）', () => {
+  // 历史 DRIFT_READ 的 DSML 原形状（run-2 逐字 + 最小闭合补全）。退役语义：
+  // DSML 残骸只走 UNPARSED 再教学；若这里恢复出调用，等于奖励漂移形状。
+  const B = String.fromCharCode(0xFF5C);
+  const dsmlRead = '先看这个文件。\n' + B + B + 'DSML' + B + B + 'calls>\n' + B + B + 'DSML' + B + B + 'invoke name="read">\n'
+    + B + B + 'DSML' + B + B + 'parameter name="file_path" string="true">lib/openai.js</' + B + 'DSML' + B + ' param\n';
+  assert.deepEqual(recoverUnparsedCalls(dsmlRead, TOOLS), [],
+    'DSML 形状被恢复派发了——退役必须让漂移形状无收益');
 });
 
 test('端到端：UNPARSED 轮带可恢复调用时必须派发 tool-call 块（循环存活），并如实说明', async () => {

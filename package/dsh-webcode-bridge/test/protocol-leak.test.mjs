@@ -32,7 +32,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseAgentReply, findProtocolStart, stripProtocolText, normalizeDsml, proseSafeEnd, partialProtocolAt } from '../lib/agent-preset.js';
+import { parseAgentReply, findProtocolStart, stripProtocolText, normalizeOfficialToolCalls, proseSafeEnd, partialProtocolAt } from '../lib/agent-preset.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixturePath = path.join(here, 'fixtures', 'leaked-dsml-reply.txt');
@@ -50,11 +50,11 @@ const TAG_F = LT + DSML_F + ' ';
 
 // ---- 1) real fixture: the probe must hit ---------------------------------
 
-test('boundary probe recognizes the real full-width DSML shape (index was -1 before fix)', () => {
+test('boundary probe recognizes the real full-width DSML shape (withheld after 0.16.23 retirement)', () => {
   const found = findProtocolStart(leaked);
   assert.ok(found.index >= 0, 'real shape must be detected, else the protocol body is emitted as text');
-  assert.equal(found.name, 'pwsh', 'should read the tool name out of the invoke attribute');
-  assert.equal(found.transport, true, 'should classify as a tool transport shape');
+  assert.equal(found.name, '', 'DSML retired: no tool name is read out any more');
+  assert.equal(found.transport, false, 'DSML retired: withheld + UNPARSED re-teach, never executed');
   assert.equal(leaked.slice(0, found.index).trim(), PROSE, 'boundary must sit at the protocol start');
 });
 
@@ -68,28 +68,24 @@ test('stripping leaves only prose, with no protocol residue', () => {
 
 // ---- 2) the tool loop is untouched ---------------------------------------
 
-test('parsing still yields the complete call (stripping never touches the tool loop)', () => {
+test('retired DSML fixture parses to 0 calls (withheld text goes to UNPARSED re-teach, 0.16.23)', () => {
   const { calls } = parseAgentReply(leaked);
-  assert.equal(calls.length, 1, 'the fixture holds exactly one tool call');
-  assert.equal(calls[0].name, 'pwsh');
-  assert.ok(
-    typeof calls[0].arguments.command === 'string' && calls[0].arguments.command.includes('Get-Location'),
-    'command must survive intact, else the tool runs with empty arguments',
-  );
-  assert.equal(calls[0].arguments.description, 'Show working directory and top-level files');
+  assert.equal(calls.length, 0, 'DSML shapes are retired: never executed (backup: backup/dsml-protocol)');
 });
 
-test('one text: the UI gets prose and the parser gets the call, simultaneously', () => {
+test('one text: the UI gets prose only; the parser withholds the retired block', () => {
   const prose = stripProtocolText(leaked);
   const { calls } = parseAgentReply(leaked);
   assert.equal(prose, PROSE);
-  assert.equal(calls.length, 1);
-  assert.ok(calls.length > 0 && prose.length > 0);
+  assert.equal(calls.length, 0);
+  assert.ok(calls.length === 0 && prose.length > 0);
 });
 
 // ---- 3) probe and parser must not drift ----------------------------------
 
 const SHAPES = [
+  // 0.16.23 起分两组：前三个是**在役**形状（probe 命中 ⇔ parser 收下）；后三个是
+  // **退役**的 DSML 形状（probe 必须命中以扣留，parser 必须 0 calls——退役 ≠ 撤哨）。
   ['half-width tool_call tag',
     LT + 'tool_call' + GT + '\n{"mcp_action":"call","name":"pwsh","arguments":{"command":"git log"}}\n' + LT + SL + 'tool_call' + GT],
   ['json fence (mcp_action protocol)',
@@ -108,13 +104,20 @@ const SHAPES = [
     DSML_F + 'invoke name="read"' + GT + LT + DSML_F + 'parameter name="path"' + GT + 'PLAN.md' +
     LT + SL + DSML_F + 'parameter' + GT + LT + SL + DSML_F + 'invoke' + GT],
 ];
+const RETIRED_DSML_SHAPES = new Set([
+  'full-width bar-DSML calls + invoke + parameter (real main shape)',
+  'half-width bar-DSML prefix',
+  'bar-DSML with dropped leading angle bracket',
+]);
 
-test('six protocol shapes: probe and parser agree (neither may accept alone)', () => {
+test('protocol shapes: active shapes probe⇔parse agree; retired DSML withheld but never parsed (0.16.23)', () => {
   const drift = [];
   for (const [name, text] of SHAPES) {
     const probed = findProtocolStart(text).index >= 0;
     const parsed = parseAgentReply(text).calls.length > 0;
-    if (probed !== parsed) drift.push(name + ': probe=' + probed + ' parse=' + parsed);
+    const retired = RETIRED_DSML_SHAPES.has(name);
+    const ok = retired ? (probed && !parsed) : (probed === parsed && probed);
+    if (!ok) drift.push(name + ': probe=' + probed + ' parse=' + parsed + ' retired=' + retired);
   }
   assert.deepEqual(drift, [], 'probe/parser shape sets drifted:\n  ' + drift.join('\n  '));
 });
@@ -364,7 +367,7 @@ test('<toolcalling> is NOT a protocol anchor (word boundary must hold for the ne
 //   session session-a6835ca1 step 22: the same shape, 21,905 chars persisted.
 //
 // Mechanism, two causes stacked:
-//   (a) normalizeDsml did not eat the space after the marker, so it produced
+//   (a) normalizeOfficialToolCalls did not eat the space after the marker, so it produced
 //       `< calls>` and the exact-prefix table in partialProtocolAt missed it
 //       entirely (the anchors tolerated `<\s`, which is why this stayed hidden);
 //   (b) the closing path treated "no parseable call" as "the whole text is prose"
@@ -374,21 +377,11 @@ test('<toolcalling> is NOT a protocol anchor (word boundary must hold for the ne
 // this file (DSH strips DSML-looking sequences out of tool arguments).
 const DSML_MARK = LT + BARF + BARF + 'DSML' + BARF + BARF;
 
-test('normalizeDsml eats the space between the marker and the tag name (real leak)', () => {
-  // This is cause (a). Before 0.15.0 this returned '< calls>' and every
-  // exact-prefix check downstream silently stopped working.
-  const raw = DSML_MARK + ' calls>';
-  assert.equal(normalizeDsml(raw), LT + 'calls>', 'marker + space + name must collapse to <calls>');
-  const withInvoke = DSML_MARK + ' invoke name="pwsh">';
-  assert.equal(normalizeDsml(withInvoke), LT + 'invoke name="pwsh">');
-});
-
-test('normalizeDsml does NOT eat the space when no known tag name follows', () => {
-  // The safety line: if the space were eaten unconditionally, ordinary prose after
-  // a stray marker would be spliced into a fake tag (`<hello`). Only the
-  // lookahead form collapses.
-  const raw = DSML_MARK + ' hello';
-  assert.equal(normalizeDsml(raw), LT + ' hello', 'space must survive before an unknown name');
+test('retired: normalizeOfficialToolCalls no longer rewrites DSML markers at all (0.16.23)', () => {
+  // 0.15.0–0.16.22 这里钉的是改写层的两条行为（吃空格/不吃空格）；0.16.23 改写层
+  // 收缩为官方 token 改写，DSML 标记**逐字原样通过**（解析退役，扣留在锚点层）。
+  assert.equal(normalizeOfficialToolCalls(DSML_MARK + ' calls>'), DSML_MARK + ' calls>');
+  assert.equal(normalizeOfficialToolCalls(DSML_MARK + ' hello'), DSML_MARK + ' hello');
 });
 
 test('proseSafeEnd: the real leaked block yields prose only (the 354-char case)', () => {
@@ -453,7 +446,7 @@ test('proseSafeEnd: never throws on malformed input', () => {
 
 // ---- 5) normalization consistency ----------------------------------------
 
-test('normalizeDsml is idempotent', () => {
-  const once = normalizeDsml(leaked);
-  assert.equal(normalizeDsml(once), once);
+test('normalizeOfficialToolCalls is idempotent', () => {
+  const once = normalizeOfficialToolCalls(leaked);
+  assert.equal(normalizeOfficialToolCalls(once), once);
 });

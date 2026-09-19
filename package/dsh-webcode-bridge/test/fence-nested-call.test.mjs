@@ -108,11 +108,11 @@ const REPORT_MD_SAMPLE = [
   `</${BAR}${BAR}DSML${BAR}${BAR} calls>`,
 ].join('\n');
 
-test('⓪a 真机泄漏样本（全角竖线 DSML）：边界必须命中，且安全终点必须停在边界而不是全文', () => {
+test('⓪a 真机泄漏样本（全角竖线 DSML）：锚点必须命中扣留，transport 退役为 false（0.16.23）', () => {
   const b = findProtocolStart(REPORT_MD_SAMPLE);
-  assert.ok(b.index >= 0, '全角竖线的 DSML 必须探得到（#18 的 normalizeDsml 修法）');
+  assert.ok(b.index >= 0, '全角竖线的 DSML 必须仍被锚点探到——退役只撤解析，不撤防泄漏扣留');
   assert.equal(b.index, REPORT_MD_SAMPLE.indexOf(`<${BAR}${BAR}DSML`), '边界必须恰好停在协议起点');
-  assert.equal(b.transport, true, '真调用围栏的 transport 必须为 true');
+  assert.equal(b.transport, false, 'DSML 已退役：不再是可执行的传输形状（0 calls → UNPARSED 再教学）');
   const safe = proseSafeEnd(REPORT_MD_SAMPLE, b.index);
   assert.equal(safe, b.index, '安全终点必须停在边界；返回全文长度即为 #18 的全泄漏形态');
   assert.ok(safe < REPORT_MD_SAMPLE.length, '必须扣住协议尾巴，不得外发');
@@ -120,31 +120,14 @@ test('⓪a 真机泄漏样本（全角竖线 DSML）：边界必须命中，且�
   assert.equal(REPORT_MD_SAMPLE.slice(0, safe), 'All data gathered and verified. Writing the deliverable report.\n\n');
 });
 
-test('⓪b 真机泄漏样本的**完整正文**（含参数体）必须是可解析的——丢调用发生在体，不在标记', () => {
-  // 这一条是上一条的对照，也是本族问题最后一次误判的教训。
-  //
-  // 实测差异（本次诊断，2026-09-16）：
-  //   - REPORT.md 的**真实全文**（22,366 字符）：calls = 0
-  //   - 同一形态的**缩小样本**（上面 REPORT_MD_SAMPLE）：calls = 1
-  //
-  // 两者唯一的差别是**参数体的规模与内容**。这直接推翻了「解析器认不出全角竖线
-  // 标记」这个曾被认为的根因——标记本身认得出来（⓪a 已证）。真正让调用
-  // 不可执行的变量在**体的形状**（巨型单行参数体 / 未配平的转义与花括号），
-  // 而不是前缀标记。
-  //
-  // 因此本用例钉住的是一条**正面能力**：缩小样本必须解析出 1 个调用且 content 逐字完整。
-  // 若它变红，说明有人在动 readCallAt/fenceCallBodyAt 的配平逻辑，必须先按
-  // doc/comment-style.md §9.3 做反向验证。
+test('⓪b 真机泄漏样本（含参数体）退役后必须 0 calls 且不退化成全泄漏（0.16.23）', () => {
+  // 旧断言（夹具体必须解析出 1 条调用）随 DSML 退役删除——真机取证与旧实现
+  // 见分支 backup/dsml-protocol。这里钉住退役后的两条硬边界：
   const parsed = parseAgentReply(REPORT_MD_SAMPLE);
-  assert.equal(parsed.calls.length, 1, '同形态的缩小样本必须可执行（不可执行的真因在体不在标记）');
-  assert.equal(parsed.calls[0].name, 'write');
-  assert.ok(
-    parsed.calls[0].arguments.content.includes('| a | b |'),
-    '参数体里的 markdown 表格必须逐字保留，不得被围栏窗口截断',
-  );
+  assert.equal(parsed.calls.length, 0, 'DSML 形状退役：不得再产生可执行调用');
   // 关键安全线：无论可执行与否，协议原文都不得作为正文外发。
   const b = findProtocolStart(REPORT_MD_SAMPLE);
-  assert.ok(proseSafeEnd(REPORT_MD_SAMPLE, b.index) < REPORT_MD_SAMPLE.length, '丢调用不能退化成全泄漏');
+  assert.ok(proseSafeEnd(REPORT_MD_SAMPLE, b.index) < REPORT_MD_SAMPLE.length, '退役不得退化成全泄漏——扣留 + UNPARSED 再教学接管');
 });
 
 // ---- ① 正向：参数里带一组围栏，调用必须解析出来且内容逐字完整 ---------------

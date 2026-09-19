@@ -34,7 +34,7 @@ const bridgeSrcFrom = (rel) => readFileSync(path.resolve(here, '../lib/', rel), 
 const SESSION_PROPS = { sessionId: 'session-render-test' };
 
 /** 在当前进程里加载 client.cjs 并跑若干渲染周期，返回每次渲染捕获的异常。 */
-async function renderPane({ payloads, which = 'pane', sites = [], roster = null } = {}) {
+async function renderPane({ payloads, which = 'pane', sites = [], roster = null, primitiveOmit = [] } = {}) {
   const saved = { window: global.window, document: global.document, fetch: global.fetch, setInterval: global.setInterval, clearInterval: global.clearInterval };
   const realSetTimeout = global.setTimeout;
   let captured = null;
@@ -115,7 +115,26 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null 
     // 这里仍留一条 react-dom 桩，但要求它**不得**被用到：真被 require 到说明
     // portal 路线又被加回来了。
     if (id === 'react-dom') return { createPortal: () => { throw new Error('不得再用 createPortal：官方统计行标记已不存在'); } };
-    if (id === '@deepseek-ai/dsh-client-ui-primitives') return { IconCodeOutline16: () => null, IconQueueOutline14: () => null };
+    // 官方 primitives 桩（0.16.23 起按真实契约补齐）：client.cjs 还解构了
+    // IconChevronDownOutline14 / FishLogo / FISH_LOGO_PATH / FISH_LOGO_VIEWBOX /
+    // useDismissOnOutsidePointer（站点图标与选择框，0.16.23 接手网页会话半成品时
+    // 加入）。桩按真机 0.1.6-alpha.2 的导出形状给**可渲染**的替身——FISH_LOGO_VIEWBOX
+    // 用官方真实值，路径给一条合法占位 d（断言不依赖形状细节，只依赖渲染不崩）。
+    // primitiveOmit：模拟旧版 primitives 缺导出（每个缺位导出必须被 client.cjs 的
+    // 防御回退接住——「降级不是崩溃」，0.16.21 事故的回归钉子）。
+    if (id === '@deepseek-ai/dsh-client-ui-primitives') {
+      const stub = {
+        IconCodeOutline16: () => null,
+        IconQueueOutline14: () => null,
+        IconChevronDownOutline14: () => null,
+        FishLogo: () => null,
+        FISH_LOGO_PATH: '<path d="M11.58 17.04C6.5 16.6 1 12.6 1 8.5 1 3.8 5.6 0 11.6 0c5.4 0 10 3 11.2 7.2L14 6l-2.4 11z" fill="currentColor"/>',
+        FISH_LOGO_VIEWBOX: { width: 23.16, height: 17.04 },
+        useDismissOnOutsidePointer: () => {},
+      };
+      for (const k of primitiveOmit) delete stub[k];
+      return stub;
+    }
     throw new Error('unexpected require: ' + id);
   };
 
@@ -444,6 +463,37 @@ test('右栏：注册全部走 ctx.effect，并把「刷新 / 独立窗口」挂
 });
 
 // ------------------------------------------------------------------ 0.14.8
+
+test('★ 站点图标与一级选择框（0.16.23 接手网页会话半成品）：图标/档位说明/首屏选择框都要渲染出来', async () => {
+  const ten = [
+    { siteId: 'deepseek', siteName: 'DeepSeek 网页版', initialized: true, loggedIn: true },
+    { siteId: 'glm', siteName: '智谱清言 (GLM)', initialized: false, loggedIn: true },
+  ];
+  const full = await renderPane({ payloads: [emptyWindows], sites: ten });
+  assert.deepEqual(full.errors, [], '站点图标渲染抛错：' + full.errors.map(e => e.message).join('; '));
+  // 档位表语义：DeepSeek 是官方鲸鱼矢量（official 档），GLM 如实标注「未找到」——
+  // 不许把第三方图集冒充官方（doc/brand-icons-research.md 的结论）。
+  const titles = treeAttrs(full.tree, ['title']).join(' | ');
+  assert.ok(titles.includes('官方鲸鱼矢量'), 'DeepSeek 的 official 档位说明未出现在 title 中');
+  assert.ok(titles.includes('未找到品牌方发布的透明底矢量'), 'GLM 的 missing 档位说明未出现在 title 中');
+  // 站点栏每个 tab 内都有 glyph 挂点（图标或文字标记的容器）。
+  const html = JSON.stringify(full.tree);
+  assert.ok(html.includes('hwb-tab-glyph'), '站点栏 tab 缺少图标挂点');
+});
+
+test('★ 站点图标：旧版 primitives 缺导出时必须降级而不是白屏（0.16.21 事故回归钉子）', async () => {
+  // 0.16.21 误打包的半成品里，对 primitives 的新增导出**无回退解构**，而测试桩
+  // 只给了两个图标——FishLogo/FISH_LOGO_VIEWBOX/IconChevronDownOutline14/
+  // useDismissOnOutsidePointer 全是 undefined，渲染期 h(undefined/读 .height) 抛
+  // TypeError，6 条渲染测试全崩。修复 = 防御回退解构（client.cjs）；本条钉住：
+  // 把新增导出**全部抽走**（模拟 < 0.1.6 的旧版 primitives），渲染必须照样成立。
+  const { errors } = await renderPane({
+    payloads: [emptyWindows],
+    sites: [{ siteId: 'deepseek', siteName: 'DeepSeek 网页版', initialized: true, loggedIn: true }],
+    primitiveOmit: ['IconChevronDownOutline14', 'FishLogo', 'FISH_LOGO_PATH', 'FISH_LOGO_VIEWBOX', 'useDismissOnOutsidePointer'],
+  });
+  assert.deepEqual(errors, [], '缺导出时渲染抛错（回退缺失，会白屏）：' + errors.map(e => e.message).join('; '));
+});
 
 test('右栏账户头像：圆框按真实读数分三态，且颜色不是唯一状态载体', async () => {
   // 用户原话：「账户栏目已登录的账户有头像一样的（就是适应大小的圆框账户，

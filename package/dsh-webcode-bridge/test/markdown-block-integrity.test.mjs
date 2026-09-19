@@ -193,15 +193,17 @@ function assertBlockIntegrity(r, expectedProse, label) {
 }
 
 // ── 用例素材：权威全文 = PROSE1 + CALL + PROSE2 ──────────────────────────────
-
+// 0.16.23：调用素材从 DSML 形状换成官方 token 形状——DSML 已退役（0 calls），
+// 而本文件测的是「块完整性」（调用必须仍被交出去），需要的是**在役**调用形状。
+// 官方 token 用码位现造，源码里不出现全角字符。
 const PROSE1 = '## 结论\n第一段正文由增量通道送达，这一段应当两侧逐字相同。\n';
 const PROSE2 = '\n第二段正文只存在于网页给的权威全文里，增量通道没有送出它。\n';
+const SPC = String.fromCharCode(0x2581);
+const otok = (w) => '<' + BAR + 'tool' + w.map((x) => SPC + x).join('') + BAR + '>';
 const CALL = [
-  '<' + MARK + ' calls>',
-  '<' + MARK + ' invoke name="read">',
-  '<' + MARK + ' parameter name="file_path" string="true">doc/progress.md</' + MARK + ' parameter>',
-  '</' + MARK + ' invoke>',
-  '</' + MARK + ' calls>',
+  otok(['calls', 'begin']),
+  otok(['call', 'begin']) + 'read' + otok(['sep']) + '{"file_path":"doc/progress.md"}' + otok(['call', 'end']),
+  otok(['calls', 'end']),
 ].join('\n');
 
 // ── ① 对照：增量通道把全文都送了（恒等场景，不该有任何差异）──────────────────
