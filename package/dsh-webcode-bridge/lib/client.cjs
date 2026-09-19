@@ -2092,12 +2092,17 @@ window.__ModuleLoader__.load({
               // 基类必须始终在：0.12.9 只渲染 'active' 或 ''，于是没有基础样式
               //（字号/内边距/圆角全无），站点栏看起来是一排裸 <button>。
               className: 'hwb-site-tab' + (sid === siteId ? ' active' : ''),
-              title: name + ' · ' + statusLabel(siteStatuses[sid]) + (statusTitle(siteStatuses[sid]) ? ' · ' + statusTitle(siteStatuses[sid]) : ''),
-              onClick: () => setSiteId(sid),
+              title: name + ' · ' + statusLabel(siteStatuses[sid]) + (statusTitle(siteStatuses[sid]) ? ' · ' + statusTitle(siteStatuses[sid]) : '') + ' · ' + siteIconWhy(sid),
               // Ctrl/⌘ + 点击 = 在**新分屏**里打开该站点：多开不同网页的直接入口
               //（另一块面板是独立的组件实例，站点选择互不影响）。
+              // 0.16.22 修：旧实现只 setSiteId 就 onSplit，没把 sid 交接给新实例，新 pane
+              // 会停在默认站点，于是「分屏看两个站点」实际得到两个 DeepSeek。
+              onClick: (e) => { if (e.ctrlKey || e.metaKey) { e.preventDefault(); openSiteInPane(sid); } else setSiteId(sid); },
               onAuxClick: (e) => { if (e.button === 1) { e.preventDefault(); openSiteInPane(sid); } },
             }, statusDot(siteStatuses[sid]),
+              // 站点标记：有官方矢量就画官方矢量，没有就画文字标记。
+              h('span', { className: 'hwb-tab-glyph' + (siteTier(sid) === 'official' ? ' official' : '') },
+                h(SiteGlyph, { sid, size: 14 })),
               h('span', { className: 'hwb-site-tab-name' }, name))))),
         // 站点栏之下的「网页区」：iframe 与各种遮罩（加载中 / 拦截 / 不可达 /
         // 未初始化）全部放在这里。遮罩的 position:absolute;inset:0 于是只覆盖
@@ -2111,6 +2116,7 @@ window.__ModuleLoader__.load({
           shouldGuide(siteStatus) && h('div', { className: 'hwb-guide', role: 'status' },
             h('strong', null, siteName(siteId) + ' 尚未初始化'),
             h('p', null, '请先在设置页点击“登录”或“检测”，完成一次真实网页核验后再打开右栏。网络不可达或地区受限时，请使用独立窗口确认。'),
+            h('div', { className: 'hwb-firstrun' }, h(SitePicker, { siteId, siteStatuses, onSplit: openSiteInPane, onPick: (sid) => setSiteId(sid) })),
             h('button', { className: 'hwb-retry', onClick: () => api('window', { siteId, action: 'open' }).then(winState).catch(e => setConnectError(e.message)) }, '打开独立窗口')),
           // 本机直连不通：**不挂 iframe**（挂上去只会是一张 502/403 裸错误页，还常驻
           // 保活占资源）。给出站点名、失败原因与两条真正可行的出路。
@@ -2324,6 +2330,41 @@ window.__ModuleLoader__.load({
         ".hwb-site-tab:hover{background:var(--dsw-alias-interactive-bg-hover,#8882);color:var(--dsw-alias-label-primary,inherit)}",
         ".hwb-site-tab.active{color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border-color:var(--dsw-alias-border-l3,#8885)}",
         ".hwb-site-tab-name{white-space:nowrap}",
+        // ---- 站点图标与一级选择框（0.16.22）--------------------------------
+        // 尺寸口径：图标框 = 图标尺寸 + 8（内边距），与官方图标按钮的 28px 同族。
+        // 颜色一律 currentColor：官方鲸鱼是单条填充路径，随宿主主题变色——
+        // 这也是「透明底」的实际含义（没有底色块需要跟着主题反转）。
+        ".hwb-glyph-svg{display:block;flex:none}",
+        ".hwb-glyph,.hwb-tab-glyph,.hwb-picker-ico{display:inline-flex;align-items:center;justify-content:center;flex:none;color:var(--dsw-alias-label-secondary,inherit)}",
+        ".hwb-glyph.official,.hwb-tab-glyph.official{color:var(--dsw-alias-brand-primary,#3b82f6)}",
+        ".hwb-tab-glyph{margin-right:-2px}",
+        ".hwb-picker{position:relative}",
+        ".hwb-picker.inline{flex:none}",
+        ".hwb-picker-trigger{display:inline-flex;align-items:center;gap:6px;height:28px;max-width:180px;padding:0 6px 0 4px;font:inherit;font-size:13px;line-height:26px;color:var(--dsw-alias-label-primary,inherit);background:0 0;border:.5px solid transparent;border-radius:14px;cursor:pointer;transition:background .12s ease,border-color .12s ease}",
+        ".hwb-picker-trigger:hover{background:var(--dsw-alias-interactive-bg-hover,#8882);border-color:var(--dsw-alias-border-l4,#8884)}",
+        ".hwb-picker-trigger:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#3b82f6);outline-offset:1px}",
+        ".hwb-picker-trigger-name{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
+        ".hwb-picker-caret{display:inline-flex;flex:none;color:var(--dsw-alias-label-tertiary,#8a8f98)}",
+        // 面板体：尺寸/圆角/阴影对齐官方菜单（--dsw-specific-menu + elevation-prominent）。
+        // 下拉态绝对定位在触发器下方；首屏态（.bare）是文档流里的一张卡片。
+        ".hwb-picker-surface{position:absolute;top:calc(100% + 6px);left:0;z-index:1100;box-sizing:border-box;width:max-content;min-width:min(320px,100vw - 24px);max-width:min(420px,100vw - 24px);padding:12px;border-radius:12px;background:var(--dsw-specific-menu,var(--dsw-alias-bg-layer-1,#fff));box-shadow:var(--dsw-elevation-prominent,0 8px 24px #0003);color:var(--dsw-alias-label-secondary,inherit)}",
+        ".hwb-picker-surface.bare{position:static;width:100%;max-width:440px;min-width:0;text-align:left;margin:0 auto;box-shadow:none;border:.5px solid var(--dsw-alias-border-l4,#8884)}",
+        ".hwb-picker-head{font-size:12px;line-height:18px;margin:0 0 8px;color:var(--dsw-alias-label-tertiary,#8a8f98)}",
+        ".hwb-picker-grid{display:grid;grid-template-columns:1fr;gap:2px;max-height:min(52vh,420px);overflow:auto}",
+        ".hwb-picker-cell{display:flex;align-items:center;gap:2px}",
+        ".hwb-picker-item{flex:1;min-width:0;display:flex;align-items:center;gap:10px;padding:6px 8px;font:inherit;text-align:left;color:var(--dsw-alias-label-primary,inherit);background:0 0;border:0;border-radius:8px;cursor:pointer}",
+        ".hwb-picker-item:hover{background:var(--dsw-alias-interactive-bg-hover,#8882)}",
+        ".hwb-picker-item.active{background:var(--dsw-alias-interactive-bg-hover,#8882)}",
+        ".hwb-picker-item:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#3b82f6);outline-offset:-1px}",
+        ".hwb-picker-ico.official{color:var(--dsw-alias-brand-primary,#3b82f6)}",
+        ".hwb-picker-text{display:flex;flex-direction:column;min-width:0;gap:1px}",
+        ".hwb-picker-name{font-size:13px;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
+        ".hwb-picker-meta{display:inline-flex;align-items:center;gap:5px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#8a8f98)}",
+        ".hwb-picker-split{flex:none;width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;font-size:12px;color:var(--dsw-alias-label-tertiary,#8a8f98);background:0 0;border:.5px solid transparent;border-radius:12px;cursor:pointer}",
+        ".hwb-picker-split:hover{background:var(--dsw-alias-interactive-bg-hover,#8882);color:var(--dsw-alias-label-primary,inherit);border-color:var(--dsw-alias-border-l4,#8884)}",
+        ".hwb-picker-foot{font-size:11px;line-height:16px;margin:10px 0 0;padding-top:8px;border-top:.5px solid var(--dsw-alias-border-l4,#8884);color:var(--dsw-alias-label-tertiary,#8a8f98)}",
+        // 首屏网格：作为引导页里的一块内容，不吸走整页宽度，也不与遮罩的居中布局打架。
+        ".hwb-firstrun{width:100%;max-width:440px;display:flex;justify-content:center}",
         // 动作组：四颗**同形图标按钮**（官方 expand 按钮的 28px/圆角/透明底）。
         // 旧实现里刷新是裸图标、独立窗口是一颗长药丸，两套视觉语言并存——用户报
         // 「刷新栏目/独立窗口状态有点简略，而且不统一风格」。文字全部进
