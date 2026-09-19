@@ -25,17 +25,17 @@ const pkgRoot = path.resolve(here, '..');
 const readLib = (f) => fs.readFileSync(path.join(pkgRoot, 'lib', f), 'utf8');
 
 test('预算够：窗口 1000 token，本轮远低于它 → ok', () => {
-  // 1000 字符按 0.7 tok/字符 + 10% 余量 ≈ 770 token < 1000
-  const r = checkContextBudget({ chars: 1000, contextWindow: 1000 });
+  // 1000 个 ASCII 字符按 0.25 tok/字符 + 10% 余量 ≈ 275 token < 1000
+  const r = checkContextBudget({ text: 'a'.repeat(1000), contextWindow: 1000 });
   assert.equal(r.ok, true);
   assert.equal(r.window, 1000);
   assert.ok(r.ratio < 1, `ratio 应 < 1，实际 ${r.ratio}`);
   assert.equal(r.overflowTokens, 0);
 });
 
-test('预算超：字符数折算后超过窗口 → 不 ok，且给出超出量', () => {
-  // 2000 字符 ≈ 1540 token > 1000
-  const r = checkContextBudget({ chars: 2000, contextWindow: 1000 });
+test('预算超：折算后超过窗口 → 不 ok，且给出超出量', () => {
+  // 8000 个 ASCII 字符 ≈ 2200 token > 1000
+  const r = checkContextBudget({ text: 'a'.repeat(8000), contextWindow: 1000 });
   assert.equal(r.ok, false);
   assert.ok(r.tokens > r.window);
   assert.equal(r.overflowTokens, r.tokens - r.window);
@@ -43,42 +43,51 @@ test('预算超：字符数折算后超过窗口 → 不 ok，且给出超出量
 });
 
 test('边界：恰好等于窗口 → 放行（闸门只拦「超」，不做「接近就拦」的节流）', () => {
-  // 反解出恰好命中窗口的字符数：tokens = ceil(n*0.7*1.1) === window
+  // CJK 档反解：tokens = ceil(0.7n × 1.1) = ceil(0.77n)；n=999 → 770 恰好命中
   const window = 770;
-  const n = Math.floor(window / (0.7 * 1.1));
-  const r = checkContextBudget({ chars: n, contextWindow: window });
+  const r = checkContextBudget({ text: '你'.repeat(999), contextWindow: window });
   assert.ok(r.tokens <= window, `tokens=${r.tokens} 应 <= window=${window}`);
   assert.equal(r.ok, true);
 });
 
-test('折算口径与 estimateTokens 同源：同一段文本两边一致', () => {
-  const text = '你好世界，这是一个用来对齐口径的句子。';
-  const r = checkContextBudget({ chars: text.length, contextWindow: 10_000_000 });
-  // estimateTokens 按实际字符构成算（CJK 0.7 / ASCII 0.25），这里传的是**纯字符数**，
-  // 因此全 CJK 文本两边应一致；混合文本只要求同一数量级。
-  const direct = estimateTokens(text);
-  assert.ok(Math.abs(r.tokens - direct) <= 1, `口径应一致：闸=${r.tokens} estimateTokens=${direct}`);
+test('折算口径与 estimateTokens 严格同源：同一个 text 两边相等（0.16.22 起）', () => {
+  // 0.16.22 修复点：旧实现收 chars 按 0.7 平铺折算，对英文/代码为主体的
+  // 工具 prompt 高估近 3 倍（长英文轮被误拒）。现在收原文、内部直接走
+  // estimateTokens——两边必须是同一个数，混合构成也不例外。
+  for (const text of [
+    '你好世界，这是一个用来对齐口径的句子。',
+    'function checkContextBudget({ text, contextWindow }) { return null; }',
+    '混合文本 mixed 工具结果 {"json": true, "n": 42} 与代码 `ls -la`。',
+  ]) {
+    const r = checkContextBudget({ text, contextWindow: 10_000_000 });
+    assert.equal(r.tokens, estimateTokens(text), `口径应严格同源：${text.slice(0, 12)}…`);
+  }
+});
+
+test('英文/代码主体的 prompt 不再被 CJK 档高估（0.16.22 修复钉子）', () => {
+  // 10000 个 ASCII 字符：真实口径 ≈ 2750 token；旧平铺 0.7 会算出 ≈ 7700。
+  // 窗口 5000 下旧实现误拒、新实现放行——这条钉住这个行为差。
+  const r = checkContextBudget({ text: 'a'.repeat(10_000), contextWindow: 5000 });
+  assert.ok(r.tokens < 4000, `tokens=${r.tokens} 应按 ASCII 档 ≈ 2750，而不是平铺 0.7 的 ≈ 7700`);
+  assert.equal(r.ok, true);
 });
 
 test('边界：拿不到窗口（缺失/0/负数/NaN）→ 一律不拦（返回 null）', () => {
   // 猜一个窗口去拒绝用户，比放行更糟；这种情况交给 PROMPT_TRUNCATED 兜底。
   for (const w of [undefined, null, 0, -1, NaN, 'abc']) {
-    assert.equal(checkContextBudget({ chars: 10_000_000, contextWindow: w }), null, `window=${w} 应返回 null`);
+    assert.equal(checkContextBudget({ text: 'a'.repeat(10_000_000), contextWindow: w }), null, `window=${w} 应返回 null`);
   }
 });
 
-test('边界：非法 chars 不拦，也不抛错', () => {
-  assert.equal(checkContextBudget({ chars: NaN, contextWindow: 1000 }), null);
-  assert.equal(checkContextBudget({ chars: -5, contextWindow: 1000 }), null);
-  assert.equal(checkContextBudget({ chars: undefined, contextWindow: 1000 }), null);
-  // 空轮（0 字符）是合法输入：不超预算
-  assert.equal(checkContextBudget({ chars: 0, contextWindow: 1000 }).ok, true);
+test('边界：空轮是合法输入，不超预算', () => {
+  assert.equal(checkContextBudget({ text: '', contextWindow: 1000 }).ok, true);
+  assert.equal(checkContextBudget({ text: undefined, contextWindow: 1000 }).ok, true);
 });
 
-test('图片不参与文本预算：chars 只算文本长度（调用方口径）', () => {
+test('图片不参与文本预算：text 只含提示词原文（调用方口径）', () => {
   // 这条是「契约备忘」型断言：图片走附件上传，不占 composer 文本长度。
-  // 若将来有人把图片 base64 也算进 chars，这条会提醒他预算语义变了。
-  const textOnly = checkContextBudget({ chars: 100, contextWindow: 1000 });
+  // 若将来有人把图片 base64 也算进 text，这条会提醒他预算语义变了。
+  const textOnly = checkContextBudget({ text: 'a'.repeat(100), contextWindow: 1000 });
   assert.equal(textOnly.ok, true);
   assert.equal(textOnly.chars, 100);
 });

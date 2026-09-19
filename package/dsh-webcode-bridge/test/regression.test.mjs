@@ -5,6 +5,7 @@ import { readFileSync, mkdtempSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { apply } from '../lib/index.js';
+import { estimateTokens } from '../lib/metrics.js';
 import { createWebControl } from '../lib/web-control.js';
 import { serializeFirstTurn, serializeDelta, parseAgentReply } from '../lib/agent-preset.js';
 import '../lib/decoder.js';
@@ -786,10 +787,13 @@ test('右栏窗口状态是聚合对象：没有独立窗口时不得让面板�
 
 test('上下文计数按累计口径上报：增量轮不得让 inputTokens 掉回本轮增量', async () => {
   let adapter; const turns = [];
+  // 网页回复刻意较长：0.16.22 起助手回复也计入上下文分子（问题④），
+  // 回复越长这条测试对「漏计输出」的旧实现越不宽容。
+  const REPLY = '这是网页端返回的一段不算短的回复正文。'.repeat(6);
   const driver = {
     status: () => ({ running: true }), close: async () => {}, resetConversation: async () => {},
-    sendTurn: async (key, prompt, opts) => { turns.push({ key, prompt, ...opts }); opts.onDelta?.('答'); return { text: '答' }; },
-    sendPrompt: async (prompt, opts) => { turns.push({ prompt, ...opts }); return { text: '答' }; },
+    sendTurn: async (key, prompt, opts) => { turns.push({ key, prompt, ...opts }); opts.onDelta?.(REPLY); return { text: REPLY }; },
+    sendPrompt: async (prompt, opts) => { turns.push({ prompt, ...opts }); return { text: REPLY }; },
   };
   const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
   const user = text => ({ role: 'user', content: [{ type: 'text', text }] });
@@ -799,16 +803,19 @@ test('上下文计数按累计口径上报：增量轮不得让 inputTokens 掉�
     return out.filter(c => c.type === 'usage').at(-1).usage.inputTokens;
   };
   try {
-    // 首轮：累计 = 首轮全文估算
+    // 首轮：累计 = 首轮全文估算 + 本轮回复估算（commit 先于收尾，条目已在）
     const long = '这是一段足够长的首轮问题。'.repeat(40);
     const u1 = await usageOf({ sessionId: 'ctx-acc', model: 'deepseek', messages: [user(long)] });
     assert.ok(u1 > 0, '首轮 inputTokens 必须为正');
-    // 第二轮：只发增量，但上报的必须是「首轮 + 增量」的累计值，不能掉回增量本身
+    assert.ok(u1 >= estimateTokens(REPLY), `首轮分子应含本轮回复估算：u1=${u1} 回复≈${estimateTokens(REPLY)}`);
+    // 第二轮：只发增量，但上报的必须是「已发累计 + 助手输出累计 + 增量」，
+    // 既不能掉回增量本身，也不得漏掉助手回复（0.16.22 修复点）
     const u2 = await usageOf({ sessionId: 'ctx-acc', model: 'deepseek', messages: [user(long), { role: 'assistant', content: [{ type: 'text', text: '答' }] }, user('再补一句很短的话')] });
     assert.ok(u2 > u1, `第二轮必须大于首轮（累计口径）：u1=${u1} u2=${u2}`);
+    assert.ok(u2 >= u1 + estimateTokens(REPLY), `分子必须把上一轮回复也算进去：u1=${u1} u2=${u2} 回复≈${estimateTokens(REPLY)}`);
     // 第三轮继续单调不减
     const u3 = await usageOf({ sessionId: 'ctx-acc', model: 'deepseek', messages: [user(long), { role: 'assistant', content: [{ type: 'text', text: '答' }] }, user('再补一句很短的话'), { role: 'assistant', content: [{ type: 'text', text: '答' }] }, user('第三句')] });
-    assert.ok(u3 >= u2, `累计值必须单调不减：u2=${u2} u3=${u3}`);
+    assert.ok(u3 >= u2 + estimateTokens(REPLY), `每轮回复都应累计：u2=${u2} u3=${u3}`);
     // 增量轮本身确实只发了很短一段（证明上面涨的是累计而不是重发全文）
     assert.ok(!turns[1].prompt.includes('这是一段足够长的首轮问题'), '第二轮仍是增量发送');
   } finally { await dispose(); }

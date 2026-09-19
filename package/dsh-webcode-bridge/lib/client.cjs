@@ -25,16 +25,7 @@ window.__ModuleLoader__.load({
     // 0.16.18：不再 require react-dom 的 createPortal。
     // 旧实现靠 portal 把等待药丸塞进官方统计行（`[data-composer-stats]`），
     // 而那个标记在 DSH 0.1.6-alpha.2 里**已经不存在**（见 WaitLine 注释）。
-    // 0.16.22：站点图标与选择框（见下方 SiteGlyph / SitePicker）。
-    // FishLogo 是**官方**鲸鱼矢量（dsh-client-ui-primitives 自带，viewBox 23.16×17.04、
-    // 单条填充路径、透明底、随 currentColor），官方自己的侧栏 logo 就用它——
-    // 因此 DeepSeek 这一项零新增依赖、零新增资产文件。
-    // useDismissOnOutsidePointer 是官方弹层关闭契约；选择框不自己写
-    // document 级 pointerdown 监听，避免与官方菜单的重叠关闭互相打架。
-    const {
-      IconCodeOutline16, IconQueueOutline14, IconChevronDownOutline14,
-      FishLogo, FISH_LOGO_PATH, FISH_LOGO_VIEWBOX, useDismissOnOutsidePointer,
-    } = require('@deepseek-ai/dsh-client-ui-primitives');
+    const { IconCodeOutline16, IconQueueOutline14 } = require('@deepseek-ai/dsh-client-ui-primitives');
     const h = React.createElement;
     // 等待统计用的图标：官方 primitives 没有 gauge/clock 图标，队列图标是同一
     // 语义域里最近的一个（「还没轮到发送」）。与官方一样只取 14px 线框图标。
@@ -1661,215 +1652,8 @@ window.__ModuleLoader__.load({
       bind(h) { this.handlers = h; return () => { if (this.handlers === h) this.handlers = null; }; },
     };
 
-    // ---- 站点图标与一级选择框（0.16.22） --------------------------------------
-    //
-    // ## 为什么需要一个「档位」表，而不是一张图标表
-    //
-    // 用户的要求是「用各站官方矢量透明底图标」。调研结论（doc/brand-icons-research.md）
-    // 说得很清楚：**多数站点并不对外发布透明底纯符号的官方 SVG**——官方给的多是
-    // 「文字+符号」组合标，或干脆只有 PNG/ICO；第三方图集（LobeHub / Wikimedia 社区
-    // 上传 / logo.dev）里那些看着像的，**不是品牌方资产**。
-    //
-    // 于是这里按档位如实标注，而不是给每个站点硬塞一张看起来像官方的图：
-    //   'official' —— 官方矢量已在磁盘上（本仓库唯一一个是 DeepSeek：primitives 的
-    //                 FishLogo / FISH_LOGO_PATH，DSH 自家产品线随包发布的官方资产）；
-    //   'missing'  —— 本轮没有权威官方源。**画文字标记**（品牌名缩写），
-    //                 并在 title 与选择框里如实写明「官方矢量未找到」。
-    //
-    // 为什么不干脆用 simple-icons（官方 primitives 的 siteGlyph 用的就是它）：
-    // 它是 CC0 的**第三方图集**，且取的是链接的 currentColor 而非品牌固有色，
-    // 定位是「外链前导图标」不是品牌墙。用它等于把「第三方复刻」冒充官方——
-    // 与用户「官方优先」的要求正相反，也与本仓库「不造假状态」的纪律冲突。
-    //
-    // 补件入口（B 档，见调研文档 §4.1）：Kimi 官方 Brand Guidelines 直接给 SVG
-    // 下载、Grok 有官方品牌规范页。取回后**原样**落进 SITE_ICON_TIER 对应的分支，
-    // 并在条目注释里写明来源 URL + 取件日期 + 许可，同时把 tier 改成 'official'。
-    const SITE_BRANDS = {
-      deepseek: { mark: 'DS' },
-      glm: { mark: 'GL' },
-      chatgpt: { mark: 'GPT' },
-      kimi: { mark: 'KM' },
-      qwen: { mark: 'QW' },
-      doubao: { mark: 'DB' },
-      grok: { mark: 'GK' },
-      claude: { mark: 'CL' },
-      gemini: { mark: 'GM' },
-      zai: { mark: 'ZA' },
-    };
-    /** 站点 id → { tier, why }。tier 只有 'official' 与 'missing' 两态，没有中间态。 */
-    const SITE_ICON_TIER = {
-      deepseek: { tier: 'official', why: '官方鲸鱼矢量（@deepseek-ai/dsh-client-ui-primitives 的 FishLogo / FISH_LOGO_PATH）' },
-      glm: { tier: 'missing', why: '未找到品牌方发布的透明底矢量；第三方图集不作为官方源' },
-      chatgpt: { tier: 'missing', why: '本轮未找到官方图标/媒体资源页' },
-      kimi: { tier: 'missing', why: '官方 Brand Guidelines 提供 SVG 下载（尚未取回入库，见 doc/brand-icons-research.md §4.1 B 档）' },
-      qwen: { tier: 'missing', why: '仅有 Wikimedia 社区上传，非品牌方发布' },
-      doubao: { tier: 'missing', why: '仅有第三方图集（LobeHub），不作为官方源' },
-      grok: { tier: 'missing', why: '官方品牌规范页有条款入口（尚未取回入库，见 doc/brand-icons-research.md §4.1 B 档）' },
-      claude: { tier: 'missing', why: '仅有 Wikimedia 社区上传与第三方聚合站' },
-      gemini: { tier: 'missing', why: '本轮未找到官方图标/媒体资源页' },
-      zai: { tier: 'missing', why: '与 GLM 同源品牌，沿用 GLM 结论' },
-    };
-    const siteBrand = sid => SITE_BRANDS[sid] || { mark: String(sid || '?').slice(0, 2).toUpperCase() };
-    const siteTier = sid => SITE_ICON_TIER[sid]?.tier || 'missing';
-    const siteIconWhy = sid => SITE_ICON_TIER[sid]?.why || '官方矢量图标未找到';
-
-    /**
-     * 站点标记：有官方矢量就画官方矢量，没有就画文字标记。
-     *
-     * 两种形态**共用一个 svg 画布与尺寸口径**，因此同一排里图标的光学大小一致
-     * （文字标记按「几个字母填满同样的圆框」排版，不是各自一个尺寸）。
-     *
-     * DeepSeek 走 FISH_LOGO_PATH 自己组 svg（而不是直接 <FishLogo/>）：鲸鱼原生
-     * viewBox 是 23.16×17.04（宽高比 1.36），塞进方形框会左右留白、视觉偏小；
-     * 这里按**正方形 viewBox + 手动居中**摆放，与旁边的文字标记对齐。
-     * 路径常量是官方注释明说「exported for consumers that compose their own svg」的用法。
-     */
-    function SiteGlyph({ sid, size = 18 }) {
-      const box = size + 8;
-      if (siteTier(sid) === 'official' && sid === 'deepseek') {
-        const pad = (box - size) / 2;
-        const hh = size * FISH_LOGO_VIEWBOX.height / FISH_LOGO_VIEWBOX.width;
-        return h('svg', {
-          className: 'hwb-glyph-svg', width: box, height: box, viewBox: '0 0 ' + box + ' ' + box,
-          'aria-hidden': 'true', focusable: 'false',
-        }, h('path', {
-          d: FISH_LOGO_PATH, fill: 'currentColor',
-          transform: 'translate(' + pad + ' ' + ((box - hh) / 2) + ')',
-        }));
-      }
-      // 文字标记：品牌名缩写。**不是**「找不到图标就用首字母凑合」——它是有意
-      // 为之的占位表达，title 里会写明官方矢量尚未取得，用户一眼能看出区别。
-      return h('svg', {
-        className: 'hwb-glyph-svg', width: box, height: box, viewBox: '0 0 ' + box + ' ' + box,
-        'aria-hidden': 'true', focusable: 'false',
-      }, h('circle', {
-        cx: box / 2, cy: box / 2, r: box / 2 - 0.5,
-        fill: 'none', stroke: 'currentColor', 'stroke-opacity': 0.35,
-      }), h('text', {
-        x: box / 2, y: box / 2, 'text-anchor': 'middle', 'dominant-baseline': 'central',
-        'font-size': Math.max(8, Math.round(size * 0.5)), 'font-weight': 600, fill: 'currentColor',
-      }, siteBrand(sid).mark));
-    }
-
-    /**
-     * 一级站点选择框（面板首屏 + 工具条下拉两种形态共用一个组件）。
-     *
-     * ## 为什么是「面板内的选择框」而不是「点开标签就先弹一层」
-     *
-     * 调研文档 §4.2① 已经把结论写下了：右侧栏的标签页是官方 `sidebarRightTabs` 契约
-     * 下的**常驻视图**，用户点开它就期待看到面板本体；每次都先弹一层会让「回到上次
-     * 那个站点」变慢。因此选择框挂在**面板内部**的两处既有座位里：
-     *   · 工具条上的站点身份按钮 —— 当前站点是什么、切到别的；
-     *   · 尚无任何站点连接时的首屏 —— 直接铺一张站点网格，省掉「先看到空面板」这一步。
-     * 两者都走这个组件，于是图标、键盘导航、状态点只有一份实现。
-     *
-     * ## 键盘与关闭
-     *
-     * 菜单语义按官方 Menu 的做法（role=menu / menuitemradio）：上下键移动、Home/End
-     * 到两端、Esc 关闭。外点关闭走官方 `useDismissOnOutsidePointer`，不自挂 document
-     * 监听——官方那套还处理 portal 边界，自己写一份迟早与它互相打架。
-     */
-    function SitePicker({ siteId, siteStatuses, onPick, onSplit, compact }) {
-      const [open, setOpen] = React.useState(false);
-      const rootRef = React.useRef(null);
-      useDismissOnOutsidePointer(rootRef, open, setOpen);
-      const pick = (sid) => { setOpen(false); onPick(sid); };
-      if (compact) {
-        return h('div', { className: 'hwb-picker inline', ref: rootRef },
-          h('button', {
-            className: 'hwb-picker-trigger', type: 'button',
-            'aria-haspopup': 'menu', 'aria-expanded': open,
-            title: '切换内容服务站点（当前：' + siteName(siteId) + '）',
-            onClick: () => setOpen(v => !v),
-          },
-            h('span', { className: 'hwb-glyph' + (siteTier(siteId) === 'official' ? ' official' : '') },
-              h(SiteGlyph, { sid: siteId, size: 16 })),
-            h('span', { className: 'hwb-picker-trigger-name' }, siteName(siteId)),
-            h('span', { className: 'hwb-picker-caret', 'aria-hidden': 'true' }, h(IconChevronDownOutline14, { size: 14 }))),
-          open && h(SitePickerSurface, { siteId, siteStatuses, onPick: pick, onSplit, onMenuKey: null }));
-      }
-      return h('div', { className: 'hwb-picker grid-host', ref: rootRef },
-        h(SitePickerSurface, { siteId, siteStatuses, onPick: pick, onSplit, bare: true }));
-    }
-
-    /** 选择框的面板体。单独抽出来是因为「下拉」与「首屏网格」只差一层定位与开合。 */
-    function SitePickerSurface({ siteId, siteStatuses, onPick, onSplit, onMenuKey, bare }) {
-      const ids = Object.keys(SITE_NAMES);
-      const stateCls = sid => {
-        const row = siteStatuses[sid];
-        return row?.loggedIn === true ? 'ok' : row?.loggedIn === false ? 'bad' : 'idle';
-      };
-      const stateText = sid => {
-        const row = siteStatuses[sid];
-        if (!row || row.loggedIn == null) return '待检查';
-        return row.loggedIn === true ? '已登录' : '未登录';
-      };
-      const key = (e) => {
-        if (!onMenuKey) return;
-        const i = ids.indexOf(siteId);
-        let next = null;
-        if (e.key === 'ArrowDown') next = ids[(i + 1) % ids.length];
-        else if (e.key === 'ArrowUp') next = ids[(i - 1 + ids.length) % ids.length];
-        else if (e.key === 'Home') next = ids[0];
-        else if (e.key === 'End') next = ids[ids.length - 1];
-        if (next === null) return;
-        e.preventDefault();
-        onPick(next);
-      };
-      return h('div', {
-        className: 'hwb-picker-surface' + (bare ? ' bare' : ''),
-        role: 'menu', 'aria-label': '选择内容服务站点', onKeyDown: key,
-      },
-        h('p', { className: 'hwb-picker-head' },
-          bare ? '选择一个站点开始。生成任务仍由该站点网页原生执行。' : '切换站点'),
-        h('div', { className: 'hwb-picker-grid' },
-          ids.map(sid => h('div', { className: 'hwb-picker-cell', key: sid },
-            h('button', {
-              className: 'hwb-picker-item' + (sid === siteId ? ' active' : ''),
-              type: 'button', role: 'menuitemradio', 'aria-checked': sid === siteId,
-              title: siteName(sid) + ' · ' + siteIconWhy(sid),
-              onClick: () => onPick(sid),
-            },
-              h('span', { className: 'hwb-picker-ico' + (siteTier(sid) === 'official' ? ' official' : '') },
-                h(SiteGlyph, { sid, size: 20 })),
-              h('span', { className: 'hwb-picker-text' },
-                h('span', { className: 'hwb-picker-name' }, siteName(sid)),
-                h('span', { className: 'hwb-picker-meta' },
-                  h('span', { className: 'hwb-dot ' + stateCls(sid), 'aria-hidden': 'true' }),
-                  stateText(sid),
-                  siteTier(sid) === 'official' ? '' : ' · 官方矢量未找到'))),
-            // 分屏入口：多开不同网址。这里显式给一颗按钮，而不只留 Ctrl+点击
-            // （旧实现只有 Ctrl/⌘+点击与中键两个**看不见的**入口，用户无从发现）。
-            onSplit && h('button', {
-              className: 'hwb-picker-split', type: 'button',
-              title: '在新面板中打开 ' + siteName(sid) + '（可与当前面板同时看两个站点）',
-              'aria-label': '在新面板中打开 ' + siteName(sid),
-              onClick: () => onSplit(sid),
-            }, h('span', { 'aria-hidden': 'true' }, '\u25eb'))))),
-        h('p', { className: 'hwb-picker-foot' },
-          '图标：DeepSeek 为官方矢量；其余站点品牌方未发布透明底矢量，按「官方优先」暂用文字标记。'));
-    }
-
-    /**
-     * 「下一个新开的分屏应该落在哪个站点」（0.16.22）。
-     *
-     * 旧实现里 Ctrl/⌘+点击站点只是 `setSiteId(sid)` 之后再 `onSplit()`——而分屏出来的
-     * 新 pane 是**另一个 Conversation 实例**，它的 `useState('deepseek')` 恒等于默认站点。
-     * 于是「Ctrl+点击 Kimi 想在旁边再开一个 Kimi」得到的是一左一右两个 DeepSeek，
-     * 用户看到的是一句「多开不同网址」的承诺没有兑现。
-     *
-     * 这里用一个模块级的一次性交接：请求方把目标站点放进来，新实例初始化时取走并清空。
-     * 之所以不做成 Context/服务，是因为它只跨一次**新实例初始化**，而且必须在新实例
-     * 挂载前就已确定（挂载后再 setState 会让新 pane 先闪一下 DeepSeek）。
-     */
-    let pendingPaneSite = null;
-
     function Conversation({ browserSrc, onSplit, onFloat }) {
-      const [siteId, setSiteId] = React.useState(() => {
-        const handed = pendingPaneSite;
-        pendingPaneSite = null;
-        return handed || 'deepseek';
-      });
+      const [siteId, setSiteId] = React.useState('deepseek');
       const [siteStatuses, setSiteStatuses] = React.useState({});
       // iframe 保活：每个访问过的站点一个 frame，全部常驻 DOM，用 display 切换。
       // 旧实现每次挂载都重设 src（?ts= 时间戳）——侧栏每开合一次就整页重载，
@@ -2015,12 +1799,11 @@ window.__ModuleLoader__.load({
       }, [frames]);
       /** 在新分屏里打开某个站点（多开不同网页）。宿主不支持时安静略过。 */
       const openSiteInPane = (sid) => {
-        setSiteId(sid);
-        if (typeof onSplit !== 'function') return;
-        // 交接给即将挂载的新 pane：它自己 useState 的初值恒为默认站点，不交接的话
-        // 「分屏看另一个站点」实际得到两个相同的站点（见 pendingPaneSite 注释）。
-        pendingPaneSite = sid;
-        try { onSplit(sid); } catch { pendingPaneSite = null; }
+        try {
+          if (typeof onSplit !== 'function') { setSiteId(sid); return; }
+          setSiteId(sid);
+          onSplit(sid);
+        } catch { setSiteId(sid); }
       };
       const siteIds = Object.keys(SITE_NAMES);
       const onTabKey = (e) => {
@@ -2054,14 +1837,8 @@ window.__ModuleLoader__.load({
         // 我能对它做什么」，标签条只负责「切站点」。
         h('div', { className: 'hwb-toolbar' },
           h('div', { className: 'hwb-toolbar-id' },
-            // 站点身份 + 一级选择框：工具条左边的图标按钮打开它。
-            // 0.16.22 起这里取代了旧的「状态点 + 站点名」静态文本——同样一处位置，
-            // 但可点、可键盘操作，且把「切到哪个站点」这件事从下面的标签条收了上来。
-            h(SitePicker, {
-              siteId, siteStatuses, compact: true, onSplit: openSiteInPane,
-              onPick: (sid) => setSiteId(sid),
-            }),
             statusDot(siteStatus),
+            h('span', { className: 'hwb-toolbar-name', title: siteName(siteId) }, siteName(siteId)),
             h('span', { className: 'hwb-toolbar-state' }, winBusy ? '切换中' : statusLabel(siteStatus))),
           h('div', { className: 'hwb-toolbar-actions' },
             h('button', {

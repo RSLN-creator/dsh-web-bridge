@@ -216,7 +216,7 @@ export function answerDomLength(text) {
 
 /**
  * 发送前预算闸 —— 「整段提示词超过声明的上下文窗口」必须在**发出之前**拦下来
- *（0.14.1，B-2）。
+ *（0.14.1，B-2；0.16.22 改按真实文本构成折算）。
  *
  * 为什么需要它：桥向 DSH 声明的 `contextWindow` 是**乐观值**（glm/zai 现在是
  * 实测出来的 1M，见 providers.js 的 GLM_CONTEXT_WINDOW），而「声明得偏大」的
@@ -225,9 +225,18 @@ export function answerDomLength(text) {
  * 已有的 `PROMPT_TRUNCATED` 回读校验能发现「填进去被截断」，但它发生在**填写
  * 之后**：那时输入框已经被写入，且报错文本只有长度差，看不出「超了预算多少」。
  *
- * 本闸把这件事前移成一道**可解释的拒绝**：拿本轮真正要发的字符数，按站点声明的
- * 窗口折算 token，超了就抛 `CONTEXT_WINDOW_EXCEEDED`，文本里直接给出
- * 「本轮 N 字符 ≈ M token > 声明窗口 W」以及可行的下一步（新开会话 / 调大声明）。
+ * 本闸把这件事前移成一道**可解释的拒绝**：拿本轮真正要发的**文本**，按
+ * `estimateTokens` 的 CJK 感知口径折算 token，超了就抛 `CONTEXT_WINDOW_EXCEEDED`，
+ * 文本里直接给出「本轮 N 字符 ≈ M token > 声明窗口 W」以及可行的下一步
+ *（新开会话 / 调大声明）。
+ *
+ * 为什么收 `text` 而不是 `chars`（0.16.22 修）：旧实现按 `chars × 0.7` 平铺折算，
+ * 那是 CJK 档的密度。工具型会话的提示词主体是**英文/代码/JSON**（工具 schema、
+ * 工具结果、官方 tool-call 模板），真实密度 ≈ 0.25 token/字符——平铺 0.7 把这类
+ * prompt 高估近 3 倍，长英文轮次会被**误拒**（真机 2026-09-19：整段英文工具结果
+ * 远未到窗口就吃 CONTEXT_WINDOW_EXCEEDED）。字符数不构成信息，**字符构成**才
+ * 构成——折算必须走与展示同源的 `estimateTokens`（CJK 0.7 / ASCII 0.25，
+ * 自带 +10% 余量，这里不得再加第二道余量）。
  *
  * 三个刻意的边界：
  *   • **只拦「超预算」，不拦「接近预算」**——留白交给 DSH 的压缩策略，闸门不是
@@ -237,28 +246,25 @@ export function answerDomLength(text) {
  *   • **图片不参与**：它们走附件上传，不占 composer 文本长度。
  *
  * @param {object} o
- * @param {number} o.chars       本轮要发出去的提示词字符数
+ * @param {string} o.text        本轮要发出去的提示词原文（图片 base64 不在其中）
  * @param {number} o.contextWindow 站点向 DSH 声明的窗口（token）
- * @param {number} [o.charsPerToken] 折算口径，默认 0.7（与 estimateTokens 的 CJK 档一致）
  * @returns {{ok:boolean, tokens:number, window:number, chars:number, ratio:number, overflowTokens:number}|null}
  *          null = 无法判定（窗口缺失/非法），调用方应放行
  */
-export function checkContextBudget({ chars, contextWindow, charsPerToken = 0.7 } = {}) {
+export function checkContextBudget({ text, contextWindow } = {}) {
   const win = Number(contextWindow);
-  const n = Number(chars);
   if (!Number.isFinite(win) || win <= 0) return null;      // 没有可信窗口 → 不拦
-  if (!Number.isFinite(n) || n < 0) return null;
-  const per = Number(charsPerToken) > 0 ? Number(charsPerToken) : 0.7;
-  // 与 estimateTokens 同口径：字符 → token 后 +10% 余量，避免「刚好卡线」
-  // 的轮次在网页端的真实计费口径下反而越界。
-  const raw = n * per;
-  const tokens = Math.ceil(raw + raw * 0.1);
+  const s = text == null ? '' : String(text);
+  // 折算与展示同源：estimateTokens 是唯一的字符→token 单价表（含 +10% 余量）。
+  // 这里若再乘一道余量就是双重加成，会把「刚好卡线」的轮次误拒。
+  const tokens = estimateTokens(s);
+  const chars = s.length;
   const ratio = tokens / win;
   return {
     ok: ratio <= 1,
     tokens,
     window: win,
-    chars: n,
+    chars,
     ratio,
     overflowTokens: Math.max(0, tokens - win),
   };

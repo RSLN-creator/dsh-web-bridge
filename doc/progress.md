@@ -20,17 +20,17 @@
 
 | 项 | 值 |
 | --- | --- |
-| 工作树版本 | **0.16.21** |
-| 已装版本（profile） | **0.16.21**（2026-09-19 实测：web + headless 两处声明一致指向 `dsh-webcode-bridge-0.16.21.tgz`，`node_modules` 内 `package.json` = 0.16.21 且 `lib/client.cjs` 含本版 token 与 page 契约；`dsh plugin add` 声明持久层通道） |
+| 工作树版本 | **0.16.22** |
+| 已装版本（profile） | **0.16.21**（2026-09-19 实测：web + headless 两处声明一致指向 `dsh-webcode-bridge-0.16.21.tgz`，`node_modules` 内 `package.json` = 0.16.21 且 `lib/client.cjs` 含本版 token 与 page 契约；`dsh plugin add` 声明持久层通道）。**0.16.22 未打包未装**，需走 `dsh plugin add` |
 | 运行中的进程 | run-8 真机验收以 `dsh --profile headless` 进程级验证（0.16.16 时段）；DSH web（3080）2026-09-19 凌晨未运行 |
-| 上游 | `origin/main` = `9d4c61a`（0.16.10 台账推送）；0.16.11–0.16.21 本地已提交/待推 |
-| 单测基线 | **67/67 测试文件**；全量 **784 条**（0.16.20 为 782；0.16.21：`client-render` 新增 2 条样式契约——等待药丸 content-font token、左栏任务板官方 page 契约） |
+| 上游 | `origin/main` = `9d4c61a`（0.16.10 台账推送）；0.16.11–0.16.22 本地已提交/待推 |
+| 单测基线 | **67/67 测试文件**；全量 **785 条**（0.16.21 为 784；0.16.22：`context-budget` 改按 estimateTokens 真实口径重写并新增 ASCII 密度钉子，`regression` 累计口径断言补助手输出项） |
 | 注释闸门 | **error 0 / warn 0，退出码 0**（2026-09-19 实跑） |
 | 文件规范闸门 | `check-repo-hygiene.mjs` **PASS**（无 BOM + 索引无死链 + CI/engines Node 版本相容） |
 | 发布闸门 | `verify-pack` 逐文件 sha256 相同 + 接线完好，退出 0（0.16.16 实跑 37/37） |
-| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.21 / testFiles 67/67） |
+| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.22 / testFiles 67/67） |
 | 已装包核对 | 0.16.21 已装机核对（见已装版本行） |
-| 下一阶段 | **0.16.21 需重启 DSH 后生效**；第三步（站点选择框 + 官方矢量品牌图标）只出调研结论，见 [doc/brand-icons-research.md](brand-icons-research.md) |
+| 下一阶段 | **0.16.22 需打包安装并重启 DSH 后生效**；第三步（站点选择框 + 官方矢量品牌图标）只出调研结论，见 [doc/brand-icons-research.md](brand-icons-research.md)；工具调用残余失败（DSML 斜杠闭家族 32/40）待下一版加容错，取证见 §0.16.22 |
 
 > **§0.16.10 真机判据（重启后逐条核）**：① `GET /__webcode/status` 的 `build.version` = **0.16.10**；
 > ② 让模型回复一段含 `<b>`、`<foo>`、`Array<T>` 或字面 `<tool_call>` 示例的正文，**逐字对比** harness
@@ -44,7 +44,73 @@
 > **教训记在这里而不是删掉**：凡是「已装/已重启/已验证」这类状态行，**必须逐 profile 写、并附
 > sha256 前 12 位**，否则它会把「一个 profile 装了」读成「都装了」。 |
 
+## 0.16.22（2026-09-19）—— 上下文计算三修 + 工具调用残余失败取证（reply-log 全量重放）
+
+**用户指令（逐字）**：「1.请你修复：上下文计算可能有的问题 2.请你查看最近的dsh会话！看下：为什么用的官方工具格式！但是比起官方api现在这个老是出问题？工具调用不行？长上下文？是他那里还是我这里问题？？快速不更改！」
+
+### 一、上下文计算修了什么（对照官方 deepseek-harness token-meter 结论）
+
+官方链路（`reference/deepseek-harness` 的 `contextPressure` 投影 + `ContextMeter`）：分子优先
+provider 真实 usage 样本（不含输出），分母来自路由注册容量；网页桥拿不到真实 usage，分子只能
+由桥上报、分母由桥声明。三处修复：
+
+| # | 问题 | 落点 | 修法 |
+| --- | --- | --- | --- |
+| ① | 预算闸按 `chars × 0.7` 平铺折算——CJK 档密度套在英文/代码/JSON 主体上，高估近 3 倍，长英文轮被**误拒** `CONTEXT_WINDOW_EXCEEDED` | `lib/metrics.js` `checkContextBudget` | 改收 `text` 原文，内部直接走 `estimateTokens`（CJK 0.7 / ASCII 0.25，自带 +10% 余量，不再双重加成）；`assertContextBudget` 传原文 |
+| ② | `contextWindowFor` 把模型自带 `context` 排在 `cfg.contextWindowBySite` 之前，而内置模型全部声明了 context → 设置覆盖**永远不生效**，报错里「在设置里调大窗口声明」是空头支票 | `lib/index.js` | cfg 提到最高优先级（「运维覆盖」语义本就如此） |
+| ③ | 累计分子只算「已发出去的文本」，网页会话的真实上下文还含**每轮助手回复**（增量序列化刻意不发它们）→ 官方圆环/GUI 上下文表系统性低估 | `lib/index.js` buildTurn | 会话条目新增 `outTokens`：`finishChunks`/`emitText` 收尾经 `noteOutput()` 累计输出估算，`usageInput()` = 已发累计 + 输出累计；fresh 重建开新网页会话时归零；`commit()` 重建条目必须延续 `outTokens`（两种时序都对） |
+
+**没动的**：deepseek/glm 声明的 1M 乐观窗口本身——那是「声明偏大 → DSH 压缩不触发 → 由
+预算闸 + PROMPT_TRUNCATED 兜底」的既定取舍，调小要真机校准，不在本轮。
+
+### 二、工具调用残余失败取证（第二问，只查不改）
+
+方法：`~/.dsh/logs/webcode-bridge-replies.log` 全量 452 条 → 40 条「有工具 token 但 calls=0」
+→ 用**当前（0.16.21）解析器**原样重放全部 40 条。结论：**8 条现在已能解析（run-10 修复生效），
+32 条仍失败，且 32 条全部含 DSML 斜杠闭 token**。
+
+按天：09-18 失败率 28/188 ≈ 15% → 09-19 12/264 ≈ 4.5%（在降，但没归零）。
+最新会话（`session-375c497c`，本地 15:01–15:16，36 条中 5 条失败）逐条重放：
+
+| 形状（模型漂移） | 例（本地时间） | 当前解析器 |
+| --- | --- | --- |
+| **DSML 斜杠闭**：官方 begin + `</｜｜DSML｜｜ parameter>` 收参、`</｜｜DSML｜｜ calls>` 收块（闭 token 以 `>` 结尾、非 `｜>`，且带 `/`） | 15:12（9996 字符大 edit，begin 完全规范，仅闭 token 漂移）；15:16（`<｜｜DSML｜｜ calls▁begin｜>` 开 + DSML 闭） | **仍失败**（31 条主家族） |
+| **双 begin**：`calls▁begin`⏎`call▁begin` 或 `call▁begin`⏎`call▁begin`（外层多写一个 begin，内层调用本身规范），收尾 `call▁end` 也双写 | 15:13、15:14、15:15 | **仍失败**——0.16.20「禁止 begin 类 token 起配」让外层起配失败后**不重试内层**，整条放弃 |
+| token 内斜杠闭 `</｜tool▁call▁end｜>` + `calls▁begin` 逐条起配 | 凌晨 04:55 ×3、05:56 | **已恢复**（0.16.20 容错覆盖） |
+
+**归因（「他那里还是我这里」）**：两边都有。**他**（DeepSeek 网页服务栈）：同一模板教下去，
+网页侧采样出的 token 词表混入内部 DSML 词汇（`｜｜DSML｜｜`），begin/end 双写——官方 API 走
+原生 tool_calls 字段、根本不过文本协议，所以「官方 API 没这毛病」。**我**（桥解析器）：32/40
+残余失败集中在「DSML 斜杠闭」一族 + 「双 begin 后不重试内层」，两条容错都不难加（收参/收块锚点
+加 DSML 斜杠形；begin 类起配失败后从下一个 token 重扫）。**与长上下文无关**——失败与回复长度
+相关（长 edit 更容易漂移、9KB 大调用更显眼）但不是窗口溢出；04:55 的失败是 273 字符的小调用。
+
+**本轮不改**（用户明示）：上述两条容错留待下一版，取证已钉在 test 夹具可用的逐字形状上
+（reply-log 条目可直喂 `parseAgentReply`）。
+
+### 四、连带事故与恢复：0.16.21 误扫入网页会话半成品（2026-09-19 15:14）
+
+**事故**：15:00 DSH 会话（`session-375c497c`）正由网页 AI 实施第三步（站点图标+一级选择框），
+编辑**直接落在工作树**；15:14:56 本会话推送 0.16.21 时 `git add -A` 把当时**未完成**的
+231 行一并扫进了 a3ae211（tag v0.16.21）——已发布的 0.16.21 里 client.cjs 含半成品，
+`client-render` 6 条失败。前一会话留下的「784 条绿」结论在网页会话开始前成立，
+被 15:01 起的并发编辑作废，而打包在前、失败在后。
+
+**恢复**：以 **已装 profile 的 0.16.21 正本**（`~/.dsh/profiles/{web,headless}/node_modules/
+dsh-webcode-bridge/lib/client.cjs`，打包于网页会话开始前，SitePicker 引用 = 0）回写工作树，
+`client-render` 恢复 35/35。网页会话完整半成品（15:16 状态）保全在分支
+`wip/web-session-site-picker`（d0145bb）。
+
+**教训**：桥的网页会话与本仓库共用同一工作树，**任何 `git add -A`/提交前必须先查
+`git status` 是否出现非本会话的改动**（尤其 client.cjs）；这一点已记入操作纪律。
+
+### 五、测试
+
+- `test/context-budget.test.mjs`：全部改按 `text` 口径重写；新增「英文/代码主体不再被 CJK 档高估」钉子（10000 ASCII 字符 ≈ 2750 token，旧实现 ≈ 7700 会误拒）；「折算与 estimateTokens 严格同源」升级为逐字相等（混合构成也不例外）。
+- `test/regression.test.mjs`：累计口径测试的网页回复改长（120 字符），新增断言「分子必须把上一轮回复也算进去」（旧实现 u2 = u1 + 增量，新实现 u2 ≥ u1 + 回复估算）。
+
 ## 0.16.19（2026-09-19）—— run-9 占位符照抄事故：教学示例改真实工具名 + 围栏示例守卫 + TOOL_UNKNOWN 自动再教学
+
 
 **用户指令（逐字）**：「？？？你提示词还没有改啊！我想要出现这个时候自动返回提示词！好让会话继续！」
 

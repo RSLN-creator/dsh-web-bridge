@@ -663,16 +663,21 @@ export function apply(ctx, config = {}) {
    * 站点声明的上下文窗口（token）的唯一取值处 —— resolveModel 与发送前预算闸
    * 共用这一份，避免「声明的是一个数、闸门比的是另一个数」。
    *
-   * 优先级：模型自带 context（providers.js 各站点，glm/zai 已是真机实测下界）
-   *        > cfg.contextWindowBySite[siteId]（运维/测试覆盖）
+   * 优先级（0.16.22 调整）：cfg.contextWindowBySite[siteId]（运维/测试覆盖，
+   * **最高**）> 模型自带 context（providers.js 各站点，glm/zai 已是真机实测下界）
    *        > deepseek 1_000_000 / 其余 64_000 的诚实兜底。
+   *
+   * 为什么 cfg 必须排在模型声明前面（0.16.22 修）：内置模型全部声明了 context，
+   * 旧优先级下 `contextWindowBySite` 永远轮空——预算闸报错文本里「在设置里调大
+   * 该站点的窗口声明」这条建议是**空头支票**，用户照做也不会生效。「运维覆盖」
+   * 的语义就是覆盖，声明值只是缺省。
    *
    * 未校准站点的 64_000 是**保守值**，含义是「宁可让 DSH 早一点压缩，也不要
    * 发出去被网页端截半截」；越界同样由 PROMPT_TRUNCATED 与预算闸双重兜底。
    */
   function contextWindowFor(m) {
-    return m?.context
-      ?? cfg.contextWindowBySite?.[m?.siteId]
+    return cfg.contextWindowBySite?.[m?.siteId]
+      ?? m?.context
       ?? (m?.siteId === 'deepseek' ? 1_000_000 : 64_000);
   }
 
@@ -694,7 +699,7 @@ export function apply(ctx, config = {}) {
     let m;
     try { m = resolveWebModel(modelId); } catch { return; }
     const budget = checkContextBudget({
-      chars: String(prompt || '').length,
+      text: String(prompt ?? ''),
       contextWindow: contextWindowFor(m),
     });
     if (!budget || budget.ok) return;
@@ -1594,8 +1599,18 @@ async function* emitText(text, turn, index = 0) {
   yield { type: 'block-start', index, blockType: 'text' };
   yield { type: 'text-delta', index, text };
   yield { type: 'block-end', index, block: { type: 'text', text } };
-  yield { type: 'usage', usage: { inputTokens: inputTokensOf(turn), outputTokens: estimateTokens(text) } };
+  yield { type: 'usage', ...usagePairOf(turn, estimateTokens(text)) };
   yield { type: 'finish', reason: { kind: 'stop' } };
+}
+
+/** usage 事件的字段（0.16.22）：先把本轮输出累进会话分子，再取含输出累计的
+ *  inputTokens——顺序不能反，否则分子永远少最后一轮回复。会话轮（buildTurn 的
+ *  keyPath 分支）提供 noteOutput/usageInput；无 keyPath 的单轮没有这两个方法，
+ *  退回旧口径 inputTokensOf（没有「会话」可言，谈不上累计）。 */
+function usagePairOf(turn, outTokens) {
+  turn?.noteOutput?.(outTokens);
+  const inputTokens = turn?.usageInput ? turn.usageInput() : inputTokensOf(turn);
+  return { usage: { inputTokens, outputTokens: outTokens } };
 }
 
 /** 本轮上报给 DSH 的输入 token 数：turn 自带累计值就用它，否则退回本轮文本估算。
@@ -1752,7 +1767,7 @@ function sessionSwitchedNotice(scene = {}) {
 
 /** 每轮收尾的 usage + finish 事件对（outputTokens 口径：正文+思考一起估）。 */
 function* finishChunks(turn, outputText, kind) {
-  yield { type: 'usage', usage: { inputTokens: inputTokensOf(turn), outputTokens: estimateTokens(outputText) } };
+  yield { type: 'usage', ...usagePairOf(turn, estimateTokens(outputText)) };
   yield { type: 'finish', reason: { kind } };
 }
 
@@ -2615,11 +2630,34 @@ function imageMarkdown(images) {
     // 报成 estimateTokens(turn.prompt)，增量轮里 turn.prompt 只是本轮那一小段增量；
     // GUI 上下文表取最近一次 usage 的 inputTokens，于是每开新一轮就掉回接近 0，
     // 看起来「清空重新开始」。这里改成累计值（单调不减）。
+    //
+    // 0.16.22 补全（问题④）：上面的「已发文本之和」仍不是完整分子——网页会话的
+    // 真实上下文还包含**每轮助手回复**（增量序列化刻意不发它们，网页侧本来就有）。
+    // 于是旧口径系统性低估，长回复会话里低估得相当可观。补法：finishChunks/emitText
+    // 在每轮收尾时经 noteOutput() 把输出估算累进会话条目的 outTokens（见下），而
+    // usage.inputTokens 改报 usageInput() = 已发累计 + 助手输出累计。outTokens 的
+    // 生命周期与网页会话严格对齐：fresh 重建开的是**新**网页会话，旧回复不在里面，
+    // 所以新条目从 0 起算；commit() 重建条目时必须带上 st.outTokens，否则「先收尾
+    // 后 commit」的时序会把已累计的输出丢掉。
     const deltaTokens = estimateTokens(prompt);
     const cumulativeTokens = fresh ? deltaTokens : (st.tokens || 0) + deltaTokens;
     return {
       prompt,
       inputTokens: cumulativeTokens,
+      // usage 事件（finishChunks/emitText）用的分子：含助手输出累计。条目不存在
+      // （本轮 commit 尚未执行/已被 invalidate）时退回已发累计——少报一轮输出，
+      // 好过编一个数。
+      usageInput() {
+        const cur = sessionState.get(keyPath);
+        return cumulativeTokens + (Number.isFinite(cur?.outTokens) ? cur.outTokens : 0);
+      },
+      // 每轮收尾把助手输出估算累进当前会话条目（读改写 Map 里的现存引用，不重建：
+      // commit() 可能先于也可能晚于本调用，两种时序下条目都必须是同一个对象）。
+      noteOutput(tokens) {
+        const cur = sessionState.get(keyPath);
+        if (!cur || !Number.isFinite(tokens) || tokens <= 0) return;
+        cur.outTokens = (cur.outTokens || 0) + tokens;
+      },
       meta: {
         sessionKey: keyPath, fresh, model: formatModelId(siteId, slot, model), siteId, slot, accountKey, thinkMode,
         // 发送间隔（设置页）：executor 在发送前按它节流，限流退避也以它为基数。
@@ -2659,7 +2697,9 @@ function imageMarkdown(images) {
         // 旧写法对已存在键 set 不改变插入序，淘汰会先丢掉最老的热会话，
         // 表现为长会话莫名重新整段重发。
         sessionState.delete(keyPath);
-        sessionState.set(keyPath, { sent: messages.length, toolResults: delta.toolResultsSent, fingerprint: fingerprint(messages.length), tokens: cumulativeTokens });
+        // outTokens 必须随条目延续：noteOutput 与 commit 的先后不定，若这里重建
+        // 时丢掉它，「先收尾后 commit」的轮次会把助手输出累计清零（分子悄悄回落）。
+        sessionState.set(keyPath, { sent: messages.length, toolResults: delta.toolResultsSent, fingerprint: fingerprint(messages.length), tokens: cumulativeTokens, outTokens: st.outTokens || 0 });
         if (sessionState.size > 512) sessionState.delete(sessionState.keys().next().value);
       },
     };
