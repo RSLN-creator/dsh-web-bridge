@@ -264,20 +264,37 @@ const RE_OFFICIAL_CALL = new RegExp(
   + '\\s*(?:function)?\\s*([^<' + OFFICIAL_BAR + ']*?)\\s*'
   + '<' + OFFICIAL_BAR + '\\s*tool(?:' + OFFICIAL_SEP_SRC + ')?sep(?:' + OFFICIAL_SEP_SRC + ')?' + OFFICIAL_BAR + '>'
   + '([\\s\\S]*?)'
-  + '<' + OFFICIAL_BAR + '\\s*tool(?:' + OFFICIAL_SEP_SRC + ')?calls?[\\s\\S]*?end(?:' + OFFICIAL_SEP_SRC + ')?' + OFFICIAL_BAR + '>', 'g');
+  // 端锚两条硬约束（0.16.20，run-10 session-33f37b03 逐字双修，缺一吞调用）：
+  // ① `</?` 容忍模型把闭 token 写成 XML 斜杠形 `</｜tool▁call▁end｜>`（官方模板
+  //    无斜杠，reference/deepseek-harness 零命中；run-10 第 1 轮起 20/20 轮如此）；
+  // ② `call(s)` 与 `end` 之间只允许一枚连接符（旧写法是自由 `[\s\S]*?`）。旧写法
+  //    让 **begin 类 token 也能当端锚起点**（`calls` 凑上 `calls?`、懒匹配跳到任意
+  //    `end｜>`）——斜杠闭 token 不被认出时端锚跨到下一条调用的 begin token，
+  //    把**下一条调用整块当端锚吃掉**（run-10：pwsh×2 只执行 1 条、三调用只出
+  //    2 条，全程零诊断零通知）。
+  + '</?\\s*' + OFFICIAL_BAR + '\\s*tool(?:' + OFFICIAL_SEP_SRC + ')?calls?(?:' + OFFICIAL_SEP_SRC + ')?end(?:' + OFFICIAL_SEP_SRC + ')?' + OFFICIAL_BAR + '>', 'g');
 const RE_OFFICIAL_CALLS_BEGIN = new RegExp(
   '<' + OFFICIAL_BAR + '\\s*tool' + OFFICIAL_SEP_SRC + 'calls' + OFFICIAL_SEP_SRC + 'begin(?:' + OFFICIAL_SEP_SRC + ')?' + OFFICIAL_BAR + '>', 'g');
 const RE_OFFICIAL_CALLS_END = new RegExp(
   '<' + OFFICIAL_BAR + '\\s*tool' + OFFICIAL_SEP_SRC + 'calls' + OFFICIAL_SEP_SRC + 'end(?:' + OFFICIAL_SEP_SRC + ')?' + OFFICIAL_BAR + '>', 'g');
 
+/** m 以 calls▁begin 起配（漂移：模型把它直接当调用开头，漏写 call▁begin）。 */
+const RE_OFFICIAL_CALLS_BEGIN_AT = new RegExp(
+  '^<' + OFFICIAL_BAR + '\\s*tool(?:' + OFFICIAL_SEP_SRC + ')?calls(?:' + OFFICIAL_SEP_SRC + ')?begin');
+
 function rewriteOfficialToolCalls(text) {
   // 全调用段优先（连同 NAME / sep / 参数体一起收编），孤立的 calls 包裹 token
   // （漂移产物）随后映射成规范外壳——这一步之后官方格式与 DSML 走同一条解析路。
+  // calls▁begin 起配的 match 会把包裹**开头**吃进替换，必须补发 `<calls>`：
+  // 无参调用的安全线（parseAgentReply 的 insideCalls）靠它判定，而收尾映射
+  // 最多只能配出闭端（run-10：cordis_inspect_list{} 三连灭，calls=0 的根因）。
+  // 规范 call▁begin 起配的 match 不补——开头留在外面，由 CALLS_BEGIN 映射配对。
   return text.replace(RE_OFFICIAL_CALL, (m, name, args) => {
     let a = args.trim();
     const fence = a.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
     if (fence) a = fence[1].trim();
-    return '<invoke name="' + name.trim() + '">' + a + '</invoke>';
+    return (RE_OFFICIAL_CALLS_BEGIN_AT.test(m) ? '<calls>' : '')
+      + '<invoke name="' + name.trim() + '">' + a + '</invoke>';
   }).replace(RE_OFFICIAL_CALLS_BEGIN, '<calls>')
     .replace(RE_OFFICIAL_CALLS_END, '</calls>');
 }

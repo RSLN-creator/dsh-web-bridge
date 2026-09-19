@@ -1273,6 +1273,10 @@ export function apply(ctx, config = {}) {
           + `本会话只有这些工具：${available.join(', ') || '（无）'}。`
           + `请按官方模板改用真实工具名重新发起：${officialToolCallSpecimen(sample.name, sample.args)}`
           + '——骨架与文档里的「工具名」等只是占位符，示例形状不是调用，只有真实工具名才会执行；'
+          // 0.16.20：点名 run-10 的两个真实漂移（旧文案只打「name 不能省」，没打到
+          // 斜杠闭 token 与漏 per-call begin，run-10 里模型连抄三轮坏形状没被纠正）。
+          + '重发注意：收尾 token 不带斜杠，每条调用都要用成对的 call-begin/call-end 包住、'
+          + '多条共用同一对 calls-begin/calls-end；'
           + '如果任务不需要工具，请直接给出结论。';
         warn(notice);
         // index 传 nextIndex：上面 closeThink() 已经关掉了思考块（它占用 0），
@@ -1682,7 +1686,13 @@ function unparsedCallNotice({ thinkAcc = '', tools = [], scene = null, withheld 
     // 0.16.18/0.16.19：重发指引改指官方训练模板（与首轮教学/再教学同一个形状），
     // 且示例用**真实工具名**（占位符会被模型照抄 → TOOL_UNKNOWN，run-9 实证）。
     + `请按要求重发：${(() => { const sample = officialCallExampleFor(tools); return officialToolCallSpecimen(sample.name, sample.args); })()}`
-    + '——name 不能省；如果任务不需要工具，请直接给出结论。'
+    + '——name 不能省；'
+    // 0.16.20：点名 run-10 的两个真实漂移（闭 token 带斜杠、漏 per-call begin）。
+    // run-10 里旧文案唯一形状要点是「name 不能省」——而模型 name 一直写对了，
+    // 教学没打到病灶，模型连抄三轮坏形状（.tmp/debug-log-2026-09-19-run10-*.md）。
+    + '重发注意：收尾 token 不带斜杠，每条调用都要用成对的 call-begin/call-end 包住、'
+    + '多条共用同一对 calls-begin/calls-end；'
+    + '如果任务不需要工具，请直接给出结论。'
     + (bits.length ? `（${bits.join('，')}）` : '')
     + (headText ? `\n被扣协议原文开头：${headText}` : '')
     + (tail ? `\n思考末尾：${tail}。` : '');
