@@ -22,9 +22,19 @@ window.__ModuleLoader__.load({
     'use strict';
     const React = require('react');
     const { createRoot } = require('react-dom/client');
-    // portal 用：把等待药丸挂进官方统计那一行（见 WaitLine / useOfficialStatsHost）。
-    const { createPortal } = require('react-dom');
-    const { IconCodeOutline16, IconQueueOutline14 } = require('@deepseek-ai/dsh-client-ui-primitives');
+    // 0.16.18：不再 require react-dom 的 createPortal。
+    // 旧实现靠 portal 把等待药丸塞进官方统计行（`[data-composer-stats]`），
+    // 而那个标记在 DSH 0.1.6-alpha.2 里**已经不存在**（见 WaitLine 注释）。
+    // 0.16.22：站点图标与选择框（见下方 SiteGlyph / SitePicker）。
+    // FishLogo 是**官方**鲸鱼矢量（dsh-client-ui-primitives 自带，viewBox 23.16×17.04、
+    // 单条填充路径、透明底、随 currentColor），官方自己的侧栏 logo 就用它——
+    // 因此 DeepSeek 这一项零新增依赖、零新增资产文件。
+    // useDismissOnOutsidePointer 是官方弹层关闭契约；选择框不自己写
+    // document 级 pointerdown 监听，避免与官方菜单的重叠关闭互相打架。
+    const {
+      IconCodeOutline16, IconQueueOutline14, IconChevronDownOutline14,
+      FishLogo, FISH_LOGO_PATH, FISH_LOGO_VIEWBOX, useDismissOnOutsidePointer,
+    } = require('@deepseek-ai/dsh-client-ui-primitives');
     const h = React.createElement;
     // 等待统计用的图标：官方 primitives 没有 gauge/clock 图标，队列图标是同一
     // 语义域里最近的一个（「还没轮到发送」）。与官方一样只取 14px 线框图标。
@@ -258,48 +268,42 @@ window.__ModuleLoader__.load({
      *
      * @param {{sessionId?: string}} owner 由 inject 注入的会话 id
      */
-    /**
-     * 官方统计行的挂载点（0.15.11）。
-     *
-     * ui-chat 的 StatsPills 把根节点标成 `data-composer-stats`，它那条 CSS 是
-     * `display:flex; justify-content:center; gap:12px`——**它本身就是一行**。而
-     * `conversation.composer.dock` 的每个条目都落在 composerStack（列向 flex）里，
-     * 所以另起一个条目必然换行。把本组件 portal 进那个行容器，它就成为该行里
-     * 紧跟官方药丸之后的 flex 子项：居中、间距、换行全部由官方 CSS 决定，
-     * 没有任何写死的偏移量。
-     *
-     * 官方行不存在时（会话尚无任何统计：StatsPills 在 steps===0 && !hasTokens
-     * 时返回 null）返回 null，调用方回落到自建的一行。
-     *
-     * 为什么要观察：dock 条目与官方药丸的挂载时机不同（后者要等第一个统计投影
-     * 到达），首次渲染常常还找不到行。这里用 MutationObserver 盯着 body，行一
-     * 出现就重算并断开观察，避免「必须刷新才同栏」。
-     *
-     * @param {boolean} wanted 本组件是否有内容要显示（false 时不必扫）
-     * @returns {HTMLElement|null} 官方统计行容器
-     */
-    function useOfficialStatsHost(wanted) {
-      const [host, setHost] = React.useState(null);
-      React.useEffect(() => {
-        if (!wanted) { setHost(null); return () => {}; }
-        let observer = null;
-        const find = () => {
-          let found = null;
-          try { found = document.querySelector('[data-composer-stats]'); } catch { found = null; }
-          setHost(prev => (prev === found ? prev : found));
-          return found;
-        };
-        if (find() !== null) return () => {};
-        try {
-          observer = new MutationObserver(() => {
-            if (find() !== null && observer !== null) { observer.disconnect(); observer = null; }
-          });
-          observer.observe(document.body, { childList: true, subtree: true });
-        } catch { observer = null; }
-        return () => { if (observer !== null) observer.disconnect(); };
-      }, [wanted]);
-      return host;
-    }
+    // ---- 0.16.18：官方 dock 行的适配（**旧实现已失效，这里说清为什么**）---------
+    //
+    // 旧实现（0.15.11）找的是 `[data-composer-stats]`——ui-chat 的 StatsPills 当年
+    // 给根节点打的标记。它把本组件 portal 进那一行，好让等待药丸与官方统计药丸
+    // 同排居中。
+    //
+    // **那个标记在 DSH 0.1.6-alpha.2 里已经不存在。** 实测（本机装的
+    // @deepseek-ai/dsh-client-ui-chat@0.1.6-alpha.2/lib/client.js:4115）新版
+    // StatsPills 的根节点只渲染 `className: StatsPills_module_css_default.root`，
+    // 整个包里 grep `data-composer-stats` 命中 0 处。
+    //
+    // 于是旧实现**必然**走「找不到官方行」那条回落分支：给自建节点打上
+    // `data-webcode-wait`，而那条 CSS 是 `width:100%;max-width:...;margin:0 auto`。
+    // 官方新版的 dock 行（ui-conversation 的 InputBar.module.css 里的
+    // `uV2eYG_dock`）是
+    //
+    //     display:flex; justify-content:center; align-items:center; gap:12px
+    //
+    // —— 一个 `width:100%` 的子项会**独占整行**，把官方药丸挤到下一行。用户看到的
+    // 「等待发送1分xx 没适配」就是这个：药丸自己撑满一行、与官方那排药丸分成两栏。
+    //
+    // ## 新版正确做法：什么都不用做，本来就在那一行里
+    //
+    // 新版 ui-conversation 的 InputBar 直接这样渲染 dock：
+    //
+    //     h('div', { className: InputBar_module_css_default.dock },
+    //       renderSlot('conversation.composer.dock', {}),   // ← 我们注册的条目
+    //       h(ContextMeter, {...}))
+    //
+    // 也就是说 `conversation.composer.dock` 的每个条目**本来就是那个 flex 行的直接
+    // 子项**。0.15.11 的 portal 是在补偿「条目落在列向 composerStack 里」的旧结构；
+    // 新结构里这个补偿不仅多余，还正好是 bug 的来源。
+    //
+    // 因此本版**删掉 portal 与 MutationObserver**，改为内联渲染一个
+    // `display:inline-flex` 的药丸：居中、间距、换行全部由官方那条 `uV2eYG_dock`
+    // 决定。跨度更小、依赖更少，也不再需要盯着 body 等官方行出现。
 
     function WaitLine(owner) {
       const sessionId = owner?.sessionId || null;
@@ -341,16 +345,16 @@ window.__ModuleLoader__.load({
         };
       }, [open]);
       const label = typeof data?.label === 'string' ? data.label : '';
-      const officialHost = useOfficialStatsHost(label !== '');
       if (!label) return null;
       const rows = Array.isArray(data?.detailRows) ? data.detailRows : [];
       // 与官方 stat-dialog 的排布逐项对齐：标题行（图标+标题 / 右侧值）→
       // 细分隔线 → dl 网格（dt 左、dd 右、tabular-nums）。
-      const content = h('div', {
+      //
+      // 0.16.18：不再 portal、也不再自建整行。本节点就是官方 dock 行的直接子项，
+      // 尺寸由 .hwb-waitwrap（inline-flex）决定，见上方那段长注释。
+      return h('div', {
         className: 'hwb-waitwrap',
         ref: rootRef,
-        // 自建一行时用官方同款行的类名（CSS 逐字抄 StatsPills.root）。
-        'data-webcode-wait': officialHost === null ? '' : null,
       },
         // 不给按钮挂 role="status"：那会把一个可聚焦控件声明成活区，屏幕阅读器
         // 会把它当播报文本而非按钮（官方药丸也只给 aria-haspopup/aria-expanded）。
@@ -376,10 +380,6 @@ window.__ModuleLoader__.load({
               rows.map(r => h('div', { key: r.label, className: 'hwb-waitpanel-row' },
                 h('dt', null, r.label), h('dd', null, r.value))))
             : h('p', { className: 'hwb-hint' }, '本会话尚无等待记录。')));
-      // 官方统计行在 → portal 进去（成为该行的第三个 flex 子项，居中/间距/换行
-      // 全由官方那条 CSS 决定）；不在 → 原样返回，dock 自成一行的行为与 0.15.10
-      // 之前一致，但样式抄的是官方同款行。
-      return officialHost === null ? content : createPortal(content, officialHost);
     }
 
     /**
@@ -1661,8 +1661,215 @@ window.__ModuleLoader__.load({
       bind(h) { this.handlers = h; return () => { if (this.handlers === h) this.handlers = null; }; },
     };
 
+    // ---- 站点图标与一级选择框（0.16.22） --------------------------------------
+    //
+    // ## 为什么需要一个「档位」表，而不是一张图标表
+    //
+    // 用户的要求是「用各站官方矢量透明底图标」。调研结论（doc/brand-icons-research.md）
+    // 说得很清楚：**多数站点并不对外发布透明底纯符号的官方 SVG**——官方给的多是
+    // 「文字+符号」组合标，或干脆只有 PNG/ICO；第三方图集（LobeHub / Wikimedia 社区
+    // 上传 / logo.dev）里那些看着像的，**不是品牌方资产**。
+    //
+    // 于是这里按档位如实标注，而不是给每个站点硬塞一张看起来像官方的图：
+    //   'official' —— 官方矢量已在磁盘上（本仓库唯一一个是 DeepSeek：primitives 的
+    //                 FishLogo / FISH_LOGO_PATH，DSH 自家产品线随包发布的官方资产）；
+    //   'missing'  —— 本轮没有权威官方源。**画文字标记**（品牌名缩写），
+    //                 并在 title 与选择框里如实写明「官方矢量未找到」。
+    //
+    // 为什么不干脆用 simple-icons（官方 primitives 的 siteGlyph 用的就是它）：
+    // 它是 CC0 的**第三方图集**，且取的是链接的 currentColor 而非品牌固有色，
+    // 定位是「外链前导图标」不是品牌墙。用它等于把「第三方复刻」冒充官方——
+    // 与用户「官方优先」的要求正相反，也与本仓库「不造假状态」的纪律冲突。
+    //
+    // 补件入口（B 档，见调研文档 §4.1）：Kimi 官方 Brand Guidelines 直接给 SVG
+    // 下载、Grok 有官方品牌规范页。取回后**原样**落进 SITE_ICON_TIER 对应的分支，
+    // 并在条目注释里写明来源 URL + 取件日期 + 许可，同时把 tier 改成 'official'。
+    const SITE_BRANDS = {
+      deepseek: { mark: 'DS' },
+      glm: { mark: 'GL' },
+      chatgpt: { mark: 'GPT' },
+      kimi: { mark: 'KM' },
+      qwen: { mark: 'QW' },
+      doubao: { mark: 'DB' },
+      grok: { mark: 'GK' },
+      claude: { mark: 'CL' },
+      gemini: { mark: 'GM' },
+      zai: { mark: 'ZA' },
+    };
+    /** 站点 id → { tier, why }。tier 只有 'official' 与 'missing' 两态，没有中间态。 */
+    const SITE_ICON_TIER = {
+      deepseek: { tier: 'official', why: '官方鲸鱼矢量（@deepseek-ai/dsh-client-ui-primitives 的 FishLogo / FISH_LOGO_PATH）' },
+      glm: { tier: 'missing', why: '未找到品牌方发布的透明底矢量；第三方图集不作为官方源' },
+      chatgpt: { tier: 'missing', why: '本轮未找到官方图标/媒体资源页' },
+      kimi: { tier: 'missing', why: '官方 Brand Guidelines 提供 SVG 下载（尚未取回入库，见 doc/brand-icons-research.md §4.1 B 档）' },
+      qwen: { tier: 'missing', why: '仅有 Wikimedia 社区上传，非品牌方发布' },
+      doubao: { tier: 'missing', why: '仅有第三方图集（LobeHub），不作为官方源' },
+      grok: { tier: 'missing', why: '官方品牌规范页有条款入口（尚未取回入库，见 doc/brand-icons-research.md §4.1 B 档）' },
+      claude: { tier: 'missing', why: '仅有 Wikimedia 社区上传与第三方聚合站' },
+      gemini: { tier: 'missing', why: '本轮未找到官方图标/媒体资源页' },
+      zai: { tier: 'missing', why: '与 GLM 同源品牌，沿用 GLM 结论' },
+    };
+    const siteBrand = sid => SITE_BRANDS[sid] || { mark: String(sid || '?').slice(0, 2).toUpperCase() };
+    const siteTier = sid => SITE_ICON_TIER[sid]?.tier || 'missing';
+    const siteIconWhy = sid => SITE_ICON_TIER[sid]?.why || '官方矢量图标未找到';
+
+    /**
+     * 站点标记：有官方矢量就画官方矢量，没有就画文字标记。
+     *
+     * 两种形态**共用一个 svg 画布与尺寸口径**，因此同一排里图标的光学大小一致
+     * （文字标记按「几个字母填满同样的圆框」排版，不是各自一个尺寸）。
+     *
+     * DeepSeek 走 FISH_LOGO_PATH 自己组 svg（而不是直接 <FishLogo/>）：鲸鱼原生
+     * viewBox 是 23.16×17.04（宽高比 1.36），塞进方形框会左右留白、视觉偏小；
+     * 这里按**正方形 viewBox + 手动居中**摆放，与旁边的文字标记对齐。
+     * 路径常量是官方注释明说「exported for consumers that compose their own svg」的用法。
+     */
+    function SiteGlyph({ sid, size = 18 }) {
+      const box = size + 8;
+      if (siteTier(sid) === 'official' && sid === 'deepseek') {
+        const pad = (box - size) / 2;
+        const hh = size * FISH_LOGO_VIEWBOX.height / FISH_LOGO_VIEWBOX.width;
+        return h('svg', {
+          className: 'hwb-glyph-svg', width: box, height: box, viewBox: '0 0 ' + box + ' ' + box,
+          'aria-hidden': 'true', focusable: 'false',
+        }, h('path', {
+          d: FISH_LOGO_PATH, fill: 'currentColor',
+          transform: 'translate(' + pad + ' ' + ((box - hh) / 2) + ')',
+        }));
+      }
+      // 文字标记：品牌名缩写。**不是**「找不到图标就用首字母凑合」——它是有意
+      // 为之的占位表达，title 里会写明官方矢量尚未取得，用户一眼能看出区别。
+      return h('svg', {
+        className: 'hwb-glyph-svg', width: box, height: box, viewBox: '0 0 ' + box + ' ' + box,
+        'aria-hidden': 'true', focusable: 'false',
+      }, h('circle', {
+        cx: box / 2, cy: box / 2, r: box / 2 - 0.5,
+        fill: 'none', stroke: 'currentColor', 'stroke-opacity': 0.35,
+      }), h('text', {
+        x: box / 2, y: box / 2, 'text-anchor': 'middle', 'dominant-baseline': 'central',
+        'font-size': Math.max(8, Math.round(size * 0.5)), 'font-weight': 600, fill: 'currentColor',
+      }, siteBrand(sid).mark));
+    }
+
+    /**
+     * 一级站点选择框（面板首屏 + 工具条下拉两种形态共用一个组件）。
+     *
+     * ## 为什么是「面板内的选择框」而不是「点开标签就先弹一层」
+     *
+     * 调研文档 §4.2① 已经把结论写下了：右侧栏的标签页是官方 `sidebarRightTabs` 契约
+     * 下的**常驻视图**，用户点开它就期待看到面板本体；每次都先弹一层会让「回到上次
+     * 那个站点」变慢。因此选择框挂在**面板内部**的两处既有座位里：
+     *   · 工具条上的站点身份按钮 —— 当前站点是什么、切到别的；
+     *   · 尚无任何站点连接时的首屏 —— 直接铺一张站点网格，省掉「先看到空面板」这一步。
+     * 两者都走这个组件，于是图标、键盘导航、状态点只有一份实现。
+     *
+     * ## 键盘与关闭
+     *
+     * 菜单语义按官方 Menu 的做法（role=menu / menuitemradio）：上下键移动、Home/End
+     * 到两端、Esc 关闭。外点关闭走官方 `useDismissOnOutsidePointer`，不自挂 document
+     * 监听——官方那套还处理 portal 边界，自己写一份迟早与它互相打架。
+     */
+    function SitePicker({ siteId, siteStatuses, onPick, onSplit, compact }) {
+      const [open, setOpen] = React.useState(false);
+      const rootRef = React.useRef(null);
+      useDismissOnOutsidePointer(rootRef, open, setOpen);
+      const pick = (sid) => { setOpen(false); onPick(sid); };
+      if (compact) {
+        return h('div', { className: 'hwb-picker inline', ref: rootRef },
+          h('button', {
+            className: 'hwb-picker-trigger', type: 'button',
+            'aria-haspopup': 'menu', 'aria-expanded': open,
+            title: '切换内容服务站点（当前：' + siteName(siteId) + '）',
+            onClick: () => setOpen(v => !v),
+          },
+            h('span', { className: 'hwb-glyph' + (siteTier(siteId) === 'official' ? ' official' : '') },
+              h(SiteGlyph, { sid: siteId, size: 16 })),
+            h('span', { className: 'hwb-picker-trigger-name' }, siteName(siteId)),
+            h('span', { className: 'hwb-picker-caret', 'aria-hidden': 'true' }, h(IconChevronDownOutline14, { size: 14 }))),
+          open && h(SitePickerSurface, { siteId, siteStatuses, onPick: pick, onSplit, onMenuKey: null }));
+      }
+      return h('div', { className: 'hwb-picker grid-host', ref: rootRef },
+        h(SitePickerSurface, { siteId, siteStatuses, onPick: pick, onSplit, bare: true }));
+    }
+
+    /** 选择框的面板体。单独抽出来是因为「下拉」与「首屏网格」只差一层定位与开合。 */
+    function SitePickerSurface({ siteId, siteStatuses, onPick, onSplit, onMenuKey, bare }) {
+      const ids = Object.keys(SITE_NAMES);
+      const stateCls = sid => {
+        const row = siteStatuses[sid];
+        return row?.loggedIn === true ? 'ok' : row?.loggedIn === false ? 'bad' : 'idle';
+      };
+      const stateText = sid => {
+        const row = siteStatuses[sid];
+        if (!row || row.loggedIn == null) return '待检查';
+        return row.loggedIn === true ? '已登录' : '未登录';
+      };
+      const key = (e) => {
+        if (!onMenuKey) return;
+        const i = ids.indexOf(siteId);
+        let next = null;
+        if (e.key === 'ArrowDown') next = ids[(i + 1) % ids.length];
+        else if (e.key === 'ArrowUp') next = ids[(i - 1 + ids.length) % ids.length];
+        else if (e.key === 'Home') next = ids[0];
+        else if (e.key === 'End') next = ids[ids.length - 1];
+        if (next === null) return;
+        e.preventDefault();
+        onPick(next);
+      };
+      return h('div', {
+        className: 'hwb-picker-surface' + (bare ? ' bare' : ''),
+        role: 'menu', 'aria-label': '选择内容服务站点', onKeyDown: key,
+      },
+        h('p', { className: 'hwb-picker-head' },
+          bare ? '选择一个站点开始。生成任务仍由该站点网页原生执行。' : '切换站点'),
+        h('div', { className: 'hwb-picker-grid' },
+          ids.map(sid => h('div', { className: 'hwb-picker-cell', key: sid },
+            h('button', {
+              className: 'hwb-picker-item' + (sid === siteId ? ' active' : ''),
+              type: 'button', role: 'menuitemradio', 'aria-checked': sid === siteId,
+              title: siteName(sid) + ' · ' + siteIconWhy(sid),
+              onClick: () => onPick(sid),
+            },
+              h('span', { className: 'hwb-picker-ico' + (siteTier(sid) === 'official' ? ' official' : '') },
+                h(SiteGlyph, { sid, size: 20 })),
+              h('span', { className: 'hwb-picker-text' },
+                h('span', { className: 'hwb-picker-name' }, siteName(sid)),
+                h('span', { className: 'hwb-picker-meta' },
+                  h('span', { className: 'hwb-dot ' + stateCls(sid), 'aria-hidden': 'true' }),
+                  stateText(sid),
+                  siteTier(sid) === 'official' ? '' : ' · 官方矢量未找到'))),
+            // 分屏入口：多开不同网址。这里显式给一颗按钮，而不只留 Ctrl+点击
+            // （旧实现只有 Ctrl/⌘+点击与中键两个**看不见的**入口，用户无从发现）。
+            onSplit && h('button', {
+              className: 'hwb-picker-split', type: 'button',
+              title: '在新面板中打开 ' + siteName(sid) + '（可与当前面板同时看两个站点）',
+              'aria-label': '在新面板中打开 ' + siteName(sid),
+              onClick: () => onSplit(sid),
+            }, h('span', { 'aria-hidden': 'true' }, '\u25eb'))))),
+        h('p', { className: 'hwb-picker-foot' },
+          '图标：DeepSeek 为官方矢量；其余站点品牌方未发布透明底矢量，按「官方优先」暂用文字标记。'));
+    }
+
+    /**
+     * 「下一个新开的分屏应该落在哪个站点」（0.16.22）。
+     *
+     * 旧实现里 Ctrl/⌘+点击站点只是 `setSiteId(sid)` 之后再 `onSplit()`——而分屏出来的
+     * 新 pane 是**另一个 Conversation 实例**，它的 `useState('deepseek')` 恒等于默认站点。
+     * 于是「Ctrl+点击 Kimi 想在旁边再开一个 Kimi」得到的是一左一右两个 DeepSeek，
+     * 用户看到的是一句「多开不同网址」的承诺没有兑现。
+     *
+     * 这里用一个模块级的一次性交接：请求方把目标站点放进来，新实例初始化时取走并清空。
+     * 之所以不做成 Context/服务，是因为它只跨一次**新实例初始化**，而且必须在新实例
+     * 挂载前就已确定（挂载后再 setState 会让新 pane 先闪一下 DeepSeek）。
+     */
+    let pendingPaneSite = null;
+
     function Conversation({ browserSrc, onSplit, onFloat }) {
-      const [siteId, setSiteId] = React.useState('deepseek');
+      const [siteId, setSiteId] = React.useState(() => {
+        const handed = pendingPaneSite;
+        pendingPaneSite = null;
+        return handed || 'deepseek';
+      });
       const [siteStatuses, setSiteStatuses] = React.useState({});
       // iframe 保活：每个访问过的站点一个 frame，全部常驻 DOM，用 display 切换。
       // 旧实现每次挂载都重设 src（?ts= 时间戳）——侧栏每开合一次就整页重载，
@@ -1808,11 +2015,12 @@ window.__ModuleLoader__.load({
       }, [frames]);
       /** 在新分屏里打开某个站点（多开不同网页）。宿主不支持时安静略过。 */
       const openSiteInPane = (sid) => {
-        try {
-          if (typeof onSplit !== 'function') { setSiteId(sid); return; }
-          setSiteId(sid);
-          onSplit(sid);
-        } catch { setSiteId(sid); }
+        setSiteId(sid);
+        if (typeof onSplit !== 'function') return;
+        // 交接给即将挂载的新 pane：它自己 useState 的初值恒为默认站点，不交接的话
+        // 「分屏看另一个站点」实际得到两个相同的站点（见 pendingPaneSite 注释）。
+        pendingPaneSite = sid;
+        try { onSplit(sid); } catch { pendingPaneSite = null; }
       };
       const siteIds = Object.keys(SITE_NAMES);
       const onTabKey = (e) => {
@@ -1846,8 +2054,14 @@ window.__ModuleLoader__.load({
         // 我能对它做什么」，标签条只负责「切站点」。
         h('div', { className: 'hwb-toolbar' },
           h('div', { className: 'hwb-toolbar-id' },
+            // 站点身份 + 一级选择框：工具条左边的图标按钮打开它。
+            // 0.16.22 起这里取代了旧的「状态点 + 站点名」静态文本——同样一处位置，
+            // 但可点、可键盘操作，且把「切到哪个站点」这件事从下面的标签条收了上来。
+            h(SitePicker, {
+              siteId, siteStatuses, compact: true, onSplit: openSiteInPane,
+              onPick: (sid) => setSiteId(sid),
+            }),
             statusDot(siteStatus),
-            h('span', { className: 'hwb-toolbar-name', title: siteName(siteId) }, siteName(siteId)),
             h('span', { className: 'hwb-toolbar-state' }, winBusy ? '切换中' : statusLabel(siteStatus))),
           h('div', { className: 'hwb-toolbar-actions' },
             h('button', {
@@ -2030,16 +2244,28 @@ window.__ModuleLoader__.load({
         // 28px 高、border-radius 24px、padding 1px 8px、gap 6px、14px 线框图标，
         // 悬停/展开用 interactive-bg-hover + label-secondary。
         //
-        // 「同栏」由结构决定、不靠边距（0.15.11 重做）：找到官方统计行
-        //（[data-composer-stats]）后由 React portal 把本节点挂进去，它就成了
-        // 该行的兄弟 flex 子项，居中/间距/换行全归官方那条 CSS 管。只有官方行
-        // 缺席时才自建一行，样式逐字抄 StatsPills.root（见下条规则）——两处
-        // 视觉因此一致，也没有任何写死的偏移量会在侧栏挤窄时错位重叠。
-        ".hwb-waitwrap{position:relative;display:inline-flex;min-width:0}",
-        // 官方行缺席时的自建行：逐字抄 StatsPills.root
-        //（width/max-width/padding/justify-content/gap/margin/font-size）。
-        ".hwb-waitwrap[data-webcode-wait]{display:flex;box-sizing:border-box;width:100%;max-width:var(--dsh-chat-content-width);margin:0 auto;padding:4px calc(var(--dsh-composer-side-clearance,16px) + 16px) 0;justify-content:center;gap:12px;font-size:var(--dsh-content-font-size-secondary,13px);line-height:calc(20px + var(--dsh-content-font-delta-secondary,0px))}",
-        ".hwb-waitpill{box-sizing:border-box;max-width:100%;height:28px;display:inline-flex;align-items:center;gap:6px;padding:1px 8px;font:inherit;font-size:13px;line-height:24px;font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--dsw-alias-label-tertiary,#8a8f98);background:0 0;border:none;border-radius:24px;cursor:pointer;transition:background .12s ease,color .12s ease}",
+        // 「同栏」由结构决定（0.16.18 简化）：本节点**本来就是**官方 dock 行的直接
+        // 子项（ui-conversation 的 InputBar 直接 `renderSlot('conversation.composer.dock')`
+        // 再渲染 ContextMeter），因此只需把自己收成 inline-flex 即可与官方药丸同排。
+        //
+        // 0.15.11 那套「找官方统计行 → portal 进去 → 找不到就自建整行」在
+        // DSH 0.1.6-alpha.2 上已经失效：官方标记 `data-composer-stats` 整个包
+        // 命中 0 处，于是自建整行**永远**生效，`width:100%` 把官方药丸挤到下一行。
+        // 那条自建行规则因此一并删除——留着一个永不生效、但一旦生效就排版崩坏的
+        // 规则，比没有更糟。
+        ".hwb-waitwrap{position:relative;display:inline-flex;align-items:center;min-width:0;flex:none}",
+        // 尺寸**逐项**取自官方药丸（ui-chat 的 StatsPills 与 TurnUsagePanel 两张
+        // module.css），不是照着截图量的近似值。三个值分别是：字号取官方
+        // `--dsh-content-font-size-secondary`（缺省 13px）；行高取官方
+        // `--dsh-content-font-delta-secondary` 以 24px 为基；高度取官方
+        // `--dsh-content-font-delta` 以 28px 为基。
+        //
+        // 为什么必须写 token 而不是把 13px/24px/28px 抄下来：用户在设置里改
+        // 「内容字号」时，官方所有药丸按这两个 delta 一起缩放，而写死的那一枚
+        // **不跟着变**——同一行里出现一大一小两枚药丸，正是「没适配」在数值层面
+        // 的形态。0.16.21 之前这里正是写死的三个值；本版改为官方 token。图标仍是
+        // 官方规定的 14px 线框（`.hwb-waitpill svg` 那条）。
+        ".hwb-waitpill{box-sizing:border-box;max-width:100%;height:calc(28px + var(--dsh-content-font-delta,0px));display:inline-flex;align-items:center;gap:6px;padding:1px 8px;font:inherit;font-size:var(--dsh-content-font-size-secondary,13px);line-height:calc(24px + var(--dsh-content-font-delta-secondary,0px));font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--dsw-alias-label-tertiary,#8a8f98);background:0 0;border:none;border-radius:24px;cursor:pointer;transition:background .12s ease,color .12s ease}",
         ".hwb-waitpill:hover,.hwb-waitpill[aria-expanded=true]{background:var(--dsw-alias-interactive-bg-hover,#8882);color:var(--dsw-alias-label-secondary,inherit)}",
         ".hwb-waitpill:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#3b82f6);outline-offset:1px}",
         ".hwb-waitpill svg{flex:none;width:14px;height:14px}",
@@ -2160,10 +2386,37 @@ window.__ModuleLoader__.load({
         ".hwb-panel>p.hwb-hint{margin:0}",
         // 左栏入口切过来的主列页面（0.16.0）。滚动与页面内边距归**容器**，
         // 面板内部继续用 .hwb-panel 那一套——同一个语义只有一份排版。
-        // box-sizing 必须显式写：中央列的高度由 frame 的 grid 给定，
-        // 少这一句 padding 会把容器撑出可视区，底部一行永远滚不到。
-        ".hwb-main{height:100%;box-sizing:border-box;overflow:auto;padding:16px 20px}",
-        ".hwb-main-head{margin:0 0 12px;font-size:15px;line-height:24px;color:var(--dsw-alias-label-primary,inherit)}",
+        //
+        // 0.16.18：中央列容器在新版官方里是**列向 flex**
+        //（ui-layout 的 `pI_x6G_centerCol{flex-direction:column;display:flex}`，
+        // 见 AppFrame 的 CenterColumn），main 座位渲染进去的就是它的 flex 子项。
+        // 因此这里必须按 flex 子项的规则写：`flex:1;min-height:0` 才能正确占满并
+        // 允许内部滚动；旧写的 `height:100%` 在 flex 父容器下**不保证**解析出高度
+        //（百分比高度要求父级有确定高度），表现是内容撑不满或底部滚不到。
+        //
+        // box-sizing 仍必须显式写：少这一句 padding 会把容器撑出可视区。
+        // 内层排版**逐项**对齐官方整列页面（ui-plugin-manager 的 page / pageHead /
+        // pageTitle 那条 CSS）：页面内边距上下 28px、左右随视口在 24–48px 之间伸缩；
+        // 分节间距 32px；正文列宽上限 960px 并居中；页面标题 20px/500/28px。
+        //
+        // 为什么标题从 15px 改成官方的 20px/28px：15px 是**右栏窄条**那一档的
+        // 尺度。左栏入口切过来的是**整列页面**，官方给整列页面的标题就是 20px/28px；
+        // 沿用窄条的 15px 会让页面看起来像「一条被放大的侧栏」，层级也压不住
+        // 下面 13px 的正文——这正是用户说的「没适配」在观感层面的样子。
+        //
+        // 为什么正文列要 max-width 居中：整列页面在宽屏上可以到 1600px+，任务标题
+        // 与关键路径一行铺满整屏就没法读了。960px 是官方整列页面的正文列宽。
+        //
+        // 容器自身仍保留 flex:1;min-height:0（中央列在新版官方里是列向 flex，
+        // 见 AppFrame 的 CenterColumn，上面那段注释已说明为什么不能写 height:100%）；
+        // 这里只是把**内层排版**换成官方 page 那一套。
+        ".hwb-main{flex:1;min-height:0;box-sizing:border-box;overflow:auto;display:flex;flex-direction:column;align-items:center;gap:32px;padding:28px clamp(24px,4vw,48px) 48px}",
+        ".hwb-main>*{width:100%;max-width:960px}",
+        ".hwb-main-head{margin:0;font-size:20px;font-weight:500;line-height:28px;color:var(--dsw-alias-label-primary,inherit)}",
+        // 页面内边距归 .hwb-main（官方 page 也是这么分的），面板自己那圈内边距
+        // 在这里就是重复留白。.hwb-panel 本身**不改**——它同时挂在右栏窄条与
+        // 设置页下，那两处的内边距是对的，动了会让它们一起漂移。
+        ".hwb-main>.hwb-panel{padding:0}",
       ].join('');
       document.head.appendChild(style);
       const disposers = [() => style.remove()];
@@ -2209,22 +2462,23 @@ window.__ModuleLoader__.load({
 
       // ---- 官方右侧栏（@deepseek-ai/dsh-client-ui-sidebar-right）--------
       //
-      // 三个标签页，各自一个独立的 kind：
+      // **两个**标签页，各自一个独立的 kind（0.16.18 起由三个减为两个）：
       //   • webcode-bridge —— 网页镜像（可多开、可浮动）；
-      //   • webcode-team   —— Team 面板：谁在团队里、各自在忙什么；
-      //   • webcode-tasks  —— 任务板：依赖图、就绪/阻塞、关键路径。
+      //   • webcode-team   —— Team 面板：谁在团队里、各自在忙什么。
       //
-      // 为什么是**三个 kind** 而不是一个 kind 内部再分栏：官方契约（tab-registry.d.ts）
-      // 里 kind 就是「这是什么类型的标签页」，每个 kind 有自己的标题、地址识别与
-      // guide 入口；合成一个的话，标签条上会出现三个同名标签，浮动/分屏也无法按
-      // 类型定位。而 pane.tab 座位是 keyed 的（按定义 id 派发），三个 kind 各注册
-      // 自己的 body 即自然成立。
+      // 任务板原来也是这里的一个 kind（webcode-tasks），0.16.18 删掉了：它与左栏
+      // 全局面板同数据同组件，两个入口互相打架，而右栏窄条也放不下依赖图。现在
+      // 任务板只走左栏 `sidebar.panellist` + `main`（见下方注册处）。
+      //
+      // 为什么每个面板一个**独立 kind** 而不是一个 kind 内部再分栏：官方契约
+      //（tab-registry.d.ts）里 kind 就是「这是什么类型的标签页」，每个 kind 有自己
+      // 的标题、地址识别与 guide 入口；合成一个的话，标签条上会出现同名标签，
+      // 浮动/分屏也无法按类型定位。而 pane.tab 座位是 keyed 的（按定义 id 派发），
+      // 两个 kind 各注册自己的 body 即自然成立。
       const TAB_ID = 'dsh-webcode-bridge';
       const TAB_KIND = 'webcode-bridge';
       const TEAM_ID = 'dsh-webcode-bridge/team';
       const TEAM_KIND = 'webcode-team';
-      const TASKS_ID = 'dsh-webcode-bridge/tasks';
-      const TASKS_KIND = 'webcode-tasks';
       // 左栏全局面板（`sidebar.panellist` + `main`）的 id。与上面两个是**不同域**：
       // 那两个是右侧栏的标签页类型/实例 id，这个既是侧栏行的 list id、也是中央列
       // main 座位的 key——官方契约要求这两者**逐字相同**（「Each list id addresses
@@ -2310,29 +2564,20 @@ window.__ModuleLoader__.load({
         } catch (e) { warn('pane.tab body (team)', e); }
       });
 
-      // ---- 任务板标签页（0.15.12）---------------------------------------
-      own(() => {
-        try {
-          return ctx.sidebarRightTabs.register({
-            id: TASKS_ID,
-            kind: TASKS_KIND,
-            priority: 'extension',
-            title: () => '任务板',
-            guide: [{
-              order: 57,
-              title: () => '任务板',
-              description: () => '依赖图视角：可开工 / 被阻塞 / 进行中 / 已完成，含当前阻塞点与关键路径（只读）',
-            }],
-          });
-        } catch (e) { warn('sidebarRightTabs.register (tasks)', e); }
-      });
-      own(() => {
-        try {
-          return ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
-            name: 'sidebar.right.pane.tab', key: TASKS_ID,
-          }, TaskBoardPanel));
-        } catch (e) { warn('pane.tab body (tasks)', e); }
-      });
+      // ---- 任务板的右栏标签页：**已删除**（0.16.18）------------------------
+      //
+      // 0.15.12 曾在右栏注册第三个 kind `webcode-tasks`（id `…/tasks`），与左栏
+      // 那个全局面板**指向同一份数据、同一个组件**（`TaskBoardPanel`）。用户
+      // 0.16.18 明确要求删掉这一份注册，理由成立：
+      //
+      //   • 同一件事有两个入口，用户不知道哪个是「真的」——点开左边和点开右边
+      //     看到的是同一张板，却各自记着独立的滚动位置与选中标签；
+      //   • 右栏是**窄条常驻**视图（几百像素），依赖图在那里只能一行一省略号，
+      //     而左栏那份是整列页面、宽度充足。窄条那版从来没被真正用过。
+      //
+      // 任务板现在只有**一个**入口：左栏 `sidebar.panellist` 行 + 同名 `main`
+      // 中央列页面（见下方注册处）。`TaskBoardPanel` 组件本身保留——它仍是那
+      // 个页面的渲染体，只是不再被右栏标签页复用。
 
       // ---- 左栏全局面板入口：任务板（0.16.0）-----------------------------
       //

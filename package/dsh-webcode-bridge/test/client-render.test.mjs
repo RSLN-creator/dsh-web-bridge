@@ -49,6 +49,10 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null 
   // 后者的 key 必须与前者 id 逐字相同——两半各收一处，便于断言「成对」。
   const PanelEntries = [];
   const MainKeys = [];
+  // 0.16.18：main 是 **keyed** 座位，按 key 派发。只收 key 已经不够——任务板正文
+  // 现在只从这里取（右栏那份 `sidebar.right.pane.tab` 注册已按用户要求删除），
+  // 因此组件本身也要留一份，否则 which:'tasks' 无座位可渲染。
+  const MainComponents = new Map();
   let SettingsComponent = null;
   // 0.15.11：输入框底下的等待药丸也必须被真的渲染到。此前没有任何用例捕获
   // `conversation.composer.dock` 的组件，于是「药丸长什么样、点了会怎样」
@@ -106,10 +110,11 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null 
   const mockRequire = (id) => {
     if (id === 'react') return React;
     if (id === 'react-dom/client') return { createRoot: () => ({ render() {} }) };
-    // 0.15.11：等待药丸用 portal 挂进官方统计那一行，因此真的 require 了 react-dom。
-    // 桩成「就地返回内容」——测试断言的是渲染不抛错与文案，不是 portal 的落点；
-    // 落点由下面「不得靠几何偏移」那条源码护栏钉住。
-    if (id === 'react-dom') return { createPortal: (node) => node };
+    // 0.16.18：等待药丸不再 require react-dom——官方 `[data-composer-stats]`
+    // 标记在新版里已不存在，portal 已删除（见 client.cjs 的长注释与源码护栏）。
+    // 这里仍留一条 react-dom 桩，但要求它**不得**被用到：真被 require 到说明
+    // portal 路线又被加回来了。
+    if (id === 'react-dom') return { createPortal: () => { throw new Error('不得再用 createPortal：官方统计行标记已不存在'); } };
     if (id === '@deepseek-ai/dsh-client-ui-primitives') return { IconCodeOutline16: () => null, IconQueueOutline14: () => null };
     throw new Error('unexpected require: ' + id);
   };
@@ -215,7 +220,7 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null 
           // 0.15.12/0.16.0：左栏入口与中央列 main 座位。list 座位带 id（= main key）；
           // main 是 keyed 座位，按 key 派发。两者分别收下，用于断言成对且同名。
           if (def?.name === 'sidebar.panellist') PanelEntries.push({ id: def.id, order: def.order, label: def.label, Comp });
-          if (def?.name === 'main') MainKeys.push(def.key);
+          if (def?.name === 'main') { MainKeys.push(def.key); MainComponents.set(def.key, Comp); }
           return () => {};
         },
       },
@@ -253,17 +258,26 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null 
       return { ...el, children: (el.children || []).map(instantiate) };
     };
     const errors = [];
-    /** which → 座位 key。三个标签页正文与设置页、等待药丸各一条路径。 */
+    /** which → 座位 key。标签页正文、中央列 main 面板、设置页、等待药丸各一条路径。 */
     const PANE_KEYS = {
       pane: 'dsh-webcode-bridge',
       team: 'dsh-webcode-bridge/team',
-      tasks: 'dsh-webcode-bridge/tasks',
     };
+    // 0.16.18：任务板正文不再挂在 `sidebar.right.pane.tab` 上（右栏那份注册已按
+    // 用户要求删除），它现在只由左栏 `sidebar.panellist` 行 + 同名 `main` 座位提供。
+    // 因此 `which: 'tasks'` 去 MainComponents 取，而不是 PaneComponents。
+    const TASKS_PANEL_ID = 'webcode-tasks-panel';
     const Target = which === 'settings' ? SettingsComponent
       : which === 'dock' ? DockComponent
-        : PaneComponents.get(PANE_KEYS[which] || PANE_KEYS.pane);
+        : which === 'tasks' ? MainComponents.get(TASKS_PANEL_ID)
+          : PaneComponents.get(PANE_KEYS[which] || PANE_KEYS.pane);
     if (which === 'dock') assert.ok(DockComponent, 'conversation.composer.dock 从未注册');
-    assert.ok(Target, '未注册座位 ' + which + '（已注册：' + [...PaneComponents.keys()].join(', ') + '）');
+    if (which === 'tasks') {
+      assert.ok(Target, '未注册 main 座位 ' + TASKS_PANEL_ID
+        + '（已注册：' + [...MainComponents.keys()].join(', ') + '）——任务板必须由左栏入口 + main 成对提供');
+    } else {
+      assert.ok(Target, '未注册座位 ' + which + '（已注册：' + [...PaneComponents.keys()].join(', ') + '）');
+    }
     // 0.15.0：设置页的官方槽 inject 会喂进**当前会话 id**（花名册的
     // subagentCatalog 是会话级投影，服务端要用它去 sessions.get(sessionId)）。
     // 旧 harness 直接 `Target()` 调，等于模拟了一个「inject 什么都没给」的宿主；
@@ -658,17 +672,34 @@ test('★ 等待药丸：可点（onClick 存在），且 aria 契约完整', as
   assert.match(String(pill.props['aria-label']), /等待发送/);
 });
 
-test('★ 等待药丸：同栏必须靠 portal 结构，不得用负边距等几何偏移硬拽', () => {
+test('★ 等待药丸：靠官方 dock 行自身的 flex 同栏，不得 portal、不得几何偏移', () => {
   // 用户原话：「写死的会被侧面面板挤到重叠的」。0.15.10 用负上边距把本行拽进
   // 官方那一行，官方行一旦换行（右栏把输入区挤窄）两块内容就叠在一起。
-  // 0.15.11 改成 portal 进 [data-composer-stats] 行容器——这条钉住「结构而非
-  // 偏移」：源码里不许再出现给等待 wrap 算负边距的代码。
+  //
+  // 0.15.11 改成 portal 进 [data-composer-stats] 行容器，但**那个官方标记在
+  // DSH 0.1.6-alpha.2 里已经不存在**（新版 StatsPills 根节点只渲染 className，
+  // 整个包 grep 命中 0 处）。于是 portal 分支永不生效，回落的自建整行
+  // （width:100%）反而把官方药丸挤到下一行——这就是用户报的「没适配」。
+  //
+  // 新版正确解：`conversation.composer.dock` 的条目本来就是官方 dock flex 行的
+  // 直接子项（ui-conversation 的 InputBar 直接 renderSlot 再渲染 ContextMeter），
+  // 所以只要自己是 inline-flex，同栏就自动成立。
+  //
+  // 这条同时钉住三件事：不许再 portal（依赖已消失的标记）、不许有几何偏移、
+  // 必须是 inline-flex 而不是整行。
   const src = bridgeSrcFrom('client.cjs');
-  assert.ok(src.includes('createPortal'), 'client.cjs 必须用 portal 挂进官方统计行');
-  assert.ok(src.includes('data-composer-stats'), '必须按官方标记找那一行');
+  // 断言的是**调用形态**而不是这个词：0.16.18 的注释里正当地解释了「为什么不再用
+  // portal」，把注释一起禁掉会逼着后续维护者删掉那段解释——那是本末倒置。
+  assert.ok(!/\bcreatePortal\s*\(/.test(src), 'client.cjs 不得再调用 createPortal：官方 [data-composer-stats] 标记已不存在');
+  assert.ok(!src.includes('useOfficialStatsHost'), '不得保留找官方统计行的旧钩子');
+  assert.ok(!/data-composer-stats'\]/.test(src), '不得再按已消失的官方标记去 querySelector');
   assert.ok(!/joinOffset/.test(src), '不得再保留负边距的几何补偿量 joinOffset');
   assert.ok(!/marginTop:\s*-/.test(src), '不得给等待 wrap 写负上边距');
   assert.ok(!/\.hwb-waitwrap\.joined/.test(src), '不得保留 joined 的几何 hack 样式');
+  // 必须是内联行内盒：整行 width:100% 正是「药丸独占一行」的成因。
+  const wrap = src.slice(src.indexOf('".hwb-waitwrap{'), src.indexOf('".hwb-waitpill{'));
+  assert.match(wrap, /display:inline-flex/, '等待 wrap 必须是 inline-flex（官方 dock 行已提供 justify-content:center）');
+  assert.ok(!/width:100%/.test(wrap), '不得给等待 wrap 写 width:100%——那会独占官方 dock 行');
 });
 
 test('★ 等待药丸：关闭语义必须与官方一致（Esc + 点外部）', () => {
@@ -681,6 +712,66 @@ test('★ 等待药丸：关闭语义必须与官方一致（Esc + 点外部）'
   assert.ok(/!root\.contains\(event\.target\)/.test(src), '关闭边界必须是本组件自身，而不是整行');
 });
 
+test('★ 等待药丸：字号/行高/高度必须走官方 content-font token，不得写死像素', () => {
+  // 官方药丸（ui-chat 的 StatsPills 与 TurnUsagePanel）三个值都走 token：字号取
+  // `--dsh-content-font-size-secondary`（缺省 13px），行高取
+  // `--dsh-content-font-delta-secondary` 以 24px 为基，高度取
+  // `--dsh-content-font-delta` 以 28px 为基。
+  // 用户在设置里改「内容字号」时，这两个 delta 会让官方所有药丸一起缩放；
+  // 写死 13px/24px/28px 的那一枚**不跟着变**——同一行里出现一大一小两枚药丸，
+  // 就是「没适配」在数值层面的形态。
+  //
+  // 为什么用静态样式断言：这是 CSS 值，渲染树的文本里读不到；而它恰恰最容易
+  // 被后续「顺手调一下」改回写死值（13px 看着也不丑）。钉住 token = 把适配
+  // 结论变成可执行约束。
+  const src = bridgeSrcFrom('client.cjs');
+  // 取单条规则：CSS 是 `".hwb-x{...}"` 形式，所以规则的右界是 `}"` 而不是 `"}`。
+  // 写错会静默变成 `slice(i, -1)`——那会扫到文件结尾（26KB），断言于是横跨几十条
+  // 规则。这类断言看起来更严，实际是在别处命中，是**假绿**。
+  const ruleAt = (sel) => {
+    const i = src.indexOf(sel);
+    assert.ok(i > 0, '找不到样式规则：' + sel);
+    const end = src.indexOf('}"', i);
+    assert.ok(end > i, '样式规则 ' + sel + ' 没有终止符' );
+    return src.slice(i, end + 2);
+  };
+  const pill = ruleAt('".hwb-waitpill{');
+  assert.match(pill, /font-size:var\(--dsh-content-font-size-secondary,13px\)/, '药丸字号必须走官方 content-font token');
+  assert.match(pill, /line-height:calc\(24px \+ var\(--dsh-content-font-delta-secondary,0px\)\)/, '药丸行高必须跟随官方 content-font delta');
+  assert.match(pill, /height:calc\(28px \+ var\(--dsh-content-font-delta,0px\)\)/, '药丸高度必须跟随官方 content-font delta');
+  assert.ok(!/font-size:13px/.test(pill), '药丸字号不得写死 13px：用户改内容字号时它不会跟着缩放');
+});
+
+test('★ 左栏任务板：整列页面排版必须对齐官方 page 契约', () => {
+  // 左栏入口切过来的是**整列页面**。官方给整列页面的排版是 ui-plugin-manager 的
+  // `X_2TxG_page` / `X_2TxG_pageTitle`：
+  //   padding: 28px clamp(24px,4vw,48px) 48px；分节间距 32px
+  //   正文列:  width:100%; max-width:960px（居中）
+  //   标题:    font-size:20px; font-weight:500; line-height:28px
+  // 旧的 15px/24px + padding:16px 20px 是**右栏窄条**那一档的尺度。沿用窄条
+  // 尺度会让整列页面像「一条被放大的侧栏」，也压不住下面 13px 的正文。
+  const src = bridgeSrcFrom('client.cjs');
+  // 同 `ruleAt`：右界必须是 `}"`。写 `"}` 会返回 -1，回落分支于是扫到文件结尾，
+  // 断言横跨几十条规则——看着更严，其实是假绿。
+  const grab = (sel) => {
+    const i = src.indexOf(sel);
+    assert.ok(i > 0, '找不到样式规则：' + sel);
+    const end = src.indexOf('}"', i);
+    assert.ok(end > i, '样式规则 ' + sel + ' 没有终止符');
+    return src.slice(i, end + 2);
+  };
+  const main = grab('".hwb-main{');
+  assert.match(main, /display:flex/, '整列页面容器应为 flex 列');
+  assert.match(main, /gap:32px/, '分节间距应为 32px（官方 page 契约）');
+  assert.match(main, /padding:28px clamp\(24px,4vw,48px\) 48px/, '页面内边距应对齐官方 page 契约');
+  assert.match(main, /flex:1/, '必须保留 flex:1 占满中央列');
+  assert.match(main, /min-height:0/, '必须保留 min-height:0 以便内部滚动');
+  assert.match(grab('".hwb-main>*{'), /max-width:960px/, '正文列应为官方 960px 列宽');
+  const head = grab('".hwb-main-head{');
+  assert.match(head, /font-size:20px/, '页面标题应为 20px（官方 pageTitle），而不是右栏窄条的 15px');
+  assert.match(head, /line-height:28px/, '页面标题行高应为 28px');
+});
+
 test('去臃肿：设置页密度 token 必须与调研 token 表一致，且不再用线分隔行', async () => {
   // 用户原话：「做到简洁高效美观，而不是现在的臃肿」。
   // 数值依据不是审美偏好，而是 doc/research/agent-ui-design-references.md §4.4
@@ -690,12 +781,14 @@ test('去臃肿：设置页密度 token 必须与调研 token 表一致，且不
   // 而它恰恰是最容易被后续「顺手调一下」改回去的东西（16px 看着也「不丑」）。
   // 钉住数值 = 把调研结论变成可执行的约束，而不是一段会被遗忘的文档。
   const src = bridgeSrcFrom('client.cjs');
+  // 右界是 `}"`（CSS 写成 `".hwb-x{...}"`）。旧写 `"}` 恒返回 -1，回落分支
+  // `slice(i, i+400)` 于是横跨好几条规则——断言在**别的规则**里命中，是假绿。
   const grab = (sel) => {
     const i = src.indexOf(sel);
     assert.ok(i > 0, '找不到样式规则：' + sel);
-    // 取到该规则的右花括号为止，避免误匹配下一条规则。
-    const end = src.indexOf('"}', i);
-    return src.slice(i, end === -1 ? i + 400 : end);
+    const end = src.indexOf('}"', i);
+    assert.ok(end > i, '样式规则 ' + sel + ' 没有终止符');
+    return src.slice(i, end + 2);
   };
   // 卡片圆角：12px（§4.4 明列「从现 16px 收紧」）
   const card = grab('".hwb-card{');
@@ -758,33 +851,41 @@ test('设置页：会话身份必须经 useSessions 取，不得用 root 槽的 
   assert.ok(/useSessions\(s => \(s && s\.current\)/.test(src), 'useSessions 的取值形态变了（应读 state.current）');
 });
 
-// ------------------------------------------------------------------ 0.15.12 两个新面板
+// ------------------------------------------------------------------ 0.15.12 / 0.16.18 面板注册
 
 /**
- * 两个新标签页必须**真的注册**，且必须是 page type。
+ * 标签页注册的**当前**形态：两个 kind，且都是 page type。
  *
  * 官方契约（tab-registry.d.ts）：省略 `patterns` 的类型是 page type，「is opened by
- * kind」，不做地址识别。团队与任务板本来就没有「打开某个资源」的语义——若照抄
- * 网页那个 kind 的写法给它加 patterns，它会去和文件类 kind 抢地址。
+ * kind」，不做地址识别。团队面板本来就没有「打开某个资源」的语义——若照抄网页那个
+ * kind 的写法给它加 patterns，它会去和文件类 kind 抢地址。
+ *
+ * 0.16.18 起任务板**不再是**右栏标签页（用户要求删掉那份注册）：它与左栏全局面板
+ * 指向同一份数据、同一个组件，两个入口只会让用户不知道该看哪个；而右栏是窄条
+ * 常驻视图，放不下依赖图。任务板现在只由左栏 `sidebar.panellist` + `main` 提供。
  */
-test('★ 两个新面板：三个 kind 各自注册，且新面板是 page type（无 patterns）', async () => {
+test('★ 标签页：只注册 webcode-bridge 与 webcode-team，任务是左栏面板而非右栏标签', async () => {
   const { errors, paneKeys, tabDefinitions } = await renderPane({ payloads: [emptyWindows] });
   assert.deepEqual(errors, [], '注册阶段抛错：' + errors.map(e => e.message).join('; '));
-  for (const kind of ['webcode-bridge', 'webcode-team', 'webcode-tasks']) {
+  for (const kind of ['webcode-bridge', 'webcode-team']) {
     assert.ok(tabDefinitions.has(kind), '标签页类型未注册：' + kind + '（已注册：' + [...tabDefinitions.keys()].join(', ') + '）');
     const def = tabDefinitions.get(kind);
     assert.equal(typeof def.title, 'function', kind + ' 的 title 必须是 thunk（语言切换要能重读）');
     assert.equal(def.priority, 'extension', kind + ' 必须声明 extension 优先级');
     assert.ok(Array.isArray(def.guide) && def.guide.length > 0, kind + ' 缺少 guide 入口');
   }
-  // 新面板是 page type：不得声明 patterns。
-  for (const kind of ['webcode-team', 'webcode-tasks']) {
-    assert.equal(tabDefinitions.get(kind).patterns, undefined,
-      kind + ' 声明了 patterns —— 它是 page type，不该参与地址识别');
-  }
-  // 三个正文各自占一个 keyed 座位，且 key 互不相同（合成一个会让标签条出现同名项）。
+  // 0.16.18：右栏不得再有任务板标签页。反向断言——防止日后「顺手」把那个 kind
+  // 加回来，从而把用户明确要求删掉的双入口重新引入。
+  assert.ok(!tabDefinitions.has('webcode-tasks'),
+    '右栏不得再注册任务板标签页（0.16.18 起任务板只走左栏 sidebar.panellist）');
+  // team 是 page type：不得声明 patterns。
+  assert.equal(tabDefinitions.get('webcode-team').patterns, undefined,
+    'webcode-team 声明了 patterns —— 它是 page type，不该参与地址识别');
+  // 正文各自占一个 keyed 座位，且 key 互不相同（合成一个会让标签条出现同名项）。
   assert.equal(new Set(paneKeys).size, paneKeys.length, 'pane.tab 座位 key 有重复：' + paneKeys.join(', '));
-  assert.ok(paneKeys.length >= 3, '新面板正文未注册（座位：' + paneKeys.join(', ') + '）');
+  assert.ok(paneKeys.length >= 2, '面板正文未注册（座位：' + paneKeys.join(', ') + '）');
+  assert.ok(!paneKeys.includes('dsh-webcode-bridge/tasks'),
+    '任务板正文仍挂在 sidebar.right.pane.tab 上——右栏那份注册没删干净');
 });
 
 /**

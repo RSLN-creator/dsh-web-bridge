@@ -20,17 +20,17 @@
 
 | 项 | 值 |
 | --- | --- |
-| 工作树版本 | **0.16.19** |
-| 已装版本（profile） | **0.16.19**（2026-09-19 实测：web + headless 三处声明一致指向 `dsh-webcode-bridge-0.16.19.tgz`，`lib/index.js` sha256 前 12 位 `04C087741916` 与工作树一致；`dsh plugin add` 声明持久层通道） |
+| 工作树版本 | **0.16.21** |
+| 已装版本（profile） | **0.16.21**（2026-09-19 实测：web + headless 两处声明一致指向 `dsh-webcode-bridge-0.16.21.tgz`，`node_modules` 内 `package.json` = 0.16.21 且 `lib/client.cjs` 含本版 token 与 page 契约；`dsh plugin add` 声明持久层通道） |
 | 运行中的进程 | run-8 真机验收以 `dsh --profile headless` 进程级验证（0.16.16 时段）；DSH web（3080）2026-09-19 凌晨未运行 |
-| 上游 | `origin/main` = `9d4c61a`（0.16.10 台账推送）；0.16.11–0.16.19 本地已提交/待推 |
-| 单测基线 | **66/66 测试文件**；全量 **776 条**（0.16.18 为 774；0.16.19：`official-tool-calls` 扩至 9 条 + run-9 逐字夹具 `official-echo-1` 入档；`glm-session-replay` 断言随教学切换同步更新） |
+| 上游 | `origin/main` = `9d4c61a`（0.16.10 台账推送）；0.16.11–0.16.21 本地已提交/待推 |
+| 单测基线 | **67/67 测试文件**；全量 **784 条**（0.16.20 为 782；0.16.21：`client-render` 新增 2 条样式契约——等待药丸 content-font token、左栏任务板官方 page 契约） |
 | 注释闸门 | **error 0 / warn 0，退出码 0**（2026-09-19 实跑） |
 | 文件规范闸门 | `check-repo-hygiene.mjs` **PASS**（无 BOM + 索引无死链 + CI/engines Node 版本相容） |
 | 发布闸门 | `verify-pack` 逐文件 sha256 相同 + 接线完好，退出 0（0.16.16 实跑 37/37） |
-| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.19 / testFiles 66/66） |
-| 已装包核对 | 0.16.19 已装机核对（见已装版本行） |
-| 下一阶段 | **0.16.19 真机验收由用户执行**：§0.16.18 战略实验判据照旧（官方模板下 UNPARSED/isError 显著下降）+ §0.16.19 四（占位符照抄事故不再复现，触发即自动再教学） |
+| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.21 / testFiles 67/67） |
+| 已装包核对 | 0.16.21 已装机核对（见已装版本行） |
+| 下一阶段 | **0.16.21 需重启 DSH 后生效**；第三步（站点选择框 + 官方矢量品牌图标）只出调研结论，见 [doc/brand-icons-research.md](brand-icons-research.md) |
 
 > **§0.16.10 真机判据（重启后逐条核）**：① `GET /__webcode/status` 的 `build.version` = **0.16.10**；
 > ② 让模型回复一段含 `<b>`、`<foo>`、`Array<T>` 或字面 `<tool_call>` 示例的正文，**逐字对比** harness
