@@ -34,7 +34,7 @@ const bridgeSrcFrom = (rel) => readFileSync(path.resolve(here, '../lib/', rel), 
 const SESSION_PROPS = { sessionId: 'session-render-test' };
 
 /** 在当前进程里加载 client.cjs 并跑若干渲染周期，返回每次渲染捕获的异常。 */
-async function renderPane({ payloads, which = 'pane', sites = [], roster = null, primitiveOmit = [] } = {}) {
+async function renderPane({ payloads, which = 'pane', sites = [], roster = null, primitiveOmit = [], waitStats = null } = {}) {
   const saved = { window: global.window, document: global.document, fetch: global.fetch, setInterval: global.setInterval, clearInterval: global.clearInterval };
   const realSetTimeout = global.setTimeout;
   let captured = null;
@@ -61,6 +61,8 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
   const MenuItems = [];
   const effectDisposers = [];
   let windowHits = 0;
+  // 每次 setInterval 的周期（ms）。药丸的轮询节奏由它在途与否决定，见 0.16.24 用例。
+  const intervalDelays = [];
   let current = payloads[0];
 
   let states = [], cursor = 0, effectSlots = [], effectSlotCursor = 0, pendingEffects = [];
@@ -100,9 +102,9 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
       const frame = ownerStack[ownerStack.length - 1];
       const i = frame ? frame.id + '::e' + (frame.e++) : 'ge::' + (effectSlotCursor++);
       const prev = effectSlots[i];
-      const changed = !prev || !deps || !prev.deps || deps.some((d, k) => d !== prev.deps[k]);
-      if (changed && !prev?.ran) { effectSlots[i] = { fn, deps, ran: true }; pendingEffects.push(fn); }
-      else effectSlots[i] = prev || { fn, deps, ran: false };
+      const changed = !prev || (deps && (!prev.deps || deps.some((d, k) => d !== prev.deps[k])));
+      if (changed) { effectSlots[i] = { fn, deps }; pendingEffects.push(fn); }
+      else effectSlots[i] = prev || { fn, deps };
     },
     useCallback: (fn) => fn,
     useRef: (init) => ({ current: init }),
@@ -142,7 +144,9 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
     global.window = { __ModuleLoader__: { load: (def) => { captured = def; } } };
     global.document = { createElement: () => ({ textContent: '', remove() {} }), head: { appendChild() {} }, body: {}, querySelector: () => null, addEventListener() {}, removeEventListener() {} };
     global.MutationObserver = class { observe() {} disconnect() {} };
-    global.setInterval = () => ({});       // 组件的轮询计时器：不 stub 会拖住事件循环
+    // 组件的轮询计时器：不 stub 会拖住事件循环。0.16.24 起还要**记下周期**——
+    // 「在途等待时 1 秒一问」是需求的一半（10 秒一问的话数字 10 秒才动一格）。
+    global.setInterval = (_fn, ms) => { intervalDelays.push(ms); return {}; };
     global.clearInterval = () => {};
     global.fetch = async (url) => {
       const u = String(url);
@@ -174,12 +178,20 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
       else if (u.includes('/__webcode/prompt-variants')) {
         // 0.14.0：设置页默认显示首轮提示词。变体必须真的带 text，否则「默认显示」
         // 只会渲染一个空 <pre>，与折叠起来没有区别。
+        // 0.16.25：载荷追加 `sites`——UI 改为「按网站逐行」，每行的 text 是**该站点
+        // 实际会用的协议**的模板（服务端按站点现算）。夹具照真实形状给两份，
+        // 其中 deepseek 与 glm 用不同协议，才能验证「每行取的是自己那一支」。
         body = {
           ok: true, toolsSource: 'session',
           active: { variantId: 'glm', siteId: 'glm', model: 'glm:glm-5.3', tools: ['read', 'pwsh'], at: '2026-09-13T00:00:00.000Z' },
           variants: [
-            { id: 'default', label: '默认（<tool_call> 标签形状）', note: 'n1', text: 'DEFAULT-PROMPT-TEXT', trainNote: 'tn1', siteIds: null, excludes: ['glm'] },
-            { id: 'glm', label: 'GLM 专用（```json 代码块形状）', note: 'n2', text: 'GLM-PROMPT-TEXT', trainNote: 'tn2', siteIds: ['glm'], excludes: [] },
+            { id: 'default', label: '标签形状（<tool_call> 标签）', note: 'n1', text: 'DEFAULT-PROMPT-TEXT', trainNote: 'tn1', siteIds: null, excludes: ['glm', 'deepseek'] },
+            { id: 'glm', label: 'GLM 代码块（```json 代码块）', note: 'n2', text: 'GLM-PROMPT-TEXT', trainNote: 'tn2', siteIds: ['glm'], excludes: [] },
+            { id: 'official', label: 'DeepSeek 官方模板（原生工具调用格式）', note: 'n3', text: 'OFFICIAL-PROMPT-TEXT', trainNote: 'tn3', siteIds: ['deepseek'], excludes: [] },
+          ],
+          sites: [
+            { siteId: 'deepseek', siteName: 'DeepSeek 网页版', variantId: 'official', variantLabel: 'DeepSeek 官方模板（原生工具调用格式）', text: 'OFFICIAL-PROMPT-TEXT' },
+            { siteId: 'glm', siteName: '智谱清言 (GLM)', variantId: 'glm', variantLabel: 'GLM 代码块（```json 代码块）', text: 'GLM-PROMPT-TEXT' },
           ],
         };
       }
@@ -187,16 +199,19 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
       else if (u.includes('/__webcode/connect')) body = { ok: true, loggedIn: true };
       // 0.15.11：等待药丸的数据面。服务端已把文案与明细算好（label / detailRows），
       // 客户端只负责渲染——夹具照真实载荷形状给，含本会话与累计两类行。
-      else if (u.includes('/__webcode/wait-stats')) body = {
+      // 0.16.24：`waitStats` 可整体替换该载荷（在途等待用例要带 live/now/liveValue），
+      // 缺省仍给 0.15.11 那份「已结算」夹具。文案里的 `3 s` 与 wait-stats.js 的
+      // formatElapsed（秒级取整）一致——夹具必须照真实服务端输出给，否则护栏是假绿。
+      else if (u.includes('/__webcode/wait-stats')) body = waitStats || {
         ok: true,
         total: { totalWaitMs: 20000, turns: 9, waitedTurns: 4, rateLimitRetries: 1, updatedAt: 1789000000000 },
         session: { totalWaitMs: 3000, turns: 2, waitedTurns: 1, rateLimitRetries: 0, updatedAt: 1789000000000 },
         rows: [{ label: '累计等待发送', value: '20.0 s' }],
-        line: '本次会话等待发送 3.0 s',
-        label: '等待发送 3.0 s',
-        sessionValue: '3.0 s',
+        line: '本次会话等待发送 3 s',
+        label: '等待发送 3 s',
+        sessionValue: '3 s',
         detailRows: [
-          { label: '本次会话等待发送', value: '3.0 s' },
+          { label: '本次会话等待发送', value: '3 s' },
           { label: '累计等待发送', value: '20.0 s' },
         ],
       };
@@ -321,6 +336,8 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
       // 0.16.0：左栏入口与中央列 main 座位的登记结果。两个都返回，用例才能断言
       // 「成对且同名」——只看一半会放过「侧栏行存在但点了报未注册」那类缺陷。
       panelEntries: PanelEntries, mainKeys: MainKeys,
+      // 0.16.24：药丸 setInterval 的周期序列（静止 10000 / 在途 1000）。
+      intervalDelays,
     };
   } finally {
     global.window = saved.window; global.document = saved.document;
@@ -383,17 +400,28 @@ test('设置面板：发送间隔行与「发送前等待」统计条渲染不�
 
 // ------------------------------------------------------------------ 0.14.0
 
-test('设置面板：首轮提示词默认就显示（无需任何点击），且列出全部适配分支', async () => {
-  // 用户原话：「设置界面提示词应该默认就显示，首轮提示词又不会变？有多的适配
-  // 就可选择框选择列出」。旧实现折叠在 <details> 里，不点开页面上一个字都没有。
+test('设置面板：首轮提示词默认就显示，且**按网站逐行**列出', async () => {
+  // 用户原话（0.14.0）：「设置界面提示词应该默认就显示，首轮提示词又不会变？有多的
+  // 适配就可选择框选择列出」。旧实现折叠在 <details> 里，不点开页面上一个字都没有。
+  //
+  // 用户原话（0.16.25）：「改为以网站为导向列出，每行一个网站，然后后面选择框
+  // 选择已有协议中的一个」。因此这里断言的是**逐站点行**与每行自己的协议文本，
+  // 而不是「下拉里列出了几个协议」——后者在按协议列时也成立，测不出本次改动。
   const { errors, tree } = await renderPane({ payloads: [emptyWindows], which: 'settings' });
   assert.deepEqual(errors, [], '设置面板渲染抛错：' + errors.map(e => e.message).join('; '));
   const text = treeText(tree);
-  // 默认展示的是「本会话实际在用的那一支」（payload 里 active=glm）
-  assert.ok(text.includes('GLM-PROMPT-TEXT'), '首轮提示词未默认渲染：' + text.slice(0, 200));
-  // 适配下拉必须列出另一个分支（默认标签形状），否则「可选」是空话
-  assert.ok(text.includes('默认（<tool_call> 标签形状）'), '适配分支未在下拉里列出');
-  assert.ok(text.includes('GLM 专用'), '当前适配分支未在下拉里列出');
+  // 两个站点各一行，且各自显示**自己实际会用的协议**的模板全文。
+  // （deepseek 走官方模板、glm 走代码块——若 UI 拿同一份文本填所有行，这里会红。）
+  assert.ok(text.includes('DeepSeek 网页版'), '未按网站列出 deepseek 行');
+  assert.ok(text.includes('智谱清言 (GLM)'), '未按网站列出 glm 行');
+  assert.ok(text.includes('OFFICIAL-PROMPT-TEXT'), 'deepseek 行未渲染它自己的模板');
+  assert.ok(text.includes('GLM-PROMPT-TEXT'), 'glm 行未渲染它自己的模板');
+  // 「实际使用」标注必须在（用户要能分辨「预览」与「生效」）。
+  assert.ok(/实际使用：/.test(text), '每行必须标出该网站实际在用的协议');
+  // 协议仍要能选（每行一个下拉），选项文案用新标签。
+  assert.ok(text.includes('标签形状（<tool_call> 标签）'), '协议下拉未列出标签形状');
+  assert.ok(text.includes('GLM 代码块'), '协议下拉未列出 GLM 代码块');
+  assert.ok(text.includes('DeepSeek 官方模板'), '协议下拉未列出官方模板');
   // 全局指令仍是可编辑的（唯一可编辑项）
   assert.ok(text.includes('保存全局指令'), '全局指令编辑区未默认渲染');
 });
@@ -691,10 +719,72 @@ test('★ 等待药丸：真的渲染出短读数，且默认不展开明细', a
   const { errors, tree } = await renderPane({ which: 'dock', payloads: [{}] });
   assert.deepEqual(errors, [], '药丸渲染抛错');
   const text = treeText(tree);
-  assert.match(text, /等待发送 3\.0 s/, '药丸必须显示服务端算好的短读数');
+  assert.match(text, /等待发送 3 s/, '药丸必须显示服务端算好的短读数');
   // 默认收起：明细只在点击后才出现——「默认没有，点击能出现」是用户的要求。
   assert.ok(!/累计等待发送/.test(text), '明细默认不应展开');
   assert.ok(!/本会话尚无等待记录/.test(text), '不该显示空态文案');
+});
+
+// --------------------------------------------------------- 0.16.24 在途等待计时
+
+// 需求（用户原话）：「能做到等待发送实际显示和官方一样开始就计时增长，不要等过了
+// 再变一下子从 n 秒到 m 秒？」这条链路跨三处，缺一处就退回旧观感：
+//   index.js  在等待**开始**时发布 live（而不是等账本结算）
+//   web-control.js 把 live + now 透给药丸
+//   client.cjs 在途时把轮询提到 1 秒（否则 10 秒才动一格）
+// 前两处由 wait-stats 单测与服务端夹具钉住，这里钉住「客户端确实照它渲染与加速」。
+
+/** 在途等待的服务端载荷（字段照 /__webcode/wait-stats 真实输出给）。 */
+const liveWaitPayload = {
+  ok: true,
+  total: { totalWaitMs: 20000, turns: 9, waitedTurns: 4, rateLimitRetries: 1, updatedAt: 1789000000000 },
+  // 本会话账本里已有 12 秒历史等待：在途读数必须**盖过**它，否则用户看到的
+  // 仍是一个不动的数（这正是旧观感）。
+  session: { totalWaitMs: 12000, turns: 2, waitedTurns: 1, rateLimitRetries: 0, updatedAt: 1789000000000 },
+  live: { startedAt: 1789000000000, endsAt: 1789000010000, baseMs: 0, kind: 'gap' },
+  now: 1789000003000,
+  rows: [{ label: '累计等待发送', value: '20.0 s' }],
+  label: '等待发送 3 s',
+  sessionValue: '12 s',
+  liveValue: '3 s',
+  detailRows: [
+    { label: '本次会话等待发送', value: '12 s' },
+    { label: '累计等待发送', value: '20.0 s' },
+  ],
+};
+
+test('★ 等待药丸：在途读数盖过账本累计（显示正在涨的那个数）', async () => {
+  const { errors, tree } = await renderPane({ which: 'dock', payloads: [{}], waitStats: liveWaitPayload });
+  assert.deepEqual(errors, [], '在途药丸渲染抛错');
+  const text = treeText(tree);
+  assert.match(text, /等待发送 3 s/, '在途时必须显示现算的短读数');
+  // 账本里的 12 s 不得到药丸上——两个数同时出现等于没修。
+  assert.ok(!/等待发送 12 s/.test(text), '在途时药丸不得回落到账本累计值');
+});
+
+test('★ 等待药丸：在途时轮询提到 1 秒（10 秒一问等于没在动）', async () => {
+  // 这条是需求里最容易漏掉的一半：服务端算得再勤，客户端 10 秒才问一次，
+  // 数字仍然是「一下子跳」。两者必须成对。
+  const live = await renderPane({ which: 'dock', payloads: [{}], waitStats: liveWaitPayload });
+  assert.deepEqual(live.errors, []);
+  assert.ok(live.intervalDelays.includes(1000), '在途等待时轮询周期必须是 1000ms（实得：' + live.intervalDelays.join(',') + '）');
+  // 静止（无 live）时保持 10 秒，不要把本地回环请求变成每秒一次。
+  const idle = await renderPane({ which: 'dock', payloads: [{}] });
+  assert.ok(idle.intervalDelays.includes(10000), '静止时必须保持 10000ms 轮询');
+  assert.ok(!idle.intervalDelays.includes(1000), '静止时不该每秒轮询');
+});
+
+test('★ 等待药丸：展开面板含「正在等待发送」行（与药丸同源同数）', async () => {
+  // 展开态的内容由本条源码护栏 + wait-stats 单测覆盖（同 0.15.11 的既有做法：
+  // 本 harness 的 setState 不触发重渲染，点开态无法在渲染树里直接观察）。
+  const src = bridgeSrcFrom('client.cjs');
+  // 药丸文案与面板行都取服务端算好的字段，客户端不自己算时长——
+  // 否则「两个数字迟早对不上」（见 wait-stats.js 开头的口径说明）。
+  assert.ok(/data\?\.liveValue/.test(src), '展开面板必须渲染 liveValue（在途那一段）');
+  assert.ok(src.includes('正在等待发送'), '展开面板必须有「正在等待发送」行');
+  // 空态判定要把 liveValue 算进去：在途但账本还空时（首次等待）不能落到
+  // 「本会话尚无等待记录」——那正是「首次等待整枚药丸不渲染」的同族缺陷。
+  assert.ok(/\(data\?\.liveValue \|\| rows\.length\)/.test(src), '空态判定必须包含 liveValue');
 });
 
 test('★ 等待药丸：可点（onClick 存在），且 aria 契约完整', async () => {

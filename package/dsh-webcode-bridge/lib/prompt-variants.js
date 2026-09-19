@@ -13,25 +13,43 @@
 // 钉住：glm 变体不得出现 <tool_call>，默认变体必须出现；两者必须互不相同。
 
 import { serializeFirstTurn, trainNoteFor, trainExtraFor } from './agent-preset.js';
+// 站点清单与显示名从 providers.js 现算（唯一真相），本模块不另维护一份。
+import { SITES } from './providers.js';
 
-/** 适配分支表：id → { label, siteIds, siteId }（siteId 是喂给 serializeFirstTurn 的） */
+/** 适配分支表：id → { label, siteIds, siteId }（siteId 是喂给 serializeFirstTurn 的）
+ *
+ * 0.16.25：补上 **official**（DeepSeek 官方训练模板）一支，并纠正 default 的
+ * excludes。此前 `variantIdForSite('deepseek')` 返回 'default'，可 deepseek 在
+ * serializeFirstTurn 里走的是**官方模板**分支（agent-preset.js 的 siteId === 'deepseek'
+ * 那一段）——于是设置页给 deepseek 显示的模板与真正发出去的**不是同一份**。
+ * 加 official 之前这个错误不可见：下拉只有两支，用户不会去比对「deepseek 到底
+ * 选没选对」。改成「每行一个网站 + 该网站实际用的协议」之后，它立刻就是错的。
+ * 因此这是修正，不是扩展：站点 → 分支的映射现在与 agent-preset 的真实分支一一对应。 */
 export const VARIANT_SPECS = Object.freeze([
   {
     id: 'default',
-    label: '默认（<tool_call> 标签形状）',
-    // 除 glm 外的全部站点都走这一支（含 z.ai——它的前端不吃调用标签的问题
-    // 与 chatglm.cn 不同，仍按标签教学）。
+    label: '标签形状（<tool_call> 标签）',
+    // 除 glm（代码块）与 deepseek（官方模板）外的全部站点都走这一支（含 z.ai——
+    // 它的前端不吃调用标签的问题与 chatglm.cn 不同，仍按标签教学）。
     siteId: undefined,
-    excludes: ['glm'],
+    excludes: ['glm', 'deepseek'],
     note: '以 <tool_call>{…}</tool_call> 发起调用；网页不会拦截该标签。',
   },
   {
     id: 'glm',
-    label: 'GLM 专用（```json 代码块形状）',
+    label: 'GLM 代码块（```json 代码块）',
     siteId: 'glm',
     only: ['glm'],
     note: 'chatglm.cn 对正文里的调用标签有原生执行器（只认它内置的 search/open/click/find），'
       + '标签形状会被它抢走执行并回灌 unknown tool call，因此该站点只教代码块形状。',
+  },
+  {
+    id: 'official',
+    label: 'DeepSeek 官方模板（原生工具调用格式）',
+    siteId: 'deepseek',
+    only: ['deepseek'],
+    note: 'DeepSeek 网页走官方训练模板（模型被训练时见过的形状）。DSML 已于 0.16.23 退役，'
+      + '不再作为教学或解析形状。',
   },
 ]);
 
@@ -135,4 +153,62 @@ export function variantIdForSite(siteId) {
   const sid = String(siteId || '').trim();
   for (const spec of VARIANT_SPECS) if (spec.only && spec.only.includes(sid)) return spec.id;
   return 'default';
+}
+
+/**
+ * 「按站点」的提示词视图（0.16.25）：每个站点一行，附该站点**实际会用**的协议。
+ *
+ * 用户诉求（原话）：「设置界面的提示词选择：改为以网站为导向列出，每行一个网站，
+ * 然后后面选择框选择已有协议中的一个」。
+ *
+ * 为什么由后端算这行数据，而不是让前端自己组合：每行的 `text` 必须是**真正会
+ * 发给该站点的那一份**（按它的 siteId 调 serializeFirstTurn 现算）。前端若自己
+ * 拿「默认变体的文本」去填每一行，deepseek 那行就会显示标签形状——那正是本版
+ * 顺手修掉的那个错误（见 VARIANT_SPECS 的注释）。
+ *
+ * `variantId` 是该站点当前实际使用的协议（选中项）；`text` 是它的模板全文；
+ * `variants` 是可选协议清单（供下拉切换**预览**——只读，不改变真实选路，
+ * 与「模板只读」的既定立场一致）。
+ *
+ * @param {object} options
+ * @param {Array}  [options.tools]       真实工具清单（缺省用占位集）
+ * @param {string} [options.extraPrompt] 设置页的「全局指令」
+ * @param {string} [options.system]      宿主系统提示词
+ * @param {object} [options.lastPreset]  最近一次真实首轮
+ * @returns {{sites: Array, variants: Array, toolsSource: string, active: object|null}}
+ */
+export function buildSitePromptRows({ tools, extraPrompt, system, lastPreset } = {}) {
+  const real = Array.isArray(tools) && tools.length > 0;
+  const toolList = real ? tools : PLACEHOLDER_TOOLS;
+  // 协议清单：id + label + 该协议在「本会话工具清单」下的完整文本。
+  const variants = VARIANT_SPECS.map((spec) => ({
+    id: spec.id,
+    label: spec.label,
+    note: spec.note,
+    text: serializeFirstTurn({ messages: [], tools: toolList, extraPrompt, system, siteId: spec.siteId }),
+  }));
+  const byId = new Map(variants.map((v) => [v.id, v]));
+  const sites = SITES.map((st) => {
+    const variantId = variantIdForSite(st.id);
+    const chosen = byId.get(variantId) || variants[0];
+    return {
+      siteId: st.id,
+      // 显示名直接用 providers 的那份（与右栏站点栏、模型下拉同一串字）。
+      siteName: st.name || st.id,
+      variantId,
+      variantLabel: chosen.label,
+      // 该站点真正会发出去的模板（按它自己的 siteId 现算）。
+      text: chosen.text,
+    };
+  });
+  const active = lastPreset
+    ? {
+      variantId: variantIdForSite(lastPreset.siteId),
+      model: lastPreset.model || null,
+      siteId: lastPreset.siteId || null,
+      tools: Array.isArray(lastPreset.tools) ? lastPreset.tools : [],
+      at: lastPreset.at || null,
+    }
+    : null;
+  return { sites, variants, toolsSource: real ? 'session' : 'placeholder', active };
 }

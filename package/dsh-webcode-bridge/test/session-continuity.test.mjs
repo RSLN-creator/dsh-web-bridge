@@ -144,21 +144,21 @@ function scriptedDriver({ script = [], slot = null } = {}) {
  * 已经发到第几条消息」），每次 `apply` 都是全新的一张表——每个用例各起一个实例的话，
  * 第二轮会因为「实例是新的」而必然 fresh，护栏就变成了永远测不到真东西的假红。
  */
-async function openBridge({ driver, profileDir = tmpDir() }) {
+async function openBridge({ driver, profileDir = tmpDir(), ...cfgExtra }) {
   const { apply } = await import(pathToFileURL(path.join(pkg, 'lib', 'index.js')).href);
   const { ctx, registered } = mockCtx();
   const disposer = apply(ctx, {
-    port: 0, host: '127.0.0.1', requireConsent: false, driver, profileDir,
+    port: 0, host: '127.0.0.1', requireConsent: false, driver, profileDir, ...cfgExtra,
   });
   if (!registered.adapter) throw new Error('适配器没注册上：mock ctx 与 index.js 的取法对不上了');
   return {
     routes: registered.routes,
     /** 跑一轮真实适配器流（失败时连错误码一起带回）。 */
-    async stream({ sessionId, messages }) {
+    async stream({ sessionId, messages, signal }) {
       let text = '';
       try {
         for await (const c of registered.adapter.stream({
-          purpose: null, model: 'deepseek', messages, tools: [], sessionId,
+          purpose: null, model: 'deepseek', messages, tools: [], sessionId, signal,
         })) {
           if (c?.type === 'text-delta') text += c.text;
         }
@@ -356,12 +356,17 @@ test('④ 第二轮失败（WEB_NO_PROGRESS）后，第三轮仍必须 fresh=fal
   } finally { await bridge.close(); }
 });
 
-// ── ⑥ 重建节流：连续两次 WEB_SESSION_LOST 不再中断会话，改交回「已切换会话」提示 ──
+// ── ⑥ 重建节流（0.16.28 新契约）：撞窗后**本轮内等完剩余窗口再重建**，不再用提示打断任务 ──
+//
+// 0.16.6 的旧契约是「撞窗 → 交回『已切换会话』提示、重放挡在发送之前」。真机取证
+// （session-4f236a51，reply-log 逐字 52 次 SESSION_SWITCHED）证明那个契约有致命盲区：
+// 提示是**纯文本回复**，agent 循环把它当最终答复收场——goal 自动化的每一轮被空转
+// 烧掉 30 秒、任务零进展，用户原话「被好心提示内容完全打断」。0.16.28 起撞窗改为
+// 等待后重建；提示只在「用户真的叫停」（abort）时才有资格成为本轮正文（⑥b）。
 
-test('⑥ 同一会话键连续两次 WEB_SESSION_LOST：第二次改交回「已切换会话」提示（不再整轮失败），重放依旧被挡在发送之前', async () => {
-  // 剧本按调用序：① 第一轮原发 ② 第一轮整段重放 —— 两次都丢；
-  //              ③ 第二轮原发（这一次丢 → 命中节流）④ 第三轮原发（成功）。
-  // 第四条存在的唯一理由：验证节流那一轮**没有让游标前进**（见下）。
+test('⑥ 节流窗内的第二次会话丢失：等完剩余窗口后照常重建并交回重建内容', async () => {
+  // 剧本按调用序：① 第一轮原发（丢）② 第一轮整段重放（丢）——本轮失败；
+  //              ③ 第二轮原发（丢 → 撞节流窗 → 等完 → 重建，成功）。
   const driver = scriptedDriver({
     script: [
       { throw: 'WEB_SESSION_LOST' },
@@ -371,7 +376,8 @@ test('⑥ 同一会话键连续两次 WEB_SESSION_LOST：第二次改交回「�
     ],
   });
   const sessionId = 'sess-throttle';
-  const bridge = await openBridge({ driver });
+  // 窗口取 400ms：足够让「等待语义」可观测（≥300ms），又不拖慢测试。
+  const bridge = await openBridge({ driver, sessionRebuildThrottleMs: 400 });
   try {
     const before1 = driver.calls.length;
     const r1 = await bridge.stream({ sessionId, messages: messagesAt(1) });
@@ -384,48 +390,67 @@ test('⑥ 同一会话键连续两次 WEB_SESSION_LOST：第二次改交回「�
       + JSON.stringify(driver.calls.map((c) => ({ fresh: c.fresh, chars: c.messageChars }))));
 
     const before2 = driver.calls.length;
+    const t0 = Date.now();
     const r2 = await bridge.stream({ sessionId, messages: messagesAt(2) });
+    const waitedMs = Date.now() - t0;
     const during2 = driver.calls.length - before2;
-    // 0.16.6 的用户判据（用户原话：「改为只提示已经切换会话而不是打扰直接中断会话」）：
-    // 节流窗口内的第二次会话丢失**不再**把这一轮判死，而是交回一条提示正文。
-    // 旧判据断言的是 `r2.ok === false && r2.code === 'WEB_SESSION_REBUILD_THROTTLED'`，
-    // 那条红在界面上就是「本轮运行失败」——正是本轮要改掉的东西。
     assert.equal(r2.ok, true,
-      '第二次会话丢失仍然让整轮失败（r2.code=' + r2.code + '）：'
-      + String(r2.error?.message || '').slice(0, 200));
-    assert.match(String(r2.text || ''), /SESSION_SWITCHED/,
-      '第二次这一轮没有交回「网页会话已切换」提示，实际正文 = '
+      '撞节流窗的第二轮不该失败：' + String(r2.error?.message || '').slice(0, 200));
+    assert.equal(String(r2.text || '').trim(), '重建后的答复',
+      '第二轮必须等完节流窗后真的重建，并把重建轮的真实回复交回（任务不断链），实际正文 = '
       + JSON.stringify(String(r2.text || '').slice(0, 200)));
-    assert.match(String(r2.text || ''), /已切换/,
-      '提示里没有「已切换」三个字（用户要的就是这句话），实际正文 = '
-      + JSON.stringify(String(r2.text || '').slice(0, 200)));
-    assert.ok(!/WEB_SESSION_REBUILD_THROTTLED/.test(String(r2.text || '')),
-      '提示正文里还留着内部失败码——用户看到的就是它，实际正文 = '
-      + JSON.stringify(String(r2.text || '').slice(0, 200)));
-    // 这条不是文风要求：提示会走与模型回复同一条解析链（工具协议锚点扫描），
-    // 带角度括号或 JSON 的正文会被当成调用去执行。
-    assert.ok(!/[<>{]/.test(String(r2.text || '')),
-      '提示正文含角度括号或大括号，会被工具协议解析器当成调用：'
-      + JSON.stringify(String(r2.text || '').slice(0, 200)));
-    assert.equal(during2, 1,
-      '第二次会话丢失这一轮发了 ' + during2 + ' 次（应为 1 = 只发了原轮，重放被节流挡在发送之前）：'
-      + '多出来的每一次都是四十万字符的白跑');
+    assert.ok(waitedMs >= 300,
+      '第二轮没有等待节流窗口就重建了（等待语义丢失）：只过了 ' + waitedMs + 'ms');
+    assert.equal(during2, 2,
+      '第二轮应发 2 次（原轮 + 等待后的整段重建），实际 ' + during2 + '：'
+      + JSON.stringify(driver.calls.map((c) => ({ fresh: c.fresh, chars: c.messageChars }))));
+    const rebuilt = driver.calls[driver.calls.length - 1];
+    assert.equal(rebuilt.fresh, true, '等待后的那次发送必须是整段重建（fresh）');
+    assert.ok(rebuilt.messageChars > 100_000,
+      '重建发送 messageChars = ' + rebuilt.messageChars + '，不足 10 万：整段首轮提示词没有真的重放');
 
-    // 节流那一轮**不许让游标前进**：它的正文一个字节都没进网页会话，游标前进了，
-    // 下一轮就只会发「增量」——网页侧于是永久缺一段前文（静默丢上下文）。
-    // 判据因此只能是「第三轮仍是整段重建」，而不是「第三轮很便宜」。
+    // 重建成功并正常 commit → 游标前进 → 第三轮是增量（不再有第三次重建）。
     const before3 = driver.calls.length;
     const r3 = await bridge.stream({ sessionId, messages: messagesAt(3) });
-    const during3 = driver.calls.length - before3;
     assert.equal(r3.ok, true, '第三轮不该失败：' + String(r3.error?.message || '').slice(0, 200));
-    assert.equal(during3, 1, '第三轮发了 ' + during3 + ' 次（应为 1）');
     const third = driver.calls[driver.calls.length - 1];
-    assert.equal(third.fresh, true,
-      '节流那一轮让游标前进了：第三轮不是整段重建（fresh=' + third.fresh
-      + '，字符数 ' + third.messageChars + '），网页侧永久缺一段前文。'
-      + ' 三轮 (fresh, chars) = ' + JSON.stringify(driver.calls.map((c) => [c.fresh, c.messageChars])));
-    assert.ok(third.messageChars > 100_000,
-      '第三轮 messageChars = ' + third.messageChars + '，不足 10 万：整段首轮提示词没有真的重放');
+    assert.equal(third.fresh, false,
+      '重建成功后第三轮应是增量（fresh=' + third.fresh + '）——重建不再被节流挡掉，游标正常前进');
+    assert.ok(third.messageChars < SMALL_CHARS,
+      '第三轮 messageChars = ' + third.messageChars + '：增量轮不应重发大数');
+  } finally { await bridge.close(); }
+});
+
+test('⑥b 节流等待中途被 abort：本轮按中止收场，且绝不发起等待后的重建发送', async () => {
+  // abort 的到达语义在 relay（调用方 abort → item 立即 reject，executor 的任何
+  // 返回都被丢弃）。因此这条护栏钉的不是「提示能不能送达」，而是**资源安全线**：
+  // 用户叫停之后，executor 不得再向网页发起一次 40 万字符的整段重建——
+  // 等待必须被 abort 打断、重建分支必须被跳过。
+  const driver = scriptedDriver({
+    script: [
+      { throw: 'WEB_SESSION_LOST' },
+      { throw: 'WEB_SESSION_LOST' },
+      { throw: 'WEB_SESSION_LOST' },
+      { text: '不该走到这一步' },
+    ],
+  });
+  const sessionId = 'sess-throttle-abort';
+  const bridge = await openBridge({ driver, sessionRebuildThrottleMs: 5_000 });
+  try {
+    const r1 = await bridge.stream({ sessionId, messages: messagesAt(1) });
+    assert.equal(r1.ok, false, '第一轮按剧本失败（建立节流记录）');
+    // 第二轮撞窗进入 5s 等待；100ms 时 abort → 等待短路，重建分支不得执行。
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 100);
+    const r2 = await bridge.stream({ sessionId, messages: messagesAt(2), signal: controller.signal });
+    assert.equal(r2.ok, false, '调用方 abort 的本轮应当按中止收场');
+    assert.match(String(r2.error?.message || r2.code || ''), /abort/i,
+      '失败原因应当是中止，实际：' + String(r2.error?.message || r2.code || '').slice(0, 120));
+    assert.ok(!/不该走到这一步/.test(String(r2.text || '')),
+      'abort 之后不应再发起重建发送');
+    assert.equal(driver.calls.length, 3,
+      'abort 后应停在 3 次发送（原轮+重放 ×2 轮），第 4 次（等待后的重建）绝不发生，实际 '
+      + driver.calls.length);
   } finally { await bridge.close(); }
 });
 

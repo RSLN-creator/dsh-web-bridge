@@ -24,7 +24,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildPromptVariants, variantIdForSite, VARIANT_SPECS, EXPERIMENT_SPECS } from '../lib/prompt-variants.js';
+import { buildPromptVariants, buildSitePromptRows, variantIdForSite, VARIANT_SPECS, EXPERIMENT_SPECS } from '../lib/prompt-variants.js';
 import { serializeFirstTurn, trainNoteFor, trainExtraFor } from '../lib/agent-preset.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -32,15 +32,47 @@ const read = (p) => fs.readFileSync(path.resolve(here, '..', p), 'utf8');
 
 const TOOLS = [{ name: 'read', description: '读文件', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } }];
 
-test('两个适配分支都存在，且文本来自 serializeFirstTurn（不是另抄一份）', () => {
+test('三个适配分支都存在，且文本来自 serializeFirstTurn（不是另抄一份）', () => {
   const { variants } = buildPromptVariants({ tools: TOOLS });
-  assert.deepEqual(variants.map((v) => v.id).sort(), ['default', 'glm']);
+  assert.deepEqual(variants.map((v) => v.id).sort(), ['default', 'glm', 'official']);
   const dflt = variants.find((v) => v.id === 'default');
   const glm = variants.find((v) => v.id === 'glm');
+  const official = variants.find((v) => v.id === 'official');
   // 与真函数逐字一致：这是「设置里看到的 = 真正发出去的」的唯一保证。
   assert.equal(dflt.text, serializeFirstTurn({ messages: [], tools: TOOLS, siteId: undefined }));
   assert.equal(glm.text, serializeFirstTurn({ messages: [], tools: TOOLS, siteId: 'glm' }));
+  // 0.16.25：official 分支的存在就是为了让 deepseek 显示**它真正会收到的**模板。
+  assert.equal(official.text, serializeFirstTurn({ messages: [], tools: TOOLS, siteId: 'deepseek' }));
   assert.notEqual(dflt.text, glm.text, '两个分支的模板必须不同（否则下拉没有意义）');
+  assert.notEqual(official.text, dflt.text, 'official 与 default 必须是两份文本（deepseek 不走标签形状）');
+});
+
+test('按网站逐行：每行的 text 必须是**该站点**实际会用的那一支（0.16.25）', () => {
+  // 用户原话：「改为以网站为导向列出，每行一个网站，然后后面选择框选择已有协议
+  // 中的一个」。这条钉的是「每行显示的是它自己的模板」——若前端拿同一份文本
+  // 填所有行（或后端不按 siteId 现算），deepseek 行就会显示标签形状。
+  const { sites, variants, toolsSource } = buildSitePromptRows({ tools: TOOLS });
+  assert.equal(toolsSource, 'session');
+  // 每个站点一行，站点集合与 providers 的 SITES 同源（不另维护一份清单）。
+  assert.ok(sites.length >= 10, '应按站点逐行列出（实得 ' + sites.length + ' 行）');
+  const ids = sites.map((s) => s.siteId);
+  for (const sid of ['deepseek', 'glm', 'chatgpt', 'kimi', 'qwen', 'doubao', 'grok', 'claude', 'gemini', 'zai']) {
+    assert.ok(ids.includes(sid), '缺少站点行 ' + sid);
+  }
+  const byId = new Map(variants.map((v) => [v.id, v]));
+  for (const row of sites) {
+    const expected = byId.get(row.variantId);
+    assert.ok(expected, row.siteId + ' 的 variantId 不在协议清单里：' + row.variantId);
+    // 关键：行的 text 必须与「该协议自己的 text」逐字相同，而不是复制别人的。
+    assert.equal(row.text, expected.text, row.siteId + ' 行渲染的不是它自己那一支的模板');
+    // 且必须与 serializeFirstTurn 按该站点现算的结果一致。
+    assert.equal(row.text, serializeFirstTurn({ messages: [], tools: TOOLS, siteId: row.variantId === 'official' ? 'deepseek' : (row.variantId === 'glm' ? 'glm' : undefined) }),
+      row.siteId + ' 行的模板与按站点现算的结果不一致');
+  }
+  // 三个立场各自落在正确的站点上。
+  assert.equal(sites.find((s) => s.siteId === 'deepseek').variantId, 'official');
+  assert.equal(sites.find((s) => s.siteId === 'glm').variantId, 'glm');
+  assert.equal(sites.find((s) => s.siteId === 'kimi').variantId, 'default');
 });
 
 test('协议立场：glm 变体只教代码块并警告标签，默认变体教标签', () => {
@@ -60,6 +92,20 @@ test('协议立场：glm 变体只教代码块并警告标签，默认变体教�
   assert.equal(dflt.trainNote, trainNoteFor('default'));
   assert.equal(glm.trainNote, trainNoteFor('glm'));
   assert.doesNotMatch(glm.trainNote, /^\[系统提示\] 请保持工具调用格式：以 <tool_call>/);
+  // 0.16.25：official（deepseek）立场 —— 教官方模板，且**不得**把它教成标签形状。
+  // 这条是本版顺手修掉的那个错误的护栏：此前 deepseek 在设置页显示的是 default
+  // （标签形状），而它真正收到的是官方模板。
+  const official = variants.find((v) => v.id === 'official');
+  assert.match(official.text, /官方工具调用格式/, 'official 分支必须教官方模板');
+  assert.doesNotMatch(official.text, /必须使用 <tool_call>\{"mcp_action"/, 'official 分支不得教标签形状');
+  assert.match(official.text, /必须逐字完整/, 'official 分支必须带上「标记逐字完整」的约束');
+  // official 的再教学提示必须也走**官方**立场（trainNoteFor 按 siteId 分派：
+  // 'deepseek' → trainNoteOfficialFor）。若这里退回 'default' 的标签形状再教学，
+  // 模型每 5 个工具结果就会被拉回标签形状——首轮与再教学必须同立场。
+  // 注意必须把 TOOLS 传进去：trainNoteFor 的官方分支用**会话真实工具名**做示例，
+  // 不传工具表就退回占位符「工具名」——那样比较的是两份不同的东西。
+  assert.equal(official.trainNote, trainNoteFor('deepseek', '', TOOLS), 'official 的再教学提示必须是官方立场');
+  assert.notEqual(official.trainNote, trainNoteFor('default', '', TOOLS), 'official 不得复用标签形状的再教学提示');
 });
 
 test('全局指令体现在每个变体里，且保存后重新拉取即变', () => {
@@ -88,9 +134,13 @@ test('未注册 present 时不提 present；注册了才教（与预设同一护
   assert.ok(withPresent.variants.every((v) => v.text.includes('present')), '注册了 present 就必须教');
 });
 
-test('站点 → 变体的映射与 agent-preset 的分支一致（目前只有 glm 走代码块）', () => {
+test('站点 → 变体的映射与 agent-preset 的分支一致（glm 代码块、deepseek 官方模板、其余标签）', () => {
   assert.equal(variantIdForSite('glm'), 'glm');
-  for (const sid of ['deepseek', 'zai', 'kimi', 'qwen', 'doubao', 'chatgpt', 'claude', 'gemini', 'grok']) {
+  // 0.16.25：deepseek 走官方模板。此前它被映射到 'default'（标签形状），
+  // 而 agent-preset 的 serializeFirstTurn 里 siteId === 'deepseek' 走的是官方分支
+  // ——设置页于是给 deepseek 显示了一份**它根本不会收到**的模板。
+  assert.equal(variantIdForSite('deepseek'), 'official', 'deepseek 必须映射到官方模板分支');
+  for (const sid of ['zai', 'kimi', 'qwen', 'doubao', 'chatgpt', 'claude', 'gemini', 'grok']) {
     assert.equal(variantIdForSite(sid), 'default', sid + ' 必须走默认（标签）分支');
   }
   // 变体表自身的立场声明不能自相矛盾
@@ -205,9 +255,11 @@ test('默认路径零位移：不传 experiments 时 default 变体文本与 0.1
   assert.equal(stripHost(dflt.text), stripHost(ZERO_DRIFT_BASELINE));
 });
 
-test('默认路径变体集合零位移：只有 default 与 glm，且都不带 experimental 标记', () => {
+test('默认路径变体集合：三个生产分支，且都不带 experimental 标记', () => {
   const { variants } = buildPromptVariants({ tools: TOOLS });
-  assert.deepEqual(variants.map((v) => v.id), ['default', 'glm'], '默认返回的变体集合与 0.14.7 必须一致（顺序也一致）');
+  // 0.16.25：新增 official（deepseek 官方模板）。这不是「多加了一个候选」，
+  // 而是把 deepseek 一直在用、却从没被列出的那一支补进清单——它本来就是生产分支。
+  assert.deepEqual(variants.map((v) => v.id), ['default', 'glm', 'official']);
   for (const v of variants) assert.equal(v.experimental, false, v.id + ' 是生产分支，不得带 experimental 标记');
 });
 
@@ -221,7 +273,7 @@ test('实验变体不得出现在默认返回里（反向断言）', () => {
 
 test('experiments: true 时 reinstruct 与 slim 必须出现，且带 experimental: true', () => {
   const { variants } = buildPromptVariants({ tools: TOOLS, experiments: true });
-  assert.deepEqual(variants.map((v) => v.id), ['default', 'glm', 'reinstruct', 'slim'], '实验变体附在生产分支之后，顺序固定');
+  assert.deepEqual(variants.map((v) => v.id), ['default', 'glm', 'official', 'reinstruct', 'slim'], '实验变体附在生产分支之后，顺序固定');
   for (const v of variants) {
     const shouldBeExperimental = EXPERIMENT_SPECS.some((s) => s.id === v.id);
     assert.equal(v.experimental, shouldBeExperimental, v.id + ' 的 experimental 标记不对');

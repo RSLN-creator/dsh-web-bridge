@@ -18,8 +18,8 @@
 
 import { listAllModels, SITES, getSite } from './providers.js';
 import { DEFAULT_SLOT, normalizeSlot, formatAccountKey, parseAccountKey, normalizeAccounts } from './accounts.js';
-import { buildPromptVariants } from './prompt-variants.js';
-import { composerWaitLine, composerWaitPillLabel, waitStatDetailRows, waitStatRows, formatDuration, sanitizeWaitStats } from './wait-stats.js';
+import { buildPromptVariants, buildSitePromptRows } from './prompt-variants.js';
+import { composerWaitLine, composerWaitPillLabel, waitStatDetailRows, waitStatRows, formatDuration, formatElapsed, sanitizeWaitStats } from './wait-stats.js';
 import { isLoopbackHost, originMatchesHost } from './loopback.js';
 import { httpFetch } from './upstream.js';
 import fs from 'node:fs';
@@ -236,10 +236,17 @@ export function createWebControl(deps = {}) {
     const snap = waitStatsOf ? waitStatsOf(sessionId) : { total: null, session: null };
     const total = snap?.total || null;
     const session = snap?.session || null;
+    // 0.16.24：在途等待（正在等的那一段）。服务端每次现算文案（`live` 分支），
+    // 客户端只管渲染——这样 13px 单行药丸与点击面板给出的仍是同一个数。
+    const live = snap?.live || null;
+    const now = Number(snap?.now) || Date.now();
     return {
       ok: true,
       total,
       session,
+      // 客户端据此判断「还要不要更快地回来问」：在途 = 数字每秒都在变。
+      live: live ? { startedAt: live.startedAt, endsAt: live.endsAt, baseMs: live.baseMs, kind: live.kind } : null,
+      now,
       // 设置页「累计」区块直接渲染这些行（0.15.10 起该区块已从设置页移除，
       // 字段保留：它是累计账本的公开只读面，curl 与旧前端仍可核对）。
       rows: total ? waitStatRows(total) : [],
@@ -249,10 +256,26 @@ export function createWebControl(deps = {}) {
         : null),
       // 0.15.10：药丸用的短文案（与官方 StatsPills 同为单行 13px），以及点击
       // 面板的详情行。三者同源同口径，避免「药丸一个数、面板另一个数」。
-      label: composerWaitPillLabel({ session, metrics }),
+      //
+      // 0.16.24：`now` 显式传入而不是让纯函数各取各的时钟——同一份载荷里
+      // 药丸、速览、详情行必须基于**同一个时刻**，否则三条路径会差出几十毫秒，
+      // 在秒级取整下就足以让两个数不同（「3 s」与「4 s」并存）。
+      label: composerWaitPillLabel({ session, metrics, live, now }),
       sessionValue: session ? formatDuration(sanitizeWaitStats(session).totalWaitMs) : '',
+      // 面板里的「正在等待」行：与药丸同一套边界（liveElapsedMs），只在在途时有。
+      liveValue: live ? formatElapsed(liveElapsedMs(live, now)) : null,
       detailRows: waitStatDetailRows({ session, total, metrics }),
     };
+  }
+
+  /** 在途等待已过的毫秒数（与 liveWaitLabel 同一套边界，供面板显示）。 */
+  function liveElapsedMs(live, now) {
+    const startedAt = Number(live?.startedAt);
+    if (!Number.isFinite(startedAt)) return 0;
+    const baseMs = Math.max(0, Math.round(Number(live?.baseMs) || 0));
+    const endsAt = Number(live?.endsAt);
+    const ceiling = Number.isFinite(endsAt) ? endsAt : Math.max(now, startedAt);
+    return baseMs + Math.max(0, Math.min(now, ceiling) - startedAt);
   }
 
   /** One route table keyed by "METHOD path-suffix". */
@@ -742,6 +765,9 @@ export function createWebControl(deps = {}) {
     // 模板由桥按当前会话的工具清单现算，因此不存在「一个固定字符串」可编辑；
     // 能编辑的只有 extraPrompt（全局指令），它会体现在每个变体的 text 里。
     // 变体由 lib/prompt-variants.js 用真函数现算——与真正发出去的那一份同源。
+    //
+    // 0.16.25：追加 `sites`——「每行一个网站 + 该网站实际使用的协议」。UI 以它
+    // 为准渲染；`variants` 保留给「切换预览另一个协议」用（只读，不改真实选路）。
     'GET prompt-variants': async () => {
       const last = presetInfo?.() ?? null;
       // 优先用「本会话最近一次真实调用过的工具清单」：这样设置页看到的就是
@@ -751,12 +777,11 @@ export function createWebControl(deps = {}) {
         ? last.tools.map((n) => ({ name: n, description: '', parameters: {} }))
         : undefined;
       const settings = settingsStore ? settingsStore.get() : {};
-      const { variants, toolsSource, active } = buildPromptVariants({
-        tools,
-        extraPrompt: settings.extraPrompt || '',
-        lastPreset: last,
-      });
-      return { ok: true, variants, toolsSource, active, extraPrompt: settings.extraPrompt || '' };
+      const opts = { tools, extraPrompt: settings.extraPrompt || '', system: undefined, lastPreset: last };
+      const { variants, toolsSource, active } = buildPromptVariants(opts);
+      // sites 与 variants 必须基于**同一份输入**现算，否则两处会给出不同的模板。
+      const { sites } = buildSitePromptRows({ ...opts, system: undefined });
+      return { ok: true, variants, sites, toolsSource, active, extraPrompt: settings.extraPrompt || '' };
     },
     'POST login': async (body) => {
       const accountKey = accountKeyOf(body, { fallback: '' });

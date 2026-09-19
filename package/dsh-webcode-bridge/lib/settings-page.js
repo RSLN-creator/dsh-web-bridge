@@ -25,6 +25,15 @@ button:hover { background: #1d4ed8; }
 .success { background: #dcfce7; color: #166534; }
 .error { background: #fee2e2; color: #991b1b; }
 .hint { font-size: 13px; color: #6b7280; margin-top: 4px; }
+/* 0.16.25 首轮提示词：按网站逐行。每行 = 网站名 + 协议下拉 + 「实际使用」标注，
+   模板折叠在 details 里——十个站点各铺一份全文会把设置页淹掉。 */
+.site-prompt { border: 1px solid #e5e7eb; border-radius: 8px; padding: 8px 10px; margin-top: 8px; }
+.site-prompt-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.site-prompt-name { font-size: 14px; font-weight: 600; min-width: 9em; }
+.site-prompt-select { width: auto; min-width: 14em; flex: 1 1 14em; padding: 4px 6px; font-size: 13px; }
+.site-prompt details { margin-top: 6px; }
+.site-prompt summary { font-size: 13px; color: #2563eb; cursor: pointer; }
+.site-prompt pre.preset { max-height: 240px; }
 .state { display: inline-block; font-size: 12px; padding: 2px 10px; border-radius: 10px; }
 .state.ok { background: #dcfce7; color: #166534; }
 .state.bad { background: #fee2e2; color: #991b1b; }
@@ -43,11 +52,10 @@ button.mini { width: auto; margin-top: 0; padding: 6px 12px; font-size: 13px; }
     <label>首轮提示词（只读，默认显示）</label>
     <div class="hint">
       发送首条消息时注入网页的完整内容，由桥按当前会话的工具清单自动生成。
-      不同站点是**两套协议**（GLM 网页会拦截正文里的调用标签），用下面的选择框切换查看。
+      下面**按网站逐行列出**，每行后面的选择框是该网站可用的协议——切换只预览模板，
+      不改变真实选路（每个网站实际用哪一支由桥按站点决定，写在行首）。
     </div>
-    <select id="variantSelect" style="margin-top:6px;"></select>
-    <div id="variantNote" class="hint"></div>
-    <pre id="variantText" class="preset">加载中…</pre>
+    <div id="sitePrompts">加载中…</div>
     <div id="variantTools" class="hint"></div>
 
     <label for="defaultModel">默认模型</label>
@@ -185,24 +193,64 @@ button.mini { width: auto; margin-top: 0; padding: 6px 12px; font-size: 13px; }
     }
   }
 
-  // ---- 首轮提示词（只读模板 + 适配下拉，默认显示） --------------------------
+  // ---- 首轮提示词（按网站逐行，只读，默认显示） ------------------------------ 
   // 模板由 GET /__webcode/prompt-variants 现算（与真正发出去的那一份同源）。
-  // 这里只做展示与切换，不提供编辑——可编辑的只有上面的「全局指令」。
+  // 服务端的 sites 数组已把「每个网站 → 它实际会用的协议 + 该协议的模板全文」
+  // 算好；本页只渲染与切换预览，不提供编辑——可编辑的只有上面的「全局指令」。
+  //
+  // 为什么按网站列而不是按协议列：用户要看的是「这个网站到底会收到什么」，
+  // 而协议只有三支、网站有十个——按协议列时，用户得自己去推断「我这个站算哪支」。
   let variantData = null;
-  function renderVariant(id) {
+  const sitePick = {};   // siteId → 预览选中的协议 id（缺省 = 该网站真实在用的）
+  function variantById(id) {
+    if (!variantData) return null;
+    return variantData.variants.find((x) => x.id === id) || variantData.variants[0];
+  }
+  function renderSiteText(siteId) {
     if (!variantData) return;
-    const v = variantData.variants.find((x) => x.id === id) || variantData.variants[0];
-    document.getElementById('variantText').textContent = v.text;
-    document.getElementById('variantNote').textContent =
-      v.note
-      + (variantData.active && variantData.active.variantId === v.id ? '（本会话最近一次实际使用的就是这一支）' : '')
-      + (variantData.active && variantData.active.variantId !== v.id
-        ? '（本会话最近一次实际使用的是「' + ((variantData.variants.find((x) => x.id === variantData.active.variantId) || {}).label || variantData.active.variantId) + '」）'
-        : '');
-    document.getElementById('variantTools').textContent = variantData.toolsSource === 'placeholder'
-      ? '当前工具清单是占位示例——发送第一条消息后会自动换成该会话的真实清单。'
-      : (variantData.active && variantData.active.tools && variantData.active.tools.length
-        ? '本会话工具：' + variantData.active.tools.join(', ') : '');
+    const row = (variantData.sites || []).find((s) => s.siteId === siteId);
+    if (!row) return;
+    const picked = sitePick[siteId] || row.variantId;
+    const v = variantById(picked);
+    const realLabel = (variantById(row.variantId) || {}).label || row.variantId;
+    const previewing = picked !== row.variantId;
+    const textEl = document.getElementById('siteText-' + siteId);
+    const noteEl = document.getElementById('siteNote-' + siteId);
+    const stateEl = document.getElementById('siteState-' + siteId);
+    if (textEl) textEl.textContent = v ? v.text : '';
+    if (noteEl) noteEl.textContent = (v ? v.note + ' ' : '') + (v ? '再教学提示：' + v.trainNote : '');
+    if (stateEl) {
+      stateEl.textContent = '实际使用：' + realLabel + (previewing ? '（下方为预览，未生效）' : '');
+    }
+  }
+  function renderSiteRows(d) {
+    const byId = new Map((d.variants || []).map((v) => [v.id, v]));
+    document.getElementById('sitePrompts').innerHTML = (d.sites || []).map((row) => {
+      const options = (d.variants || []).map((v) => '<option value="' + v.id + '"'
+        + (v.id === row.variantId ? ' selected' : '') + '>' + v.label
+        + (v.id === row.variantId ? ' · 该网站正在用' : '') + '</option>').join('');
+      const realLabel = (byId.get(row.variantId) || {}).label || row.variantId;
+      return '<div class="site-prompt">'
+        + '<div class="site-prompt-head">'
+        + '<span class="site-prompt-name">' + row.siteName + '</span>'
+        + '<select class="site-prompt-select" data-site="' + row.siteId + '">' + options + '</select>'
+        + '<span class="hint" id="siteState-' + row.siteId + '">实际使用：' + realLabel + '</span>'
+        + '</div>'
+        + '<details><summary>查看该协议的完整模板</summary>'
+        + '<div class="hint" id="siteNote-' + row.siteId + '"></div>'
+        + '<pre id="siteText-' + row.siteId + '" class="preset"></pre>'
+        + '</details>'
+        + '</div>';
+    }).join('');
+    // 事件绑定放在 innerHTML 之后（重建过节点，旧引用会失效）。
+    document.querySelectorAll('.site-prompt-select').forEach((sel) => {
+      sel.addEventListener('change', (e) => {
+        const sid = e.target.getAttribute('data-site');
+        sitePick[sid] = e.target.value;
+        renderSiteText(sid);
+      });
+    });
+    (d.sites || []).forEach((row) => renderSiteText(row.siteId));
   }
   async function loadVariants() {
     try {
@@ -210,17 +258,15 @@ button.mini { width: auto; margin-top: 0; padding: 6px 12px; font-size: 13px; }
       const d = await r.json();
       if (!d.ok) throw new Error(d.error || 'HTTP ' + r.status);
       variantData = d;
-      const sel = document.getElementById('variantSelect');
-      sel.innerHTML = d.variants.map((v) => '<option value="' + v.id + '">' + v.label
-        + (d.active && d.active.variantId === v.id ? ' · 本会话正在用' : '') + '</option>').join('');
-      const want = (d.active && d.active.variantId) || (d.variants[0] && d.variants[0].id);
-      sel.value = want;
-      renderVariant(want);
+      renderSiteRows(d);
+      document.getElementById('variantTools').textContent = d.toolsSource === 'placeholder'
+        ? '当前工具清单是占位示例——发送第一条消息后会自动换成该会话的真实清单。'
+        : (d.active && d.active.tools && d.active.tools.length
+          ? '本会话工具：' + d.active.tools.join(', ') : '');
     } catch (e) {
-      document.getElementById('variantText').textContent = '首轮提示词加载失败：' + e.message;
+      document.getElementById('sitePrompts').textContent = '首轮提示词加载失败：' + e.message;
     }
   }
-  document.getElementById('variantSelect').addEventListener('change', (e) => renderVariant(e.target.value));
   loadVariants();
 
   document.getElementById('syncMainToSub').addEventListener('click', () => {

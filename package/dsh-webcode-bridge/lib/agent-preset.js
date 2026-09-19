@@ -292,6 +292,46 @@ function presentTransportNote(tools) {
     + '（present 让文件以可点开的面板出现在界面上，只在正文写路径则是点不动的纯文本）。';
 }
 
+// ---- 传输协议段：按站点分立场，全桥唯一一处（0.16.25 抽取） --------------------
+//
+// 抽取理由：0.16.25 的「解析失败自动续跑」要把再教学提示**作为用户消息**补发进
+// 同一个网页会话，那一轮模型看到的协议段必须与该站点**首轮教学逐字相同**。
+// 续跑处若另写一份（或写死某一个站点的立场），deepseek 会同时收到官方模板与
+// 标签形状两套互斥教学、glm 会被教回它网页会抢走的标签形状——两处文案迟早
+// 漂移，而漂移方向恰好是「把模型教坏」。因此协议文本只有一处定义：
+// serializeFirstTurn（首轮）与 index.js 的 autoContinueRound（续跑）都调这里。
+//
+// 三个立场与 buildPreset 的「# 工具调用格式」段一一对应，改一处必须同时改另一处：
+//   · glm      → ```json 代码块，并明说标签会被该网页抢走执行；
+//   · deepseek → 官方训练模板（DSH 原生模板，begin/end 逐字完整）；
+//   · 其余站点 → <tool_call>{…}</tool_call> 标签形状。
+//
+// 关于「用户手写的那段文本」：那段（<tool_call> 形状）是**默认立场**，不是
+// deepseek 立场——deepseek 站点实际走官方模板分支。按站点复用本生成器即可，
+// 不要拿那一段去覆盖所有站点。
+const GLM_TRANSPORT = '\n[本地工具传输协议]\n必须使用 ```json 代码块发起工具调用：先写一行 ```json，下一行是单个 JSON 对象 {"mcp_action":"call","name":"实际工具名","purpose":"原因","arguments":{…}}，再以一行 ``` 结束。不要使用 <tool_call> 等标签包裹——本网页会把这些标签当成它自己的内置工具抢走执行并报 unknown tool call，调用会静默丢失。工具名和参数必须严格匹配上面的 schema（arguments 必须包含 required 里的每个字段，如 pwsh 的 description）。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。';
+
+const LABEL_TRANSPORT = '\n[本地工具传输协议]\n必须使用 <tool_call>{"mcp_action":"call","name":"实际工具名","arguments":{}}</tool_call> 发起工具调用。工具名和参数必须严格匹配上面的 schema。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。';
+
+/** deepseek 立场：骨架逐字来自 officialToolCallSkeletonFor（与首轮/再教学同源）。 */
+function deepseekTransport(tools) {
+  return "\n[本地工具传输协议]\n用官方工具调用格式（DeepSeek 原生模板）发起工具调用，形状：" + officialToolCallSkeletonFor(tools) + "。标记必须逐字完整：竖线、词间连接符（▁）、begin/end 一个都不能少，不要改成空格、不要拆行。sep 之后是完整 JSON 对象，required 的每个必填参数都要在；无参数的工具 arguments 写 {}；不要加 ```json 围栏。工具名和参数必须严格匹配上面的 schema。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。";
+}
+
+/**
+ * 该站点的传输协议段（含 present 提醒）。无工具时返回空串。
+ *
+ * @param {string} [siteId] 站点 id（deepseek / glm / …；未知站点按默认立场）
+ * @param {Array}  [tools]  本会话工具清单
+ * @returns {string}
+ */
+export function transportNoteFor(siteId, tools) {
+  if (!Array.isArray(tools) || !tools.length) return '';
+  if (siteId === 'glm') return GLM_TRANSPORT + presentTransportNote(tools);
+  if (siteId === 'deepseek') return deepseekTransport(tools) + presentTransportNote(tools);
+  return LABEL_TRANSPORT + presentTransportNote(tools);
+}
+
 /** The agent preset: who the model is, which local tools exist, and the exact
  *  call/result protocol. Mirrors webcode's prompt_zh.md structure. */
 export function buildPreset(options = {}) {
@@ -415,17 +455,12 @@ export function serializeFirstTurn(options = {}) {
   });
   const text = segments.join('\n\n');
   const preset = buildPreset(options);
-  // 传输协议按站点分立场：glm 网页会拦截正文里的调用标签（原生执行器只认
-  // search/open/click/find），必须只教代码块形状并明说标签会被吃；其它站点
-  // 维持既有文字逐字不动。
-  const transport = !options.tools?.length ? '' : options.siteId === 'glm'
-    ? '\n[本地工具传输协议]\n必须使用 ```json 代码块发起工具调用：先写一行 ```json，下一行是单个 JSON 对象 {"mcp_action":"call","name":"实际工具名","purpose":"原因","arguments":{…}}，再以一行 ``` 结束。不要使用 <tool_call> 等标签包裹——本网页会把这些标签当成它自己的内置工具抢走执行并报 unknown tool call，调用会静默丢失。工具名和参数必须严格匹配上面的 schema（arguments 必须包含 required 里的每个字段，如 pwsh 的 description）。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。' + presentTransportNote(options.tools)
-    : options.siteId === 'deepseek'
-      // 0.16.18：与首轮教学、增量轮再教学同源（官方训练模板是唯一骨架；
-      // officialToolCallSkeleton 与 buildPreset / TRAIN_NOTE_OFFICIAL 三处同一形状）。
-      // 「立即停止等待结果」这句行为约束保持逐字——它不属于格式、属于时序。
-      ? "\n[本地工具传输协议]\n用官方工具调用格式（DeepSeek 原生模板）发起工具调用，形状：" + officialToolCallSkeletonFor(options.tools) + "。标记必须逐字完整：竖线、词间连接符（▁）、begin/end 一个都不能少，不要改成空格、不要拆行。sep 之后是完整 JSON 对象，required 的每个必填参数都要在；无参数的工具 arguments 写 {}；不要加 ```json 围栏。工具名和参数必须严格匹配上面的 schema。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。" + presentTransportNote(options.tools)
-    : '\n[本地工具传输协议]\n必须使用 <tool_call>{"mcp_action":"call","name":"实际工具名","arguments":{}}</tool_call> 发起工具调用。工具名和参数必须严格匹配上面的 schema。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。' + presentTransportNote(options.tools);
+  // 传输协议按站点分立场——文本在 transportNoteFor（本文件上方的唯一一处定义）：
+  // glm 网页会拦截正文里的调用标签（原生执行器只认 search/open/click/find），
+  // 必须只教代码块形状并明说标签会被吃；deepseek 走官方训练模板；其余站点维持
+  // 标签形状（既有文字逐字不动）。0.16.25 抽取后，自动续跑轮复用同一个函数，
+  // 于是「首轮教什么」与「续跑提醒重申什么」不可能再分叉。
+  const transport = transportNoteFor(options.siteId, options.tools);
   const budget = Number(options.maxPromptChars);
   if (!Number.isFinite(budget) || budget <= 0) {
     return [preset, '[会话开始]', text || '（用户未提供文字）', transport].filter(Boolean).join('\n\n');
@@ -1907,6 +1942,23 @@ export function parseAgentReply(text, options = {}) {
     while ((pm = paramRe.exec(m[2])) !== null) { args[pm[1]] = pm[2].trim(); n++; }
     if (n === 0) {
       const raw = jsonObjectIn(m[2]);
+      // 0.16.25：体里有 JSON 形状、整体却解析不出时**不再静默**。真机 cd997dd3
+      // （2026-09-19）三连灭的形状：主对象完全合法、闭合后多挂 `,{"replace_all":false}`
+      // 第二对象——jsonObjectIn 按「首个 { 到末个 }」切段，整段 parse 必败，旧代码
+      // 一声不响地丢调用，UNPARSED 提示只能让模型往「太长/截断」上猜。诊断分两类：
+      // ① 首个配平对象之后还有残余内容 → 点名「对象闭合后追加了多余内容」；
+      // ② 连首个对象都配不平 → 不配平/截断。只留痕、不改宽容度：参数照旧不代拼
+      //    （红线不变），诊断经 UNPARSED 提示透出，模型按真因重发。
+      if (!raw && m[2].trim().startsWith('{')) {
+        const first = readCallAt(m[2], 0);
+        if (first) {
+          const rest = m[2].slice(first.end).trim();
+          if (rest) diagnostics.push(`invoke body has trailing content after the first JSON object (must be a SINGLE object): ${rest.slice(0, 80)}`);
+          else diagnostics.push(`invoke body JSON failed to parse: ${m[2].slice(0, 80)}`);
+        } else {
+          diagnostics.push(`invoke body is not a single balanced JSON object (unbalanced or truncated): ${m[2].slice(0, 80)}`);
+        }
+      }
       // 壳里装的是「完整调用对象」时（真机 2026-09-10 第 3 跑：<invoke name="tool_call">
       // 里塞了整段 {"mcp_action":"call","name":"read",…}），外壳名是噪声——
       // 按内层对象本身入账，别把 read/grep 变成名为 tool_call 的工具的参数。

@@ -22,8 +22,10 @@ import { createBrowserDriver } from './browser-driver.js';
 import { zeroProgressDecision } from './zero-progress.js';
 import { idleWindowDecision } from './idle-window.js';
 import { createWebControl, buildSessionEvents, mainLineOf } from './web-control.js';
-import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, stripProtocolRegions, proseSafeEnd, readCallAt, partialProtocolAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeOfficialToolCalls, normCallArgs, inferToolNameFromArgs, recoverUnparsedCalls, officialToolCallSpecimen, officialCallExampleFor } from './agent-preset.js';
+import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, stripProtocolRegions, proseSafeEnd, readCallAt, partialProtocolAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeOfficialToolCalls, normCallArgs, inferToolNameFromArgs, recoverUnparsedCalls, officialToolCallSpecimen, officialCallExampleFor, transportNoteFor, buildPreset } from './agent-preset.js';
 import { appendReplyLog } from './reply-log.js';
+import { contractFingerprintOf, reanchorSent, messageHash, ANCHOR_LEN } from './session-anchor.js';
+import { writePromptFiles, sitePromptPath, sessionPromptPath, DEFAULT_PROMPT_STORE_DIR } from './prompt-store.js';
 import { createMirror } from './mirror.js';
 import { httpFetch } from './upstream.js';
 import { textOfBlocks } from './flatten.js';
@@ -214,6 +216,11 @@ const DEFAULTS = {
   profileDir: path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 'webcode-edge-profile'),
   headless: true,
   contextMode: 'session', // 'session': one web conversation per DSH session, incremental turns
+  // 解析失败自动续跑的轮数上限（0.16.25）。UNPARSED 收尾前把再教学提示**作为用户
+  // 消息补发进同一个网页会话**并收第二轮回复——把真机里用户手动打「继续，注意
+  // 工具调用」救活循环的动作自动化（session cd997dd3 11:21:26 / 11:22:51 两次逐字）。
+  // 0 = 关闭（回落为「提示当正文」收场）；只认会话模式轮（无状态轮由调用方自己循环）。
+  autoContinueRounds: 1,
   // 允许携带 Origin 的显式白名单（除「同源」之外的额外放行）。同源判定本身由
   // lib/loopback.js 的 originMatchesHost 完成，因此这里**只需列 DSH 前端自己的
   // 两个源**——右栏站点 iframe 是 <siteId>.localhost:<relay 端口>，它们与 relay
@@ -1029,6 +1036,109 @@ export function apply(ctx, config = {}) {
       let lastBoundary = -1;
       const callSeq = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
       const callId = i => `call-webcode-${String(options?.sessionId || 'stateless')}-${callSeq}-${i}`;
+      // 主文本块已经 block-end 之后的追加文本块（自动续跑的结果说明用）。块内容与
+      // delta 逐字一致由调用方保证——这里只负责开/发/收三件套与下标推进。
+      const emitFollowUp = function* (text) {
+        const idx = nextIndex++;
+        yield { type: 'block-start', index: idx, blockType: 'text' };
+        yield { type: 'text-delta', index: idx, text };
+        yield { type: 'block-end', index: idx, block: { type: 'text', text } };
+      };
+      // 调用块派发三件套（自动续跑两处出口共用）：与流式开块路径同一个
+      // coerce/fill 管线，参数纠偏与必填补齐不因「来自续跑轮」而降级。
+      const emitCallBlocks = function* (calls, purposeFallback) {
+        for (const rc of calls) {
+          const idx = nextIndex++;
+          const id = callId(idx);
+          const target = tools.find((t) => t?.name === rc.name) || null;
+          const { args: fixedArgs } = coerceArguments(rc.arguments, target?.parameters);
+          const { args: filledArgs, filled } = fillMissingRequired(fixedArgs, target?.parameters, rc.purpose || purposeFallback);
+          if (filled.length) log(`filled missing required args for ${rc.name}: ${filled.join(', ')}`);
+          const args = JSON.stringify(filledArgs);
+          yield { type: 'block-start', index: idx, blockType: 'tool-call' };
+          yield { type: 'tool-call-delta', index: idx, id, name: rc.name, argumentsDelta: args };
+          yield { type: 'block-end', index: idx, block: { type: 'tool-call', id, name: rc.name, arguments: args } };
+        }
+      };
+      // —— 解析失败自动续跑（0.16.25）————————————————————————————————————
+      //
+      // 为什么需要它（真机 cd997dd3，2026-09-19 19:2x，reply-log 逐字取证）：官方
+      // 格式漂移（参数对象闭合后多挂 `,{"replace_all":false}` 第二对象）连续三轮
+      // UNPARSED，桥把再教学提示交回会话后，agent 循环把「纯文本轮」当最终答案
+      // 收场——两次都是**用户手动**打「继续，注意工具的调用」才救活（会话 jsonl
+      // 11:21:26 / 11:22:51 两条 user/message 逐字）。提示能让模型改正的前提是
+      // **循环还在跑**；0.16.12 的恢复派发只救只读白名单，写类工具（edit/write）
+      // 的漂移轮在无人值守下依旧终止。本函数把手动续跑自动化：把 UNPARSED 提示
+      // **作为用户消息补发进同一个网页会话**，收第二轮回复交回调用的解析结果。
+      //
+      // 红线（与 0.16.23 退役纪律同源）：
+      //   ① 不改解析宽容度——第二轮回复走同一个 parseAgentReply，第二对象照旧
+      //      拒收（代拼参数 = 给漂移发奖励，模型永不收敛）；
+      //   ② 只在会话模式（meta.sessionKey）续跑：无状态轮（OpenAI 前端/aux）的
+      //      调用方自己拥有循环语义，桥不代做多轮；
+      //   ③ 每步至多 autoContinueRounds 次（默认 1，0 = 关闭），续跑轮再失败就
+      //      回落既有「提示当正文」收场，绝不递归——最坏代价是一轮额外的网页往返；
+      //   ④ 走 relay.submit（同一 meta），发送间隔/限流退避/WEB_SESSION_LOST 整段
+      //      重放全套机器原样生效，不绕过任何节流。
+      const autoContinueRound = async (noticeText) => {
+        const rounds = Math.max(0, Number(cfg.autoContinueRounds ?? 1) || 0);
+        if (rounds < 1 || !turn.meta?.sessionKey) return null;
+        // 0.16.25：协议段按**站点**复用 transportNoteFor（与首轮教学同一函数、
+        // 逐字同一份文本）。这一轮是「把再教学提示当用户消息补发」，模型看到的
+        // 格式指引必须与它首轮被教的完全一致：deepseek 拿官方模板、glm 拿代码块
+        // 形状、其余站点拿标签形状。若在这里另写一份或写死某站点的立场，就会
+        // 出现「首轮教 A、续跑重申 B」——模型在两者之间摇摆，正是漂移的成因。
+        // （noticeText 本身已由 unparsedCallNotice 按官方骨架给出重发示例，这里
+        // 补的是**完整协议段**：它带着该站点的格式立场与行为约束。）
+        const siteId = turn.meta?.siteId || null;
+        const transport = transportNoteFor(siteId, tools);
+        // 0.16.28：框架前置。真机（session-4f236a51）里模型读到再教学提示会停下来
+        // 「回应提醒」而不是「按提醒行动」——续跑轮的开头必须先声明这条消息的身份
+        // （系统提示、勿回应），把模型的注意力钉回任务。协议段（transport）保留：
+        // 0.16.25 的红线仍然成立——续跑轮看到的格式指引必须与首轮逐字同源，删掉
+        // 它等于让模型在两套立场之间摇摆。
+        const prompt = '[桥·系统提示] 本条是桥发出的自动化续跑提示，不是用户发言：不要回应、解释或复述它，直接按下面的指示行动并继续任务。\n\n'
+          + noticeText
+          + '\n\n[自动续跑] 上一轮的工具调用没有被执行（桥没能解析）。请按上面的模板重发那条调用；'
+          + '如果任务已经完成或不需要工具，直接给出结论。'
+          + (transport ? `\n\n${transport}` : '');
+        try {
+          // fresh 必须钉死 false：executor 按 meta.fresh 决定开不开新网页会话，
+          // 而续跑的前提恰恰是「上一轮刚在这个会话里落地」——沿用原 fresh 值会把
+          // 首轮的续跑提醒发进一个零上下文的新会话（模型根本不知道自己刚才调了什么）。
+          const res = await relay.submit(prompt, { signal: options.signal, meta: { ...turn.meta, fresh: false } });
+          const text = String(res?.text || '');
+          const cont = parseAgentReply(text, { tools });
+          // 续跑轮的原始回复同样全量落盘（0.16.17 同一纪律：没有原文就无法离线归因）。
+          appendReplyLog(text, {
+            sessionId: options?.sessionId ?? null,
+            chars: text.length,
+            calls: cont.calls.length,
+            note: 'auto-continue reply, verbatim',
+          });
+          if (!text.trim() && !cont.calls.length) {
+            log('auto-continue round returned empty reply — 回落为 UNPARSED 提示收场');
+            return null;
+          }
+          log(`auto-continue round: ${text.length} chars, ${cont.calls.length} call(s) parsed`);
+          return { ...cont, text };
+        } catch (err) {
+          warn(`auto-continue round failed (${String(err?.code || err?.message || err)}) — 回落为 UNPARSED 提示收场`);
+          return null;
+        }
+      };
+      // 续跑回复的散文要走与权威正文同一套协议防线（探到协议痕迹就整段扣住——
+      // 续跑回复里出现畸形调用块的概率比正常轮更高，这正是它存在的理由）。
+      const safeAutoProse = (raw) => {
+        let prose = '';
+        try { prose = stripProtocolRegions(raw); } catch { return ''; }
+        if (prose && findProtocolStart(prose).index >= 0) {
+          warn(`auto-continue prose withheld (${prose.length} chars, 协议痕迹未通过探测)`);
+          return '';
+        }
+        return prose;
+      };
+
       // 与 pure-chat 路径同一组块开关帮助函数（闭包改写上方 let 状态）。
       const openThink = function* () {
         if (thinkOpen) return;
@@ -1237,6 +1347,18 @@ export function apply(ctx, config = {}) {
         calls: calls.length,
         note: 'raw reply, verbatim',
       });
+      // 0.16.26：**思考通道也落盘**。真机（session-181c23b1，2026-09-19 15:17:46）
+      // 出现过 `chars=0 | calls=0` 的一轮：正文一个字符都没有、调用写在思考里，
+      // 而 0.16.17 的原始回复日志只记正文通道——磁盘上除了「这轮是空的」什么都看不到，
+      // 归因第四次断链。思考全文是与正文同级的取证数据，必须一并留存。
+      if (thinkAcc) {
+        appendReplyLog(thinkAcc, {
+          sessionId: options?.sessionId ?? null,
+          chars: thinkAcc.length,
+          calls: 0,
+          note: 'raw thinking, verbatim',
+        });
+      }
       // 0.15.6：**丢调用不再静默**。旧实现的 `takeObj` 把「看起来是调用、但解析
       // 不出来」和「这段本来就不是调用」压成同一个结果，一次丢调用在会话、在 UI、
       // 在日志里都不留痕——参数含 markdown 围栏的 write 调用被丢、报告从未落盘，
@@ -1284,6 +1406,38 @@ export function apply(ctx, config = {}) {
           + '多条共用同一对 calls-begin/calls-end；'
           + '如果任务不需要工具，请直接给出结论。';
         warn(notice);
+        // 0.16.27 自动续跑：这一支与 UNPARSED / thinking-only 是**同一个病**——
+        // 交回一条纯文本再教学后，agent 循环把它当最终答案收场。用户原话点名了
+        // 这一类：「尤其是意外错误工具调用引起的-web 端调用技能因为是文本告知会有
+        // 偏移」——模型调了本会话没有的工具名（或把教学骨架里的占位名当真），
+        // 桥把清单与模板交回去，但**循环已经停了**，模型没有下一次机会改。
+        // 处置与 0.16.25/0.16.26 逐字同型：把提示补发进**同一个网页会话**收第二轮，
+        // 解析出真实工具名的调用就照常派发（finish=tool-calls，循环存活）。
+        const cont = await autoContinueRound(notice);
+        if (cont) {
+          const contValid = cont.calls.filter((c) => tools.some((t) => t?.name === c.name));
+          const contProse = safeAutoProse(cont.text);
+          // 0.16.27：`notice` 必须**作为正文外发**，不能只进 finishChunks 的记账字符串。
+          // 旧写法（本版首轮）把它只写进 finish 文本，于是界面上只看到一句
+          // AUTO_CONTINUED，用户不知道桥为什么重试、模型被要求改什么——与 UNPARSED
+          // 出口（`head = out + notice` 随后 emitFollowUp）不一致。护栏
+          // test/auto-continue.test.mjs「TOOL_UNKNOWN 后自动续跑」正是钉这一点。
+          if (contValid.length) {
+            const text = notice + '\n\n'
+              + `AUTO_CONTINUED: 已自动补发提醒，网页已按真实工具名重新发起 ${contValid.length} 条调用。`
+              + (contProse ? `\n\n${contProse}` : '');
+            yield* emitFollowUp(text);
+            yield* emitCallBlocks(contValid, 'auto-continued after TOOL_UNKNOWN round');
+            yield* finishChunks(turn, text + thinkAcc + cont.text, 'tool-calls');
+            return;
+          }
+          if (contProse) {
+            const text = notice + '\n\n' + contProse;
+            yield* emitFollowUp(text);
+            yield* finishChunks(turn, text + thinkAcc, 'stop');
+            return;
+          }
+        }
         // index 传 nextIndex：上面 closeThink() 已经关掉了思考块（它占用 0），
         // 写死 0 会让正文块与已关闭的 reasoning 块撞下标。
         yield* emitText(notice, turn, nextIndex);
@@ -1500,14 +1654,65 @@ export function apply(ctx, config = {}) {
             yield* finishChunks(turn, (out || '') + thinkAcc, 'tool-calls');
             return;
           }
-          const notice = unparsedCallNotice({ thinkAcc, tools, scene: idleScene(), withheld, head: finalText.slice(safe, safe + 200) });
+          const notice = unparsedCallNotice({ thinkAcc, tools, scene: idleScene(), withheld, head: finalText.slice(safe, safe + 200), diagnostic: diagnostics[0] || '' });
           warn(notice);
-          yield* emitText(out ? `${out}\n\n${notice}` : notice, turn, nextIndex);
+          // 0.16.25 自动续跑：把提示作为用户消息补发进同一网页会话并收第二轮回复。
+          // 第二轮解析出可执行调用就照常派发（finish=tool-calls，循环存活）；
+          // 续跑失败/仍无调用则回落「提示当正文」收场（与旧行为逐字同型）。
+          const cont = await autoContinueRound(notice);
+          if (!cont) {
+            yield* emitText(out ? `${out}\n\n${notice}` : notice, turn, nextIndex);
+            return;
+          }
+          const contValid = cont.calls.filter((c) => tools.some((t) => t?.name === c.name));
+          const contProse = safeAutoProse(cont.text);
+          const head = (out ? `${out}\n\n` : '') + notice;
+          const text = head
+            + (contValid.length
+              ? `\n\nAUTO_CONTINUED: 已自动补发提醒，网页已重新发起 ${contValid.length} 条调用。`
+              : '\n\n（已自动补发提醒并重试一轮，网页仍未发起可执行调用——以上为其回复，按最终答复收场。）')
+            + (contProse ? `\n\n${contProse}` : '');
+          yield* emitFollowUp(text);
+          yield* emitCallBlocks(contValid, 'auto-continued after unparsed round');
+          yield* finishChunks(turn, text + thinkAcc + cont.text, contValid.length ? 'tool-calls' : 'stop');
           return;
         }
         if (decision === 'thinking-only') {
           const notice = thinkingOnlyNotice(thinkAcc, idleScene());
           warn(notice);
+          // 0.16.26 自动续跑：这一支与 UNPARSED 是**同一个病**——交回一条纯文本提示
+          // 后 agent 循环把它当最终答案收场，长任务就此停摆。真机 session-181c23b1
+          // （2026-09-19 15:17:46，reply-log `chars=0 | calls=0`）就是它：WIP 稳态收束
+          // （`partial-wip-settled`）在模型刚想完、还没落笔调用时把这一轮截断，
+          // 正文空、思考里有半截推理，于是「思考完就没下文」。
+          // 用户要求很明确：deepseek 会话要能长期跑，不许每次遇到就断。
+          // 处置与 0.16.25 的 UNPARSED 续跑逐字同型：把提示作为用户消息补发进**同一
+          // 个网页会话**收第二轮，解析出调用就照常派发（finish=tool-calls，循环存活）；
+          // 无调用但有散文就按最终答复收场；两头都落空才回落旧的「提示当正文」。
+          const cont = await autoContinueRound(notice);
+          if (cont) {
+            const contValid = cont.calls.filter((c) => tools.some((t) => t?.name === c.name));
+            const contProse = safeAutoProse(cont.text);
+            // 与上面 TOOL_UNKNOWN 同一处修正：归因提示必须外发，用户才看得到
+            // 「本轮为什么被自动重试」。只写进 finishChunks 的记账字符串等于没发。
+            if (contValid.length) {
+              const text = notice + '\n\n'
+                + `AUTO_CONTINUED: 已自动补发提醒，网页已重新发起 ${contValid.length} 条调用。`
+                + (contProse ? `\n\n${contProse}` : '');
+              yield* closeThink();
+              yield* emitFollowUp(text);
+              yield* emitCallBlocks(contValid, 'auto-continued after thinking-only round');
+              yield* finishChunks(turn, text + thinkAcc + cont.text, 'tool-calls');
+              return;
+            }
+            if (contProse) {
+              const text = notice + '\n\n' + contProse;
+              yield* closeThink();
+              yield* emitFollowUp(text);
+              yield* finishChunks(turn, text + thinkAcc, 'stop');
+              return;
+            }
+          }
           // closeThink() 已关掉思考块，正文必须用新的下标，不能写死 0。
           yield* emitText(notice, turn, nextIndex);
           return;
@@ -1541,6 +1746,7 @@ export function apply(ctx, config = {}) {
       // 个文本块里——tail 同时用于 text-delta 与 block-end 的块内容，接在这里
       // 两处逐字一致，不会出现「块内容比外发的 delta 多一段」的错位。
       let recoveredCalls = null;
+      let unparsedNotice = null;
       if (withheld > 0 && !calls.length) {
         warn(`withheld protocol text (log-only full copy): ${finalText.slice(proseLimit)}`);
         recoveredCalls = recoverUnparsedCalls(finalText, tools);
@@ -1549,9 +1755,10 @@ export function apply(ctx, config = {}) {
           warn(notice);
           tail = tail ? `${tail}\n\n${notice}` : notice;
         } else {
-          const notice = unparsedCallNotice({ thinkAcc, tools, scene: idleScene(), withheld, head: finalText.slice(proseLimit, proseLimit + 200) });
+          const notice = unparsedCallNotice({ thinkAcc, tools, scene: idleScene(), withheld, head: finalText.slice(proseLimit, proseLimit + 200), diagnostic: diagnostics[0] || '' });
           warn(notice);
           tail = tail ? `${tail}\n\n${notice}` : notice;
+          unparsedNotice = notice;
         }
       }
       // 块内容必须与外发的 delta 逐字一致，否则界面上这一块会凭空多出协议原文。
@@ -1588,6 +1795,29 @@ export function apply(ctx, config = {}) {
         }
         yield* finishChunks(turn, proseBlock + thinkAcc, 'tool-calls');
         return;
+      }
+      // 0.16.25 自动续跑（正文块已收口的出口）：与 !textOpen 出口同一语义——把
+      // UNPARSED 提示补发进同一网页会话收第二轮；有调用照常派发（tool-calls），
+      // 有散文就作为最终答复收场，两头都不落空才回到既有的纯文本 stop 收场。
+      if (unparsedNotice) {
+        const cont = await autoContinueRound(unparsedNotice);
+        if (cont) {
+          const contValid = cont.calls.filter((c) => tools.some((t) => t?.name === c.name));
+          const contProse = safeAutoProse(cont.text);
+          if (contValid.length) {
+            const text = `AUTO_CONTINUED: 已自动补发提醒，网页已重新发起 ${contValid.length} 条调用。` + (contProse ? `\n\n${contProse}` : '');
+            yield* emitFollowUp(text);
+            yield* emitCallBlocks(contValid, 'auto-continued after unparsed round');
+            yield* finishChunks(turn, proseBlock + text + thinkAcc + cont.text, 'tool-calls');
+            return;
+          }
+          if (contProse) {
+            yield* emitFollowUp(contProse);
+            yield* finishChunks(turn, proseBlock + contProse + thinkAcc, 'stop');
+            return;
+          }
+          // 续跑轮既无调用也无可用散文（空回复）：不动块结构，落回下面的 stop 收场。
+        }
       }
       yield* finishChunks(turn, proseBlock + thinkAcc, 'stop');
     },
@@ -1681,7 +1911,7 @@ function thinkingOnlyNotice(thinkAcc, scene) {
  * @param {{thinkAcc?: string, tools?: Array<{name?: string}>, scene?: object|null, withheld?: number, head?: string}} v 本轮现场
  * @returns {string} 作为助手回复交回会话的提示文本
  */
-function unparsedCallNotice({ thinkAcc = '', tools = [], scene = null, withheld = 0, head = '' } = {}) {
+function unparsedCallNotice({ thinkAcc = '', tools = [], scene = null, withheld = 0, head = '', diagnostic = '' } = {}) {
   const available = (Array.isArray(tools) ? tools : []).map((t) => t?.name).filter(Boolean);
   const list = available.length > 24 ? available.slice(0, 24).join(', ') + ' …' : available.join(', ');
   const think = String(thinkAcc || '');
@@ -1695,8 +1925,12 @@ function unparsedCallNotice({ thinkAcc = '', tools = [], scene = null, withheld 
   const bits = [];
   if (withheld > 0) bits.push(`已扣留 ${withheld} 字符协议原文`);
   if (scene?.lastEndReason) bits.push(`本轮收束原因 ${scene.lastEndReason}`);
+  // 0.16.25：解析诊断随提示透出（invoke 体静默丢弃分支补的留痕）。真机 cd997dd3
+  // 同一形状连错 3 轮、提示没打到病灶是直接原因——模型看到「对象闭合后还挂着
+  // {"replace_all":false}」这种点名判语，才知道该改什么，而不是往「太长/截断」上猜。
+  if (diagnostic) bits.push(`解析诊断 ${String(diagnostic).slice(0, 200)}`);
   return 'TOOL_CALL_UNPARSED: 网页这一轮发出了工具调用，但桥没能把它变成可执行的调用'
-    + '（最常见原因：JSON 里漏写 name 字段，或参数 JSON 不配平/被截断）。'
+    + '（最常见原因：JSON 里漏写 name 字段、参数 JSON 不配平/被截断，或参数对象闭合后追加了第二个对象等多余内容）。'
     + `本会话可用工具：${list || '（无）'}。`
     // 0.16.18/0.16.19：重发指引改指官方训练模板（与首轮教学/再教学同一个形状），
     // 且示例用**真实工具名**（占位符会被模型照抄 → TOOL_UNKNOWN，run-9 实证）。
@@ -1707,6 +1941,11 @@ function unparsedCallNotice({ thinkAcc = '', tools = [], scene = null, withheld 
     // 教学没打到病灶，模型连抄三轮坏形状（.tmp/debug-log-2026-09-19-run10-*.md）。
     + '重发注意：收尾 token 不带斜杠，每条调用都要用成对的 call-begin/call-end 包住、'
     + '多条共用同一对 calls-begin/calls-end；'
+    // 0.16.25：点名 cd997dd3 的病灶（sep 后必须是单个 JSON 对象）。模型当时的
+    // 自查「太长/被截断/字符坏 JSON」三项都不成立——主对象 2029 字符完全合法，
+    // 坏的只是闭合后多挂的 `,{"replace_all":false}`。
+    + 'sep 与 call end 之间必须是单个完整 JSON 对象，可选参数（如 replace_all）写在同一个对象里，'
+    + '对象闭合后不要再追加任何内容；'
     + '如果任务不需要工具，请直接给出结论。'
     + (bits.length ? `（${bits.join('，')}）` : '')
     + (headText ? `\n被扣协议原文开头：${headText}` : '')
@@ -2031,6 +2270,10 @@ function imageMarkdown(images) {
    */
   function recordWaitMetrics(metrics, meta) {
     if (!metrics) return;
+    // 0.16.24：本轮已结算 ⇒ 在途读数必须让位。否则药丸会同时持有「正在涨的
+    // live」与「已落账的累计」，而 composerWaitPillLabel 优先显示 live——
+    // 那个数会一直停在冻结值上，把刚结算完的账本挡住。
+    clearLiveWait(meta);
     waitStats.total = accumulateWait(waitStats.total, metrics);
     const key = sessionKeyOf(meta);
     if (key) {
@@ -2050,12 +2293,71 @@ function imageMarkdown(images) {
     if (typeof raw !== 'string' || !raw) return null;
     return raw.split('::')[0] || null;
   }
+  // ---- 在途等待（0.16.24）----------------------------------------------------
+  //
+  // 需求（用户原话）：「能做到等待发送实际显示和官方一样开始就计时增长，不要等
+  // 过了再变一下子从 n 秒到 m 秒？」
+  //
+  // 旧实现只把 waitStats 账本透给前端，而账本是**事后结算**的——它在整轮生成
+  // 结束、relay 把 metrics 交回来时才更新。于是等待期间药丸什么都不显示（首次
+  // 等待时整枚不渲染），等一切结束数字才一次性跳出来，正是用户描述的那个观感。
+  //
+  // 这里发布「这一轮正在等」的起始时刻；`liveWaitLabel`（wait-stats.js）每次
+  // 轮询现算时长——文案仍只有一个来源，客户端不需要第二份时长格式化。
+  //
+  // 键取 sessionKeyOf(meta)（= 主会话 id），与账本同一把键：药丸按会话 id 查询，
+  // 两者必须能对上，否则会出现「面板有数、药丸没有」。
+  const liveWaits = new Map();   // sessionId → { startedAt, endsAt, baseMs, kind, accountKey }
+  const LIVE_WAIT_CAP = 64;
+  // 幽灵兜底：一轮在 sleepSignal 里被 abort 时 finally 会清，但万一某条路径抛在
+  // 清理之前，这条在途记录会永远冻结在一个数上。超过这个年龄一律当没有——
+  // 宁可少显示一段实时读数，也不要让药丸停在一个不动的假数上。
+  const LIVE_WAIT_STALE_MS = 15 * 60_000;
+
+  /** 发布/续写一段在途等待。同一会话重复调用按 LRU 刷新（后一段覆盖前一段）。 */
+  function beginLiveWait(meta, accountKey, kind, waitMs, baseMs) {
+    const key = sessionKeyOf(meta);
+    if (!key) return null;
+    const startedAt = Date.now();
+    liveWaits.delete(key);
+    liveWaits.set(key, {
+      startedAt,
+      // endsAt 之后 liveWaitLabel 把时长**冻结**在满值：等待确实结束了，但整轮
+      // 生成还没跑完、账本还没结算，这时数字不该回退也不该继续涨。
+      endsAt: startedAt + Math.max(0, Math.round(Number(waitMs) || 0)),
+      baseMs: Math.max(0, Math.round(Number(baseMs) || 0)),
+      kind,
+      accountKey,
+    });
+    while (liveWaits.size > LIVE_WAIT_CAP) liveWaits.delete(liveWaits.keys().next().value);
+    return key;
+  }
+
+  /** 清掉某会话的在途等待（等待结束、轮次收场、或结算落账时）。 */
+  function clearLiveWait(meta) {
+    const key = sessionKeyOf(meta);
+    if (key) liveWaits.delete(key);
+  }
+
+  /** 控制面读取用：某会话**正在**等待的那一段（无则 null）。 */
+  function liveWaitOf(sessionId) {
+    const key = typeof sessionId === 'string' && sessionId ? sessionId.split('::')[0] : null;
+    if (!key) return null;
+    const live = liveWaits.get(key) || null;
+    if (!live) return null;
+    if (Date.now() - live.startedAt > LIVE_WAIT_STALE_MS) { liveWaits.delete(key); return null; }
+    return live;
+  }
+
   /** 控制面读取用：`{ total, session }`。sessionId 缺省时只回累计。 */
   function waitStatsSnapshot(sessionId) {
     const key = typeof sessionId === 'string' && sessionId ? sessionId.split('::')[0] : null;
     return {
       total: waitStats.total,
       session: key ? (waitStats.sessions.get(key) || emptyWaitStats()) : null,
+      // 在途等待与账本一起回，保证药丸的「正在涨」与「已结算」是同一把键查出来的。
+      live: liveWaitOf(sessionId),
+      now: Date.now(),
     };
   }
   // 站点限流退避重试上限（RATE_LIMITED）。退避时长 = max(发送间隔, 10s) × 已重试次数，
@@ -2168,26 +2470,63 @@ function imageMarkdown(images) {
               //     两条路都保住了上下文，没有静默丢弃；
               //   · 不重置会话槽 ⇒ 万一网页其实还停在那个会话上（驱动的 URL 自愈），
               //     下一轮的增量直接落对地方，而不是被我们提前判死。
-              // 窗口过期后的重建照旧由上面的 `m.rebuild()` 分支放行。
+              // 窗口过期后的重建照旧由下面的 `m.rebuild()` 分支放行。
+              //
+              // 0.16.28：节流窗口内**先等完剩余窗口再重建**，不再把提示当正文交回。
+              // 真机取证（session-4f236a51，reply-log 逐字 52 次）：提示是**纯文本
+              // 回复**，agent 循环把它当最终答复收场——goal 自动化的每一轮被空转
+              // 烧掉 30 秒、任务零进展，用户看到「被好心提醒完全打断」。等待是有界
+              // 的（≤ 窗口全长，默认 60s），abort 立即短路到旧收场（提示只在
+              // 「用户真的叫停」时才有资格成为本轮正文）。
               if (SESSION_REBUILD_THROTTLE_MS > 0 && prev && now - prev.at < SESSION_REBUILD_THROTTLE_MS) {
                 const waitMs = SESSION_REBUILD_THROTTLE_MS - (now - prev.at);
-                const notice = sessionSwitchedNotice({
-                  waitLeftMs: waitMs,
-                  sinceLastMs: now - prev.at,
-                  chars: prev.chars,
-                });
+                if (opts.signal?.aborted) {
+                  const notice = sessionSwitchedNotice({
+                    waitLeftMs: waitMs,
+                    sinceLastMs: now - prev.at,
+                    chars: prev.chars,
+                  });
+                  warn(`web session rebuild throttled (sessionKey=${m.sessionKey}, ${Math.round(waitMs / 1000)}s left, `
+                    + `last rebuild ${prev.chars} chars) — 已中止，交回「已切换会话」提示`);
+                  sessionSwitchNotices += 1;
+                  cededCursorKeys.add(m.sessionKey);
+                  while (cededCursorKeys.size > 512) cededCursorKeys.delete(cededCursorKeys.values().next().value);
+                  return { text: notice, thinking: '', images: [] };
+                }
                 warn(`web session rebuild throttled (sessionKey=${m.sessionKey}, ${Math.round(waitMs / 1000)}s left, `
-                  + `last rebuild ${prev.chars} chars) — 不再重复整段重建，改交回「已切换会话」提示`);
-                sessionSwitchNotices += 1;
-                cededCursorKeys.add(m.sessionKey);
-                while (cededCursorKeys.size > 512) cededCursorKeys.delete(cededCursorKeys.values().next().value);
-                return { text: notice, thinking: '', images: [] };
+                  + `last rebuild ${prev.chars} chars) — 本轮内等完剩余窗口后照常重建（0.16.28：不再用提示打断任务）`);
+                try {
+                  await sleepSignal(waitMs, opts.signal);
+                } catch {
+                  // 等待中途被 abort：短路到旧收场，不往下重建。
+                  const notice = sessionSwitchedNotice({
+                    waitLeftMs: 0,
+                    sinceLastMs: now - prev.at,
+                    chars: prev.chars,
+                  });
+                  sessionSwitchNotices += 1;
+                  cededCursorKeys.add(m.sessionKey);
+                  while (cededCursorKeys.size > 512) cededCursorKeys.delete(cededCursorKeys.values().next().value);
+                  return { text: notice, thinking: '', images: [] };
+                }
               }
               // 重放文本只算一次：既要发给网页，也要作为「这次重建了多少字符」的读数
               // 留给下一次节流判定（m.rebuild() 是纯序列化，但 40 万字符不该算两遍）。
+              // 0.16.28：等待过节流窗的话时钟必须刷新——否则节流记录带着等待前的
+              // 旧时间戳，下一次撞窗判定会把真实间隔算长（窗口提前失效）。
               const rebuildText = m.rebuild();
-              lastSessionRebuildAt.set(m.sessionKey, { at: now, chars: rebuildText.length });
+              lastSessionRebuildAt.set(m.sessionKey, { at: Date.now(), chars: rebuildText.length });
               while (lastSessionRebuildAt.size > 512) lastSessionRebuildAt.delete(lastSessionRebuildAt.keys().next().value);
+              // 整段重建全文同步落盘（0.16.28）：这份文本就是「新开会话时把上下文
+              // 通过文件发送」的会话文件——无论投递走 inline 还是附件，磁盘上必须
+              // 有这一轮真实重放了什么的正本。站点教学文件不在这里重写：它由
+              // fresh 首轮维护（重建的教学部分与首轮相同，executor 也没有工具
+              // 清单可再生成），这里只补会话文件。
+              writePromptFiles({
+                siteId,
+                sessionKey: m.sessionKey,
+                sessionText: rebuildText,
+              });
               log(`web session lost — replaying the full first-turn prompt into a fresh web chat (${rebuildText.length} chars)`);
               await drive.resetConversation(m.sessionKey).catch(() => {});
               return drive.sendTurn(m.sessionKey, rebuildText, { ...turnOpts, fresh: true });
@@ -2210,7 +2549,16 @@ function imageMarkdown(images) {
       }
       if (gapPlan.waitMs > 0) {
         log(`send gap: waiting ${Math.round(gapPlan.waitMs / 1000)}s before next send to ${accountKey}`);
-        await sleepSignal(gapPlan.waitMs, opts.signal);
+        // 0.16.24：等待**开始**就发布在途读数（药丸从此处开始逐秒涨），而不是
+        // 等整轮结束再让账本一次性跳变。
+        beginLiveWait(m, accountKey, 'gap', gapPlan.waitMs, waitedMs);
+        try {
+          await sleepSignal(gapPlan.waitMs, opts.signal);
+        } finally {
+          // 中途被 abort 时也要清：否则这条在途记录会停在一个不动的数上，
+          // 直到 LIVE_WAIT_STALE_MS 的幽灵兜底才消失。
+          clearLiveWait(m);
+        }
         waitedMs += gapPlan.waitMs;
       }
       // 基准在「本轮真正交给网页」的那一刻更新，且只在成功发出时——限流退避
@@ -2231,9 +2579,17 @@ function imageMarkdown(images) {
               // 10s 下限：限流滑窗以十秒计，几十毫秒的短间隔重试只会再次撞墙。
               // （rateLimitBackoffMinMs 仅供离线测试调小；真实运行缺省 10_000。）
               const backoff = Math.max(sendGapMs, cfg.rateLimitBackoffMinMs ?? 10_000) * retries;
+              // 0.16.24：`baseMs` 传**已经等过的**时长，于是药丸从「发送间隔等待」
+              // 直接接着往上涨，而不是退避一开始又从 0 重来。
+              const baseBeforeBackoff = waitedMs;
               waitedMs += backoff;
               warn(`rate limited — retry ${retries}/${RATE_LIMIT_RETRIES} after ${Math.round(backoff / 1000)}s (${accountKey})`);
-              await sleepSignal(backoff, opts.signal);
+              beginLiveWait(m, accountKey, 'rate-limit', backoff, baseBeforeBackoff);
+              try {
+                await sleepSignal(backoff, opts.signal);
+              } finally {
+                clearLiveWait(m);
+              }
               continue;
             }
             // PROMPT_TRUNCATED 自动压缩重试（0.16.11）：真机 0a62dbb8 首轮 72,980 字符
@@ -2604,26 +2960,58 @@ function imageMarkdown(images) {
         commit() {},
       };
     }
-    // 游标指纹只锁「真正决定网页侧提示词内容」的东西：模型、系统提示词、
-    // 全局指令、工具**名字集合**、以及已经发出去的消息。
+    // 游标判定（0.16.28 拆两层，见 lib/session-anchor.js 头注）：
     //
-    // 旧实现把 options.tools 整个对象 JSON.stringify 进指纹——工具描述的措辞
-    // 一变（宿主升级、动态描述、参数 schema 里字段顺序变化）指纹就变，游标被
-    // 判为陈旧、下一轮改走「整段重建」，网页那一侧于是被重开一个新会话。
-    // 真机表现：一切正常但上下文像「不动了」（每轮都在重建首轮），并且网页会话
-    // 槽被反复切换。名字集合一致就沿用同一网页会话。
+    //   · **契约指纹**——模型、系统提示词、全局指令、工具**名字集合**。任何一项
+    //     变了，网页侧的教学/协议形态就变了，必须整段重建。旧实现把 options.tools
+    //     整个对象 JSON.stringify 进指纹——工具描述的措辞一变（宿主升级、动态描述、
+    //     参数 schema 里字段顺序变化）指纹就变，游标被判为陈旧、下一轮改走
+    //     「整段重建」，网页那一侧于是被重开一个新会话。真机表现：一切正常但
+    //     上下文像「不动了」（每轮都在重建首轮），并且网页会话槽被反复切换。
+    //     名字集合一致就沿用同一网页会话——这条 0.16.4 的修正原样保留。
+    //   · **内容锚**——已发尾部 K 条消息的逐条哈希。真机取证（session-4f236a51，
+    //     2026-09-20）：宿主 goal 自动化每个 turn 把 `<goal_round>` 提示拼进数组
+    //     头部、turn 结束再移除（agent/inbox/spliced start=0 各 24 次），旧整体
+    //     前缀指纹对头部增删零容忍 → 每轮判 fresh → 整段重建风暴（52 次
+    //     SESSION_SWITCHED、重放 245k→251k 字符逐轮膨胀、网页会话被反复重开）。
+    //     现在指纹失配先试锚点重定位（reanchorSent）：在尾部找已发内容的连续
+    //     匹配段，命中就**续同一网页会话**发增量；只有尾部真被改写（压缩摘要
+    //     替换等）才回落整段重建。
     const toolNameKey = Array.isArray(options.tools)
       ? options.tools.map((t) => String(t?.name || '')).filter(Boolean).sort().join(',')
       : '';
+    const contract = contractFingerprintOf({ model, system: options.system, toolNameKey, extraPrompt });
     const fingerprint = count => createHash('sha256').update(JSON.stringify({ model, system: options.system, tools: toolNameKey, extraPrompt, messages: messages.slice(0, count) })).digest('hex');
     let st = sessionState.get(keyPath);
-    if (st && (messages.length <= st.sent || st.fingerprint !== fingerprint(st.sent))) st = null;
+    if (st) {
+      if (st.contract !== contract) {
+        st = null;
+      } else if (st.fingerprint !== fingerprint(st.sent) || messages.length <= st.sent) {
+        // 旧判据在此直接判死。现在先试内容锚：头槽轮转 / 历史删改（只删不改尾）
+        // 都能重定位续跑；锚定后没有新消息（sent' >= length）或锚定失败才判 fresh。
+        const re = reanchorSent(messages, st.tailHashes);
+        if (re && re.sent < messages.length) st.sent = re.sent;
+        else st = null;
+      }
+    }
     const fresh = !st;
     st ||= { sent: 0, toolResults: 0, tokens: 0 };
     // 增量轮的再教学提示按站点取（glm 只教代码块形状，与首轮同一立场）。
     const delta = serializeDelta(messages, st.sent, st.toolResults, undefined, trainNoteFor(siteId, '', options.tools));
     let prompt;
-    if (fresh) { prompt = serializeFirstTurn({ ...options, extraPrompt, siteId }); recordPreset(prompt); }
+    if (fresh) {
+      prompt = serializeFirstTurn({ ...options, extraPrompt, siteId });
+      recordPreset(prompt);
+      // 提示词落盘（0.16.28）：fresh 首轮 = 站点教学全文（稳定部分）+ 会话上下文
+      // 全文（完整首轮）同时落盘。增量轮不写——上下文没变，落盘只会制造 IO 噪音。
+      // 静默失败由 prompt-store 自己兜底，这里不接错误分支。
+      writePromptFiles({
+        siteId,
+        sessionKey: keyPath,
+        siteText: buildPreset({ ...options, extraPrompt }) + transportNoteFor(siteId, options.tools),
+        sessionText: prompt,
+      });
+    }
     else prompt = delta.text;
     // 上下文计数口径（问题③根因）：网页这一侧是「首轮全文 + 后续增量」，模型
     // 实际看到的上下文 = 本会话已发出去的全部文本之和。旧实现把 usage.inputTokens
@@ -2699,7 +3087,17 @@ function imageMarkdown(images) {
         sessionState.delete(keyPath);
         // outTokens 必须随条目延续：noteOutput 与 commit 的先后不定，若这里重建
         // 时丢掉它，「先收尾后 commit」的轮次会把助手输出累计清零（分子悄悄回落）。
-        sessionState.set(keyPath, { sent: messages.length, toolResults: delta.toolResultsSent, fingerprint: fingerprint(messages.length), tokens: cumulativeTokens, outTokens: st.outTokens || 0 });
+        // contract / tailHashes（0.16.28）：下一轮游标判定的两层依据，见上方
+        // buildTurn 注释与 lib/session-anchor.js。
+        sessionState.set(keyPath, {
+          sent: messages.length,
+          toolResults: delta.toolResultsSent,
+          fingerprint: fingerprint(messages.length),
+          contract,
+          tailHashes: messages.slice(-ANCHOR_LEN).map(messageHash),
+          tokens: cumulativeTokens,
+          outTokens: st.outTokens || 0,
+        });
         if (sessionState.size > 512) sessionState.delete(sessionState.keys().next().value);
       },
     };

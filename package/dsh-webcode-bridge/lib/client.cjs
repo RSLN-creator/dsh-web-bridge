@@ -323,18 +323,29 @@ window.__ModuleLoader__.load({
       const sessionId = owner?.sessionId || null;
       const [data, setData] = React.useState(null);
       const [open, setOpen] = React.useState(false);
+      // 0.16.24：本轮是否**正在等待发送**。服务端在 live 期间每秒现算文案，
+      // 因此这里也要跟着把轮询节奏从 10 秒提到 1 秒——否则那个数 10 秒才动
+      // 一格，与用户要的「开始就计时增长」不是一回事。
+      const [liveActive, setLiveActive] = React.useState(false);
       const rootRef = React.useRef(null);
       React.useEffect(() => {
-        if (!sessionId) { setData(null); return () => {}; }
+        if (!sessionId) { setData(null); setLiveActive(false); return () => {}; }
         let alive = true;
         const pull = () => api('wait-stats', { sessionId })
-          .then(r => { if (alive) setData(r || null); })
+          .then(r => {
+            if (!alive) return;
+            setData(r || null);
+            // live 由服务端发布/清理（等待开始与结束两个时刻），客户端只跟随：
+            // 不在本地推断「应该在等了」，避免两端各自算出一个不同的结论。
+            setLiveActive(Boolean(r && r.live));
+          })
           .catch(() => { /* 中继未起时静默：这条是附加信息，不该刷错误 */ });
         pull();
-        // 10 秒一次足够：这个数只在本轮结束后才变，且是本地回环请求。
-        const timer = setInterval(pull, 10000);
+        // 静止时 10 秒一次足够（这个数只在本轮结束后才变，且是本地回环请求）；
+        // 在途时 1 秒一次，让数字逐秒往上走。
+        const timer = setInterval(pull, liveActive ? 1000 : 10000);
         return () => { alive = false; clearInterval(timer); };
-      }, [sessionId]);
+      }, [sessionId, liveActive]);
       // 官方 StatsPills 的关闭语义（0.15.11）。
       //
       // 官方那两枚药丸由同一个 useState 驱动（openPill 独占：点另一枚就换过去），
@@ -389,8 +400,15 @@ window.__ModuleLoader__.load({
               ? h('span', { className: 'hwb-waitpanel-value' }, data.sessionValue)
               : null),
           h('div', { className: 'hwb-waitpanel-rule', 'aria-hidden': true }),
-          rows.length
+          // 0.16.24：正在等待时，明细第一行就是这一段（与药丸同源同数）。
+          // 它排在账本行之前，因为「此刻在等多久」比「历史累计」更贴近用户此刻
+          // 的问题——面板展开时数字仍在逐秒更新。
+          (data?.liveValue || rows.length)
             ? h('dl', { className: 'hwb-waitpanel-grid' },
+              data?.liveValue
+                ? h('div', { className: 'hwb-waitpanel-row live' },
+                  h('dt', null, '正在等待发送'), h('dd', null, data.liveValue))
+                : null,
               rows.map(r => h('div', { key: r.label, className: 'hwb-waitpanel-row' },
                 h('dt', null, r.label), h('dd', null, r.value))))
             : h('p', { className: 'hwb-hint' }, '本会话尚无等待记录。')));
@@ -412,46 +430,68 @@ window.__ModuleLoader__.load({
      */
     function PromptPanel({ onSaved }) {
       const [variants, setVariants] = React.useState(null);
+      // 每行一个网站：`sites` 由服务端按**该站点实际会用的协议**现算（含模板全文）。
+      const [rows, setRows] = React.useState(null);
       const [activeId, setActiveId] = React.useState('');
-      const [chosen, setChosen] = React.useState('');
+      // 预览选择：siteId → 协议 id。缺省 = 该站点**真实在用**的协议（sites[].variantId），
+      // 下拉只切换预览，不改真实选路（与「模板只读」的既定立场一致）。
+      const [pick, setPick] = React.useState({});
       const [meta, setMeta] = React.useState(null);
       const [error, setError] = React.useState('');
       const load = React.useCallback(() => {
         api('prompt-variants').then(r => {
           setVariants(r.variants || []);
+          setRows(r.sites || []);
           setMeta({ toolsSource: r.toolsSource, active: r.active, extraPrompt: r.extraPrompt });
-          // 默认展示「本会话真正会用的那一支」——那才是用户想核对的东西。
-          const want = r.active?.variantId || (r.variants?.[0]?.id ?? '');
-          setActiveId(want); setChosen(c => c || want);
+          // 标出「本会话最近一次真正用的是哪一支」——那才是用户想核对的东西。
+          setActiveId(r.active?.variantId || '');
           setError('');
         }).catch(e => setError(e.message));
       }, []);
       React.useEffect(() => { load(); }, [load]);
       if (error) return h('p', { role: 'alert', className: 'hwb-hint' }, '首轮提示词加载失败：' + error);
-      if (variants === null) return h('p', { className: 'hwb-hint' }, '加载首轮提示词…');
-      const hit = variants.find(v => v.id === chosen) || variants[0];
-      const activeVariant = variants.find(v => v.id === activeId);
+      if (rows === null || variants === null) return h('p', { className: 'hwb-hint' }, '加载首轮提示词…');
+      const variantById = new Map(variants.map(v => [v.id, v]));
       return h('div', { className: 'hwb-import' },
-        h('div', { className: 'hwb-row' },
-          h('span', { className: 'hwb-row-label' }, '适配'),
-          h('div', { className: 'hwb-row-main' },
-            variants.length > 1
-              ? h('select', { className: 'hwb-model-select', value: hit.id, onChange: e => setChosen(e.target.value) },
-                variants.map(v => h('option', { key: v.id, value: v.id },
-                  v.label + (v.id === activeId ? ' · 本会话正在用' : ''))))
-              : h('span', { className: 'hwb-hint' }, hit.label))),
-        h('p', { className: 'hwb-hint' }, hit.note),
         h('p', { className: 'hwb-hint' },
-          '模板由桥按会话的工具清单自动生成，是**只读**的；可编辑的只有下方的「全局指令」。'
+          '按网站列出。每行的下拉是该网站可用的协议——切换只**预览**模板，不改变真实'
+          + '选路（每个网站实际用哪一支由桥按站点决定，标在行首）。模板由桥按会话的工具'
+          + '清单自动生成，是**只读**的；可编辑的只有下方的「全局指令」。'
           + (meta?.toolsSource === 'placeholder'
             ? '当前工具清单是占位示例——发送第一条消息后会自动换成该会话的真实清单。'
-            : '')
-          + (activeVariant ? '本会话最近一次实际使用的是「' + activeVariant.label + '」。' : '')),
-        h('pre', null, hit.text),
+            : '')),
+        rows.map(row => {
+          const picked = pick[row.siteId] || row.variantId;
+          const hit = variantById.get(picked) || variantById.get(row.variantId) || variants[0];
+          // 该站点真实在用的那一支（行首标签用它，与「预览选中」区分开）。
+          const realLabel = (variantById.get(row.variantId) || {}).label || row.variantId;
+          const previewing = picked !== row.variantId;
+          return h('div', { key: row.siteId, className: 'hwb-site-prompt' },
+            h('div', { className: 'hwb-row' },
+              h('span', { className: 'hwb-row-label' }, row.siteName),
+              h('div', { className: 'hwb-row-main' },
+                h('select', {
+                  className: 'hwb-model-select', value: picked,
+                  onChange: e => setPick(p => ({ ...p, [row.siteId]: e.target.value })),
+                },
+                  variants.map(v => h('option', { key: v.id, value: v.id },
+                    v.label + (v.id === row.variantId ? ' · 该网站正在用' : '')))),
+                h('span', { className: 'hwb-hint' },
+                  '实际使用：' + realLabel + (previewing ? '（下方为预览，未生效）' : '')))),
+            h('details', { className: 'hwb-site-prompt-details' },
+              h('summary', null, '查看该协议的完整模板'),
+              h('p', { className: 'hwb-hint' }, hit.note),
+              h('pre', null, hit.text),
+              h('p', { className: 'hwb-hint' },
+                '增量轮再教学提示（每 5 个工具结果重贴一次，立场必须与首轮一致）：' + hit.trainNote)));
+        }),
         meta?.active?.tools?.length
           ? h('p', { className: 'hwb-hint' }, '本会话工具：' + meta.active.tools.join(', '))
           : null,
-        h('p', { className: 'hwb-hint' }, '增量轮再教学提示（每 5 个工具结果重贴一次，立场必须与首轮一致）：' + hit.trainNote));
+        activeId
+          ? h('p', { className: 'hwb-hint' }, '本会话最近一次实际使用的是「'
+            + ((variantById.get(activeId) || {}).label || activeId) + '」。')
+          : null);
     }
 
     function GlobalPrompt({ onSaved }) {
@@ -2317,6 +2357,13 @@ window.__ModuleLoader__.load({
         ".hwb-preset pre,.hwb-import pre{max-height:320px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.55;background:var(--dsw-alias-interactive-bg-hover,#8881);border-radius:8px;padding:10px;margin:0}",
         // 全局指令编辑区 / 首轮提示词面板的容器
         ".hwb-import{display:flex;flex-direction:column;gap:8px;padding:8px 0}",
+        // 0.16.25 首轮提示词：按网站逐行。每行 = 网站名 + 协议下拉 + 「实际使用」标注，
+        // 完整模板折进 details——十个站点各铺一份全文会把设置页淹掉。
+        ".hwb-site-prompt{border:1px solid var(--dsw-alias-border-l3,#8883);border-radius:8px;padding:8px 10px}",
+        ".hwb-site-prompt select{max-width:100%}",
+        ".hwb-site-prompt details{margin-top:2px}",
+        ".hwb-site-prompt summary{cursor:pointer;font-size:13px;color:var(--dsw-alias-label-secondary,inherit)}",
+        ".hwb-site-prompt pre{max-height:240px}",
         ".hwb-conversation{position:relative;display:flex;flex-direction:column;width:100%;height:100%;min-height:0}",
         // 站点栏：flex:none + z-index 保证**永不被网页区遮住**（用户报的「有一点
         // 遮挡」就是旧实现里网页区在层叠上压过了标签条）。

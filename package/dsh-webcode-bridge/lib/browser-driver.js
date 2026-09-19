@@ -309,6 +309,39 @@ export function promptTransportPlan(o = {}) {
 export const ATTACH_FORBIDDEN_SITES = Object.freeze(new Set(['deepseek']));
 
 /**
+ * 运行期附件禁令（0.16.28）：站点级**自愈降级**记录 ——「附件投递后零回复 ⇒ 自动
+ * 降级并记住」。这是 0.16.7 台账「仍未做 §2」挂账的理想形态：静态禁令（上面的
+ * ATTACH_FORBIDDEN_SITES）只能人工复验后解除，而站点契约是会变的（DeepSeek 修好
+ * 附件解析的那天，静态表就成了盲区）；反过来，未列入静态表的站点一旦出现同款
+ * 「传得上、零回复」症状，旧实现会每轮都白传一次附件。
+ *
+ * 判据与 0.16.7 真机签名逐字同源：**该轮真的走了附件**（attachTransport.transport
+ * === 'attach' 且未回落）且**正文/思考/图片全空**（emptyWebResponseError 的判定）。
+ * 命中即按站点记录（进程生命周期内有效，重启清零——重启后首预算作一次自然复验），
+ * promptTransportPlan 的 attachForbidden 判定与 status 读数都会看见它。
+ */
+const DYNAMIC_ATTACH_BLOCKS = new Map();
+
+/** 运行期附件禁令读数：{ at, code, total } | null。 */
+export function dynamicAttachBlock(siteId) {
+  return DYNAMIC_ATTACH_BLOCKS.get(String(siteId || '')) || null;
+}
+
+/** 该站点当前是否被附件禁令（静态 ∪ 运行期）拦住。 */
+export function attachForbiddenFor(siteId) {
+  return ATTACH_FORBIDDEN_SITES.has(siteId) || DYNAMIC_ATTACH_BLOCKS.has(String(siteId || ''));
+}
+
+/** 记录一次运行期禁令（runTurn 的空回复 × 附件轮现场）。幂等，保留首次现场。
+ *  返回是否新记（false = 已有记录）；warn 由调用点负责——模块级拿不到 cfg.logger。 */
+export function markDynamicAttachBlock(siteId, total) {
+  const key = String(siteId || '');
+  if (DYNAMIC_ATTACH_BLOCKS.has(key)) return false;
+  DYNAMIC_ATTACH_BLOCKS.set(key, { at: Date.now(), code: 'ATTACH_ZERO_REPLY', total });
+  return true;
+}
+
+/**
  * 停滞判定（纯函数）：块间回读长度不增长即计入停滞，连续两块即判死。
  *
  * 为什么是「连续两块」而不是「一块」：富文本编辑器（tiptap/ProseMirror）在
@@ -828,7 +861,11 @@ export function createBrowserDriver(options = {}) {
       // 0.16.9：站点附件禁令的**可核对读数**。0.16.7 加了禁令却没在任何投影里出现，
       // 于是「修复生效没有」在面板与 /status 上都看不出来（attach-status 反而还在
       // 承诺超阈值走附件）。读数是站点事实，放在 status 上与 promptTransport 并列。
-      attachForbidden: ATTACH_FORBIDDEN_SITES.has(siteId),
+      // 0.16.28：拆成静态（ATTACH_FORBIDDEN_SITES）与运行期（attachBlocked，自愈
+      // 降级的现场：at/code/total）两格——「为什么这站不走附件」从此一眼可分。
+      attachForbidden: attachForbiddenFor(siteId),
+      attachForbiddenStatic: ATTACH_FORBIDDEN_SITES.has(siteId),
+      attachBlocked: dynamicAttachBlock(siteId),
       siteId,
       // 0.16.3：探针最近一次读数（见 attachProbe 声明处）。
       attachProbe,
@@ -2120,6 +2157,19 @@ export function createBrowserDriver(options = {}) {
         lastTimeoutScene = scene ? { ...scene, at: Date.now() } : { at: Date.now(), page: 'unavailable' };
         lastEndReason = 'timeout';
         lastEndReasonAt = Date.now();
+        // 0.16.28 自愈降级的第二个签名：附件轮整轮超时、页面无回复文本——真机复验
+        // （2026-09-20，62,596 字符附件上传成功 evidence 命中、240s 零回复）证明
+        // 「DeepSeek 收得下附件但不读」在整轮超时这一支同样出现，而它不走
+        // emptyWebResponseError（那是在收束后的空结果判定），自愈必须在超时点补位。
+        // 页面已有 N 字未回传（captureAlive 但 replyChars>0）不算「零回复」：
+        // 那是捕获/回传问题，不是附件不被读，降级反而会掩盖真故障。
+        const zeroReply = scene && scene.replyChars === 0;
+        if (zeroReply && attachTransport?.transport === 'attach' && !attachTransport.fallback
+          && markDynamicAttachBlock(siteId, attachTransport.total ?? String(message).length)) {
+          warn('attach transport timed out with zero reply (site=' + siteId + ', total='
+            + (attachTransport.total ?? String(message).length) + ') — auto-degraded: '
+            + 'this site stays inline until the bridge restarts (0.16.28 self-heal, timeout signature)');
+        }
         const err = new Error(`web turn timed out after ${cfg.requestTimeoutMs}ms（${detail}）`);
         if (a) a.reject(err); else warn(err.message);
       }, cfg.requestTimeoutMs);
@@ -2140,9 +2190,10 @@ export function createBrowserDriver(options = {}) {
           inlineLimit: cfg.attachInlineLimitChars,
           attachEnabled: cfg.attachInlineLimitChars > 0,
           attachSupported: true,
-          // 站点级禁令（0.16.7）：DeepSeek 收得下附件但读不到它（真机实测零回复），
-          // 因此该站点永远走输入框，与阈值无关。见 ATTACH_FORBIDDEN_SITES。
-          attachForbidden: ATTACH_FORBIDDEN_SITES.has(siteId),
+          // 站点级禁令（0.16.7 静态表 + 0.16.28 运行期自愈）：DeepSeek 收得下附件但
+          // 读不到它（真机实测零回复），因此该站点永远走输入框，与阈值无关。
+          // 见 ATTACH_FORBIDDEN_SITES 与 DYNAMIC_ATTACH_BLOCKS。
+          attachForbidden: attachForbiddenFor(siteId),
           // 设置面的「投递形态」开关（0.16.3）：'inline' = 用户显式要求纯文本，
           // 逐字回到旧行为；其余一律 'attach'（是否真的走附件仍由上面的阈值决定）。
           // 现读而不是取构造函数快照，理由见 promptTransportNow。
@@ -2330,7 +2381,19 @@ export function createBrowserDriver(options = {}) {
       // turn 8：reasoning 块 + finish、正文/调用为零 → UNKNOWN 硬失败，任务断链）。
       // 思考-only 由适配器的 thinkingOnlyNotice 路径交回提示继续任务；这里只拦全空。
       const emptyErr = emptyWebResponseError(result, { lastEndReason, rawHead: lastFinished?.rawHead });
-      if (emptyErr) throw emptyErr;
+      if (emptyErr) {
+        // 0.16.28 自愈降级：这一轮真的走了附件且全空——与 0.16.7 真机签名（传得上、
+        // 零回复）同源。按站点记住，之后该站点回落 inline 直到桥重启；不记的话，
+        // 「站点悄悄坏了附件」会表现为每轮白传一次附件 + 空回复 + 上层 reset 槽 +
+        // 整段重建的死循环（0.16.7 事故链的自动版）。
+        if (attachTransport?.transport === 'attach' && !attachTransport.fallback
+          && markDynamicAttachBlock(siteId, attachTransport.total ?? String(message).length)) {
+          warn('attach transport produced a zero-reply round (site=' + siteId + ', total='
+            + (attachTransport.total ?? String(message).length) + ') — auto-degraded: '
+            + 'this site stays inline until the bridge restarts (0.16.28 self-heal)');
+        }
+        throw emptyErr;
+      }
       if (!result.complete) {
         // 部分流：正文/思考/图片已拿到，但网页没发 FINISHED/close。把已有内容当
         // 本轮结果交出去（上层会解析工具协议、执行、回填），下一轮再让模型续写。

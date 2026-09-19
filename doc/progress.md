@@ -20,17 +20,17 @@
 
 | 项 | 值 |
 | --- | --- |
-| 工作树版本 | **0.16.23** |
-| 已装版本（profile） | **0.16.21**（2026-09-19 实测：web + headless 两处声明一致指向 `dsh-webcode-bridge-0.16.21.tgz`，`node_modules` 内 `package.json` = 0.16.21 且 `lib/client.cjs` 含本版 token 与 page 契约；`dsh plugin add` 声明持久层通道）。**0.16.22 未打包未装**，需走 `dsh plugin add` |
-| 运行中的进程 | run-8 真机验收以 `dsh --profile headless` 进程级验证（0.16.16 时段）；DSH web（3080）2026-09-19 凌晨未运行 |
+| 工作树版本 | **0.16.28** |
+| 已装版本（profile） | **0.16.28**（2026-09-20 实测：web + headless 两处 `node_modules` 均为 0.16.28、声明已同步 0.16.28 tgz、`session-anchor.js`/`prompt-store.js` 在场、`reanchorSent` 接线 3 处；`dsh web` 已重启加载，`/__webcode/status` 实测 `build.version=0.16.28`）。headless 侧**下次启动 `dsh --profile headless` 时生效** |
+| 运行中的进程 | **DSH web（3080）= 0.16.28**（2026-09-20 02:5x 重启，附件复验实验后以正式 tarball 版本运行）；运行读数：`attachForbiddenStatic:true`、`attachBlocked:null` |
 | 上游 | `origin/main` = `9d4c61a`（0.16.10 台账推送）；0.16.11–0.16.22 本地已提交/待推 |
-| 单测基线 | **63/63 测试文件**；全量 **736 条**（0.16.22 为 785/67 文件；0.16.23 删 4 个 DSML 宽容回归文件、新增 6 条退役钉子 + 2 条站点图标钉子） |
-| 注释闸门 | **error 0 / warn 0，退出码 0**（2026-09-19 实跑） |
-| 文件规范闸门 | `check-repo-hygiene.mjs` **PASS**（无 BOM + 索引无死链 + CI/engines Node 版本相容） |
+| 单测基线 | **67/67 测试文件**；全量 **782 条**（0.16.28 新增 3 文件：session-anchor 7 / prompt-store 6 / attach-selfheal 5，退出码 0） |
+| 注释闸门 | **error 0 / warn 0，退出码 0**（2026-09-20 实跑，123 文件） |
+| 文件规范闸门 | `check-repo-hygiene.mjs` **PASS**（无 BOM + 索引无死链 + CI/engines Node 版本相容，2026-09-20 实跑） |
 | 发布闸门 | `verify-pack` 逐文件 sha256 相同 + 接线完好，退出 0（0.16.16 实跑 37/37） |
-| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.23 / testFiles 63/63） |
+| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.28 / testFiles 67/67） |
 | 已装包核对 | 0.16.21 已装机核对（见已装版本行） |
-| 下一阶段 | **0.16.23 需打包安装并重启 DSH 后生效**；DSML 退役后漂移形状全部走 UNPARSED 再教学（预期 UNPARSED 通知短暂上升、官方形状占比收敛——真机判据见 §0.16.23 六）；站点图标半成品已接手做绿，待真机看效果 |
+| 下一阶段 | **0.16.28 已打包、已装（web+headless）、`dsh web` 已重启生效**。四条：① 会话游标内容锚定（goal 头槽轮转不再触发重建风暴）② 重建节流改等待重建（SESSION_SWITCHED 提示只在 abort 兜底）③ 提示词每站点/每会话落盘 ④ 附件零回复自愈降级（空结果 + 超时两签名）。真机判据见 §0.16.28 六 |
 
 > **§0.16.10 真机判据（重启后逐条核）**：① `GET /__webcode/status` 的 `build.version` = **0.16.10**；
 > ② 让模型回复一段含 `<b>`、`<foo>`、`Array<T>` 或字面 `<tool_call>` 示例的正文，**逐字对比** harness
@@ -43,6 +43,142 @@
 > 掩盖了「web 落后两个版本」这个真因，直接导致用户按台账以为装好了、重启后仍然不变。
 > **教训记在这里而不是删掉**：凡是「已装/已重启/已验证」这类状态行，**必须逐 profile 写、并附
 > sha256 前 12 位**，否则它会把「一个 profile 装了」读成「都装了」。 |
+
+## 0.16.28（2026-09-20）—— 会话游标内容锚定 + 节流改等待重建 + 提示词落盘 + 附件自愈
+
+**用户指令（逐字）**：「1.怎么做到传输文件？参考已有插件dsh-drop-caret？将提示词保存为本地的单独文件-每个网址一个，然后每轮发送过去，然后是每轮会话单独本地地址--如果新开会话-web端，就一样把这个当上下文通过文件发送！ 2.为什么网页会话会被随机重开？然后就死循环导致无法继续会话！被前面好心只是想要提醒而不是中断的提示内容完全打断！请你参考已有协议自动化以及官方的自动化流程优化这里的逻辑！」（只看 DeepSeek；先确认路线再执行）
+
+### 一、取证：两问同源，根因在会话游标（真机日志逐字核实）
+
+会话 `session-4f236a51`（2026-09-20 01:29–01:31）的 reply-log + 会话 jsonl 帧取证：
+
+1. **DSH goal 自动化**（`<goal_round> Round: 2/256…7/256`）每 30–60 秒自动续一轮；
+2. 宿主信箱机制每个 turn 把 goal 提示**拼进消息数组头部**（`agent/inbox/spliced` start=0
+   inserted=1）、turn 结束**从头部移除**（removed=1），本会话各 12 次；
+3. 桥的会话游标是对「已发消息前缀」做**整体哈希**（lib/index.js buildTurn fingerprint）。
+   头部一有增删，已发前缀窗口内容整体位移，哈希必然失配 → 判 fresh → 要求**整段重建**
+   （重放 245,486 → 251,726 字符逐轮膨胀、每轮开新网页对话）——用户看到的「网页会话被随机重开」；
+4. 30 秒节流窗（0.16.6）把第二次重建拦下，SESSION_SWITCHED 提示**当正文交回**——agent
+   循环把纯文本轮当最终答复收场，goal 轮被空转烧掉 30 秒、任务零进展——「被好心提示完全打断」。
+   该会话 reply-log 里 **52 次 SESSION_SWITCHED**，与真实工具轮交替出现。
+
+### 二、修法（四条，全在桥侧）
+
+| # | 修法 | 落点 | 护栏 |
+| --- | --- | --- | --- |
+| A | **会话游标内容锚定**：指纹拆两层——「契约指纹」（模型/系统提示词/工具名集合/extraPrompt，变了才重建，0.16.4 的名字集合修正原样保留）+「内容锚」（已发尾部 6 条消息哈希；失配时从尾部逐条丢弃做连续段匹配，命中即重定位游标**续同一网页会话发增量**，找不到才回落重建）。头槽轮转、历史尾部删改从此不再触发重建；匹配取最后一次出现 + 段长 ≥2 压误配风险；len-2 锚（会话第 2 轮）有窄域单条救援 | 新 `lib/session-anchor.js`（messageHash/contractFingerprintOf/reanchorSent）+ buildTurn/sessionState/commit | `test/session-anchor.test.mjs` 7 条（纯函数 5 + 行为级 2：goal 头槽轮转不得 fresh、历史被改写必须 fresh） |
+| B | **重建节流改等待重建**：撞 30/60s 节流窗时，本轮内 `sleepSignal` 等完剩余窗口后照常重建并交回**重建轮的真实回复**；提示只在 abort 兜底（relay 在调用方 abort 时先 reject，executor 的提示返回本就到不了调用方——它的价值是「中止后绝不发起重建发送」的资源护栏）。节流记录时间戳在等待后刷新 | `lib/index.js` executor WEB_SESSION_LOST 分支 | `session-continuity.test.mjs` ⑥ 重写为「等完窗口→重建→交回重建内容→游标正常前进」，新增 ⑥b「abort 收场且第 4 次发送绝不发生」 |
+| C | **提示词落盘**：`~/.dsh/webcode/prompts/<site>.md`（站点教学/协议全文，fresh 首轮逐轮覆盖）+ `~/.dsh/webcode/sessions/<sessionKey>.md`（该会话最近一次首轮/整段重建全文，重建点同步落盘）。借 dsh-drop-caret 的消毒/隔离模式（token 白名单、`::` 折叠、防穿越），借 reply-log 的测试进程守卫与静默失败纪律。`dir:'off'` 显式关闭。这是 D 的投递源：无论 inline 还是附件，磁盘上必须有「这一轮真实发了什么」的正本 | 新 `lib/prompt-store.js` + buildTurn fresh 分支 + executor 重建分支 | `test/prompt-store.test.mjs` 6 条 |
+| D | **附件零回复自愈降级**（0.16.7 台账「仍未做 §2」挂账的理想形态）：该轮真走了附件且正文/思考/图片全空（emptyWebResponseError 判定，与 0.16.7 真机签名同源）→ 按站点记录运行期禁令（进程生命周期，重启清零=自然复验），promptTransportPlan 与 status 立即回落 inline；status 新增 `attachForbiddenStatic`/`attachBlocked` 两格把「为什么这站不走附件」拆开可查。**静态禁令表不动**——deepseek 的解除必须先真机复验（见 §五） | `lib/browser-driver.js`（DYNAMIC_ATTACH_BLOCKS/markDynamicAttachBlock/attachForbiddenFor） | `test/attach-selfheal.test.mjs` 5 条 |
+
+连带（E）：自动续跑提示加**框架前置**——`[桥·系统提示] 本条是桥发出的自动化续跑提示，不是用户发言：不要回应、解释或复述它…`。真机里模型会停下来「回应提醒」而不是「按提醒行动」；协议段（transportNoteFor）保留不动——0.16.25 的红线（续跑轮格式指引必须与首轮逐字同源）优先于省字符。护栏：auto-continue.test.mjs 新增 2 条断言。
+
+### 三、明确不做的（与用户确认过的边界）
+
+- **「每轮发送过去」收窄为「首轮/重建时落盘、超阈值时附件投递」**（用户在四问确认中选择的语义）：普通增量轮保持短文本 inline；漂移再教轮保持 inline——它只有 2–4k 字符且有 0.16.25 红线保护，附加上下文反而多一次「附件不被读」的风险面。
+- **deepseek 不移出静态附件禁令**：必须先真机复验（`POST /__webcode/attach-probe` 只传不发 + 受控实发一轮），复验通过才解除；自愈判据（D）是解除后的安全网，不是解除的替代。
+
+### 四、验证
+
+- 全量 `pnpm test`：**782/782 通过**（67 个测试文件，退出 0）。
+- 注释闸门 error 0 / warn 0；`check-repo-hygiene.mjs` PASS；`verify-pack` 39/39 逐字相同 + 接线完好。
+
+### 五、DeepSeek 附件真机复验（2026-09-20 02:5x，`dsh web` 已重启加载 0.16.28 实测）
+
+| 步骤 | 读数 | 结论 |
+| --- | --- | --- |
+| `GET /__webcode/status` | `build.version=0.16.28`、`attachForbiddenStatic` 读数在场 | 新版加载确认（新读数字段生效） |
+| 连接 + `POST attach-probe` | `ok:true, evidence:"text:webcode-probe.md"`，DOM 出现附件卡 | 上传通道完好（只传不发） |
+| 受控实发 ①（62,496 字符，transport 当时=inline） | **回复 `ATTACH_VERIFY_MARKER_7281=42` 逐字命中**，`lastEndReason=finished` | 62.5k 级 inline 投递健康；也说明用户此前把投递形态设成 inline 后长文照常可达 |
+| 受控实发 ②（同文，transport 切 attach） | `attachTransport={transport:'attach', evidence 命中, 62,596 字符, truncated:false}`，**240s 整轮超时、页面零回复文本**（`lastEndReason=timeout`） | **0.16.7 结论维持：DeepSeek 附件「传得上、不读、不回」**。静态禁令不解除 |
+| 复验后收尾 | 设置 `promptTransport` 已恢复用户原值 `inline`；实验补丁清除、以正式 tarball 重装两 profile、`dsh web` 重启后 `attachForbiddenStatic:true` | 现场无残留 |
+
+**复验的副产品——自愈判据补了第二个签名**：实发 ② 的零回复走的是**整轮超时**路径（不经 `emptyWebResponseError`），运行期禁令最初没触发。已在超时处理器补位：附件轮 + 超时 + `replyChars===0`（页面真无回复）→ 记运行期禁令；`captureAlive 但 replyChars>0`（页面有字未回传）是捕获/回传问题，**不**降级。护栏：attach-selfheal 第 5 条（源码结构钉子）。
+
+**遗留（下一版候选）**：① DeepSeek 将来修好附件解析时，解除路径 = 真机复验通过 → 从 `ATTACH_FORBIDDEN_SITES` 删 'deepseek'（运行期自愈兜底）；② 「漂移再教轮带附件」因附件通道不可用（deepseek）暂缓；③ 会话文件（C）目前是落盘正本与排障来源，真正当**投递**附件用要等某个附件可读站点（如 GLM）先跑通「新会话=发上下文文件」链路。
+
+### 六、真机判据（重启 `dsh web` 后核）
+
+1. **重建风暴熄灭**：goal 自动化长跑里 `GET /__webcode/status` 的 `sessionSwitchNotices` 不再增长，navTrace 无连续 `fresh`，DeepSeek 侧栏不再逐轮新增对话；
+2. **节流窗内不再出现 SESSION_SWITCHED 提示**：即便撞窗，本轮也会等完窗口后重建并交回真实回复（日志应见 `本轮内等完剩余窗口后照常重建`）；
+3. **落盘可查**：`~/.dsh/webcode/prompts/deepseek.md` 与 `~/.dsh/webcode/sessions/<sessionId>__.md` 存在且与 `/__webcode/preset` 同源；
+4. **附件自愈**：若某站点附件轮再现「传得上、零回复」（空结果或超时零回复两条签名），日志应见 `auto-degraded: this site stays inline until the bridge restarts`，且 status `attachBlocked` 有现场；下一轮自动 inline 不再白传；
+5. **DeepSeek 附件禁令维持**：`attachForbiddenStatic:true`（复验结论见 §五）；62.5k 级 inline 长文投递可达（复验实发 ① 逐字命中标记）。
+
+---
+
+## 0.16.27（2026-09-19）—— 三处「文本告知即断链」出口全部接通自动续跑
+
+**用户指令（逐字）**：「请你参考官方 Harness完善自动化流程序，尤其是意外错误工具调用引起的-web 端调用技能因为是文本告知会有偏移！」
+
+### 一、发现：同一种病有三处出口，只修了两处
+
+0.16.25 修了 UNPARSED、0.16.26 修了 thinking-only，但第三处 **TOOL_UNKNOWN**
+（模型调了本会话没有的工具名 / 把教学骨架的占位名当真）仍是旧行为：
+交回「可用工具清单 + 官方模板」后 `emitText` 以 `finish='stop'` 收场 —— **循环已停**，
+模型没有下一次机会改。用户点名的「意外错误工具调用…文本告知会有偏移」正是这一支。
+
+### 二、修法（与既有两处逐字同型）
+
+`lib/index.js` 的 TOOL_UNKNOWN 分支接上同一套 `autoContinueRound`：把提示补发进
+**同一个网页会话**收第二轮 —— 解析出真实工具名的调用就照常派发
+（`finish=tool-calls`，**循环存活**）；有散文按最终答复收场；两头落空才回落旧的 `emitText`。
+
+至此三处出口行为一致：**任何「交回文本让模型改正」的分支，都先把改正机会真正发出去。**
+
+护栏：`test/zero-progress.test.mjs` 新增「TOOL_UNKNOWN 必须自动续跑」。
+
+### 三、验证
+
+- `pnpm test`：**762/762 通过**（64 个测试文件，退出 0）。
+
+---
+
+## 0.16.26（2026-09-19）—— 等待读数不跳变 + thinking-only 不再断链
+
+**用户指令（逐字）**：「审查现在的等待发送计时逻辑，为什么我看是跳的？具体例子：1-8s缓慢增长正常，然后跳到两分钟多少秒」「请你解决deepseek的这类吧问题，让会话deepseek能够长期跑」。
+
+### 一、等待读数跳变（真根因：两个不同的量拼在一枚药丸里）
+
+**症状**：药丸从 1 s 缓慢涨到 8 s，然后**一跳**到「2 分多」。
+
+**根因**（lib/wait-stats.js 的 composerWaitPillLabel，0.16.24 引入的语义切换）：live 与账本被当成两个可互换的显示源 —— 等待期间显示 liveWaitLabel「这一轮等了多久」，等待一结束 recordWaitMetrics 清掉 live，回落到 s.totalWaitMs「本会话一共等了多久」。**两次读数都真，但它们不是同一个量**，拼接处就是那个假跳变。
+
+**修法**：读数改为**一个来源的连续投影** —— s.totalWaitMs + liveWaitMs(live, now)。等待中逐秒增长；等待结束账本已被本轮结算补上、相加项归零，**读数不变**。新增纯函数 liveWaitMs。面板「正在等待发送」那一行仍只给在途增量，不受影响。
+
+护栏：test/wait-stats.test.mjs 三条（投影值 15 s 而非旧 3 s、**等待结束瞬间读数连续** during === settled、续等 baseMs 连续）；连带更新 test/control-routes.test.mjs 的药丸断言。
+
+### 二、thinking-only 断链（deepseek 长跑的真阻断点）
+
+**症状**（本轮会话内**真实复现**）：THINKING_ONLY_NO_ANSWER，收束原因 partial-wip-settled —— 会话就此停住。
+
+**取证**：~/.dsh/logs/webcode-bridge-replies.log 里那一轮是 chars=0 | calls=0（session-181c23b1，2026-09-19 15:17:46）。WIP 稳态收束在模型**刚想完、还没落笔调用**时把这一轮截断。
+
+**根因**：这与 0.16.25 修的 UNPARSED 是**同一个病** —— 交回纯文本提示后 agent 循环当最终答案收场。0.16.25 只给 UNPARSED 出口接了自动续跑，thinking-only 出口漏了。
+
+**修法**：lib/index.js 的 decision === 'thinking-only' 分支接上同一套 autoContinueRound：把提示补发进**同一个网页会话**收第二轮 —— 解析出调用就照常派发（finish=tool-calls，**循环存活**）；有散文按最终答复收场；两头落空才回落旧行为。红线沿用 0.16.25。
+
+### 三、思考通道落盘（归因第四次断链的补链）
+
+0.16.17 的原始回复日志**只记正文通道**，上面那种轮次在磁盘上只剩「这轮是空的」。现在 thinkAcc 非空时同样落盘（note: 'raw thinking, verbatim'）。
+
+护栏：test/zero-progress.test.mjs 新增「thinking-only 必须自动续跑」；既有的「必须发归因提示」改为扫**整段分支**（续跑两个出口落空后才 emitText，窗口不能再切 400 字符）。
+
+### 四、验证与交付
+
+- pnpm test：**761/761 通过**（64 个测试文件，退出 0）。
+- verify-pack：逐字相同 37/37 + 接线完好。
+- 打包 dsh-webcode-bridge-0.16.26.tgz，装入 **web + headless** 两个 profile，并同步两处 package.json 声明（否则 pnpm 通道会静默回退，见 §0.16.10 七）。
+- 装机核对（逐项在场）：liveWaitMs 导出 / projectedMs 投影 / auto-continued after thinking-only round / raw thinking, verbatim，两 profile 均 ✔。
+- **需重启 dsh web 才生效**。
+
+### 五、真机判据（重启后核）
+
+1. 药丸在等待开始与结束的**瞬间数字连续**，不再出现「1→8 s 后跳 2 分多」。
+2. 再遇 partial-wip-settled 截断时会话**不再停住**：应看到 AUTO_CONTINUED 且随后有工具调用继续执行。
+3. 若仍停住，reply log 里应同时有 note=raw reply 与 note=raw thinking 两条记录可离线归因。
+
+---
 
 ## 0.16.23（2026-09-19）—— DSML 协议退役（只留备份）+ 站点图标半成品接手做绿
 

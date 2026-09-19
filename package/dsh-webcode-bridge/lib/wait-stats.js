@@ -98,6 +98,61 @@ export function formatDuration(ms) {
 }
 
 /**
+ * 「正在等待」那一段的时长（0.16.24）。
+ *
+ * 与 {@link formatDuration} 只差一处，但那一处正是需求本身：秒级**取整**
+ * （`3 s`）而不是留一位小数（`3.0 s`）。理由是这串数字会**逐秒跳动**——
+ * 官方在输入框底下那枚统计药丸就是「开始就涨」，不是等结束了再一次性显示；
+ * 跳动时小数位只是噪声。
+ *
+ * 到分钟以上与 formatDuration 合流（`3 分 05 秒`）：那时没人盯着末位看，
+ * 两套写法必须给出同一个数，否则药丸与面板又会互相打架。
+ *
+ * @param {number} ms
+ * @returns {string}
+ */
+export function formatElapsed(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return '0 s';
+  if (n < 60_000) return Math.floor(n / 1000) + ' s';
+  return formatDuration(n);
+}
+
+/**
+ * 「这一轮正在等待发送」的实时读数（0.16.24）。
+ *
+ * 为什么需要它：`sendWaitMs` 是**事后结算**的——它在整轮生成结束、relay 把
+ * metrics 交回来时才落进账本。于是旧实现里，等待期间药丸什么都不显示（首次
+ * 等待时整枚不渲染），等一切结束数字才一次性跳出来。用户原话：「能做到等待
+ * 发送实际显示和官方一样开始就计时增长，不要等过了再变一下子从 n 秒到 m 秒？」
+ *
+ * 官方那枚药丸自带起始时刻，本地定时器把「已过时长」画出来——它计的是**正在
+ * 发生**的时长。这里用同一条思路，但把「现在几点」交给调用方（纯函数），服务端
+ * 每次轮询现算：这样文案仍然只有一个来源（本模块），客户端不需要第二份时长
+ * 格式化——那正是本文件开头说的「两个数字迟早对不上」。
+ *
+ * `baseMs` 是本轮**此前已经等过**的时长（发送间隔补满之后又撞上限流退避时，
+ * 数字必须接着涨而不是从 0 重来），`endsAt` 之后时长冻结在满值——因为那时
+ * 等待确实结束了，只是整轮生成还没跑完、账本还没结算。
+ *
+ * @param {{startedAt:number, endsAt?:number, baseMs?:number}} live
+ * @param {number} [now] 现算时刻（显式传入便于单测钉死）
+ * @returns {string|null} 无在途等待时返回 null
+ */
+export function liveWaitLabel(live, now = Date.now()) {
+  if (!live || typeof live !== 'object') return null;
+  const startedAt = Number(live.startedAt);
+  if (!Number.isFinite(startedAt)) return null;
+  const baseMs = Math.max(0, Math.round(Number(live.baseMs) || 0));
+  const endsAt = Number(live.endsAt);
+  // endsAt 缺失（理论上不会）时按「还没到期」处理：宁可多涨一会儿，也不要
+  // 让一个缺字段把正在等待的读数变成 null（那会让药丸凭空消失）。
+  const ceiling = Number.isFinite(endsAt) ? endsAt : Math.max(now, startedAt);
+  const elapsed = Math.max(0, Math.min(now, ceiling) - startedAt);
+  return '等待发送 ' + formatElapsed(baseMs + elapsed);
+}
+
+/**
  * 输入框底下那条速览要显示的文字（单行，官方风格）。
  *
  * 数据不足时返回 null —— 调用方据此**不渲染**整行，而不是显示一堆 `--`。
@@ -143,6 +198,27 @@ export function waitStatRows(stats) {
 }
 
 /**
+ * 在途等待**已过**的毫秒数（0.16.26）。
+ *
+ * 与 {@link liveWaitLabel} 同一套边界（`startedAt` / `endsAt` / `baseMs`），
+ * 只是把结果作为**数字**交给调用方。存在的理由是把药丸读数从「分段拼接」改成
+ * 「投影求和」：见 {@link composerWaitPillLabel} 的 0.16.26 说明。
+ *
+ * @param {{startedAt:number, endsAt?:number, baseMs?:number}} live
+ * @param {number} [now] 现算时刻
+ * @returns {number} 无在途等待时为 0
+ */
+export function liveWaitMs(live, now = Date.now()) {
+  if (!live || typeof live !== 'object') return 0;
+  const startedAt = Number(live.startedAt);
+  if (!Number.isFinite(startedAt)) return 0;
+  const baseMs = Math.max(0, Math.round(Number(live.baseMs) || 0));
+  const endsAt = Number(live.endsAt);
+  const ceiling = Number.isFinite(endsAt) ? endsAt : Math.max(now, startedAt);
+  return baseMs + Math.max(0, Math.min(now, ceiling) - startedAt);
+}
+
+/**
  * 输入框底下那枚药丸的**短文案**（0.15.10）。
  *
  * 与 `composerWaitLine` 的区别是长度预算：官方在同一个槽位放的是 13px 单行
@@ -154,18 +230,41 @@ export function waitStatRows(stats) {
  * 完全没数据时返回 null，调用方整枚药丸不渲染。其余细节全部进点击面板
  * （见 {@link waitStatDetailRows}）。
  *
+ * 0.16.24：**在途等待优先**。还在等的时候，药丸显示的是「正在等的这一段」
+ * （`live` 现算），而不是上一轮结算完的旧数——否则用户看到的是一个不动的
+ * 数字，等结束才跳一下，正是他要修掉的那个观感。
+ *
+ * 0.16.26：**读数改成「会话累计 + 在途增量」的连续投影**（用户报的跳变）。
+ *
+ * 0.16.24 把 live 与账本当成两个可互换的显示源，于是同一枚药丸在两种语义之间
+ * 来回切：等的时候显示「这一轮等了多久」，等一结束 live 被清、回落到
+ * `s.totalWaitMs`「本会话一共等了多久」。用户看到的就是——数字从 1 s 缓慢涨到
+ * 8 s（这一轮把发送间隔补满），然后**一跳**到「2 分多」（会话历史累计）。
+ * 两次读数都「对」，但它们不是同一个量，拼在一枚药丸里就是假跳变。
+ *
+ * 正确的量只有一个：**本会话到目前为止的等待发送总量，把正在等的这一段也算进去**。
+ * 它在等待期间逐秒增长（`s.totalWaitMs + liveWaitMs`），等待结束、账本结算后
+ * 收敛到同一个数（`s.totalWaitMs` 已经含了刚刚那一段）——**连续、单调、不跳**。
+ * 这也正是用户最初要的「和官方一样开始就计时增长」。
+ *
  * @param {object} o
  * @param {object} [o.session] 本会话账本
  * @param {object} [o.metrics] 本轮 relay.metrics
+ * @param {object} [o.live] 在途等待（见 {@link liveWaitLabel}）
+ * @param {number} [o.now] 现算时刻
  * @returns {string|null}
  */
-export function composerWaitPillLabel({ session, metrics } = {}) {
+export function composerWaitPillLabel({ session, metrics, live, now } = {}) {
   const s = sanitizeWaitStats(session);
   const m = metrics || {};
   const parts = [];
-  if (s.totalWaitMs > 0) parts.push('等待发送 ' + formatDuration(s.totalWaitMs));
+  // 0.16.26：一个数、一个来源。账本是**本轮之前**的累计，live 是本轮进行中的
+  // 增量，两者相加才是「本会话等待发送」的当前真值。live 消失后账本已被本轮
+  // 结算补上，相加项自然归零，读数不变——这正是它不再跳变的原因。
+  const projectedMs = s.totalWaitMs + liveWaitMs(live, now);
+  if (projectedMs > 0) parts.push('等待发送 ' + formatElapsed(projectedMs));
   if (s.rateLimitRetries > 0) parts.push('限流重试 ' + s.rateLimitRetries + ' 次');
-  // 还没等到发过、但已知距上次发送：至少给一个可核对的数，而不是空药丸。
+  // 还没等待过、但已知距上次发送：至少给一个可核对的数，而不是空药丸。
   if (!parts.length && m.sincePrevSendMs != null) parts.push('距上次发送 ' + formatDuration(m.sincePrevSendMs));
   if (!parts.length) return null;
   return parts.join(' · ');
@@ -190,7 +289,10 @@ export function waitStatDetailRows({ session, total, metrics } = {}) {
   const m = metrics || {};
   const rows = [];
   if (s.totalWaitMs > 0 || s.turns > 0) {
-    rows.push({ label: '本次会话等待发送', value: formatDuration(s.totalWaitMs) });
+    // 0.16.24：本会话这一行用 formatElapsed，与药丸同写法——它是「还在变的那个
+    // 数」（药丸在途时显示它、结算后回落到它）。累计/平均是历史账，继续用
+    // formatDuration 的 `20.0 s`：两者不该混成一个。
+    rows.push({ label: '本次会话等待发送', value: formatElapsed(s.totalWaitMs) });
     rows.push({ label: '本次会话轮次', value: s.turns + ' 轮' });
     if (s.rateLimitRetries > 0) rows.push({ label: '本次会话限流重试', value: s.rateLimitRetries + ' 次' });
   }

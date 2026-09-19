@@ -94,9 +94,38 @@ test('接线：收尾分支调用 zeroProgressDecision 且消费两个分支', (
 test('接线：thinking-only 分支必须发归因提示（不是静默 return）', () => {
   const src = fs.readFileSync(INDEX_SRC, 'utf8');
   const branch = src.slice(src.indexOf("decision === 'thinking-only'"));
-  const head = branch.slice(0, 400);
-  assert.match(head, /thinkingOnlyNotice\(/, 'thinking-only 必须走 thinkingOnlyNotice 发提示');
-  assert.match(head, /emitText\(/, '提示必须真的外发到会话');
+  // 0.16.26：这一支现在先走自动续跑（autoContinueRound），续跑两个出口都落空才
+  // 回落「提示当正文」。因此 emitText 不再紧跟在分支开头 —— 取到下一个分支
+  // （protocol-withheld）为止的**整段**再断言，否则窗口会切掉回落路径。
+  const end = branch.indexOf("decision === 'protocol-withheld'");
+  const body = end > 0 ? branch.slice(0, end) : branch.slice(0, 2000);
+  assert.match(body, /thinkingOnlyNotice\(/, 'thinking-only 必须走 thinkingOnlyNotice 发提示');
+  assert.match(body, /emitText\(/, '提示必须真的外发到会话');
+});
+
+test('接线：TOOL_UNKNOWN 必须自动续跑（0.16.27，意外工具名不许断链）', () => {
+  // 用户原话点名的就是这一类：「尤其是意外错误工具调用引起的-web 端调用技能
+  // 因为是文本告知会有偏移」。模型调了本会话没有的工具名 → 桥交回清单与模板，
+  // 但旧实现 finish='stop'，循环已停，模型没有下一次机会改。
+  const src = fs.readFileSync(INDEX_SRC, 'utf8');
+  const start = src.indexOf('TOOL_UNKNOWN: 网页发出了本会话不存在的工具调用');
+  assert.ok(start > 0, '必须存在 TOOL_UNKNOWN 提示点');
+  // 取到该分支结尾（下一个顶层 comment 段之前足够长的窗口）。
+  const body = src.slice(start, start + 2600);
+  assert.match(body, /autoContinueRound\(/, 'TOOL_UNKNOWN 必须尝试自动续跑');
+  assert.match(body, /'tool-calls'/, '续跑解析出真实工具名的调用时必须让循环继续');
+});
+
+test('接线：thinking-only 必须自动续跑（0.16.26，长任务不许就此停摆）', () => {
+  // 真机 session-181c23b1（2026-09-19 15:17:46，reply-log `chars=0 | calls=0`）：
+  // WIP 稳态收束把「刚想完、还没落笔调用」的一轮截断，旧实现交回纯文本提示后
+  // agent 循环当最终答案收场 —— 与 0.16.25 修的 UNPARSED 是同一个病。
+  const src = fs.readFileSync(INDEX_SRC, 'utf8');
+  const branch = src.slice(src.indexOf("decision === 'thinking-only'"));
+  const end = branch.indexOf("decision === 'protocol-withheld'");
+  const body = end > 0 ? branch.slice(0, end) : branch.slice(0, 2000);
+  assert.match(body, /autoContinueRound\(/, 'thinking-only 必须先尝试自动续跑');
+  assert.match(body, /'tool-calls'/, '续跑解析出调用时必须让循环继续（finish=tool-calls）');
 });
 
 // ---- ⑤ 顺序契约：源码里 thinkAcc 判定必须先于 withheld 判定 -----------------
