@@ -194,11 +194,39 @@ const DSML_BAR_ANCHOR_SRC = DSML_BAR_CLS + '+\\s*DSML\\s*' + DSML_BAR_CLS + '+'
  * 模型漂移多包的 ```json 围栏在 replacer 里剥掉。
  */
 const OFFICIAL_SEP_SRC = '[' + String.fromCharCode(0x2581) + '\\s]';
+/**
+ * 官方调用段的**闭 token**（0.16.20 run-10 定型；0.16.32 抽成常量复用）。
+ *
+ * 两条硬约束（缺一吞调用，逐字依据见下方 RE_OFFICIAL_CALL 的 0.16.20 注释）：
+ * ① `</?` 容忍 XML 斜杠形 `</｜tool▁call▁end｜>`；② `call(s)` 与 `end` 之间只允许
+ * 一枚连接符（旧写法自由 `[\s\S]*?` 会让 begin 类 token 当端锚起点，把**下一条
+ * 调用整块吃掉**——run-10：pwsh×2 只执行 1 条、全程零诊断）。
+ */
+const END_ANCHOR_SRC = '</?\\s*' + OFFICIAL_BAR_CLS + '\\s*tool(?:' + OFFICIAL_SEP_SRC + ')?calls?(?:' + OFFICIAL_SEP_SRC + ')?end(?:' + OFFICIAL_SEP_SRC + ')?' + OFFICIAL_BAR_CLS + '>';
+/**
+ * 参数体在**闭 token 缺位**时的右边界（0.16.32）。
+ *
+ * 端锚可选之后，`([\s\S]*?)` 若没有右界会一路吃到文末——下一条调用会被前一条
+ * 连体吞掉（run-10 「三调用只出 2 条」在无闭 token 场景重演）。右界取最早出现者：
+ *   ① **任何官方 token**（`<｜｜tool▁…` 族）——下一个 `call▁begin`（下一条调用）
+ *      或 `call▁end` / `calls▁end`（本条的闭 token）。**闭 token 必须在此收手**，
+ *      否则端锚可选 ⇒ 懒匹配会把 `call▁end` 吃进参数体，归一化产物变成
+ *      `<invoke>{"…"}<｜｜tool▁call▁end｜｜></invoke>`（0.16.30 护栏
+ *      official-double-bar.test.mjs「no double bar may survive」当场抓到）；
+ *   ② 任何 DSML 开标记（`<｜｜DSML｜｜ …`）——真机闭 token 漂移成 DSML 时，
+ *      参数体到 `DSML parameter` 就该结束，DSML 残骸由退役语义扣住不外发；
+ *   ③ 文末（半截/截断轮）。
+ * 只作**前瞻**（lookahead），不进匹配体；替换后原文仍由 RE_OFFICIAL_CALLS_BEGIN/END
+ * 与 DSML 锚点各自处理。
+ */
+const BODY_STOP_SRC = '(?=<' + OFFICIAL_BAR_CLS + '\\s*tool'
+  + '|<' + DSML_MARK_SRC + '|$)';
 const RE_OFFICIAL_CALL = new RegExp(
   '<' + OFFICIAL_BAR_CLS + '\\s*tool(?:' + OFFICIAL_SEP_SRC + ')?call(?:s)?(?:' + OFFICIAL_SEP_SRC + ')?begin(?:' + OFFICIAL_SEP_SRC + ')?' + OFFICIAL_BAR_CLS + '>'
   + '\\s*(?:function)?\\s*([^<' + OFFICIAL_BAR + ']*?)\\s*'
   + '<' + OFFICIAL_BAR_CLS + '\\s*tool(?:' + OFFICIAL_SEP_SRC + ')?sep(?:' + OFFICIAL_SEP_SRC + ')?' + OFFICIAL_BAR_CLS + '>'
   + '([\\s\\S]*?)'
+  + BODY_STOP_SRC
   // 端锚两条硬约束（0.16.20，run-10 session-33f37b03 逐字双修，缺一吞调用）：
   // ① `</?` 容忍模型把闭 token 写成 XML 斜杠形 `</｜tool▁call▁end｜>`（官方模板
   //    无斜杠，reference/deepseek-harness 零命中；run-10 第 1 轮起 20/20 轮如此）；
@@ -207,7 +235,11 @@ const RE_OFFICIAL_CALL = new RegExp(
   //    `end｜>`）——斜杠闭 token 不被认出时端锚跨到下一条调用的 begin token，
   //    把**下一条调用整块当端锚吃掉**（run-10：pwsh×2 只执行 1 条、三调用只出
   //    2 条，全程零诊断零通知）。
-  + '</?\\s*' + OFFICIAL_BAR_CLS + '\\s*tool(?:' + OFFICIAL_SEP_SRC + ')?calls?(?:' + OFFICIAL_SEP_SRC + ')?end(?:' + OFFICIAL_SEP_SRC + ')?' + OFFICIAL_BAR_CLS + '>', 'g');
+  //
+  // 0.16.32：端锚由**必需**放宽为**可选**（`END_ANCHOR_SRC + '?'`）。真机取证见
+  // test/official-truncated-close.test.mjs 与下方 END_ANCHOR_SRC 的注释——模型把
+  // 闭 token 写成 DSML 形状或干脆不写时，旧写法**整条调用归零**（不是少解析一点）。
+  + '(?:' + END_ANCHOR_SRC + ')?', 'g');
 const RE_OFFICIAL_CALLS_BEGIN = new RegExp(
   '<' + OFFICIAL_BAR_CLS + '\\s*tool' + OFFICIAL_SEP_SRC + 'calls' + OFFICIAL_SEP_SRC + 'begin(?:' + OFFICIAL_SEP_SRC + ')?' + OFFICIAL_BAR_CLS + '>', 'g');
 const RE_OFFICIAL_CALLS_END = new RegExp(
