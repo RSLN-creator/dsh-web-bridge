@@ -27,13 +27,15 @@ const TOOLS = [
 
 function harness(sendTurnImpl) {
   let adapter;
+  // 0.16.29：再教学提示只走补发通道，补发的 prompt 也要收集（见文件尾部的判据）。
+  const prompts = [];
   const dispose = apply(
     { llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null },
     {
       port: 0, requireConsent: false,
       driver: {
         status: () => ({ running: true }), close: async () => {}, resetConversation: async () => {},
-        sendTurn: sendTurnImpl,
+        sendTurn: (key, prompt, opts) => { prompts.push(String(prompt)); return sendTurnImpl(key, prompt, opts); },
         sendPrompt: async (prompt, opts) => sendTurnImpl('main', prompt, opts),
       },
     },
@@ -43,7 +45,7 @@ function harness(sendTurnImpl) {
     for await (const c of adapter.stream(options)) chunks.push(c);
     return chunks;
   };
-  return { collect, dispose };
+  return { collect, dispose, prompts };
 }
 
 // 恢复层的在役形状（0.16.23）：**半角规范 invoke 形**的畸形——参数体未闭合。
@@ -101,7 +103,7 @@ test('端到端：UNPARSED 轮带可恢复调用时必须派发 tool-call 块（
 
 test('端到端：不可恢复的畸变仍走 UNPARSED 提示（安全线不放宽）', async () => {
   const drift = '正文。\n' + MARK + 'invoke name="pwsh">\n' + MARK + 'parameter name="command" string="true">rm -rf</' + B + 'DSML' + B + ' param';
-  const { collect, dispose } = harness(async (key, prompt, opts) => {
+  const { collect, dispose, prompts } = harness(async (key, prompt, opts) => {
     opts.onDelta?.(drift);
     return { text: drift };
   });
@@ -111,7 +113,10 @@ test('端到端：不可恢复的畸变仍走 UNPARSED 提示（安全线不放�
       messages: [user('继续')],
     });
     assert.ok(!chunks.some((c) => c.type === 'block-end' && c.block?.type === 'tool-call'), 'pwsh 畸变不得被派发');
+    // 0.16.29：安全线判据落在补发通道上（正文只留 AUTO_CONTINUED）。
+    assert.ok(prompts.length >= 2, '不可恢复时必须真的补发再教学提示');
+    assert.match(prompts[1], /TOOL_CALL_UNPARSED/);
     const deltas = chunks.filter((c) => c.type === 'text-delta').map((c) => c.text).join('');
-    assert.match(deltas, /TOOL_CALL_UNPARSED/);
+    assert.ok(!/TOOL_CALL_UNPARSED/.test(deltas), '正文不得再铺提示全文（0.16.29）');
   } finally { await dispose(); }
 });

@@ -93,7 +93,9 @@ test('端到端（无正文出口）：UNPARSED 后自动补发提醒，第二�
     assert.match(prompts[1], /^\[桥·系统提示\]/, '补发提示必须以系统提示框架开头');
     assert.match(prompts[1], /不要回应、解释或复述/, '框架必须明确「勿回应」');
     const deltas = chunks.filter((c) => c.type === 'text-delta').map((c) => c.text).join('');
-    assert.match(deltas, /TOOL_CALL_UNPARSED/);
+    // 0.16.29（用户指令）：TOOL_CALL_UNPARSED 全文不进正文（只走补发通道）。
+    assert.ok(!/TOOL_CALL_UNPARSED/.test(deltas),
+      '再教学提示不得再铺进会话正文（0.16.29 用户指令「直接隐藏」）');
     assert.match(deltas, /AUTO_CONTINUED/, '必须如实说明这是自动续跑');
     const callEnd = chunks.find((c) => c.type === 'block-end' && c.block?.type === 'tool-call');
     assert.ok(callEnd, '续跑轮的调用必须派发（循环存活）');
@@ -119,7 +121,8 @@ test('端到端（带正文出口）：续跑轮无调用时其散文按最终�
     assert.equal(prompts.length, 2);
     assert.ok(!chunks.some((c) => c.type === 'block-end' && c.block?.type === 'tool-call'), '续跑轮没有调用就不得派发');
     const deltas = chunks.filter((c) => c.type === 'text-delta').map((c) => c.text).join('');
-    assert.match(deltas, /TOOL_CALL_UNPARSED/);
+    assert.ok(!/TOOL_CALL_UNPARSED/.test(deltas), '0.16.29：提示不进正文');
+    assert.match(deltas, /AUTO_CONTINUED/, '0.16.29：只留进度说明');
     assert.match(deltas, /任务其实已经完成/, '续跑轮的散文必须交回会话');
     assert.equal(chunks.at(-1).type, 'finish');
     assert.equal(chunks.at(-1).reason.kind, 'stop');
@@ -258,7 +261,8 @@ test('端到端：TOOL_UNKNOWN 后自动续跑，第二轮按真实工具名重�
     assert.match(prompts[1], /TOOL_UNKNOWN/, '补发的是 TOOL_UNKNOWN 再教学提示');
     assert.match(prompts[1], /自动续跑/, '补发必须带自动续跑指令');
     const deltas = chunks.filter((c) => c.type === 'text-delta').map((c) => c.text).join('');
-    assert.match(deltas, /TOOL_UNKNOWN/);
+    // 0.16.29（用户指令）：再教学提示全文只走补发通道，不进正文。
+    assert.ok(!/TOOL_UNKNOWN:/.test(deltas), '0.16.29：TOOL_UNKNOWN 提示不再铺进正文');
     assert.match(deltas, /AUTO_CONTINUED/, '必须如实说明这是自动续跑');
     const callEnd = chunks.find((c) => c.type === 'block-end' && c.block?.type === 'tool-call');
     assert.ok(callEnd, '续跑轮的调用必须派发（循环存活）');

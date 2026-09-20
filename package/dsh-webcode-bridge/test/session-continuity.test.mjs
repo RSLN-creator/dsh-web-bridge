@@ -106,8 +106,10 @@ function scriptedDriver({ script = [], slot = null } = {}) {
     async sendTurn(key, message, { fresh = false, onDelta } = {}) {
       const step = script[Math.min(i, script.length - 1)] || { text: '好' };
       i += 1;
-      const chars = String(message || '').length;
-      calls.push({ kind: 'sendTurn', key: String(key), fresh: Boolean(fresh), messageChars: chars });
+      const text = String(message || '');
+      const chars = text.length;
+      // `message` 一并留存：0.16.29 的「文件投递」判据要在发送文本里找哨兵。
+      calls.push({ kind: 'sendTurn', key: String(key), fresh: Boolean(fresh), messageChars: chars, message: text });
       navTrace.push({ at: Date.now(), phase: 'nav', key: String(key), requestedFresh: Boolean(fresh) });
       if (step.throw) {
         const err = new Error(step.throw + ': 脚本驱动按剧本抛出（site=deepseek）');
@@ -154,11 +156,15 @@ async function openBridge({ driver, profileDir = tmpDir(), ...cfgExtra }) {
   return {
     routes: registered.routes,
     /** 跑一轮真实适配器流（失败时连错误码一起带回）。 */
-    async stream({ sessionId, messages, signal }) {
+    // 0.16.29：`system` / `tools` 可覆盖——「契约指纹」判据（⑪）要能改契约逼出
+    // contract-changed。默认值与从前逐字相同（deepseek / 空工具表），既有用例不受影响。
+    // **不用换 model 来改契约**：换站点会去起一个真实浏览器（本机 spawn EPERM），
+    // 而 system 与工具名集合同属契约四项，改它们既改了契约又留在同一站点。
+    async stream({ sessionId, messages, signal, model = 'deepseek', tools = [], system }) {
       let text = '';
       try {
         for await (const c of registered.adapter.stream({
-          purpose: null, model: 'deepseek', messages, tools: [], sessionId, signal,
+          purpose: null, model, messages, tools, sessionId, signal, system,
         })) {
           if (c?.type === 'text-delta') text += c.text;
         }
@@ -496,6 +502,57 @@ test('⑦ 控制面 session-slot 动作必须能读回驱动当前的会话槽',
   }
 });
 
+// ── ⑪ 0.16.29：fresh 的**原因**必须可查（用户第 4 问「搞清楚为什么会新开 web 端对话」）──
+//
+// 从前只有 `fresh` 一个布尔量，于是「又新开了一个对话」在四种完全不同的真因面前
+// 长得一模一样：首次轮 / 契约变了 / 锚点丢了 / 锚定后无新消息。四者修法互不相同
+// （前两个正常，后两个是真故障），因此逐因计数并透出 /status。
+test('⑪ fresh 原因必须逐因可查：首轮记 no-cursor，契约变化记 contract-changed', async () => {
+  const driver = scriptedDriver({ script: [{ text: '答复' }] });
+  const bridge = await openBridge({ driver });
+  try {
+    const statusHandler = bridge.routes.get('/__webcode/status');
+    assert.ok(statusHandler, '/__webcode/status 没挂上：已挂 ' + [...bridge.routes.keys()].join(', '));
+
+    // 直接调控制面动作（`GET status` 同时支持 POST/GET，见 web-control 的 actions 别名）。
+    const readStatus = async () => {
+      const server = http.createServer((req, res) => {
+        if (new URL(req.url, 'http://loopback').pathname === '/__webcode/status') return statusHandler(req, res);
+        res.writeHead(404).end();
+      });
+      await new Promise((r) => server.listen(0, '127.0.0.1', r));
+      const port = server.address().port;
+      try {
+        const r = await fetch(`http://127.0.0.1:${port}/__webcode/status`, { method: 'GET' });
+        return await r.json();
+      } finally {
+        await new Promise((resolve) => { server.close(() => resolve()); server.closeAllConnections?.(); });
+      }
+    };
+
+    // ① 首轮：游标表里没有这个会话 ⇒ no-cursor。
+    const first = await bridge.stream({ sessionId: 'sess-fresh-why', messages: messagesAt(1) });
+    assert.equal(first.ok, true, '首轮应当成功');
+    const s1 = await readStatus();
+    assert.ok(s1.driver && s1.driver.freshReasons,
+      '/status 上没有 driver.freshReasons：「为什么新开对话」仍只能靠读日志猜：'
+      + JSON.stringify(Object.keys(s1.driver || {})));
+    assert.equal(s1.driver.freshReasons['no-cursor'], 1,
+      '首轮必须记成 no-cursor，实际 ' + JSON.stringify(s1.driver.freshReasons));
+
+    // ② 契约变化（系统提示词改写）⇒ contract-changed，而不是笼统的「又 fresh 了一次」。
+    // 这正是「宿主升级改了 system 措辞」那一类——它必须能一眼认出来，
+    // 否则每次宿主小版本升级都会表现成「网页会话莫名其妙重开了」。
+    const second = await bridge.stream({
+      sessionId: 'sess-fresh-why', messages: messagesAt(2), system: '改写过的系统提示词',
+    });
+    assert.equal(second.ok, true, '契约变化轮应当成功：' + String(second.error?.message || '').slice(0, 200));
+    const s2 = await readStatus();
+    assert.equal(s2.driver.freshReasons['contract-changed'], 1,
+      'system 改写必须记成 contract-changed，实际 ' + JSON.stringify(s2.driver.freshReasons));
+  } finally { await bridge.close(); }
+});
+
 /** 在控制面响应里找「会话槽」对象：字段名固定为 webSessionId/source，包在外层哪个键里由实现决定。 */
 function findSlotLike(value, depth = 0) {
   if (!value || typeof value !== 'object' || depth > 6) return null;
@@ -611,6 +668,54 @@ test('⑨ 落盘点必须在 runTurn 之内、且网页会话 id 来自地址栏
   assert.ok(at < runTurn.body.length * 0.9,
     '落盘点落在 runTurn 体的最后 10%（下标 ' + at + '/' + runTurn.body.length + '）：'
     + '那正是旧实现的形状——整轮跑完才写盘，失败的那一轮什么也不留');
+});
+
+// ── ⑩ 0.16.29：落盘文件必须是**投递源**（不只是副本）────────────────────────────
+//
+// 用户指令：「如果新开会话-web 端，就一样把这个当上下文通过文件发送」。
+// 判据：整段重建时发出去的那段文本，**逐字等于磁盘上那份会话文件**——
+// 也就是说，文件不是事后抄写的副本，而是重建时真正被读回来的正本。
+test('⑩ 整段重建必须从落盘文件读回（文件是投递源，不是副本）', async () => {
+  // 判据用**哨兵串**而不是字符数：把哨兵写进磁盘上的会话文件，再逼出一次整段重建；
+  // 只要发出去的文本里出现哨兵，就证明它是从文件读回来的（内存序列化里没有这个串）。
+  // 字符数比对会纠缠头部/换行/末尾空行，那种断言会随排版改动假红——哨兵不会。
+  const storeDir = tmpDir('webcode-file-delivery-');
+  const SENTINEL = 'FILE_DELIVERY_SENTINEL_7f3a';
+  const sessionId = 'sess-file-delivery';
+  const driver = scriptedDriver({
+    script: [
+      { text: '首轮答复', webSessionId: 'web-1' },   // 首轮正常 → 落盘
+      { throw: 'WEB_SESSION_LOST' },                 // 第二轮原发丢失 → 触发整段重建
+      { text: '重建答复', webSessionId: 'web-2' },   // 重建成功
+    ],
+  });
+  process.env.WEBCODE_PROMPT_STORE_DIR = storeDir;
+  const bridge = await openBridge({ driver, profileDir: tmpDir() });
+  try {
+    // 先跑一轮把文件写出来（fresh 首轮会落盘）。
+    const first = await bridge.stream({ sessionId, messages: messagesAt(1) });
+    assert.equal(first.ok, true, '首轮应当正常落盘：' + String(first.error?.message || '').slice(0, 200));
+    const sessionFile = path.join(storeDir, 'sessions', sessionId + '.md');
+    assert.ok(fs.existsSync(sessionFile),
+      '首轮没有落下会话文件，文件投递无从谈起：' + JSON.stringify(
+        fs.existsSync(path.join(storeDir, 'sessions')) ? fs.readdirSync(path.join(storeDir, 'sessions')) : 'dir-missing'));
+
+    // 把哨兵塞进磁盘上的正本 —— 下一次重建若真从文件读，就会把它带走。
+    fs.appendFileSync(sessionFile, '\n' + SENTINEL + '\n');
+
+    // 触发整段重建：丢掉会话槽 + 让下一次 sendTurn 抛 WEB_SESSION_LOST。
+    const before = driver.calls.length;
+    await bridge.stream({ sessionId, messages: messagesAt(2) });
+    const sent = driver.calls.slice(before);
+    const rebuilt = sent.filter((c) => c.fresh).pop();
+    assert.ok(rebuilt, '整段重建没有发生（剧本没跑到）：' + JSON.stringify(sent));
+    assert.ok(rebuilt.message.includes(SENTINEL),
+      '重建发送的文本里没有磁盘上的哨兵 —— 说明它是内存序列化出来的，文件只是副本，'
+      + '「把上下文通过文件发送」没有真正实现');
+  } finally {
+    delete process.env.WEBCODE_PROMPT_STORE_DIR;
+    await bridge.close();
+  }
 });
 
 test('⑨b sendTurn 必须把 requestedFresh 记进 navTrace（用户排障读的就是这一枚）', () => {

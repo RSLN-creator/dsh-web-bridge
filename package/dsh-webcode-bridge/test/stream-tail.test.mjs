@@ -18,13 +18,15 @@ const TOOLS = [{ name: 'read', description: '读文件', parameters: { type: 'ob
 function harness(streamScript) {
   // streamScript(turn) 在返回前依次吐增量
   let adapter;
+  // 0.16.29：再教学提示只走补发通道，补发的 prompt 也要收集。
+  const prompts = [];
   const dispose = apply(
     { llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null },
     {
       port: 0, requireConsent: false,
       driver: {
         status: () => ({ running: true }), close: async () => {}, resetConversation: async () => {},
-        sendTurn: async (key, prompt, opts) => { streamScript(opts); return { text: null }; },
+        sendTurn: async (key, prompt, opts) => { prompts.push(String(prompt)); streamScript(opts); return { text: null }; },
         sendPrompt: async (prompt, opts) => { streamScript(opts); return { text: null }; },
       },
     },
@@ -34,7 +36,7 @@ function harness(streamScript) {
     for await (const c of adapter.stream(options)) chunks.push(c);
     return chunks;
   };
-  return { collect, dispose };
+  return { collect, dispose, prompts };
 }
 
 async function withHarness(fn) {
@@ -184,7 +186,7 @@ test('0.16.10 真协议仍必须被扣住（护栏方向不得被上面两条放
   //   ② 提示必须引用被扣原文开头（新契约，反向锚定）；
   //   ③ 不得产生任何可执行调用块（截断调用绝不派发）。
   const RAWHEAD = '{"mcp_action":"call","name":"read","argu';
-  const { collect, dispose } = harness((opts) => {
+  const { collect, dispose, prompts } = harness((opts) => {
     opts.onDelta?.('先看文件。<tool_call>{"mcp_action":"call","name":"read","argu');
     return { text: '先看文件。<tool_call>{"mcp_action":"call","name":"read","argu' };
   });
@@ -195,12 +197,14 @@ test('0.16.10 真协议仍必须被扣住（护栏方向不得被上面两条放
     });
     const textEnd = chunks.find((c) => c.type === 'block-end' && c.block?.type === 'text');
     assert.ok(textEnd, '应有正文块');
-    const noticeAt = textEnd.block.text.indexOf('TOOL_CALL_UNPARSED');
-    assert.ok(noticeAt >= 0, '真协议被扣住时仍必须给出归因提示');
-    const prose = textEnd.block.text.slice(0, noticeAt);
-    assert.ok(!prose.includes(RAWHEAD), '半截真协议原文绝不得进提示之外的正文');
-    assert.ok(!prose.includes('"name":"read"'), '协议头不得进提示之外的正文');
-    assert.ok(textEnd.block.text.slice(noticeAt).includes(RAWHEAD),
+    // 0.16.29：提示不再铺进正文，改由补发的用户消息送达。判据随之分两层：
+    //   ① 正文里不得出现任何协议原文（无论提示内外——提示已经不在这里了）；
+    //   ② 补发的 prompt 必须引用被扣原文开头（0.16.11 #25：模型据此精确重发）。
+    assert.ok(!textEnd.block.text.includes('TOOL_CALL_UNPARSED'),
+      '正文不得再铺再教学提示全文（0.16.29 用户指令「直接隐藏」）');
+    assert.ok(!textEnd.block.text.includes(RAWHEAD), '半截真协议原文绝不得进正文');
+    assert.ok(!textEnd.block.text.includes('"name":"read"'), '协议头不得进正文');
+    assert.ok((prompts[1] || '').includes(RAWHEAD),
       '提示必须引用被扣原文开头（0.16.11 #25：模型据此精确重发）');
     assert.ok(!chunks.some((c) => c.type === 'block-end' && c.block?.type === 'tool-call'),
       '截断调用不得被派发成可执行调用块');

@@ -200,14 +200,18 @@ test('⑫ 接线：index.js 的两处 parseAgentReply 都必须带上 tools', ()
 /** 起一个最小适配器，驱动按给定文本作答。 */
 async function runTurn({ text, thinking = '' }) {
   let adapter;
+  // 0.16.29：再教学提示只走补发通道，因此补发的 prompt 也要收集（判据从「正文含提示」
+  // 改为「补发的 prompt 含提示」）。
+  const prompts = [];
   const driver = {
     status: () => ({ running: true }), close: async () => {}, resetConversation: async () => {},
     sendTurn: async (key, prompt, opts) => {
+      prompts.push(String(prompt));
       if (thinking) opts.onThink?.(thinking);
       opts.onDelta?.(text);
       return { text, ...(thinking ? { thinking } : {}) };
     },
-    sendPrompt: async () => ({ text }),
+    sendPrompt: async (prompt) => { prompts.push(String(prompt)); return { text }; },
   };
   const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
   try {
@@ -218,12 +222,12 @@ async function runTurn({ text, thinking = '' }) {
       tools: TOOLS,
       messages: [{ role: 'user', content: [{ type: 'text', text: '继续' }] }],
     })) chunks.push(c);
-    return chunks;
+    return { chunks, prompts };
   } finally { await dispose(); }
 }
 
 test('⑬ 端到端：真机无名调用必须变成 harness 可见的两个工具调用块', async () => {
-  const chunks = await runTurn({ text: fixture('nameless-after-prose.txt'), thinking: 'planning' });
+  const { chunks } = await runTurn({ text: fixture('nameless-after-prose.txt'), thinking: 'planning' });
   const calls = chunks.filter((c) => c.type === 'block-end' && c.block?.type === 'tool-call').map((c) => c.block.name);
   assert.deepEqual(calls, ['read', 'pwsh'], '旧代码这里一个块都不开：界面上只剩散文，任务停摆');
   const text = chunks.filter((c) => c.type === 'text-delta').map((c) => c.text).join('');
@@ -231,11 +235,16 @@ test('⑬ 端到端：真机无名调用必须变成 harness 可见的两个工�
   assert.ok(!text.includes('mcp_action'), '协议原文不得进正文');
 });
 
-test('⑭ 端到端：解析不出调用时给出可行动提示，且不得声称「只有思考」', async () => {
+test('⑭ 端到端：解析不出调用时把可行动提示补发给模型（正文只留 AUTO_CONTINUED）', async () => {
   const nameless = '<tool_call>\n{"mcp_action":"call","purpose":"x","arguments":{"totally_unknown_key":1}}\n</tool_call>';
-  const chunks = await runTurn({ text: nameless, thinking: 'I will call a tool' });
-  const text = chunks.filter((c) => c.type === 'text-delta').map((c) => c.text).join('');
-  assert.match(text, /TOOL_CALL_UNPARSED/, '必须告诉会话「调用没被解析出来」，否则模型只会反复重试');
-  assert.ok(!/只产出了思考内容/.test(text), '事实是「发了调用但解析不了」，不能反过来说网页只思考');
-  assert.ok(/grep|read|pwsh/.test(text), '提示里要给出本会话可用工具，模型才能改正');
+  const { chunks, prompts } = await runTurn({ text: nameless, thinking: 'I will call a tool' });
+  const shown = chunks.filter((c) => c.type === 'text-delta').map((c) => c.text).join('');
+  // 0.16.29（用户指令）：提示不进正文，改由补发的用户消息送达。
+  assert.ok(prompts.length >= 2, '必须真的补发过一轮');
+  const sent = prompts[1];
+  assert.match(sent, /TOOL_CALL_UNPARSED/, '必须告诉会话「调用没被解析出来」，否则模型只会反复重试');
+  assert.ok(!/只产出了思考内容/.test(sent), '事实是「发了调用但解析不了」，不能反过来说网页只思考');
+  assert.ok(/grep|read|pwsh/.test(sent), '提示里要给出本会话可用工具，模型才能改正');
+  assert.ok(!/TOOL_CALL_UNPARSED/.test(shown), '正文不得再铺提示全文');
+  assert.match(shown, /AUTO_CONTINUED/, '正文只留一句进度说明');
 });

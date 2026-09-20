@@ -20,17 +20,18 @@
 
 | 项 | 值 |
 | --- | --- |
-| 工作树版本 | **0.16.28** |
-| 已装版本（profile） | **0.16.28**（2026-09-20 实测：web + headless 两处 `node_modules` 均为 0.16.28、声明已同步 0.16.28 tgz、`session-anchor.js`/`prompt-store.js` 在场、`reanchorSent` 接线 3 处；`dsh web` 已重启加载，`/__webcode/status` 实测 `build.version=0.16.28`）。headless 侧**下次启动 `dsh --profile headless` 时生效** |
-| 运行中的进程 | **DSH web（3080）= 0.16.28**（2026-09-20 02:5x 重启，附件复验实验后以正式 tarball 版本运行）；运行读数：`attachForbiddenStatic:true`、`attachBlocked:null` |
+| 工作树版本 | **0.16.30** |
+| 已装版本（profile） | **0.16.30**（2026-09-20 实测：web + headless 两处 `node_modules/dsh-webcode-bridge/package.json` 均为 `0.16.30`，且已装副本的 `lib/agent-preset.js` 内含 `OFFICIAL_BAR_CLS = OFFICIAL_BAR + '{1,3}'`，确认修复随包落地） |
+| 运行中的进程 | **DSH web（3080）= 0.16.30（已重启生效）**——`GET /__webcode/status` 实测 `build.version=0.16.30`（2026-09-20 重启后读数，`driver.running:true`）。修复已在运行中加载，见下行真机验证 |
 | 上游 | `origin/main` = `9d4c61a`（0.16.10 台账推送）；0.16.11–0.16.22 本地已提交/待推 |
-| 单测基线 | **67/67 测试文件**；全量 **782 条**（0.16.28 新增 3 文件：session-anchor 7 / prompt-store 6 / attach-selfheal 5，退出码 0） |
-| 注释闸门 | **error 0 / warn 0，退出码 0**（2026-09-20 实跑，123 文件） |
+| 单测基线 | **68/68 测试文件通过，退出码 0**（0.16.30 实跑；0.16.29 新增 prompt-store 读回 4 条 + session-continuity ⑩ 文件投递 1 条，0.16.30 新增 official-double-bar 11 条） |
+| 注释闸门 | **error 0 / warn 0，退出码 0**（2026-09-20 实跑，124 文件） |
 | 文件规范闸门 | `check-repo-hygiene.mjs` **PASS**（无 BOM + 索引无死链 + CI/engines Node 版本相容，2026-09-20 实跑） |
 | 发布闸门 | `verify-pack` 逐文件 sha256 相同 + 接线完好，退出 0（0.16.16 实跑 37/37） |
-| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.28 / testFiles 67/67） |
+| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.30 / testFiles 68/68） |
 | 已装包核对 | 0.16.21 已装机核对（见已装版本行） |
-| 下一阶段 | **0.16.28 已打包、已装（web+headless）、`dsh web` 已重启生效**。四条：① 会话游标内容锚定（goal 头槽轮转不再触发重建风暴）② 重建节流改等待重建（SESSION_SWITCHED 提示只在 abort 兜底）③ 提示词每站点/每会话落盘 ④ 附件零回复自愈降级（空结果 + 超时两签名）。真机判据见 §0.16.28 六 |
+| 真机验证（0.16.30） | **已生效**：重启后 19 轮原始回复的 `calls` **全部 > 0**（每轮 1~4 条），无新增 `TOOL_CALL_UNPARSED`；其中 `03:42:10`/`03:42:30` 两轮**仍写双竖线却被成功解析为 `calls=1`**（修复前同形状 6/6 轮 `calls=0`）。另有一轮 `calls=0` 属回复被截断，与本修复无关，见 §0.16.30 五 |
+| 下一阶段 | **0.16.29 + 0.16.30 已改完、已全绿、已打包、已装 web+headless、`dsh web` 已重启生效**。0.16.29 四条：① 再教学提示隐藏（三处出口，只留 AUTO_CONTINUED）② 节流窗文案更正为 60 秒 ③ 落盘升格为**投递源**（重建优先读 `sessions/<key>.md`，并修掉 0.16.28 的头部粘行缺陷）④ §0.16.28 归因取证完成（133 帧解压，`start=0` 逐字坐实）。0.16.30 一条：**双竖线 `<｜｜tool▁…` 全族解析归零**（见 §0.16.30，真机 6/6 轮 `calls=0` 现场）。真机判据见 §0.16.29 四 |
 
 > **§0.16.10 真机判据（重启后逐条核）**：① `GET /__webcode/status` 的 `build.version` = **0.16.10**；
 > ② 让模型回复一段含 `<b>`、`<foo>`、`Array<T>` 或字面 `<tool_call>` 示例的正文，**逐字对比** harness
@@ -43,6 +44,249 @@
 > 掩盖了「web 落后两个版本」这个真因，直接导致用户按台账以为装好了、重启后仍然不变。
 > **教训记在这里而不是删掉**：凡是「已装/已重启/已验证」这类状态行，**必须逐 profile 写、并附
 > sha256 前 12 位**，否则它会把「一个 profile 装了」读成「都装了」。 |
+
+## 0.16.30（2026-09-20）—— 官方 token 双竖线 `<｜｜tool▁…` 全族解析归零（自动化流程被打断的根因）
+
+**用户指令（逐字）**：「请你查看最近两个对话！看看版本更新后为什么自动化流程被打断了？明明
+你好中还可以，但是新版本就一直错误调用！改了什么？你快速更改修复！」
+
+### 一、症状与现场
+
+用户报「自动化流程被打断、每轮都错，之前还好」。真机现场是每轮一条：
+
+```
+TOOL_CALL_UNPARSED: 网页这一轮发出了工具调用，但桥没能把它变成可执行的调用…
+AUTO_CONTINUED: 已自动补发提醒，网页已重新发起 N 条调用。
+```
+
+即**每轮调用数为 0**，补发再教学后下一轮照旧失败（模型无条件收敛的形状可改）。
+
+### 二、根因（已在真机取证，不是推断）
+
+回复原文落盘（`~/.dsh/logs/webcode-bridge-replies.log`）里，失败轮的工具调用长这样——
+包裹竖线是**两枚** U+FF5C：
+
+```
+<｜｜tool▁calls▁begin｜>
+<｜｜tool▁call▁begin｜>pwsh<｜｜tool▁sep｜>{"command":"pwd"}<｜｜tool▁call▁end｜>
+<｜｜tool▁calls▁end｜>
+```
+
+而 0.16.18–0.16.29 的全部解析正则都写成 `'<' + 单枚 OFFICIAL_BAR + '\\s*'`。
+**`\s*` 吃不下第二枚竖线**，于是整族一条正则都不命中：
+
+| 层 | 修复前对双竖线的结果 |
+| --- | --- |
+| `findProtocolStart` | `index = -1`（边界探测认不出，协议原文有泄漏窗口） |
+| `normalizeOfficialToolCalls` | 原文**逐字不变**（改不动，不产生 `<invoke>`） |
+| `parseAgentReply` | `calls = 0` ⇒ 每轮 UNPARSED、自动化整轮空转 |
+| `partialProtocolAt` | 半截 token 返回 `-1` ⇒ **不扣留**，半截标记当散文外发并写进会话 |
+
+**「改了什么」的形状学答案**：协议从 DSML 族换成官方 token 族（0.16.18 教学、0.16.23 成为
+唯一协议）时，**DSML 族一直有的那条竖线宽容没有跟过来**。DSML 词形源写的是
+`DSML_BAR_CLS + '{1,3}'`（容 1~3 枚竖线，见 `DSML_MARK_SRC`），官方族从引入起就只有
+一枚。日志计数坐实两族都在写双竖线：全日志 **9,803** 处 —— DSML 时代 9,764 处
+（`<｜｜DSML｜｜ invoke …>`，当年被 `{1,3}` 容下、照常执行），官方 token 族 **25** 处
+（本次故障现场，一条都不认）。所以「之前还好、新版本一直错」不是玄学：**换协议族时
+丢掉了一条宽容**。
+
+### 三、修法
+
+新增 `OFFICIAL_BAR_CLS = OFFICIAL_BAR + '{1,3}'`（与 `DSML_BAR_CLS` 同纪律、同字符、
+同 1~3 上界，两份不各写一套），替换官方族**全部五条**正则的包裹竖线：
+
+- `RE_OFFICIAL_CALL`（调用段改写，含端锚）
+- `RE_OFFICIAL_CALLS_BEGIN` / `RE_OFFICIAL_CALLS_END`（包裹 token 映射）
+- `RE_OFFICIAL_CALLS_BEGIN_AT`（补发 `<calls>` 的判定）
+- `PROTOCOL_ANCHORS` 里的官方 token 锚点（流式边界）
+
+外加 `partialProtocolAt` 的**精确前缀表**补双竖线族（前缀表是精确字符串，归一化对
+"标记不完整"一格都不改，所以归一化救不了它——与 0.15.0 空格族同一条教训的第三次生效）。
+
+上界取 3 而不是无界 `+`：锚点与改写要在流式途中被每个 delta 反复调用，无界量词会让
+`<｜｜｜｜｜…` 这类噪声串被整段吞进协议判定（会给噪声发奖励）。**只放宽竖线，不放宽
+别的**——单竖线既有行为逐字不变。
+
+再教学提示（`trainNoteFor` 的官方版尾段 + `unparsedCallNotice`）点名真实病灶：
+「包裹竖线是一枚全角竖线（｜），左右各一枚，不要写成两枚（｜｜）」。与 0.16.20 / 0.16.25
+同一条纪律：提示必须指出模型**实际写错的那一处**，否则模型自查「name 在、JSON 合法」
+后无处可改，只能原样重发。
+
+### 四、验证
+
+**红基线（对已发布的 0.16.28 代码）**：新增 `test/official-double-bar.test.mjs` 11 条，
+对着 `8689ad7` 的 `lib/agent-preset.js` 实跑 **8 红 3 绿** —— 红的正是双竖线全族
+（单/多/无参调用、改写、边界、三竖线、半成品扣留、再教学文案），绿的正是「不许回归」
+的三条（单竖线仍可解析、四竖线仍不认、普通散文仍不扣）。修复后 **11/11 全绿**。
+
+**真机回复原文重放**（把 reply-log 里 live 运行时记为 `calls=0` 的原始回复逐字喂回修复后
+的解析器，只取正文含双竖线官方 token 的那些轮）：
+
+| 读数 | 值 |
+| --- | --- |
+| 双竖线官方 token 的轮次 | **6** |
+| 其中 live 运行时记为 `calls=0` | **6**（6/6 全部失败） |
+| 修复后解析出 ≥1 条调用 | **6**（6/6 全部恢复） |
+| 修复后可执行调用总数 | **13** |
+
+逐轮样本（会话 `session-d8e01269`，`chars` 与边界下标为实跑读数）：
+`00:01:31` → pwsh×2 + glob×3；`00:02:41` → pwsh + grep×2；`00:02:51` → pwsh；
+`00:03:38` → pwsh；`00:03:58` → grep×2 + pwsh；`00:05:22` → pwsh + read。
+
+**全量**：68/68 测试文件通过、退出码 0；注释闸门 0/0（124 文件）；文件规范闸门 PASS；
+记账闸门 PASS（version 0.16.30 / testFiles 68/68）。
+
+### 五、装机状态与遗留
+
+0.16.30 **已打包并装进 web + headless 两个 profile**（`pnpm pack` → `dsh plugin --profile <p> add
+<绝对路径 tgz>`；两条 install 均退出 0，两处 `package.json` 实测均为 0.16.30，且已装副本的
+`lib/agent-preset.js` 内含 `OFFICIAL_BAR_CLS`，确认修复随包落地）。
+
+**运行中的 `dsh web`（3080）已重启并加载 0.16.30**（2026-09-20 重启）。装机只换文件、
+进程要重启才加载，这一步用户已完成。实测重启前 `build.version=0.16.28`，重启后 `0.16.30`。
+
+**真机判据：三条逐条已核通过。**① `GET /__webcode/status` 的 `build.version` = `0.16.30`；
+② 新开一轮带工具调用的对话，**不再出现** `TOOL_CALL_UNPARSED`——即使模型仍写双竖线
+`<｜｜tool▁calls▁begin｜>`，调用也应照常执行（这正是本轮修的目标）；③ reply-log 里
+新轮次的 `calls=` 计数不再为 0。
+
+③ 的实测对照（同一条 reply-log、同一台机器）：重启前故障现场 6 轮双竖线**全部 `calls=0`**；
+重启后 19 轮原始回复 **`calls` 全部 > 0**（每轮 1~4 条），且无新增 `TOOL_CALL_UNPARSED`。
+
+**最强证据：重启后真机又写出双竖线，且被成功解析。** `03:42:10.102Z` 与 `03:42:30.115Z`
+两轮原始回复的正文里仍含 `<calls>` 双竖线形状（`doubleBar=true`、
+`calls_end=true`），live 运行时读数 **`calls=1`** —— 与修复前同形状 6/6 轮 `calls=0`
+形成直接对照。修复目标「即使模型仍写双竖线，调用也照常执行」在真机上逐字达成。
+
+**已知的、与本修复无关的另一种失败（如实记，不混为一谈）**：同一时段另有一轮
+（`03:41:22.090Z`，`chars=564`）`calls=0`，但它的形状**不是**双竖线——正文在被截断处
+结束（`calls_end` 缺失、参数 JSON 未闭合），属于**回复被截断**这一类，与竖线宽容无关。
+本轮的 `OFFICIAL_BAR_CLS` 修的是「形状认不出」，不修「内容没发完」。
+
+headless 侧已装 0.16.30，下次启动 `dsh --profile headless` 时生效（本轮未启动该 profile）。
+
+## 0.16.29（2026-09-20）—— 再教学提示隐藏 + 节流窗文案更正 + 文件投递（落盘升格为投递源）
+
+**用户指令（逐字）**：「1.你先设置真实尝试后：能够实现投递再发送文件尝试，看看官方做法，再试下实现：
+「把上下文通过文件发送」2.现在返回提示时候只需要保留：AUTO_CONTINUED: 已自动补发提醒，网页已
+重新发起 4 条调用。，关于 TOOL_CALL_UNPARSED: 直接隐藏 3.声明好节流窗是 60 秒 4.最好我是想做到：
+将提示词保存为本地的单独文件-每个网址一个，然后每轮发送过去，然后是每轮会话单独本地地址--如果
+新开会话-web端，就一样把这个当上下文通过文件发送！--以此对抗新开会话：然后反复丢失，搞清楚为什么
+会新开web端对话！文件投递参考：dsh-drop-caret，然后以官方定义/ui/规范为主」
+
+### 一、② 再教学提示隐藏（三处出口统一）
+
+`TOOL_CALL_UNPARSED` / `TOOL_UNKNOWN` / `THINKING_ONLY_NO_ANSWER` 三处出口的再教学提示**不再
+铺进正文**——它仍逐字作为**补发的用户消息**发给模型（`autoContinueRound`，落 reply-log），
+界面上只留一句 `AUTO_CONTINUED: 已自动补发提醒，网页已重新发起 N 条调用。`
+
+唯一例外是**补发根本没发生**（`autoContinueRounds=0` 或无会话键的无状态轮）：此时提示是唯一
+归因通道，必须照旧当正文交回——「隐藏」的前提是它已经逐字送达模型。`autoContinueRound`
+因此返回 `{disabled:true}` 而不是裸 `null`，把「没补发」与「补发没救回来」分开处置。
+
+护栏：`auto-continue` / `unparsed-notice-head` / `nameless-call` / `recovered-dispatch` /
+`stream-tail` 五处判据从「正文含提示」改为「补发的 prompt 含提示」。
+
+### 二、③ 节流窗文案更正：60 秒
+
+`SESSION_REBUILD_THROTTLE_MS` 自 0.16.6 起就是 **60_000ms**（0.16.28 注释里的「30 秒」是引
+0.16.6 提交里用户对**更早**版本的描述）。注释已更正并写明上界（等待 ≤ 60s）。
+真机佐证：reply-log 里 `上一次整段重建在 19.962s 前…节流窗还剩约 40.038s` = 60.0s。
+
+### 三、④ 文件投递：落盘从**副本**升格为**投递源**
+
+用户要的是「新开会话时把上下文通过文件发送」。0.16.28 只落了盘（写而不读），本轮补上读回：
+
+- 新增 `readPromptFile`（剥头部元信息、兼容旧格式、失败静默返回 null）；
+- `index.js` 新增 `readSessionPrompt`（与写入端严格对称的测试进程守卫 + 'off' 一并关闭）；
+- 整段重建处 `const rebuildText = readSessionPrompt(m.sessionKey) ?? m.rebuild();`
+  ——**优先读磁盘正本**，读不到才回落内存序列化。发出去什么、重建用什么，从此同一份字节。
+
+**顺带修掉一个 0.16.28 的真缺陷**：`writePromptFile` 用 `[..., ''].filter(Boolean).join('\n')`
+拼头部，那个空串被 `filter` **删掉**，于是头部末行与正文首行**没有换行**、粘成一行；
+真机实测读回只剩第二行之后——正文首行被吞。修法：头部改显式 `+ '\n\n'`；读回端兼容
+旧粘行格式（从 ISO 时间戳后取回正文首行并补回换行），保证升级后磁盘上的旧文件仍完整可读。
+
+### 四、④ 第二半：「为什么会新开 web 端对话」逐因可查
+
+用户第 4 问的后半句是「搞清楚为什么会新开 web 端对话」。此前 status 只有 `fresh` 一个
+布尔量，于是**四种完全不同的真因在界面上长得一模一样**——其中两种是正常行为、两种是真故障：
+
+| freshReasons 键 | 含义 | 是否故障 |
+| --- | --- | --- |
+| `no-cursor` | 该会话还没有游标（首轮，或游标被作废过） | 正常 |
+| `contract-changed` | 模型 / 系统提示词 / 工具名集合 / 全局指令变了 | 正常（但宿主升级改 system 措辞会频繁触发，值得盯） |
+| `anchor-lost` | 尾部被真正改写（如压缩摘要替换），锚点全部失配 | **真故障** |
+| `anchor-no-new-messages` | 锚点找到了但没有新消息可发（宿主把这一轮当重放） | **真故障** |
+
+实现：`buildTurn` 里逐因赋值 `freshReason` 并计数，透出 `/__webcode/status` 的
+`driver.freshReasons`（两个 status 入口都带——本文件反复记过的那条纪律）。
+每条 fresh 同时写一行 `fresh web chat (reason=…, sessionKey=…)` 日志。
+
+护栏：`session-continuity` ⑪（首轮记 `no-cursor`、system 改写记 `contract-changed`）。
+判据刻意用 **system 改写**而不是换模型来逼出契约变化——换站点会去起一个真实浏览器
+（本机 spawn EPERM），而 system 与工具名集合同属契约四项，改了契约又留在同一站点。
+
+### 五、真机判据（重启 `dsh web` 后核）
+
+1. **提示隐藏**：再遇解析失败，会话里只见 `AUTO_CONTINUED: …N 条调用。`，不再见
+   `TOOL_CALL_UNPARSED:` 全文；模型侧仍收到完整再教学提示（reply-log `auto-continue reply` 可查）。
+2. **文件投递**：整段重建那一轮发出去的文本 = `~/.dsh/webcode/sessions/<key>.md` 的正文
+   （可逐字对比）；`prompts/<site>.md` 头部与正文之间有空行。
+3. **节流窗**：日志写「60 秒」量级的剩余窗口，与 `sessionRebuildThrottleMs` 默认值一致。
+4. **新开对话可归因**：`GET /__webcode/status` 的 `driver.freshReasons` 直接给出各真因计数；
+   日志里每行 `fresh web chat (reason=…)` 可与之一一对应。
+
+### 六、§0.16.28 归因复核（用户问题 2 / 问题 4 的证据补全）
+
+会话 `session-4f236a51` 的 `session.v3.jsonl.zstd` 逐帧解压（**133 帧**；`zstdDecompressSync`
+只解第一帧，这正是此前「spliced=0」误判的成因），930,247 字符、266 行，逐字取得：
+
+```
+seq 29: agent/inbox/spliced target=next-turn start=0 inserted=[<goal_round> Round: 1/256] source.kind=goal
+seq 31: agent/inbox/spliced target=next-step start=0 removedCount=1
+seq 32: agent/inbox/spliced target=next-turn start=0 removedCount=1
+seq 169 / 188: … start=0 inserted=[Round: 2/256] / [Round: 3/256]
+```
+
+**结论：0.16.28 的根因叙述成立**——goal 自动化每轮确实对 `next-turn` 做 `start=0` 的插入/移除，
+即消息数组头部增删，与「已发前缀整体指纹必然失配」的推断逐字吻合。§0.16.28 的归因从
+「推断」正式升格为「已取证」。
+
+### 七、装机命令（用户在终端执行；沙箱不允许写 `~/.dsh/profiles`）
+
+打包已完成：`package/dsh-webcode-bridge/dsh-webcode-bridge-0.16.29.tgz`（471,936 字节，
+`verify-pack` 39/39 逐字相同 + 接线完好）。剩三步：
+
+```powershell
+cd D:\9_Code_Workspace\dsh-webcode-bridge
+
+# 1) 装入两个 profile（脚本先删旧目录再解包，免疫 pnpm「同版本不重解」）
+node scripts/install-profiles.mjs
+
+# 2) 关键：同步**声明**。install-profiles 只写 node_modules，不改
+#    package.json / pnpm-lock.yaml —— 声明不跟上，任何一次 pnpm 通道
+#    （dsh plugin / dshmarket / 启动期 reconcile）都会静默回退到旧版本。
+#    真机踩过三次（见 §0.16.10 七）。两个 profile 都要：
+dsh plugin --profile web add package/dsh-webcode-bridge/dsh-webcode-bridge-0.16.29.tgz
+dsh plugin --profile headless add package/dsh-webcode-bridge/dsh-webcode-bridge-0.16.29.tgz
+
+# 3) 核对（应当两行都是 0.16.29）
+foreach ($p in @('web','headless')) { $j = "$env:USERPROFILE\.dsh\profiles\$p\node_modules\dsh-webcode-bridge\package.json"; "$p = " + (Get-Content $j -Raw | ConvertFrom-Json).version }
+
+# 4) 重启 dsh web（会断开当前 GUI 会话，刷新页面接回）
+```
+
+重启后核 §五 的四条真机判据。
+
+### 八、验证
+
+- 全量测试：**67/67 测试文件通过，退出 0**（新增 `prompt-store` 读回 4 条、
+  `session-continuity` ⑩ 文件投递哨兵 + ⑪ fresh 逐因 2 条，并更新 5 个受契约变更影响的文件）。
+- 注释闸门 error 0 / warn 0；`check-repo-hygiene.mjs` PASS；`check-ledger.mjs` PASS。
+- 真机附件探针（`POST /__webcode/attach-probe`）：`ok:true, evidence:"text:webcode-probe.md"`。
+
+---
 
 ## 0.16.28（2026-09-20）—— 会话游标内容锚定 + 节流改等待重建 + 提示词落盘 + 附件自愈
 

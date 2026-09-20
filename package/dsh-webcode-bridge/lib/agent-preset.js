@@ -53,6 +53,35 @@ const TRAIN_NOTE_GLM = '[系统提示] 请保持工具调用格式：先写一�
  */
 const OFFICIAL_BAR = String.fromCharCode(0xFF5C);
 const OFFICIAL_SEP = String.fromCharCode(0x2581);
+/**
+ * 包裹竖线的**正则字符类**（0.16.30）：官方模板逐字只有一枚 U+FF5C，但真机
+ * 模型会写成**两枚**。为什么要容两枚而不再是 `\s*`（0.16.18–0.16.29 的写法）：
+ *
+ * `\s*` 只吃空白，**吃不下第二枚竖线**，于是 `<｜｜tool▁calls▁begin｜｜>` 全部正则
+ * 一条都不命中 —— 症状不是「少解析一点」，是**每条调用都归零**：
+ *   · `findProtocolStart` → -1（边界探测认不出，协议原文有泄漏风险）；
+ *   · `normalizeOfficialToolCalls` → 原文**逐字不变**（改不动）；
+ *   · `parseAgentReply` → `calls=0` ⇒ 每轮 `TOOL_CALL_UNPARSED`、自动化流程整轮空转。
+ *
+ * 真机取证（`~/.dsh/logs/webcode-bridge-replies.log`，2026-09-20 08:05 读数）：
+ * 双竖线形态全日志 **9,803** 处 —— DSML 时代 9,764 处（`<｜｜DSML｜｜ invoke …>`），
+ * 官方 token 族 25 处（`<｜｜tool▁calls▁begin｜>`，即本次故障现场）。
+ * 逐字样本（会话 session-d8e01269，`chars=245 calls=1` 那条是真机唯一成功的一轮，
+ * 用的正是单竖线；其余各轮全是双竖线、`calls=0`）：
+ *
+ *   <｜｜tool▁calls▁begin｜>
+ *   <｜｜tool▁call▁begin｜>pwsh<｜｜tool▁sep｜>{"command":"pwd"}<｜｜tool▁call▁end｜>
+ *   <｜｜tool▁calls▁end｜>
+ *
+ * 容错宽度取 `{1,3}`，与 DSML 词形源既有的 `DSML_BAR_CLS + '{1,3}'` **同纪律**
+ * （同一批字符、同一个上界，两份不各写一套）。上界 3 而不是无界 `+`：锚点与
+ * 改写都要在流式途中被反复调用，无界量词会让 `<｜｜｜｜｜…` 这类噪声串被整段
+ * 吞进协议判定；3 已覆盖真机全部读数，再宽只是给噪声发奖励。
+ *
+ * **只放宽竖线，不放宽别的**：连接符仍收 `▁` 与空格两族（OFFICIAL_SEP_SRC），
+ * 单竖线的既有行为逐字不变。
+ */
+const OFFICIAL_BAR_CLS = OFFICIAL_BAR + '{1,3}';
 const OFFICIAL_TOKEN = (words) => '<' + OFFICIAL_BAR + 'tool' + words.map((w) => OFFICIAL_SEP + w).join('') + OFFICIAL_BAR + '>';
 const OFFICIAL_CALLS_BEGIN = OFFICIAL_TOKEN(['calls', 'begin']);
 const OFFICIAL_CALL_BEGIN = OFFICIAL_TOKEN(['call', 'begin']);
@@ -166,9 +195,9 @@ const DSML_BAR_ANCHOR_SRC = DSML_BAR_CLS + '+\\s*DSML\\s*' + DSML_BAR_CLS + '+'
  */
 const OFFICIAL_SEP_SRC = '[' + String.fromCharCode(0x2581) + '\\s]';
 const RE_OFFICIAL_CALL = new RegExp(
-  '<' + OFFICIAL_BAR + '\\s*tool(?:' + OFFICIAL_SEP_SRC + ')?call(?:s)?(?:' + OFFICIAL_SEP_SRC + ')?begin(?:' + OFFICIAL_SEP_SRC + ')?' + OFFICIAL_BAR + '>'
+  '<' + OFFICIAL_BAR_CLS + '\\s*tool(?:' + OFFICIAL_SEP_SRC + ')?call(?:s)?(?:' + OFFICIAL_SEP_SRC + ')?begin(?:' + OFFICIAL_SEP_SRC + ')?' + OFFICIAL_BAR_CLS + '>'
   + '\\s*(?:function)?\\s*([^<' + OFFICIAL_BAR + ']*?)\\s*'
-  + '<' + OFFICIAL_BAR + '\\s*tool(?:' + OFFICIAL_SEP_SRC + ')?sep(?:' + OFFICIAL_SEP_SRC + ')?' + OFFICIAL_BAR + '>'
+  + '<' + OFFICIAL_BAR_CLS + '\\s*tool(?:' + OFFICIAL_SEP_SRC + ')?sep(?:' + OFFICIAL_SEP_SRC + ')?' + OFFICIAL_BAR_CLS + '>'
   + '([\\s\\S]*?)'
   // 端锚两条硬约束（0.16.20，run-10 session-33f37b03 逐字双修，缺一吞调用）：
   // ① `</?` 容忍模型把闭 token 写成 XML 斜杠形 `</｜tool▁call▁end｜>`（官方模板
@@ -178,15 +207,15 @@ const RE_OFFICIAL_CALL = new RegExp(
   //    `end｜>`）——斜杠闭 token 不被认出时端锚跨到下一条调用的 begin token，
   //    把**下一条调用整块当端锚吃掉**（run-10：pwsh×2 只执行 1 条、三调用只出
   //    2 条，全程零诊断零通知）。
-  + '</?\\s*' + OFFICIAL_BAR + '\\s*tool(?:' + OFFICIAL_SEP_SRC + ')?calls?(?:' + OFFICIAL_SEP_SRC + ')?end(?:' + OFFICIAL_SEP_SRC + ')?' + OFFICIAL_BAR + '>', 'g');
+  + '</?\\s*' + OFFICIAL_BAR_CLS + '\\s*tool(?:' + OFFICIAL_SEP_SRC + ')?calls?(?:' + OFFICIAL_SEP_SRC + ')?end(?:' + OFFICIAL_SEP_SRC + ')?' + OFFICIAL_BAR_CLS + '>', 'g');
 const RE_OFFICIAL_CALLS_BEGIN = new RegExp(
-  '<' + OFFICIAL_BAR + '\\s*tool' + OFFICIAL_SEP_SRC + 'calls' + OFFICIAL_SEP_SRC + 'begin(?:' + OFFICIAL_SEP_SRC + ')?' + OFFICIAL_BAR + '>', 'g');
+  '<' + OFFICIAL_BAR_CLS + '\\s*tool' + OFFICIAL_SEP_SRC + 'calls' + OFFICIAL_SEP_SRC + 'begin(?:' + OFFICIAL_SEP_SRC + ')?' + OFFICIAL_BAR_CLS + '>', 'g');
 const RE_OFFICIAL_CALLS_END = new RegExp(
-  '<' + OFFICIAL_BAR + '\\s*tool' + OFFICIAL_SEP_SRC + 'calls' + OFFICIAL_SEP_SRC + 'end(?:' + OFFICIAL_SEP_SRC + ')?' + OFFICIAL_BAR + '>', 'g');
+  '<' + OFFICIAL_BAR_CLS + '\\s*tool' + OFFICIAL_SEP_SRC + 'calls' + OFFICIAL_SEP_SRC + 'end(?:' + OFFICIAL_SEP_SRC + ')?' + OFFICIAL_BAR_CLS + '>', 'g');
 
 /** m 以 calls▁begin 起配（漂移：模型把它直接当调用开头，漏写 call▁begin）。 */
 const RE_OFFICIAL_CALLS_BEGIN_AT = new RegExp(
-  '^<' + OFFICIAL_BAR + '\\s*tool(?:' + OFFICIAL_SEP_SRC + ')?calls(?:' + OFFICIAL_SEP_SRC + ')?begin');
+  '^<' + OFFICIAL_BAR_CLS + '\\s*tool(?:' + OFFICIAL_SEP_SRC + ')?calls(?:' + OFFICIAL_SEP_SRC + ')?begin');
 
 function rewriteOfficialToolCalls(text) {
   // 全调用段优先（连同 NAME / sep / 参数体一起收编），孤立的 calls 包裹 token
@@ -222,7 +251,12 @@ function rewriteOfficialToolCalls(text) {
 const TRAIN_NOTE_OFFICIAL_HEAD = '[系统提示] 请保持工具调用的官方格式：';
 const TRAIN_NOTE_OFFICIAL_TAIL = '。标记必须逐字完整（含 ▁ 连接符，不要改成空格或省略）；sep 之后是完整 JSON 对象，'
   + 'required 的每个必填参数都要在，无参数的工具 arguments 写 {}；不要加 ```json 围栏；'
-  + '多个调用重复 call begin / sep / call end 段。骨架与文档里的「工具名」等只是占位符，示例形状不是调用。';
+  + '多个调用重复 call begin / sep / call end 段。骨架与文档里的「工具名」等只是占位符，示例形状不是调用。'
+  // 0.16.30：点名**真实病灶**。与 0.16.20 同一条纪律——提示要指出模型实际写错的地方，
+  // 否则模型不收敛、每轮重复同一个错。本条的病灶是「包裹竖线写成两枚」：
+  // 真机 25 处 `<｜｜tool▁…`，解析侧当时整族不认，每轮 calls=0 空转。
+  // 措辞只陈述事实（一枚 U+FF5C），不复述内部实现名，避免模型照抄术语。
+  + '包裹标记的竖线是**一枚**全角竖线（｜），左右各一枚，不要写成两枚或更多（｜｜ 是错的）。';
 function trainNoteOfficialFor(tools) {
   const sample = officialCallExampleFor(tools);
   return TRAIN_NOTE_OFFICIAL_HEAD + officialToolCallSpecimen(sample.name, sample.args) + TRAIN_NOTE_OFFICIAL_TAIL;
@@ -958,7 +992,9 @@ const PROTOCOL_ANCHORS = [
   // 断流轮的半截 token 也要扣住（findProtocolStart 命中后 normalizeOfficialToolCalls 才有机会
   // 对协议区做官方→规范改写；没有这条锚点，官方格式整段漏成正文——红基线实测
   // proseSafeEnd=全长、0 calls）。
-  new RegExp('<' + String.fromCharCode(0xFF5C) + '\\s*tool(?:' + String.fromCharCode(0x2581) + '|\\s)', 'i'),
+  // 0.16.30：竖线放宽为 `{1,3}`（OFFICIAL_BAR_CLS 同源）——`\s*` 吃不下第二枚
+  // 竖线，`<｜｜tool▁calls▁begin｜>` 曾整族漏过本锚点（真机 25 处，calls=0 的现场）。
+  new RegExp('<' + OFFICIAL_BAR_CLS + '\\s*tool(?:' + String.fromCharCode(0x2581) + '|\\s)', 'i'),
 ];
 
 /**
@@ -1335,12 +1371,24 @@ export function partialProtocolAt(text, scope = 24) {
   // 与上面 `<toolcall` 无下划线族同一教训：锚点/前缀表与被保护的正则共享同一个
   // 盲区时，「没有泄漏告警」是假阴性——这里在 normalizeOfficialToolCalls 收官方词形之前，
   // 流式第一道防线必须先认它。
+  //
+  // 0.16.30：竖线**重复族**（`<｜｜tool…`）也必须在这张精确前缀表里。与 0.15.0 空格族
+  // 同一条教训的第三次生效：前缀表是**精确字符串**，`normalizeOfficialToolCalls` 在
+  // 「标记不完整」时**一格都不改**，所以归一化救不了它——上面那张表只列了单竖线，
+  // 双竖线的半成品直接掉到 `-1`（不扣留），半截 token 被当散文外发并写进会话。
+  // 真机读数（probe，修复前）：`<｜｜to` → 2（靠 dsmlHead 兜住），
+  // 但 `<｜｜tool▁calls` 与完整双竖线 token → **-1**，泄漏窗口真实存在。
+  // 宽度取 1~2 枚：`{1,3}` 的第三枚留给完整 token 的正则，前缀表只需覆盖
+  // 「模型正在写双竖线」这一段；两枚已覆盖真机全部 25 处读数。
   const officialPrefix = '<' + String.fromCharCode(0xFF5C) + 'tool';
+  const officialBar2 = '<' + String.fromCharCode(0xFF5C) + String.fromCharCode(0xFF5C);
   const officialSep = String.fromCharCode(0x2581);
   const prefixes = ['<tool_call', '<tool_calls', '<toolcall', '<toolcalls', '<call_call', '<call', '<invoke', '<parameter', '<function', '<stories', '**Calling:',
-    officialPrefix,
+    officialPrefix, officialBar2 + 'tool',
     officialPrefix + officialSep + 'calls' + officialSep + 'begin', officialPrefix + officialSep + 'call' + officialSep + 'begin',
     officialPrefix + officialSep + 'call' + officialSep + 'end', officialPrefix + officialSep + 'calls' + officialSep + 'end', officialPrefix + officialSep + 'sep',
+    officialBar2 + 'tool' + officialSep + 'calls' + officialSep + 'begin', officialBar2 + 'tool' + officialSep + 'call' + officialSep + 'begin',
+    officialBar2 + 'tool' + officialSep + 'call' + officialSep + 'end', officialBar2 + 'tool' + officialSep + 'calls' + officialSep + 'end', officialBar2 + 'tool' + officialSep + 'sep',
     officialPrefix + ' calls begin', officialPrefix + ' call begin', officialPrefix + ' call end', officialPrefix + ' calls end', officialPrefix + ' sep'];
   // 半成品标记的起点下标（归一化串上算出来的，再映射回原串）。
   const locate = (n) => {

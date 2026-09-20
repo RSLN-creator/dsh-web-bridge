@@ -25,7 +25,32 @@ import { createWebControl, buildSessionEvents, mainLineOf } from './web-control.
 import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, stripProtocolRegions, proseSafeEnd, readCallAt, partialProtocolAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeOfficialToolCalls, normCallArgs, inferToolNameFromArgs, recoverUnparsedCalls, officialToolCallSpecimen, officialCallExampleFor, transportNoteFor, buildPreset } from './agent-preset.js';
 import { appendReplyLog } from './reply-log.js';
 import { contractFingerprintOf, reanchorSent, messageHash, ANCHOR_LEN } from './session-anchor.js';
-import { writePromptFiles, sitePromptPath, sessionPromptPath, DEFAULT_PROMPT_STORE_DIR } from './prompt-store.js';
+import { writePromptFiles, readPromptFile, sitePromptPath, sessionPromptPath, DEFAULT_PROMPT_STORE_DIR } from './prompt-store.js';
+
+/**
+ * 提示词落盘的根目录（与 prompt-store.writePromptFiles 同一套解析）。
+ * 'off' = 用户显式关闭落盘；此时读也一并关闭（不留半个开关）。
+ */
+function promptStoreDirFor() {
+  const requested = process.env.WEBCODE_PROMPT_STORE_DIR;
+  if (requested === 'off') return null;
+  return requested || DEFAULT_PROMPT_STORE_DIR;
+}
+
+/**
+ * 读回某会话落盘的上下文正本（0.16.29 文件投递）。
+ *
+ * 测试进程（node --test）在无显式目录时不读真实 ~/.dsh/webcode/——与写入端
+ * （prompt-store 的 NODE_TEST_CONTEXT 守卫）严格对称：只写不读或只读不写
+ * 都会让「落盘即投递源」这句话在某一条通道上变成空头承诺。
+ */
+function readSessionPrompt(sessionKey) {
+  if (!sessionKey) return null;
+  const dir = promptStoreDirFor();
+  if (!dir) return null;
+  if (!process.env.WEBCODE_PROMPT_STORE_DIR && process.env.NODE_TEST_CONTEXT) return null;
+  return readPromptFile(sessionPromptPath(dir, sessionKey));
+}
 import { createMirror } from './mirror.js';
 import { httpFetch } from './upstream.js';
 import { textOfBlocks } from './flatten.js';
@@ -602,6 +627,10 @@ export function apply(ctx, config = {}) {
   // 用户报的就是它），混进 sessionCursorInvalidations 就分不清「作废游标」与
   // 「改口成提示」各发生了几次。
   let sessionSwitchNotices = 0;
+  // 0.16.29：「为什么新开了 web 端对话」的逐因计数（用户第 4 问的正面回答）。
+  // 四个真因见 buildTurn 里 freshReason 的注释。只读，透出到 /__webcode/status 的
+  // driver.freshReasons —— 从前这个问题只能靠读日志猜，现在一句话可查。
+  const freshReasons = new Map();
   let buildTurn;
   let lastPresetInfo = null;   // the most recent first-turn prompt (settings-page preview)
   // 全局指令：设置页可追加，持久化在 profile 目录的 webcode-settings.json（优先使用宿主 settings 服务）。
@@ -1082,7 +1111,12 @@ export function apply(ctx, config = {}) {
       //      重放全套机器原样生效，不绕过任何节流。
       const autoContinueRound = async (noticeText) => {
         const rounds = Math.max(0, Number(cfg.autoContinueRounds ?? 1) || 0);
-        if (rounds < 1 || !turn.meta?.sessionKey) return null;
+        // 0.16.29：返回 `{ disabled:true }` 而不是裸 null，让调用方把「根本没补发」
+        // 与「补发了但没救回来」分开处置——前者没有第二条通道，再教学提示必须
+        // 照旧当正文交回（否则 autoContinueRounds=0 的用户彻底拿不到归因）；
+        // 后者提示已经逐字进了网页会话，界面上只留 AUTO_CONTINUED
+        //（用户指令：「TOOL_CALL_UNPARSED: 直接隐藏」）。
+        if (rounds < 1 || !turn.meta?.sessionKey) return { disabled: true, calls: [], text: '' };
         // 0.16.25：协议段按**站点**复用 transportNoteFor（与首轮教学同一函数、
         // 逐字同一份文本）。这一轮是「把再教学提示当用户消息补发」，模型看到的
         // 格式指引必须与它首轮被教的完全一致：deepseek 拿官方模板、glm 拿代码块
@@ -1414,17 +1448,18 @@ export function apply(ctx, config = {}) {
         // 处置与 0.16.25/0.16.26 逐字同型：把提示补发进**同一个网页会话**收第二轮，
         // 解析出真实工具名的调用就照常派发（finish=tool-calls，循环存活）。
         const cont = await autoContinueRound(notice);
-        if (cont) {
+        if (cont && !cont.disabled) {
           const contValid = cont.calls.filter((c) => tools.some((t) => t?.name === c.name));
           const contProse = safeAutoProse(cont.text);
-          // 0.16.27：`notice` 必须**作为正文外发**，不能只进 finishChunks 的记账字符串。
-          // 旧写法（本版首轮）把它只写进 finish 文本，于是界面上只看到一句
-          // AUTO_CONTINUED，用户不知道桥为什么重试、模型被要求改什么——与 UNPARSED
-          // 出口（`head = out + notice` 随后 emitFollowUp）不一致。护栏
-          // test/auto-continue.test.mjs「TOOL_UNKNOWN 后自动续跑」正是钉这一点。
+          // 0.16.29（用户指令）：与 UNPARSED 同处置——再教学提示全文只作为补发的
+          // 用户消息发给模型（autoContinueRound 里逐字发出、逐字落 reply-log），
+          // **不再当正文铺进会话**，界面只留一句 AUTO_CONTINUED 进度说明。
+          // 0.16.27 曾要求把 notice 外发（让用户看见桥为什么重试）；0.16.29 改由
+          // AUTO_CONTINUED 一行承担同一告知职责，细节留在 reply-log 里可查。
+          // 唯一例外：补发**根本没发生**（cont.disabled）时仍交回 notice 原文，
+          // 因为那条通道不存在了，提示是唯一归因来源（见下面 emitText 兜底）。
           if (contValid.length) {
-            const text = notice + '\n\n'
-              + `AUTO_CONTINUED: 已自动补发提醒，网页已按真实工具名重新发起 ${contValid.length} 条调用。`
+            const text = `AUTO_CONTINUED: 已自动补发提醒，网页已重新发起 ${contValid.length} 条调用。`
               + (contProse ? `\n\n${contProse}` : '');
             yield* emitFollowUp(text);
             yield* emitCallBlocks(contValid, 'auto-continued after TOOL_UNKNOWN round');
@@ -1432,7 +1467,7 @@ export function apply(ctx, config = {}) {
             return;
           }
           if (contProse) {
-            const text = notice + '\n\n' + contProse;
+            const text = `AUTO_CONTINUED: 已自动补发提醒，网页仍未发起可执行调用。\n\n${contProse}`;
             yield* emitFollowUp(text);
             yield* finishChunks(turn, text + thinkAcc, 'stop');
             return;
@@ -1660,17 +1695,29 @@ export function apply(ctx, config = {}) {
           // 第二轮解析出可执行调用就照常派发（finish=tool-calls，循环存活）；
           // 续跑失败/仍无调用则回落「提示当正文」收场（与旧行为逐字同型）。
           const cont = await autoContinueRound(notice);
-          if (!cont) {
-            yield* emitText(out ? `${out}\n\n${notice}` : notice, turn, nextIndex);
+          if (!cont || cont.disabled) {
+            // 补发**根本没发生**（autoContinueRounds=0 或无会话键的无状态轮）：
+            // 再教学提示是唯一通道，必须照旧当正文交回，否则模型与用户都拿不到
+            // 「这轮为什么没执行」的归因。
+            if (cont?.disabled) {
+              yield* emitText(out ? `${out}\n\n${notice}` : notice, turn, nextIndex);
+              return;
+            }
+            // 补发过了、模型仍然没能给出可执行调用：界面上只给一句可行动的归因，
+            // 不铺再教学提示全文（0.16.29 用户指令）。
+            const fallback = 'AUTO_CONTINUED: 已自动补发提醒，但网页仍未发起可执行调用。';
+            yield* emitText(out ? `${out}\n\n${fallback}` : fallback, turn, nextIndex);
             return;
           }
           const contValid = cont.calls.filter((c) => tools.some((t) => t?.name === c.name));
           const contProse = safeAutoProse(cont.text);
-          const head = (out ? `${out}\n\n` : '') + notice;
-          const text = head
+          // 0.16.29（用户指令）：再教学提示（TOOL_CALL_UNPARSED 全文）只作为补发的
+          // 用户消息发给模型（见 autoContinueRound），**不再当正文显示在会话里**——
+          // 界面只留一句 AUTO_CONTINUED 进度说明。提示全文仍逐字补发、仍落 reply-log。
+          const text = (out ? `${out}\n\n` : '')
             + (contValid.length
-              ? `\n\nAUTO_CONTINUED: 已自动补发提醒，网页已重新发起 ${contValid.length} 条调用。`
-              : '\n\n（已自动补发提醒并重试一轮，网页仍未发起可执行调用——以上为其回复，按最终答复收场。）')
+              ? `AUTO_CONTINUED: 已自动补发提醒，网页已重新发起 ${contValid.length} 条调用。`
+              : 'AUTO_CONTINUED: 已自动补发提醒，网页仍未发起可执行调用——以上为其回复，按最终答复收场。')
             + (contProse ? `\n\n${contProse}` : '');
           yield* emitFollowUp(text);
           yield* emitCallBlocks(contValid, 'auto-continued after unparsed round');
@@ -1690,14 +1737,13 @@ export function apply(ctx, config = {}) {
           // 个网页会话**收第二轮，解析出调用就照常派发（finish=tool-calls，循环存活）；
           // 无调用但有散文就按最终答复收场；两头都落空才回落旧的「提示当正文」。
           const cont = await autoContinueRound(notice);
-          if (cont) {
+          if (cont && !cont.disabled) {
             const contValid = cont.calls.filter((c) => tools.some((t) => t?.name === c.name));
             const contProse = safeAutoProse(cont.text);
-            // 与上面 TOOL_UNKNOWN 同一处修正：归因提示必须外发，用户才看得到
-            // 「本轮为什么被自动重试」。只写进 finishChunks 的记账字符串等于没发。
+            // 0.16.29：thinking-only 的归因提示同样只走补发通道，不再铺进正文
+            // （与 UNPARSED / TOOL_UNKNOWN 三处一致）。
             if (contValid.length) {
-              const text = notice + '\n\n'
-                + `AUTO_CONTINUED: 已自动补发提醒，网页已重新发起 ${contValid.length} 条调用。`
+              const text = `AUTO_CONTINUED: 已自动补发提醒，网页已重新发起 ${contValid.length} 条调用。`
                 + (contProse ? `\n\n${contProse}` : '');
               yield* closeThink();
               yield* emitFollowUp(text);
@@ -1706,7 +1752,7 @@ export function apply(ctx, config = {}) {
               return;
             }
             if (contProse) {
-              const text = notice + '\n\n' + contProse;
+              const text = `AUTO_CONTINUED: 已自动补发提醒，网页仍未发起可执行调用。\n\n${contProse}`;
               yield* closeThink();
               yield* emitFollowUp(text);
               yield* finishChunks(turn, text + thinkAcc, 'stop');
@@ -1755,10 +1801,10 @@ export function apply(ctx, config = {}) {
           warn(notice);
           tail = tail ? `${tail}\n\n${notice}` : notice;
         } else {
-          const notice = unparsedCallNotice({ thinkAcc, tools, scene: idleScene(), withheld, head: finalText.slice(proseLimit, proseLimit + 200), diagnostic: diagnostics[0] || '' });
-          warn(notice);
-          tail = tail ? `${tail}\n\n${notice}` : notice;
-          unparsedNotice = notice;
+          // 0.16.29（用户指令）：再教学提示**不接进 tail**——tail 会作为正文外发。
+          // 它只存进变量，由下面的 autoContinueRound 作为补发的用户消息发给模型。
+          unparsedNotice = unparsedCallNotice({ thinkAcc, tools, scene: idleScene(), withheld, head: finalText.slice(proseLimit, proseLimit + 200), diagnostic: diagnostics[0] || '' });
+          warn(unparsedNotice);
         }
       }
       // 块内容必须与外发的 delta 逐字一致，否则界面上这一块会凭空多出协议原文。
@@ -1776,7 +1822,12 @@ export function apply(ctx, config = {}) {
         yield { type: 'text-delta', index: textIndex, text: tail };
       }
       const proseBlock = proseSent.slice(proseBlockStart) + tail;
-      yield { type: 'block-end', index: textIndex, block: { type: 'text', text: proseBlock } };
+      // 0.16.29：tail 现在可能为空（再教学提示不再接进来），而 textIndex 只有在
+      // openText() 之后才有效。空正文且流式期间也没开过块时跳过 block-end，
+      // 不要往一个从未 block-start 的下标上挂内容（0.16.4 修的是同一件事）。
+      if (tail || proseBlock) {
+        yield { type: 'block-end', index: textIndex, block: { type: 'text', text: proseBlock } };
+      }
       yield* closeThink();
       if (recoveredCalls?.length) {
         // 恢复派发（0.16.12）：正文块照发，调用块跟在后面，finish 用 tool-calls
@@ -1801,6 +1852,14 @@ export function apply(ctx, config = {}) {
       // 有散文就作为最终答复收场，两头都不落空才回到既有的纯文本 stop 收场。
       if (unparsedNotice) {
         const cont = await autoContinueRound(unparsedNotice);
+        if (cont?.disabled) {
+          // 0.16.29：补发通道不存在（autoContinueRounds=0 / 无会话键）时，提示是
+          // 唯一归因来源，必须照旧铺进正文——与「隐藏」不矛盾：隐藏的前提是
+          // 它已经逐字发给了模型。
+          yield* emitFollowUp(unparsedNotice);
+          yield* finishChunks(turn, proseBlock + unparsedNotice + thinkAcc, 'stop');
+          return;
+        }
         if (cont) {
           const contValid = cont.calls.filter((c) => tools.some((t) => t?.name === c.name));
           const contProse = safeAutoProse(cont.text);
@@ -1812,8 +1871,10 @@ export function apply(ctx, config = {}) {
             return;
           }
           if (contProse) {
-            yield* emitFollowUp(contProse);
-            yield* finishChunks(turn, proseBlock + contProse + thinkAcc, 'stop');
+            // 0.16.29：续跑轮只有散文时也只留进度说明（提示全文已发给模型）。
+            const text = `AUTO_CONTINUED: 已自动补发提醒，网页仍未发起可执行调用。\n\n${contProse}`;
+            yield* emitFollowUp(text);
+            yield* finishChunks(turn, proseBlock + text + thinkAcc, 'stop');
             return;
           }
           // 续跑轮既无调用也无可用散文（空回复）：不动块结构，落回下面的 stop 收场。
@@ -1941,6 +2002,10 @@ function unparsedCallNotice({ thinkAcc = '', tools = [], scene = null, withheld 
     // 教学没打到病灶，模型连抄三轮坏形状（.tmp/debug-log-2026-09-19-run10-*.md）。
     + '重发注意：收尾 token 不带斜杠，每条调用都要用成对的 call-begin/call-end 包住、'
     + '多条共用同一对 calls-begin/calls-end；'
+    // 0.16.30：点名本轮的病灶——包裹竖线写成两枚（`<｜｜tool▁…`）。与 0.16.20/0.16.25
+    // 同一条纪律：提示必须指出模型实际写错的那一处，否则模型自查「name 在、JSON 合法」
+    // 后无处可改，只能原样重发。真机 25 处 `｜｜`、每轮 calls=0 就是这个循环。
+    + '包裹竖线是一枚全角竖线（｜），左右各一枚，不要写成两枚（｜｜）；'
     // 0.16.25：点名 cd997dd3 的病灶（sep 后必须是单个 JSON 对象）。模型当时的
     // 自查「太长/被截断/字符坏 JSON」三项都不成立——主对象 2029 字符完全合法，
     // 坏的只是闭合后多挂的 `,{"replace_all":false}`。
@@ -2475,8 +2540,10 @@ function imageMarkdown(images) {
               // 0.16.28：节流窗口内**先等完剩余窗口再重建**，不再把提示当正文交回。
               // 真机取证（session-4f236a51，reply-log 逐字 52 次）：提示是**纯文本
               // 回复**，agent 循环把它当最终答复收场——goal 自动化的每一轮被空转
-              // 烧掉 30 秒、任务零进展，用户看到「被好心提醒完全打断」。等待是有界
-              // 的（≤ 窗口全长，默认 60s），abort 立即短路到旧收场（提示只在
+              // 烧掉一整个节流窗（`SESSION_REBUILD_THROTTLE_MS`，默认 **60 秒**；
+              // 0.16.6 起就是 60 秒，旧文案写「30 秒」是引 0.16.6 提交里用户对**更早**
+              // 版本的描述，0.16.29 更正）、任务零进展，用户看到「被好心提醒完全打断」。
+              // 等待是有界的（≤ 窗口全长 = 60s），abort 立即短路到旧收场（提示只在
               // 「用户真的叫停」时才有资格成为本轮正文）。
               if (SESSION_REBUILD_THROTTLE_MS > 0 && prev && now - prev.at < SESSION_REBUILD_THROTTLE_MS) {
                 const waitMs = SESSION_REBUILD_THROTTLE_MS - (now - prev.at);
@@ -2514,7 +2581,13 @@ function imageMarkdown(images) {
               // 留给下一次节流判定（m.rebuild() 是纯序列化，但 40 万字符不该算两遍）。
               // 0.16.28：等待过节流窗的话时钟必须刷新——否则节流记录带着等待前的
               // 旧时间戳，下一次撞窗判定会把真实间隔算长（窗口提前失效）。
-              const rebuildText = m.rebuild();
+              //
+              // 0.16.29（用户指令「如果新开会话-web 端，就一样把这个当上下文通过文件
+              // 发送」）：落盘文件从**副本**升格为**投递源**。磁盘上那一份就是上一轮
+              // 真实发出去的正本，这里优先读回它——于是「发出去什么」与「重建时用什么」
+              // 恒为同一份字节。读不到（首次运行 / 曾写入失败 / 配了 'off'）才回落
+              // 内存序列化：两条路都保住上下文，绝不静默丢弃。
+              const rebuildText = readSessionPrompt(m.sessionKey) ?? m.rebuild();
               lastSessionRebuildAt.set(m.sessionKey, { at: Date.now(), chars: rebuildText.length });
               while (lastSessionRebuildAt.size > 512) lastSessionRebuildAt.delete(lastSessionRebuildAt.keys().next().value);
               // 整段重建全文同步落盘（0.16.28）：这份文本就是「新开会话时把上下文
@@ -2660,6 +2733,9 @@ function imageMarkdown(images) {
         // 与上一条分开正是为了让这两件事不再混成一个数：作废游标 = 下一轮整段重建，
         // 改口成提示 = 这一轮没内容可交但会话还在。两者都发生时的排查路径完全不同。
         sessionSwitchNotices,
+        // 0.16.29：「为什么又新开了一个网页对话」的逐因计数。空对象 = 本次进程
+        // 还没发生过 fresh；有键就说明发生过，且键名直接给出真因（见 buildTurn）。
+        freshReasons: Object.fromEntries(freshReasons),
       };
 
       /** 单个槽的状态行。拆成函数是因为默认槽与非默认槽的「未初始化」分支要逐字一致。 */
@@ -2983,18 +3059,35 @@ function imageMarkdown(images) {
     const contract = contractFingerprintOf({ model, system: options.system, toolNameKey, extraPrompt });
     const fingerprint = count => createHash('sha256').update(JSON.stringify({ model, system: options.system, tools: toolNameKey, extraPrompt, messages: messages.slice(0, count) })).digest('hex');
     let st = sessionState.get(keyPath);
+    // 0.16.29：判 fresh 的**原因**必须可查（用户第 4 问「搞清楚为什么会新开 web 端
+    // 对话！」）。此前只有 `fresh` 一个布尔量，于是「新开了对话」这句话在四个
+    // 完全不同的真因面前长得一模一样：首次轮、契约变了、锚定丢了、锚定后无新消息。
+    // 四者的修法互不相同（前两个正常，后两个是真故障），因此逐因计数并透出 status。
+    let freshReason = null;
     if (st) {
       if (st.contract !== contract) {
         st = null;
+        freshReason = 'contract-changed';
       } else if (st.fingerprint !== fingerprint(st.sent) || messages.length <= st.sent) {
         // 旧判据在此直接判死。现在先试内容锚：头槽轮转 / 历史删改（只删不改尾）
         // 都能重定位续跑；锚定后没有新消息（sent' >= length）或锚定失败才判 fresh。
         const re = reanchorSent(messages, st.tailHashes);
         if (re && re.sent < messages.length) st.sent = re.sent;
-        else st = null;
+        else {
+          st = null;
+          // 锚点找到了但没有新消息可发 ≠ 锚点完全丢失：前者是「宿主把这一轮
+          // 当成重放」，后者才是「尾部真被改写」。分开记，排查时不必再猜。
+          freshReason = re ? 'anchor-no-new-messages' : 'anchor-lost';
+        }
       }
+    } else {
+      freshReason = 'no-cursor';
     }
     const fresh = !st;
+    if (fresh && freshReason && keyPath) {
+      freshReasons.set(freshReason, (freshReasons.get(freshReason) || 0) + 1);
+      log(`fresh web chat (reason=${freshReason}, sessionKey=${keyPath}) — 整段重建`);
+    }
     st ||= { sent: 0, toolResults: 0, tokens: 0 };
     // 增量轮的再教学提示按站点取（glm 只教代码块形状，与首轮同一立场）。
     const delta = serializeDelta(messages, st.sent, st.toolResults, undefined, trainNoteFor(siteId, '', options.tools));

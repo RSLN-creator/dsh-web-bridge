@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { sitePromptPath, sessionPromptPath, writePromptFile, writePromptFiles, DEFAULT_PROMPT_STORE_DIR } from '../lib/prompt-store.js';
+import { sitePromptPath, sessionPromptPath, writePromptFile, writePromptFiles, readPromptFile, DEFAULT_PROMPT_STORE_DIR } from '../lib/prompt-store.js';
 
 const pkg = path.dirname(import.meta.dirname);
 
@@ -74,4 +74,65 @@ test('失败静默：目标目录不可建（路径被文件占据）→ 返回 
 
 test('默认目录在用户目录下（与 reply-log 的 ~/.dsh 纪律一致）', () => {
   assert.ok(DEFAULT_PROMPT_STORE_DIR.includes('.dsh'), '默认目录应落在 ~/.dsh 之下：' + DEFAULT_PROMPT_STORE_DIR);
+});
+
+// ── 0.16.29：读回（文件投递）────────────────────────────────────────────────
+//
+// 用户指令：「如果新开会话-web 端，就一样把这个当上下文通过文件发送」。
+// 落盘从「副本」升格为「投递源」的前提是**能原样读回**——写出去什么，读回来
+// 就是什么（头部元信息除外）。下面四条钉住这个往返。
+
+test('读回：写→读往返必须拿回正文原文（头部元信息被剥掉）', () => {
+  const dir = tmpDir();
+  const file = writePromptFile(path.join(dir, 'prompts', 'deepseek.md'), '教学全文 ABC\n第二行');
+  assert.ok(file);
+  const back = readPromptFile(file);
+  assert.equal(back, '教学全文 ABC\n第二行', '读回的必须是正文原文，不含 writePromptFile 的头部');
+  assert.ok(!back.includes('dsh-webcode-bridge 提示词落盘'), '头部元信息不得混进投递内容');
+});
+
+test('读回：正文里的引用块（> 开头）不被当头部吃掉', () => {
+  const dir = tmpDir();
+  const body = '> 这是正文里的引用，不是头部\n\n普通段落';
+  const file = writePromptFile(path.join(dir, 'sessions', 's.md'), body);
+  const back = readPromptFile(file);
+  assert.ok(back.includes('这是正文里的引用'), '正文引用块必须保留：' + JSON.stringify(back));
+  assert.ok(back.includes('普通段落'));
+});
+
+test('读回：0.16.28 旧文件（头部与正文粘在一行）仍读得出完整正文', () => {
+  // 0.16.28 的 writePromptFile 用 `[..., ''].filter(Boolean)` 拼头部，那个空串被
+  // filter 删掉，于是头部末行与正文首行**没有换行**、粘成一行（真机实测：正文第一
+  // 行被吞）。升级后磁盘上已有的旧文件必须仍能完整读回，否则第一次重建静默丢一行。
+  const dir = tmpDir();
+  const file = path.join(dir, 'legacy.md');
+  fs.writeFileSync(file, '> dsh-webcode-bridge 提示词落盘（0.16.28）\n'
+    + '> 更新时间：2026-09-19T19:28:08.990Z教学全文 ABC\n第二行\n');
+  assert.equal(readPromptFile(file), '教学全文 ABC\n第二行', '旧粘行格式必须补回正文首行');
+});
+
+test('读回：0.16.28 带 note 的旧文件（正文粘在「说明」行后）仍读得出完整正文', () => {
+  // 真机实测（`~/.dsh/webcode/prompts/deepseek.md`，0.16.28 写的）：无 note 时正文粘在
+  // 「更新时间」行后，**有 note 时粘在「说明」行后**——而落盘入口恒传 note，所以
+  // 生产文件走的正是这一种。修前读回会丢掉正文首行（真机上就是 `# 可用本地工具` 那一行）。
+  const dir = tmpDir();
+  const file = path.join(dir, 'legacy-note.md');
+  fs.writeFileSync(file, '> dsh-webcode-bridge 提示词落盘（0.16.28）\n'
+    + '> 更新时间：2026-09-19T19:10:25.540Z\n'
+    + '> 说明：站点 deepseek 的教学/协议全文（逐轮覆盖）# 可用本地工具\n'
+    + '本次会话已为你接入…\n');
+  const back = readPromptFile(file);
+  assert.ok(back.startsWith('# 可用本地工具'),
+    '正文首行（真机是 `# 可用本地工具`）必须被补回，实际开头：' + JSON.stringify(String(back).slice(0, 40)));
+  assert.ok(back.includes('本次会话已为你接入'), '后续正文必须完整');
+});
+
+test('读回：文件不存在 / 传 null / 内容是空 → 返回 null，不抛错', () => {
+  const dir = tmpDir();
+  assert.equal(readPromptFile(path.join(dir, 'nope.md')), null);
+  assert.equal(readPromptFile(null), null);
+  assert.equal(readPromptFile(undefined), null);
+  const empty = path.join(dir, 'empty.md');
+  fs.writeFileSync(empty, '> 只有头部\n\n');
+  assert.equal(readPromptFile(empty), null, '只有头部没有正文时返回 null（调用方回落内存序列化）');
 });
