@@ -107,14 +107,15 @@ test('⑧ 小数阈值向下取整；小数长度也取整', () => {
 
 // ── ⑨ 站点级禁令（0.16.7）：DeepSeek 收得下附件但读不到它，必须永远走输入框 ──────
 
-test('⑨ attachForbidden ⇒ 无论多长都 inline（DeepSeek 附件投递零回复的直接修法）', () => {
-  // 真机 2026-09-18：71994 字符走附件（reason=over-limit）那一轮零回复。用户原话
-  // 「deepseek以附件投递会出问题！不能回复！前面时候改为输入框还行！」。
+test('⑨ attachForbidden 机制仍在（注入式）：命中即无论多长都 inline', () => {
+  // 0.16.31：判据**原样保留**——变的只是谁会被判命中。静态表已清空（DeepSeek 解禁），
+  // 但运行期自愈命中后走的就是这条分支，因此这条护栏必须继续钉住机制本身：
+  // 传 `attachForbidden: true` 时，再长也走 inline/site-no-attach，且不截断。
   const plan = promptTransportPlan({
     chars: 71_994, inlineLimit: 60_000, attachEnabled: true, attachSupported: true, attachForbidden: true,
   });
   assert.equal(plan.mode, 'inline',
-    '站点禁令没生效：' + plan.mode + '/' + plan.reason + '（DeepSeek 会走附件 ⇒ 用户报的零回复）');
+    '禁令没生效：' + plan.mode + '/' + plan.reason + '（命中运行期禁令的站点会走附件 ⇒ 又一轮零回复）');
   assert.equal(plan.reason, 'site-no-attach');
   assert.equal(plan.total, 71_994, 'inline 必须原样发全部字符（不能截断）');
   assert.equal(plan.payloadChars, 71_994);
@@ -124,14 +125,15 @@ test('⑨ attachForbidden ⇒ 无论多长都 inline（DeepSeek 附件投递零�
   assert.equal(big.mode, 'inline');
 });
 
-test('⑨b 站点禁令不误伤别的站点：GLM 超阈值仍走附件（输入框装不下长文）', () => {
+test('⑨b 解禁后站点走同一条判定：GLM 与 DeepSeek 超阈值都走附件', () => {
   const plan = promptTransportPlan({
     chars: 71_994, inlineLimit: 60_000, attachEnabled: true, attachSupported: true, attachForbidden: false,
   });
   assert.equal(plan.mode, 'attach');
   assert.equal(plan.reason, 'over-limit');
-  // 集合本身是站点契约的唯一出处：deepseek 在内，glm 不在。
-  assert.equal(ATTACH_FORBIDDEN_SITES.has('deepseek'), true);
+  // 0.16.31：静态表清空 ⇒ 两个站点都不再被静态排除；站点差异改由阈值表达。
+  assert.equal(ATTACH_FORBIDDEN_SITES.size, 0, '静态禁令表必须为空（deepseek 已解禁）');
+  assert.equal(ATTACH_FORBIDDEN_SITES.has('deepseek'), false);
   assert.equal(ATTACH_FORBIDDEN_SITES.has('glm'), false);
 });
 
@@ -170,8 +172,13 @@ test('⑩ 站点禁令必须可核对：status 投影带 attachForbidden，且 s
   });
   assert.equal(typeof driver.status, 'function', '驱动必须可读 status()');
   const st = driver.status();
-  assert.equal(st.attachForbidden, true,
-    'status() 没有投影站点禁令（attachForbidden）⇒ 用户与面板都无法核对禁令是否生效');
+  // 0.16.31 解禁：静态禁令清空后，DeepSeek 的 status 必须如实报 **false**。
+  // 这一格恰恰是解禁后最要紧的读数——它要是还报 true，面板会继续宣称
+  // 「永不使用附件投递」，而驱动已经走了附件，两边直接矛盾。
+  assert.equal(st.attachForbidden, false,
+    'status() 的 attachForbidden 必须如实反映**当前**禁令（解禁后 DeepSeek 应为 false）');
+  assert.equal(st.attachForbiddenStatic, false,
+    '解禁后 attachForbiddenStatic 必须为 false（静态表已清空）');
   assert.equal(st.siteId, 'deepseek', 'status() 必须带上站点身份，否则读数无法归因');
   await driver.stop?.();
 
@@ -183,7 +190,9 @@ test('⑩ 站点禁令必须可核对：status 投影带 attachForbidden，且 s
   assert.equal(plan.mode, 'inline',
     '设置面能把禁站点拉回附件 ⇒ 禁令可被绕过（' + plan.mode + '/' + plan.reason + '）');
 
-  // ③ 面板文案必须按站点事实陈述，且**不能**在禁站点上承诺附件投递。
+  // ③ 面板文案必须按站点事实陈述。0.16.31：解禁后 DeepSeek **不许**再说
+  // 「永不使用附件投递」（那会与驱动实际走附件矛盾），但**运行期自愈命中时**
+  // 必须照旧这么说——文案与判据同源（attachForbidden 当前值），不是按站点硬编码。
   const wc = await import(pathToFileURL(path.join(pkg, 'lib', 'web-control.js')).href);
   const control = wc.createWebControl({
     driver: { status: () => st },
@@ -193,9 +202,19 @@ test('⑩ 站点禁令必须可核对：status 投影带 attachForbidden，且 s
   });
   const fn = control.actions['GET attach-status'];
   assert.equal(typeof fn, 'function', 'attach-status 动作必须存在');
-  const forbidden = await fn({}, {});
-  assert.match(String(forbidden.transportLine), /永不使用附件投递/,
-    '面板仍在禁站点上承诺「超阈值改走附件」⇒ 面板与驱动互相矛盾');
+  const freed = await fn({}, {});
+  assert.doesNotMatch(String(freed.transportLine), /永不使用附件投递/,
+    'DeepSeek 已解禁，面板仍在宣称「永不使用附件投递」⇒ 面板与驱动互相矛盾');
+  // 运行期自愈命中（attachBlocked 有现场）时，这条文案必须回来。
+  const healed = wc.createWebControl({
+    driver: { status: () => ({ ...st, attachForbidden: true, attachBlocked: { at: Date.now(), code: 'ATTACH_ZERO_REPLY', total: 71_994 } }) },
+    relay: null,
+    config: {},
+    logger: { log() {}, warn() {}, error() {} },
+  });
+  const healedOut = await healed.actions['GET attach-status']({}, {});
+  assert.match(String(healedOut.transportLine), /永不使用附件投递/,
+    '运行期自愈已命中该站点，面板却没报「永不使用附件投递」⇒ 用户看不到自动降级');
   // 反例对照：非禁站点**不许**被这条文案误伤。
   const other = wc.createWebControl({
     driver: { status: () => ({ ...st, siteId: 'glm', attachForbidden: false }) },

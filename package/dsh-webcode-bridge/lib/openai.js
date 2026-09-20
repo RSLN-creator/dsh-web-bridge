@@ -81,7 +81,7 @@ function publicStatus(relay) {
  * @returns {object} 前端实例（handle(req,res,pathname) 等）
  */
 export function createOpenAiFront(relay, modelInfo) {
-  const { modelId, modelName, providerId, sendGapMsOf } = modelInfo;
+  const { modelId, modelName, providerId, sendGapMsOf, sendGapBasisOf } = modelInfo;
   const allowedOrigins = (relay?.config?.allowedOrigins || []).map((s) => String(s).toLowerCase());
   // 发送间隔必须**当场**读取，不能在建前端时快照：设置页改完就该立刻生效。
   // 真机取证（2026-09-14，0.14.0 真机矩阵）：`:8931` 这条 OpenAI 兼容路径上
@@ -89,6 +89,10 @@ export function createOpenAiFront(relay, modelInfo) {
   // 的 clampSendGapMs(undefined) === 0，于是「发送间隔」在这条路径上被整体绕过，
   // 用户设了 10s 也照样连发。适配器路径（buildTurn）一直是带上的，只有这里漏了。
   const gapMs = () => (typeof sendGapMsOf === 'function' ? sendGapMsOf() : undefined);
+  // 间隔**口径**（0.16.31）与 sendGapMsOf 同一套要求：当场求值、不建快照。
+  // 为什么必须一起传：两个口径同一条设置下给出**不同**的等待结论，只传间隔
+  // 会让 end-to-start 在这条路径上静默失效（读数上还看不出）。
+  const gapBasis = () => (typeof sendGapBasisOf === 'function' ? sendGapBasisOf() : undefined);
 
   function sendJson(res, code, obj) {
     const body = JSON.stringify(obj);
@@ -184,7 +188,7 @@ export function createOpenAiFront(relay, modelInfo) {
       const qualified = qualifyModelId(selectedModel, selectedSiteId);
       try {
         await relay.submit(prompt, {
-          meta: { model: qualified, siteId: selectedSiteId, images, thinkMode, sendGapMs: gapMs() },
+          meta: { model: qualified, siteId: selectedSiteId, images, thinkMode, sendGapMs: gapMs(), sendGapBasis: gapBasis() },
           signal: controller.signal,
           onDelta: (t) => { try { res.write('data: ' + frame({ content: t }, null) + '\n\n'); } catch {} },
           onThink: (t) => { try { res.write('data: ' + frame({ reasoning_content: t }, null) + '\n\n'); } catch {} },
@@ -208,7 +212,7 @@ export function createOpenAiFront(relay, modelInfo) {
 
     try {
       const qualified = qualifyModelId(selectedModel, selectedSiteId);
-      const { text, thinking, images: genImages } = await relay.submit(prompt, { meta: { model: qualified, siteId: selectedSiteId, images, thinkMode, sendGapMs: gapMs() }, signal: controller.signal });
+      const { text, thinking, images: genImages } = await relay.submit(prompt, { meta: { model: qualified, siteId: selectedSiteId, images, thinkMode, sendGapMs: gapMs(), sendGapBasis: gapBasis() }, signal: controller.signal });
       if (!text.trim()) throw new Error('empty response from web AI');
       const usage = { prompt_tokens: estimateTokens(prompt), completion_tokens: estimateTokens(text), total_tokens: estimateTokens(prompt) + estimateTokens(text) };
       const parts = [{ type: 'text', text }];

@@ -705,10 +705,16 @@ export function createWebControl(deps = {}) {
     'GET settings': async () => {
       if (!settingsStore) return { ok: true, extraPrompt: '' };
       const config = settingsStore.get();
-      // 投递形态必须**带默认值**回给调用方（0.16.3）：设置页要显示「当前生效值」，
-      // 而用户从未保存过时设置文件里根本没有这个键。回 undefined 会让面板上的
-      // 单选一个都没选中，看起来像「设置坏了」——实际是默认 'attach'。
-      return { ok: true, ...config, promptTransport: config.promptTransport === 'inline' ? 'inline' : 'attach' };
+      // 投递形态与间隔**基准**都必须带默认值回给调用方（0.16.3 / 0.16.31）：设置页
+      // 要显示「当前生效值」，而用户从未保存过时设置文件里根本没有这个键。回
+      // undefined 会让面板上的下拉/单选一个都没选中，看起来像「设置坏了」——
+      // 实际是默认值。判据与写入侧（POST settings）同源，不在前端各造一份。
+      return {
+        ok: true,
+        ...config,
+        promptTransport: config.promptTransport === 'inline' ? 'inline' : 'attach',
+        sendGapBasis: config.sendGapBasis === 'end-to-start' ? 'end-to-start' : 'send-to-send',
+      };
     },
     'POST settings': async (body) => {
       if (!settingsStore) return { ok: false, error: 'settings store unavailable' };
@@ -723,6 +729,12 @@ export function createWebControl(deps = {}) {
       // 发送间隔规范化：非负整数毫秒、上限 10 分钟。负数/NaN 一律归 0（关闭）。
       if ('sendGapMs' in updated) {
         updated.sendGapMs = Math.min(600_000, Math.max(0, Math.round(Number(updated.sendGapMs) || 0)));
+      }
+      // 间隔基准（0.16.31）：只有逐字 'end-to-start' 才认，其余一律归一成
+      // 'send-to-send'。与上面几项同一条纪律——设置文件可手改，写错的配置
+      // 只许退化成默认行为，不许变成第三种谁也没定义过的口径。
+      if ('sendGapBasis' in updated) {
+        updated.sendGapBasis = updated.sendGapBasis === 'end-to-start' ? 'end-to-start' : 'send-to-send';
       }
       // 账户槽（0.14.7）：`accounts` 与槽级间隔都来自界面，但设置文件可手改，
       // 因此写入前一律用 accounts.js 的纯函数归一化——非法条目丢弃而不是抛错，

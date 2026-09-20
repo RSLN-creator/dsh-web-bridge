@@ -196,6 +196,10 @@ export function createRelay(options = {}) {
           // 0.14.0：让「设了间隔却看不见」不可能再发生——目标值与距上次发出的
           // 实际间隔一起透出，于是**没等待**的那些轮次也有数字可核对。
           gapTargetMs: Math.max(0, Math.round(Number(measured.gapTargetMs) || 0)),
+          // 0.16.31：间隔**口径**（send-to-send / end-to-start）。读数里不写清
+          // 用的是哪把尺子，「等待不像我设的」就无从判定——同一个 sincePrevSendMs
+          // 在两个口径下含义完全不同（距上次发出 / 距上次回复完成）。
+          gapBasis: measured.gapBasis === 'end-to-start' ? 'end-to-start' : 'send-to-send',
           sincePrevSendMs: measured.sincePrevSendMs == null ? null : Math.max(0, Math.round(Number(measured.sincePrevSendMs) || 0)),
           // 本轮收束原因（finished / partial-wip-settled / timeout）——见
           // browser-driver 的 WIP 稳态收束；null 表示驱动没报（旧版本/dom 站点）。

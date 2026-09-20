@@ -12,11 +12,17 @@ import { ATTACH_FORBIDDEN_SITES, attachForbiddenFor, dynamicAttachBlock, markDyn
 
 const pkg = path.dirname(import.meta.dirname);
 
-test('静态禁令仍在：deepseek 永远不许走附件（0.16.7 站点契约原样保留）', () => {
-  assert.ok(ATTACH_FORBIDDEN_SITES.has('deepseek'), 'deepseek 必须在静态禁令表里');
-  assert.ok(attachForbiddenFor('deepseek'), 'attachForbiddenFor(deepseek) 必须为真');
-  assert.equal(promptTransportPlan({ chars: 1_000_000, inlineLimit: 60_000, attachEnabled: true, attachSupported: true, attachForbidden: attachForbiddenFor('deepseek'), transport: 'attach' }).mode,
-    'inline', 'deepseek 超长也必须 inline（site-no-attach）');
+test('静态禁令已清空（0.16.31）：deepseek 超长走附件，风险交给运行期自愈', () => {
+  // 为什么从「deepseek 必须在表里」翻成「表必须为空」：探针实测推翻了旧前提的一半
+  // （页面收得下、渲染得出），另一半（模型读不读）由下面的自愈网兜底。
+  // 判据本身没变——变的是「哪一边更贵」：静态禁令用**永久走不了附件**换**一轮风险**。
+  assert.equal(ATTACH_FORBIDDEN_SITES.size, 0, '静态禁令表必须为空（解禁后不再有站点被永久排除）');
+  assert.equal(attachForbiddenFor('deepseek'), false, 'deepseek 不再被静态拦住');
+  assert.equal(
+    promptTransportPlan({ chars: 1_000_000, inlineLimit: 60_000, attachEnabled: true, attachSupported: true, attachForbidden: attachForbiddenFor('deepseek'), transport: 'attach' }).mode,
+    'attach', 'deepseek 超长必须走附件（解禁的目标就是这个）');
+  // 反向安全线：**GLM 不受影响**，且禁令机制本身还在（只是没有静态成员）。
+  assert.equal(attachForbiddenFor('glm'), false, 'glm 也不该被静态拦住（它靠阈值而不是禁令）');
 });
 
 test('运行期禁令：命中零回复签名 → 立即回落 inline 并记住现场', () => {

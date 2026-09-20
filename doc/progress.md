@@ -20,18 +20,18 @@
 
 | 项 | 值 |
 | --- | --- |
-| 工作树版本 | **0.16.30** |
-| 已装版本（profile） | **0.16.30**（2026-09-20 实测：web + headless 两处 `node_modules/dsh-webcode-bridge/package.json` 均为 `0.16.30`，且已装副本的 `lib/agent-preset.js` 内含 `OFFICIAL_BAR_CLS = OFFICIAL_BAR + '{1,3}'`，确认修复随包落地） |
-| 运行中的进程 | **DSH web（3080）= 0.16.30（已重启生效）**——`GET /__webcode/status` 实测 `build.version=0.16.30`（2026-09-20 重启后读数，`driver.running:true`）。修复已在运行中加载，见下行真机验证 |
-| 上游 | `origin/main` = `9d4c61a`（0.16.10 台账推送）；0.16.11–0.16.22 本地已提交/待推 |
-| 单测基线 | **68/68 测试文件通过，退出码 0**（0.16.30 实跑；0.16.29 新增 prompt-store 读回 4 条 + session-continuity ⑩ 文件投递 1 条，0.16.30 新增 official-double-bar 11 条） |
-| 注释闸门 | **error 0 / warn 0，退出码 0**（2026-09-20 实跑，124 文件） |
-| 文件规范闸门 | `check-repo-hygiene.mjs` **PASS**（无 BOM + 索引无死链 + CI/engines Node 版本相容，2026-09-20 实跑） |
-| 发布闸门 | `verify-pack` 逐文件 sha256 相同 + 接线完好，退出 0（0.16.16 实跑 37/37） |
-| 记账闸门 | `check-ledger.mjs` **PASS**（version 0.16.30 / testFiles 68/68） |
-| 已装包核对 | 0.16.21 已装机核对（见已装版本行） |
-| 真机验证（0.16.30） | **已生效**：重启后 19 轮原始回复的 `calls` **全部 > 0**（每轮 1~4 条），无新增 `TOOL_CALL_UNPARSED`；其中 `03:42:10`/`03:42:30` 两轮**仍写双竖线却被成功解析为 `calls=1`**（修复前同形状 6/6 轮 `calls=0`）。另有一轮 `calls=0` 属回复被截断，与本修复无关，见 §0.16.30 五 |
-| 下一阶段 | **0.16.29 + 0.16.30 已改完、已全绿、已打包、已装 web+headless、`dsh web` 已重启生效**。0.16.29 四条：① 再教学提示隐藏（三处出口，只留 AUTO_CONTINUED）② 节流窗文案更正为 60 秒 ③ 落盘升格为**投递源**（重建优先读 `sessions/<key>.md`，并修掉 0.16.28 的头部粘行缺陷）④ §0.16.28 归因取证完成（133 帧解压，`start=0` 逐字坐实）。0.16.30 一条：**双竖线 `<｜｜tool▁…` 全族解析归零**（见 §0.16.30，真机 6/6 轮 `calls=0` 现场）。真机判据见 §0.16.29 四 |
+| 工作树版本 | **0.16.31** |
+| 已装版本（profile） | 待装（本轮改完待打包；上一版 0.16.30 两个 profile 均已装） |
+| 运行中的进程 | 待重启（当前 3080 仍跑 **0.16.30**） |
+| 上游 | `origin/main` = `556cb95`（0.16.29/0.16.30）；本轮 0.16.31 待提交/待推 |
+| 单测基线 | **69/69 测试文件通过，退出码 0**（0.16.31 实跑；新增 `send-gap-basis` 12 条） |
+| 注释闸门 | 待跑（0.16.30 时 124 文件 error 0 / warn 0） |
+| 文件规范闸门 | **PASS**（0.16.31 改名后实跑：无 BOM + 索引无死链 + Node 版本相容） |
+| 发布闸门 | 待跑（`verify-pack`） |
+| 记账闸门 | 待跑（`check-ledger`） |
+| 已装包核对 | 见下行「已装版本」 |
+| 真机验证（0.16.31） | 附件探针实测 `ok:true`（见 §0.16.31 一）；**「模型是否读到附件内容」尚未验证**，如实记 |
+| 下一阶段 | **0.16.31 三条**：① DeepSeek 附件投递解禁（静态禁令清空 + 清理路径修复）② 新增 `end-to-start` 间隔口径（距上次回复完成）③ 修掉等待药丸的跳动（在途读数不再提前清空）。真机判据见 §0.16.31 四 |
 
 > **§0.16.10 真机判据（重启后逐条核）**：① `GET /__webcode/status` 的 `build.version` = **0.16.10**；
 > ② 让模型回复一段含 `<b>`、`<foo>`、`Array<T>` 或字面 `<tool_call>` 示例的正文，**逐字对比** harness
@@ -44,6 +44,131 @@
 > 掩盖了「web 落后两个版本」这个真因，直接导致用户按台账以为装好了、重启后仍然不变。
 > **教训记在这里而不是删掉**：凡是「已装/已重启/已验证」这类状态行，**必须逐 profile 写、并附
 > sha256 前 12 位**，否则它会把「一个 profile 装了」读成「都装了」。 |
+
+## 0.16.31（2026-09-20）—— DeepSeek 附件投递解禁 + 间隔 `end-to-start` 口径 + 药丸跳动修复
+
+**用户指令（逐字）**：「1.你做得到就解禁更新文档！并修改 2.是 reply-to-send」（前一轮：
+「1.那你尝试实现，先验证后有保障再修复，放入参考文件夹复制 dsh-drop-caret，然后真实单独实现
+完善本机 deepseek 投递 2.请你看下等待发送时间逻辑：1.感觉底下框的时间会有跳动？2.我需要的是
+web 思考后调用时间后不立即回复而是间隔多少秒回复，不是现在好像是的那个距离上传里面回复时间？
+注意是为了隔开和他发消息我立马回复的规避点！」）
+
+### 一、DeepSeek 附件投递解禁（静态禁令清空）
+
+**先复制参考**：`dsh-drop-caret` 完整正本（host `lib/index.js` + client + `cordis.patch.yml`
++ README）落到 `reference/dsh-drop-caret/`。它的做法是「Host 注册 HTTP 路由 → 客户端 drop
+事件 POST → 落盘到该会话 cwd 的 `.dsh-drop/<sessionId>/` → 把路径回填输入框」。本仓库早已
+用同一模式做过提示词落盘（§0.16.28/§0.16.29 的 `prompt-store.js`），因此**没有新建上传通道**，
+而是把力气花在真正缺的那一环：**附件投递本身能不能用**。
+
+**先验证（只上传、绝不发送）**：`POST /__webcode/attach-probe` 对运行中的 3080 实测：
+
+```json
+{ "ok": true, "evidence": "text:webcode-probe.md", "ms": 105, "chars": 78, "sent": false,
+  "domSnippet": "<div class=\"e70accd6\">webcode-probe.md</div>",
+  "candidates": [ {"sel":"[class*='attachment']","count":0,"visible":0}, … 十条全 0 ],
+  "cleaned": false, "cleanedBy": "none",
+  "cleanupNote": "未找到清除入口（只试了 setInputFiles([]) 与附件节点自身容器内的删除控件）" }
+```
+
+**四条结论**：
+
+| # | 读数 | 能推出什么 |
+| --- | --- | --- |
+| 1 | `ok:true` + `domSnippet` 实拍 chip | DeepSeek 页面**收得下 `.md` 并渲染出可见附件**（105ms） |
+| 2 | `candidates` 十条全 0，命中靠 `nameHit`（文件名证据） | 当年 `ATTACH_NOT_CONFIRMED` 的直接原因是**类名清单零命中**，而文件名证据 0.16.3 才实现——旧禁令的前提已不成立 |
+| 3 | `cleaned:false` | 清理路径**确实失效**（这是真缺陷，见下） |
+| 4 | `sent:false` | 探针零副作用，可反复跑；但它**回答不了**「模型读不读」 |
+
+**先保障，再修复**（用户要求的次序）：
+
+- **清理路径重写**（阻塞项：附件留在输入框 → 下一条消息莫名带上它）。旧实现只沿**祖先链**
+  找删除控件，而真机 chip 的最深节点是文本 div（`<div class="e70accd6">webcode-probe.md</div>`），
+  控件不一定在祖先里。现在两段式：① 先按**语义标签**找（`aria-label`/`title`/`data-testid`/`class`
+  命中 删除|移除|remove|close|clear|取消|×|✕|✖|trash|delete，且排除 `type=submit`）；
+  ② 语义全落空时按**位置**找（与文件名同容器、位于其右侧、尺寸 ≤ 48px 的可点元素），
+  且**多附件时不按位置猜**——点错会删掉别人的附件。
+- **运行期自愈网已在役**（0.16.28）：`DYNAMIC_ATTACH_BLOCKS` 对「附件轮整轮零回复」的两个
+  签名（空结果 / 超时）自动降级并记住，当轮即回落 inline，`/__webcode/status` 的
+  `attachBlocked` 如实报出。
+- **解禁**：`ATTACH_FORBIDDEN_SITES` 从 `Set(['deepseek'])` 改为**空集**。取舍写在源码注释里：
+  静态禁令用**永久走不了附件**换**一轮风险**，不划算。
+
+**护栏同步更新**（钉的判据从「deepseek 必须在表里」翻成「表必须为空」，机制断言逐字保留）：
+`test/attach-selfheal.test.mjs` ①、`test/prompt-transport.test.mjs` ⑨/⑨b/⑩（⑩ 新增
+「运行期自愈命中时面板必须报『永不使用附件投递』」一条）。
+
+**如实记（未验证的部分）**：探针**不发送**，因此「模型是否真的读到了附件内容、会不会零回复」
+**本轮没有真机读数**。派出的子代理因本机沙箱 `spawn EPERM`（连 `msedge.exe` 都起不来）
+未能产出证据，它自报的「两轮确认标记」没有落盘文件、**不作为依据**。这条只能由下一次
+真实首轮（超过 60,000 字符）自行判定，判据：若自愈记下 `ATTACH_ZERO_REPLY`，
+`/__webcode/status` 的 `attachBlocked` 会有现场，届时按读数决定是否恢复静态禁令。
+
+### 二、发送间隔新增 `end-to-start`（距上次回复完成）
+
+用户要的是「隔开和他发消息我立马回复的规避点」。这与 `send-to-send`（0.14.0 默认）**防的不是
+一件事**，因此并存为选项（命名沿用 `doc/long-term-issues.md` §8「若要修，从哪下手」里的
+`'send-to-send' | 'end-to-start'`，那条挂账本轮结清）：
+
+| 口径 | 基准 | 防什么 | 上一轮跑很久时 |
+| --- | --- | --- | --- |
+| `send-to-send`（**默认**） | 上次**发出** | 站点滑窗限流（按请求到达计） | 本轮**无需再等**（已满足） |
+| `end-to-start` | 上次**回复完成** | 对话节奏贴太紧（「刚答完我立刻回」） | **不影响**本轮，答完起重新数满 |
+
+落点（五处 + 两个设置面）：
+
+- `computeSendGap({ lastSendAt, lastEndAt, basis, now, gapMs })`，返回值新增 `basis` 回显；
+  非法值一律退回 `send-to-send`（配置写错只许退化成旧行为）；基准缺失时返回 0 等待且
+  `sincePrevSendMs: null`——**不拿另一个基准凑数**（凑出来的等待无从解释）。
+- 落盘 `webcode-send-state.json` 的值从**裸数字**升成 `{ send, end }`；**旧格式照样读**
+  （裸数字即 send、end 缺失），升级不丢基准。`rememberTurnEnd()` 在**真正收束之后**打点
+  （不是 `finally`——`finally` 在抛错时也跑，会把基准提前）。
+- metrics 新增 `gapBasis`；`relay.js` 原样透出；面板明细行文案随口径切换
+  （「距上次发出」/「距上次回复完成」），**`gapBasis` 缺失时保持历史文案**（缺字段 ≠ 口径变了）。
+- 设置页两个面都加了口径下拉：HTML 页（`settings-page.js`）与右栏 React 面板
+  （`client.cjs`，与间隔共用「草稿/已保存/提示」三件套）；`POST/GET settings` 双向归一化。
+- OpenAI 兼容前端（`:8931`）同步传 `sendGapBasis`——0.14.0 那次「gapTargetMs 恒为 0」
+  的同型缺陷，这次一并堵住。
+
+### 三、等待药丸的跳动（真缺陷）
+
+用户报「底下框的时间会跳动」。根因不是取整，是**在途读数被提前清空**：
+`clearLiveWait` 原先放在等待 `sleepSignal` 的 `finally` 里，于是等待一结束读数就消失，而账本
+要等**整轮生成跑完**（`relay` 的 `onMetrics` → `recordWaitMetrics`）才吸收——中间那几十秒药丸
+掉回**上一轮**的旧值，收束时再跳上去。修法：正常路径**保留**在途记录（`endsAt` 已把时长冻结在
+满值），账本吸收时由 `recordWaitMetrics` 里的 `clearLiveWait` 收尾（同一份增量从 live 搬进账本，
+数字原地不动）；只有**中途 abort** 才在 catch 里清（那时本轮不会有 metrics，留着会让药丸停在
+一个不动的假数上）。发送间隔等待与限流退避等待**两处同修**。
+
+### 四、验证（本机实跑读数）
+
+本机 `node --test` 会 `spawn EPERM`（沙箱），但**直接 `node test/xxx.test.mjs` 可跑**（进程内）。
+本轮全部改用后者，并设 `NODE_TEST_CONTEXT=1`（与 CI 同条件——不设它时 `reply-log` 的测试进程
+守卫用例会假失败，实测确认）。
+
+| 项 | 读数 |
+| --- | --- |
+| 全量测试文件 | **69/69 通过**（串行逐个跑，`test/parse.test.mjs` 与 `test/run-m1.js` 亦 0） |
+| 新增护栏 | `test/send-gap-basis.test.mjs` **12/12**（含 8 条纯函数 + 4 条源码结构） |
+| 纯函数探针 | `.tmp/probe-gap-basis.mjs` **16/16**（既有 `send-gap` 八条回归 + 新口径八条） |
+| 模块加载探针 | `.tmp/probe-imports-1631.mjs` **11/11**（改过的模块全部 import 成功） |
+| 结构断言 | 11/11（`basis`/`lastEndAt`/`gapBasis`/`rememberTurnEnd` 接线 + 两处等待无 `finally`） |
+| 文件规范闸门 | PASS（改名后用 `Set-Content` 批量重写，逐个核对 CRLF 保留、无 BOM、尾换行完好） |
+| 附件探针（真机） | `ok:true`、`evidence:text:webcode-probe.md`、105ms |
+
+**已知既有 flake（如实记）**：`test/control-routes.test.mjs` 在**并行负载**下会读到端口为
+`null` 而红两条（台账早前记过同款）；本轮串行重跑**全绿**，确认与本轮改动无关。
+
+### 五、本次改名事故（记下来，不只修掉）
+
+把 `reply-to-send` 统一改名为 `end-to-start` 时用了 PowerShell 的
+`(Get-Content -Raw) -replace 'reply-to-send','end-to-start'`。**`-replace` 默认大小写不敏感**，
+于是测试数据里作为「非法值样例」的 `'REPLY-TO-SEND'` 也被替成了合法的 `'end-to-start'`，
+断言随即变红（期望退回默认口径、实际收到合法值）。
+**教训**：批量文本替换工具**不是**重构工具——它不区分「标识符」与「字符串字面量里故意写错的值」。
+凡是要替换的串同时出现在**正例与反例**里，必须逐处改（或用区分大小写的替换并核对 diff）。
+最终该用例补上了三个变体样例（`END-TO-START` / `end_to_start` / 带尾空格），把「逐字相等」
+这个判据钉得更死。
 
 ## 0.16.30（2026-09-20）—— 官方 token 双竖线 `<｜｜tool▁…` 全族解析归零（自动化流程被打断的根因）
 

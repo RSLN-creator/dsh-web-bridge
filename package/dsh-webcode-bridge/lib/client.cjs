@@ -229,10 +229,15 @@ window.__ModuleLoader__.load({
      */
     function gapNote(m) {
       const parts = [];
+      // 0.16.31：先报**口径**再报数字。两个口径下「距上次…」是完全不同的量，
+      // 不标出用的是哪把尺子，用户只能看到「等待不是按我设的来」而无法定位。
+      const replyBasis = m.gapBasis === 'end-to-start';
+      const sinceLabel = replyBasis ? '距上次回复完成 ' : '距上次发送 ';
       if (m.gapTargetMs > 0) parts.push('目标 ' + (m.gapTargetMs >= 1000 ? (m.gapTargetMs / 1000).toFixed(1) + ' s' : m.gapTargetMs + ' ms'));
+      if (m.gapBasis) parts.push(replyBasis ? '基准 距上次回复完成' : '基准 距上次发出');
       if (m.sincePrevSendMs != null) {
         const secs = (m.sincePrevSendMs / 1000).toFixed(1) + ' s';
-        parts.push(m.sendWaitMs > 0 ? '距上次发送 ' + secs : '未等待（距上次发送 ' + secs + ' 已满足）');
+        parts.push(m.sendWaitMs > 0 ? sinceLabel + secs : '未等待（' + sinceLabel + secs + ' 已满足）');
       }
       if (m.rateLimitRetries) parts.push('限流重试 ' + m.rateLimitRetries + ' 次');
       return parts.length ? ' · ' + parts.join(' · ') : '';
@@ -1403,6 +1408,11 @@ window.__ModuleLoader__.load({
       const [sendGapMs, setSendGapMs] = React.useState(0);
       const [sendGapSaved, setSendGapSaved] = React.useState(0);
       const [sendGapNotice, setSendGapNotice] = React.useState('');
+      // 间隔**基准**（0.16.31）：'send-to-send'（默认）| 'end-to-start'。
+      // 与 sendGapMs 同一套「草稿 / 已保存 / 提示」三件套——两者是同一条设置的两个
+      // 部分（设多少、从哪算），拆成两种交互只会让人以为它们无关。
+      const [sendGapBasis, setSendGapBasis] = React.useState('send-to-send');
+      const [sendGapBasisSaved, setSendGapBasisSaved] = React.useState('send-to-send');
       // 提示词投递形态（0.16.3）：'attach'（默认）| 'inline'。与 sendGapMs 同一套
       // 「草稿 / 已保存 / 提示」三件套——交互形态相同（改一下、点保存）。
       const [promptTransport, setPromptTransport] = React.useState('attach');
@@ -1436,6 +1446,11 @@ window.__ModuleLoader__.load({
           setSubAgentSite(subSite); setSubAgentSiteSaved(subSite);
           const gap = Math.min(600000, Math.max(0, Math.round(Number(s.sendGapMs) || 0)));
           setSendGapMs(gap); setSendGapSaved(gap);
+          // 间隔基准：与服务端 GET settings 同一条归一化（只有逐字 'end-to-start'
+          // 才算），前端不自己造默认值——两侧各造一份默认时，面板选中项与真实
+          // 行为分叉，用户没有任何办法发现。
+          const basis = s.sendGapBasis === 'end-to-start' ? 'end-to-start' : 'send-to-send';
+          setSendGapBasis(basis); setSendGapBasisSaved(basis);
           // 投递形态：只有逐字 'inline' 算纯文本（与 browser-driver 的
           // promptTransportNow、web-control 的 POST settings 同一判据）。
           const pt = s.promptTransport === 'inline' ? 'inline' : 'attach';
@@ -1546,14 +1561,29 @@ window.__ModuleLoader__.load({
                     onChange: e => setSendGapMs(Math.min(600000, Math.max(0, Math.round(Number(e.target.value) || 0)))) }),
                 ];
               })(),
-              h('button', { disabled: pending || Math.round(Number(sendGapMs) || 0) === Math.round(Number(sendGapSaved) || 0),
-                onClick: () => saveSetting('sendGapMs', Math.min(600000, Math.max(0, Math.round(Number(sendGapMs) || 0))), r => {
-                  const v = Math.min(600000, Math.max(0, Math.round(Number(r.sendGapMs) || 0)));
-                  setSendGapMs(v); setSendGapSaved(v); setSendGapNotice('已保存。下一次发送起生效。');
+              h('button', { disabled: pending || (Math.round(Number(sendGapMs) || 0) === Math.round(Number(sendGapSaved) || 0) && sendGapBasis === sendGapBasisSaved),
+                onClick: () => saveSetting('sendGapBasis', sendGapBasis === 'end-to-start' ? 'end-to-start' : 'send-to-send', r => {
+                  const v = r.sendGapBasis === 'end-to-start' ? 'end-to-start' : 'send-to-send';
+                  setSendGapBasis(v); setSendGapBasisSaved(v);
+                  // 间隔与基准是同一条设置的两半：一次保存把两半都写下去，
+                  // 避免「改了基准但间隔还是草稿值」这种半保存状态。
+                  saveSetting('sendGapMs', Math.min(600000, Math.max(0, Math.round(Number(sendGapMs) || 0))), r2 => {
+                    const g = Math.min(600000, Math.max(0, Math.round(Number(r2.sendGapMs) || 0)));
+                    setSendGapMs(g); setSendGapSaved(g); setSendGapNotice('已保存。下一次发送起生效。');
+                  });
                 }) }, '保存'),
               sendGapNotice && h('span', { className: 'hwb-hint' }, sendGapNotice)),
             ),
-          h('p', { className: 'hwb-hint indent' }, '两次向同一网站**发送**之间的最小间隔（send-to-send）：距上一次发出不足这个值就等满，已满足则不等待。网站有「消息发送过于频繁」的滑窗限流，长任务工具循环节奏密时容易触发，设为 2–10 秒可主动避开。被限流时桥按 max(发送间隔, 10 秒) 自动退避重试最多 2 次。实际等待、目标值与「距上次发送」都在下方统计的「发送前等待」里逐项显示；该设置会落盘，**重启后第一轮同样生效**。')),
+          h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '间隔基准'),
+            h('div', { className: 'hwb-row-main' },
+              h('select', { className: 'hwb-model-select', value: sendGapBasis, disabled: pending,
+                onChange: e => setSendGapBasis(e.target.value === 'end-to-start' ? 'end-to-start' : 'send-to-send') },
+                h('option', { value: 'send-to-send' }, '距上次发出（send-to-send，防限流）'),
+                h('option', { value: 'end-to-start' }, '距上次回复完成（end-to-start，防贴太紧）')),
+              h('span', { className: 'hwb-hint' }, sendGapBasis === 'end-to-start'
+                ? '网页答完那一刻起重新数满间隔——它刚答完不会立刻收到下一条。'
+                : '按请求到达计，与生成耗时无关：上一轮跑得久时本轮无需再等。'))),
+          h('p', { className: 'hwb-hint indent' }, '两次向同一网站**发送**之间的最小间隔。两个基准防的是两件不同的事：**距上次发出**（默认）防站点的「消息发送过于频繁」滑窗限流，它按请求到达计、与生成耗时无关，所以上一轮跑得久时本轮无需再等；**距上次回复完成**防对话节奏贴得太紧（「它刚答完我立刻回」），此时上一轮跑了多久不影响本轮，答完那一刻起重新数满。被限流时桥按 max(发送间隔, 10 秒) 自动退避重试最多 2 次。实际等待、目标值、基准与「距上次发送」都在下方统计的「发送前等待」里逐项显示；该设置会落盘，**重启后第一轮同样生效**。')),
 
         // 提示词投递形态（0.16.3）。用户原话：「没有做到能够把提示词放入文本
         //（设置界面也改为打开文本）导致输出对话一开头就很长 token 窗口」——

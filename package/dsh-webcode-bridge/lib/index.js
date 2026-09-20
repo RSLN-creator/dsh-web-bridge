@@ -647,7 +647,13 @@ export function apply(ctx, config = {}) {
   // 用户都不该因为升级而看到不同行为。
   // sendGapMsBySlot：槽级发送间隔覆盖（`{ 'glm#2': 60000 }`）。回落链见
   // accounts.sendGapForSlot：槽显式值 → 站点级键 → 全局 sendGapMs。
-  const defaultConfig = { extraPrompt: '', defaultModel: 'deepseek', previewRefreshRate: 5000, thinkMode: 'on', subAgentMode: 'own', subAgentSite: 'follow', sendGapMs: 0, accounts: [], sendGapMsBySlot: {} };
+  // sendGapBasis（0.16.31）：间隔基准的口径，'send-to-send'（默认）| 'end-to-start'。
+  // 为什么默认必须逐字保持 send-to-send：0.14.0 特意把基准从「上一轮结束」改成
+  // 「上一轮发出」，并配了单测（test/send-gap.test.mjs）。改默认值等于**静默改掉
+  // 所有既有用户的行为**——他们设 10 秒本意是防限流，不是要每轮多等 10 秒。
+  // 因此这里只**新增一个可选项**，把选择权交给设置面。语义与判据见
+  // metrics.computeSendGap 的注释（两个基准防的是两种不同的东西）。
+  const defaultConfig = { extraPrompt: '', defaultModel: 'deepseek', previewRefreshRate: 5000, thinkMode: 'on', subAgentMode: 'own', subAgentSite: 'follow', sendGapMs: 0, sendGapBasis: 'send-to-send', accounts: [], sendGapMsBySlot: {} };
   const configManager = {
     get() {
       // settingsService 已在初始化时校验 get/set 双全；此处仍防御式包裹
@@ -2265,34 +2271,70 @@ function imageMarkdown(images) {
   //
   // 历史文件的键是 siteId，而默认槽的 accountKey **就是** siteId，
   // 因此旧文件不需要迁移：读进来的键天然正确（见下方 knownAccountKey）。
-  const lastSendByAccount = new Map();
+  //
+  // 0.16.31：每个键的值从**一个数**（上次发出的时刻）升成 `{ send, end }` 两个时刻。
+  // 为什么必须都存：两个基准防的是两件不同的事（见 metrics.computeSendGap），
+  // 而用户可以在设置面切换口径。只存一个的话，切换基准的那一轮会退化成「没有
+  // 基准」→ 零等待，用户会看到「刚换成 end-to-start 第一轮没等」。
+  // 旧文件（值是裸数字）**照样读**：裸数字即 send，end 视为缺失——升级不丢基准。
+  const sendStateByAccount = new Map();
   /** 该键是否指向一个已知站点（`glm` 与 `glm#2` 都算）。文件可手改，不抛错。 */
   function knownAccountKey(key) {
     try { return Boolean(getSite(parseAccountKey(key).siteId)); } catch { return false; }
+  }
+  /** 时刻是否可信：正整数、不在未来、不过期（陈旧基准没有意义）。 */
+  function usableSendTime(t, now) {
+    return Number.isFinite(t) && t > 0 && t <= now && now - t <= SEND_STATE_MAX_AGE_MS;
   }
   (function loadSendState() {
     try {
       const raw = JSON.parse(fs.readFileSync(sendStatePath, 'utf8'));
       const now = Date.now();
-      for (const [key, at] of Object.entries(raw || {})) {
-        // 只认已知站点 + 合理时间窗：文件可能来自别的机器/很久以前，
-        // 陈旧基准没有意义（24h 前的「上一轮」不该再压住本轮）。
+      for (const [key, value] of Object.entries(raw || {})) {
+        // 只认已知站点 + 合理时间窗：文件可能来自别的机器/很久以前。
         if (!knownAccountKey(key)) continue;
-        const t = Number(at);
-        if (!Number.isFinite(t) || t <= 0 || t > now || now - t > SEND_STATE_MAX_AGE_MS) continue;
-        lastSendByAccount.set(key, t);
+        // 旧形态：裸数字 = 上次发出时刻。
+        if (typeof value === 'number') {
+          if (usableSendTime(value, now)) sendStateByAccount.set(key, { send: value, end: null });
+          continue;
+        }
+        if (!value || typeof value !== 'object') continue;
+        const send = Number(value.send);
+        const end = Number(value.end);
+        const entry = {
+          send: usableSendTime(send, now) ? send : null,
+          end: usableSendTime(end, now) ? end : null,
+        };
+        if (entry.send !== null || entry.end !== null) sendStateByAccount.set(key, entry);
       }
     } catch { /* 首次运行或文件损坏：按「没有基准」处理即可 */ }
   })();
-  /** 记录「刚刚真正发出」。只在发送成功那一刻调用；写失败仅 warn，绝不阻断发送。 */
-  function rememberSend(accountKey, at = Date.now()) {
-    lastSendByAccount.set(accountKey, at);
+  /** 落盘整张表。写失败仅 warn，绝不阻断发送（与 0.14.0 同一条纪律）。 */
+  function saveSendState() {
     try {
       fs.mkdirSync(path.dirname(sendStatePath), { recursive: true });
       const tmp = sendStatePath + '.tmp-' + process.pid;
-      fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(lastSendByAccount)), { mode: 0o600 });
+      fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(sendStateByAccount)), { mode: 0o600 });
       fs.renameSync(tmp, sendStatePath);
     } catch (err) { warn('send-state save failed:', err?.message); }
+  }
+  /** 记录「刚刚真正发出」。只在发送成功那一刻调用。 */
+  function rememberSend(accountKey, at = Date.now()) {
+    const prev = sendStateByAccount.get(accountKey) || { send: null, end: null };
+    sendStateByAccount.set(accountKey, { ...prev, send: at });
+    saveSendState();
+  }
+  /**
+   * 记录「刚刚生成结束」（0.16.31，end-to-start 的基准）。
+   *
+   * 调用点必须是**整轮真正收束之后**（含限流退避重试与压缩重试全部走完），
+   * 否则基准会落在一次失败尝试上，让下一轮的等待凭空变短。
+   * 与 rememberSend 同一纪律：写失败只 warn。
+   */
+  function rememberTurnEnd(accountKey, at = Date.now()) {
+    const prev = sendStateByAccount.get(accountKey) || { send: null, end: null };
+    sendStateByAccount.set(accountKey, { ...prev, end: at });
+    saveSendState();
   }
 
   // ---- 等待发送时长的累计账本（0.14.4） ----------------------------------
@@ -2496,6 +2538,10 @@ function imageMarkdown(images) {
       }
       if (!accountKey) accountKey = siteId;
       const sendGapMs = clampSendGapMs(m?.sendGapMs);
+      // 0.16.31：间隔基准（'send-to-send' | 'end-to-start'）。
+      // 口径合法性在这里收一次（与 sendGapMs 同层）：未知值一律退回默认基准，
+      // 而不是让一个写错的配置项把等待变成「看情况」——配置写错只许退化成旧行为。
+      const sendGapBasis = m?.sendGapBasis === 'end-to-start' ? 'end-to-start' : 'send-to-send';
       const attempt = (fresh) => {
         if (m?.sessionKey) {
           const drive = driverFor(accountKey);
@@ -2612,11 +2658,21 @@ function imageMarkdown(images) {
         }
         return driverFor(accountKey).sendPrompt(prompt, { signal: opts.signal, meta: m, onDelta: opts.onDelta, onThink: opts.onThink, onImage: opts.onImage, model: qualified, thinkMode });
       };
-      // 发送节流（设置页「发送间隔」）：**send-to-send** 语义——本轮发送距上一次
-      // *发出* 不足设置值就补满。判定与「距上次发送」都由纯函数给出，等待本身
-      // 不属于网页生成耗时，单独记 sendWaitMs（右栏统计「发送前等待」）。
+      // 发送节流（设置页「发送间隔」）：基准由 `sendGapBasis` 决定——
+      //   · 'send-to-send'（默认）本轮发送距上一次*发出*不足设置值就补满；
+      //   · 'end-to-start'（0.16.31）本轮发送距上一次*生成结束*不足设置值就补满，
+      //     即「它刚答完，再静默 N 秒才回」——防的是对话节奏贴得太紧，与限流无关。
+      // 判定与「距上次发送」都由纯函数给出，等待本身不属于网页生成耗时，
+      // 单独记 sendWaitMs（右栏统计「发送前等待」）。
       let waitedMs = 0;
-      const gapPlan = computeSendGap({ lastSendAt: lastSendByAccount.get(accountKey) ?? null, now: Date.now(), gapMs: sendGapMs });
+      const sendState = sendStateByAccount.get(accountKey) || null;
+      const gapPlan = computeSendGap({
+        lastSendAt: sendState?.send ?? null,
+        lastEndAt: sendState?.end ?? null,
+        basis: sendGapBasis,
+        now: Date.now(),
+        gapMs: sendGapMs,
+      });
       if (gapPlan.skewed) {
         warn(`send-state for ${accountKey} is in the future (clock skew?) — treating it as "just sent"`);
       }
@@ -2627,10 +2683,18 @@ function imageMarkdown(images) {
         beginLiveWait(m, accountKey, 'gap', gapPlan.waitMs, waitedMs);
         try {
           await sleepSignal(gapPlan.waitMs, opts.signal);
-        } finally {
-          // 中途被 abort 时也要清：否则这条在途记录会停在一个不动的数上，
-          // 直到 LIVE_WAIT_STALE_MS 的幽灵兜底才消失。
+        } catch (err) {
+          // 0.16.31：**只有「中途被 abort」才在这里清**。旧实现把清理放进 finally，
+          // 于是等待正常结束时在途读数也被抹掉，而账本要等整轮生成跑完才吸收
+          //（relay 的 onMetrics）——中间那几十秒药丸掉回**上一轮**的旧值，收束时
+          // 再跳上去。这正是用户报的「底下框的时间会跳动」。
+          // 现在正常路径**保留**在途记录：endsAt 已把它冻结在满值，读数连续；
+          // 等账本吸收时由 recordWaitMetrics 里的 clearLiveWait 收尾（同一份增量
+          // 从 live 搬进账本，数字原地不动）。
+          // abort 必须清：那时本轮不会有 metrics，账本永远不吸收它，留着会让药丸
+          // 停在一个不动的假数上（要等 LIVE_WAIT_STALE_MS 的幽灵兜底才消失）。
           clearLiveWait(m);
+          throw err;
         }
         waitedMs += gapPlan.waitMs;
       }
@@ -2660,8 +2724,12 @@ function imageMarkdown(images) {
               beginLiveWait(m, accountKey, 'rate-limit', backoff, baseBeforeBackoff);
               try {
                 await sleepSignal(backoff, opts.signal);
-              } finally {
+              } catch (err) {
+                // 与上面的发送间隔等待同一条修正（0.16.31）：正常结束时**保留**
+                // 在途读数，让「间隔等待 + 限流退避」两段在药丸上连成一条
+                // 单调增长的曲线；只有中途 abort 才清（那时本轮不会有 metrics）。
                 clearLiveWait(m);
+                throw err;
               }
               continue;
             }
@@ -2690,21 +2758,33 @@ function imageMarkdown(images) {
           }
         }
         if (result && typeof result === 'object') {
+          // 0.16.31：end-to-start 的基准 = **本轮真正收束**的时刻。
+          // 打点位置刻意放在这里（所有重试都已走完、result 已拿到）而不是
+          // finally：finally 在抛错时也会跑，一次失败的尝试不该把基准往前推，
+          // 否则下一轮的等待会凭空变短（与 markSent 只在成功时更新同一条纪律）。
+          // send-to-send 下这个字段存了也不用，但**照存**——用户随时可能切换
+          // 口径，切换那一轮不该因为「没存过 end」而退化成零等待。
+          rememberTurnEnd(accountKey);
           result.metrics = {
             ...(result.metrics || {}),
             sendWaitMs: Math.round(waitedMs),
             rateLimitRetries: retries,
             promptCompactRetries: compactRetried ? 1 : 0,
-            // 三个可核对字段（右栏与 /status 都透出）：本轮生效的目标值、
-            // 距上次发出的实际间隔、以及实际等待。用户「设了 10s 却看不到」
-            // 的症结正是旧实现只在**等待过**时才显示，这些字段让它恒可核对。
+            // 四个可核对字段（右栏与 /status 都透出）：本轮生效的目标值、**口径**、
+            // 距基准的实际间隔、以及实际等待。用户「设了 10s 却看不到」的症结
+            // 正是旧实现只在**等待过**时才显示，这些字段让它恒可核对；
+            // basis 是 0.16.31 新增的：同一条读数下两个口径给出不同结论，
+            // 不写清用的是哪一把尺子，「等待不像我设的」就无法判定。
             gapTargetMs: sendGapMs,
+            gapBasis: gapPlan.basis,
             sincePrevSendMs: gapPlan.sincePrevSendMs,
           };
         }
         return result;
       } finally {
-        // 基准不再在 finally 里无条件刷新——它只在 markSent() 更新（send-to-send）。
+        // 基准不再在 finally 里无条件刷新——send 由 markSent() 在**成功发出**
+        // 那一刻更新，end 由上面的 rememberTurnEnd() 在**真正收束**时更新。
+        // 两者都不在这个 finally 里，因为 finally 在抛错路径上同样会跑。
         void 0;
       }
     },
@@ -2965,6 +3045,9 @@ function imageMarkdown(images) {
     // 被消费，defaultModel 是个只存不用的摆设）。
     const defaultModel = settings.defaultModel;
     const thinkMode = ['on', 'off', 'auto'].includes(settings.thinkMode) ? settings.thinkMode : 'auto';
+    // 间隔口径（0.16.31）：与 thinkMode 同一层收一次合法性。未知值退回默认基准，
+    // 于是「配置写错」只退化成 0.14.0 的既有行为，不会让等待变得无从解释。
+    const sendGapBasis = settings.sendGapBasis === 'end-to-start' ? 'end-to-start' : 'send-to-send';
     const messages = Array.isArray(options.messages) ? options.messages : [];
     const resolvedModel = resolveWebModel(options.model || defaultModel || cfg.modelId);
     let model = resolvedModel.id;
@@ -3025,6 +3108,8 @@ function imageMarkdown(images) {
           model: formatModelId(siteId, slot, model), siteId, slot, accountKey, thinkMode,
           // 发送间隔按**槽**取（不同登录态风控独立）；回落链见 accounts.sendGapForSlot。
           sendGapMs: clampSendGapMs(sendGapForSlot(settings, accountKey, siteId)),
+          // 间隔口径（0.16.31）随 meta 一起下发到 executor，与 sendGapMs 同一层。
+          sendGapBasis,
         },
         async attach() {
           const imgs = imagesOfMessages(messages);
@@ -3144,6 +3229,9 @@ function imageMarkdown(images) {
         // 发送间隔（设置页）：executor 在发送前按它节流，限流退避也以它为基数。
         // 0.14.7 起按槽取——同一站点两个账户是两份独立的风控窗口。
         sendGapMs: clampSendGapMs(sendGapForSlot(settings, accountKey, siteId)),
+        // 间隔口径（0.16.31）与它同行：executor 侧两个值缺一不可，只传间隔
+        // 会让 end-to-start 的用户静默退回 send-to-send（读数上还看不出）。
+        sendGapBasis,
         // 网页会话丢失时的整段重放文本（见 executor 的 WEB_SESSION_LOST 分支）。
         // 0.16.11：接受 { maxPromptChars } —— PROMPT_TRUNCATED 压缩重试从这条路取
         // 压缩后的首轮全文；无参调用（WEB_SESSION_LOST 重放）行为逐字不变。
@@ -3339,6 +3427,10 @@ function imageMarkdown(images) {
     // 设置改完立刻生效。真机 0.14.0 矩阵发现该路径 gapTargetMs 恒为 0（见
     // doc/verify.md 的「OpenAI 前端绕过发送间隔」）。
     sendGapMsOf: () => clampSendGapMs(configManager.get().sendGapMs),
+    // 间隔**口径**同理当场求值（0.16.31）。它与间隔是一对：只传间隔不传口径，
+    // end-to-start 会在这条路径上静默退回 send-to-send，而读数上还看不出
+    // （这正是 0.14.0 那次「gapTargetMs 恒为 0」的同型缺陷，第二次修）。
+    sendGapBasisOf: () => (configManager.get().sendGapBasis === 'end-to-start' ? 'end-to-start' : 'send-to-send'),
   });
   relay.start();
   log(`provider "${cfg.providerId}" registered; relay on http://${cfg.host}:${cfg.port}`);

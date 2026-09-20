@@ -301,12 +301,33 @@ export function promptTransportPlan(o = {}) {
  * 页面退回 `https://chat.deepseek.com/` 根地址，navTrace 里连 `landed:after-submit` 都没有。
  * 同一账号改回纯文本投递后恢复正常。
  *
- * 这是**站点契约**（哪一家的附件真的能被模型读到），不是用户偏好，因此不放进设置面：
- * 放进设置面等于把「哪家能用附件」这个事实交给每个用户各猜一次。
+ * ## 2026-09-20 解禁（0.16.31）：静态表清空，DeepSeek 交回**运行期自愈**
+ *
+ * 上面那条禁令的前提在 0.16.31 被真机探针推翻了一半，而另一半有了更好的兜底：
+ *
+ * ① **前提被推翻的一半**：`POST /__webcode/attach-probe`（只上传、绝不发送）实测
+ *    `ok:true`、`evidence:'text:webcode-probe.md'`、`domSnippet` 实拍到输入框里的
+ *    chip（`<div class="e70accd6">webcode-probe.md</div>`）、耗时 105ms。
+ *    即「收得下、渲染得出」这一半**在今天的页面上是成立的**；2026-09-18 那次
+ *    `ATTACH_NOT_CONFIRMED` 的直接原因（文件名证据当时还没实现，类名清单零命中）
+ *    已经不在了。
+ *
+ * ② **另一半（模型读不读、会不会零回复）仍未由读数据证明**：探针只证明「页面
+ *    收下了」，它**不发送**，因此回答不了「模型会不会读到、会不会零回复」。
+ *    但这一半现在有**运行期自愈**兜底：`DYNAMIC_ATTACH_BLOCKS` 对「附件轮整轮
+ *    零回复」（空结果与超时两个签名）自动降级并记住，当轮即回落 inline，用户最多
+ *    损失一轮而不是一直坏。也就是说：留着静态禁令防的是「一轮」，代价却是
+ *    **永远走不了附件**——用一个永久能力换一轮风险，不划算。
+ *
+ * 因此本表清空，DeepSeek 与其它站点走同一条判定（阈值 + 入口 + 运行期自愈）。
+ * 真正的站点差异（GLM 输入框装不下长文）仍然由各站点的**阈值**表达，不由禁令表达。
+ * 若自愈再次记下 DeepSeek 的 `ATTACH_ZERO_REPLY`，`attachBlocked` 会在
+ * `/__webcode/status` 上如实报出——那时再按读数据决定要不要恢复静态禁令。
+ *
  * 反向要求同样成立：GLM 的输入框装不下长文（用户原话「他在附件可以，输入框过长」），
  * 所以它必须留在附件路径上——本表只排除，不改变其它站点的既有行为。
  */
-export const ATTACH_FORBIDDEN_SITES = Object.freeze(new Set(['deepseek']));
+export const ATTACH_FORBIDDEN_SITES = Object.freeze(new Set());
 
 /**
  * 运行期附件禁令（0.16.28）：站点级**自愈降级**记录 ——「附件投递后零回复 ⇒ 自动
@@ -1802,6 +1823,9 @@ export function createBrowserDriver(options = {}) {
     } catch { /* 清空失败照样走下面的回读与 ② */ }
     if (await gone()) return { cleaned: true, cleanedBy: 'input-cleared' };
     const clicked = await page.evaluate(({ NAME, MAX }) => {
+      // 附件 chip 的最深命中节点（真机实拍：`<div class="e70accd6">webcode-probe.md</div>`）。
+      // 它自己就是 chip 的文本节点，**删除控件不一定在它的祖先里**——所以下面
+      // 除了沿祖先链找，还要横向找兄弟（见 `roots`）。
       const hits = [...document.querySelectorAll('body *')].filter((el) => {
         const tag = el.tagName;
         if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'INPUT' || tag === 'TEXTAREA') return false;
@@ -1810,25 +1834,59 @@ export function createBrowserDriver(options = {}) {
       });
       if (!hits.length) return null;
       const deep = hits.filter((el) => !hits.some((o) => o !== el && el.contains(o)));
-      let box = deep[0] || hits[0];
-      for (let i = 0; i < 3 && box.parentElement; i += 1) {
+      const node = deep[0] || hits[0];
+      // 候选容器：最深命中节点 + 它的祖先链（文本长度仍在 chip 量级内才继续往上）。
+      const roots = [node];
+      let box = node;
+      for (let i = 0; i < 4 && box.parentElement; i += 1) {
         const p = box.parentElement;
         if ((p.textContent || '').trim().length > NAME.length + MAX) break;
         box = p;
+        roots.push(box);
       }
-      const RE = /删除|移除|remove|close|clear|取消|×|✕|✖/i;
-      const ctl = [...box.querySelectorAll('[aria-label],[title],button,[role="button"],svg')].find((el) => {
-        if (el.tagName === 'BUTTON' && el.getAttribute('type') === 'submit') return false;
-        const label = el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('class') || '';
-        return RE.test(label);
-      });
-      if (!ctl) return null;
-      try { ctl.click(); } catch { return null; }
-      return ctl.tagName.toLowerCase() + ':'
-        + String(ctl.getAttribute('aria-label') || ctl.getAttribute('title') || ctl.getAttribute('class') || '').slice(0, 60);
+      const RE = /删除|移除|remove|close|clear|取消|×|✕|✖|trash|delete/i;
+      const semantic = (el) => {
+        if (el.tagName === 'BUTTON' && el.getAttribute('type') === 'submit') return '';
+        const label = el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('data-testid') || el.getAttribute('class') || '';
+        return RE.test(label) ? label : '';
+      };
+      // ① 先按语义标签找（最稳：不依赖位置）。
+      for (const root of roots) {
+        const ctl = [...root.querySelectorAll('[aria-label],[title],[data-testid],button,[role="button"],svg,i')]
+          .find((el) => semantic(el) !== '');
+        if (ctl) {
+          try { ctl.click(); } catch { /* 试下一条路 */ }
+          return 'semantic:' + ctl.tagName.toLowerCase() + ':' + String(semantic(ctl)).slice(0, 60);
+        }
+      }
+      // ② 语义标签全落空时，按**位置**找 chip 容器里的可点控件：
+      //    chip 里的删除按钮通常是与文件名同容器、且位于其**右侧**的最后一个
+      //    可点元素（`svg` / `button` / `[role=button]` / 带 cursor:pointer 的 div）。
+      //    这条路的判据是几何关系，因此必须先确认容器内**只有一个**文件名命中——
+      //    多个附件时右边缘那个可能是别的文件的删除键，点错等于删掉别人的附件。
+      if (deep.length === 1) {
+        for (const root of roots) {
+          const cands = [...root.querySelectorAll('button,[role="button"],svg,i,[class*="icon"],[class*="close"],[class*="delete"]')]
+            .filter((el) => {
+              if (el.tagName === 'BUTTON' && el.getAttribute('type') === 'submit') return false;
+              const r = el.getBoundingClientRect();
+              return r.width > 0 && r.height > 0 && r.width <= 48 && r.height <= 48;
+            });
+          if (!cands.length) continue;
+          const nr = node.getBoundingClientRect();
+          const right = cands
+            .filter((el) => el.getBoundingClientRect().left >= nr.right - 4)
+            .sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left)[0];
+          if (!right) continue;
+          try { right.click(); } catch { continue; }
+          return 'position:right:' + right.tagName.toLowerCase() + ':'
+            + String(right.getAttribute('class') || right.getAttribute('aria-label') || '').slice(0, 60);
+        }
+      }
+      return null;
     }, { NAME: String(name || ''), MAX: 200 }).catch(() => null);
     if (!clicked) {
-      return { cleaned: false, cleanedBy: 'none', note: '未找到清除入口（只试了 setInputFiles([]) 与附件节点自身容器内的删除控件）' };
+      return { cleaned: false, cleanedBy: 'none', note: '未找到清除入口（只试了 setInputFiles([]) 与附件节点自身容器内的删除控件；多附件时不按位置猜——点错会删掉别人的附件）' };
     }
     await page.waitForTimeout(600);   // 给网页一拍把 chip 从 DOM 里摘掉
     if (await gone()) return { cleaned: true, cleanedBy: 'removed:' + clicked };

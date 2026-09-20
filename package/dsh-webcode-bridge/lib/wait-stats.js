@@ -297,7 +297,18 @@ export function waitStatDetailRows({ session, total, metrics } = {}) {
     if (s.rateLimitRetries > 0) rows.push({ label: '本次会话限流重试', value: s.rateLimitRetries + ' 次' });
   }
   if (m.gapTargetMs > 0) rows.push({ label: '发送间隔目标', value: formatDuration(m.gapTargetMs) });
-  if (m.sincePrevSendMs != null) rows.push({ label: '距上次发送', value: formatDuration(m.sincePrevSendMs) });
+  // 0.16.31：口径必须与目标值并列出现。同一条读数下两个口径给出不同结论，
+  // 只写「目标 10 s」而不管它是从「上次发出」还是「上次回复完成」起算，
+  // 用户看到的仍是「等待不像我设的」——而这次连该改哪儿都指不出来。
+  if (m.gapBasis === 'end-to-start') rows.push({ label: '间隔基准', value: '距上次回复完成' });
+  else if (m.gapBasis === 'send-to-send') rows.push({ label: '间隔基准', value: '距上次发出' });
+  if (m.sincePrevSendMs != null) {
+    // 标签只在**口径明确**时才切换。`gapBasis` 缺失（旧 metrics / 注入桩）时保持
+    // 「距上次发送」这个历史文案——缺字段不等于口径变了，悄悄换词会让读者以为
+    // 基准换了（旧读数配新词，比不显示更误导）。
+    const sinceLabel = m.gapBasis === 'end-to-start' ? '距上次回复完成' : '距上次发送';
+    rows.push({ label: sinceLabel, value: formatDuration(m.sincePrevSendMs) });
+  }
   if (t && t.totalWaitMs > 0) {
     rows.push({ label: '累计等待发送', value: formatDuration(t.totalWaitMs) });
     rows.push({ label: '累计已统计', value: t.turns + ' 轮' });

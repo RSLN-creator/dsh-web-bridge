@@ -146,7 +146,15 @@ button.mini { width: auto; margin-top: 0; padding: 6px 12px; font-size: 13px; }
       </select>
       <input type="number" id="sendGapMs" min="0" max="600000" step="500" style="flex:1;" placeholder="毫秒（0–600000）">
     </div>
-    <div class="hint">两次向同一网站<b>发送</b>之间的最小间隔（send-to-send：距上一次发出不足这个值就等满，已满足则不等待）。DeepSeek 网页有「消息发送过于频繁」的滑窗限流，长任务工具循环节奏密时容易触发；设置间隔可主动避开。触发限流后桥会按 max(发送间隔, 10 秒) 起步自动退避重试（最多 2 次）。实际等待、目标值与「距上次发送」都在右侧统计的「发送前等待」里逐项显示；该设置会落盘，<b>重启后第一轮同样生效</b>。</div>
+    <label for="sendGapBasis">间隔基准（从哪个时刻起算）</label>
+    <select id="sendGapBasis">
+      <option value="send-to-send">距上次发出（send-to-send，默认）</option>
+      <option value="end-to-start">距上次回复完成（end-to-start）</option>
+    </select>
+    <div class="hint">两次向同一网站<b>发送</b>之间的最小间隔。两个基准防的是两件不同的事，互不替代：<br>
+      · <b>距上次发出（send-to-send）</b>——防站点的「消息发送过于频繁」滑窗限流。它按请求到达计，与生成耗时无关，所以上一轮跑得久时本轮<b>无需再等</b>（已满足）。<br>
+      · <b>距上次回复完成（end-to-start）</b>——防对话节奏贴得太紧，即「它刚答完我立刻回」。此时上一轮跑了多久不影响本轮：<b>答完那一刻起</b>重新数满这个间隔。<br>
+      触发限流后桥会按 max(发送间隔, 10 秒) 起步自动退避重试（最多 2 次）。实际等待、目标值、基准与「距上次发送」都在右侧统计的「发送前等待」里逐项显示；该设置会落盘，<b>重启后第一轮同样生效</b>。</div>
 
     <button type="submit">保存设置</button>
   </form>
@@ -181,6 +189,11 @@ button.mini { width: auto; margin-top: 0; padding: 6px 12px; font-size: 13px; }
       document.getElementById('sendGapMs').value = gapMs;
       const presetEl = document.getElementById('sendGapPreset');
       presetEl.value = ['0', '2000', '5000', '10000', '30000', '60000'].includes(String(gapMs)) ? String(gapMs) : 'custom';
+      // 间隔基准（0.16.31）：与投递形态同一条纪律——**后端给默认值**（未保存过时
+      // 是 'send-to-send'），前端只按值选中，不自己造默认。前端各造一份默认，
+      // 「面板选中项」与「真实行为」分叉时用户没有任何办法发现。
+      document.getElementById('sendGapBasis').value =
+        data.sendGapBasis === 'end-to-start' ? 'end-to-start' : 'send-to-send';
       // 投递形态：后端（GET /settings）已经带默认值回来（未保存过时是 'attach'），
       // 因此这里只需按值选中；前端不自己造默认值——否则「面板选中项」与「驱动真实
       // 行为」会各有一份默认，而这两者分叉时用户没有任何办法发现。
@@ -492,6 +505,9 @@ button.mini { width: auto; margin-top: 0; padding: 6px 12px; font-size: 13px; }
       subAgentMode: document.getElementById('subAgentMode').value,
       subAgentSite: document.getElementById('subAgentSite').value || 'follow',
       sendGapMs: Math.max(0, parseInt(document.getElementById('sendGapMs').value, 10) || 0),
+      // 间隔基准（0.16.31）：只有逐字 'end-to-start' 才是「答完再等」；服务端在
+      // 写入侧还会再归一化一次（见 web-control 的 POST settings），两处判据同源。
+      sendGapBasis: document.getElementById('sendGapBasis').value === 'end-to-start' ? 'end-to-start' : 'send-to-send',
       // 投递形态（0.16.3）：只有逐字 'inline' 才是「永远纯文本」；服务端在写入侧
       // 还会再归一化一次（见 web-control 的 POST settings），两处判据同源。
       promptTransport: (document.querySelector('input[name="promptTransport"]:checked') || {}).value === 'inline' ? 'inline' : 'attach',

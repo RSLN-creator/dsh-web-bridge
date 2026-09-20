@@ -413,7 +413,30 @@ profile 里的 `DevToolsActivePort` 连上调试端口后 `browser.close()`，�
 
 ---
 
-## 8. 发送间隔的基准：已改为 send-to-send，但「是否可切换」仍是待定项
+## 8. 发送间隔的基准：已改为 send-to-send，**切换项已于 0.16.31 落地**
+
+> ### 2026-09-20 结账（0.16.31）：本节「待定项」已实现，不再挂账
+>
+> 用户指令（逐字）：「我需要的是 web 思考后调用时间后不立即回复而是间隔多少秒回复，
+> 不是现在好像是的那个距离上传里面回复时间？注意是为了隔开和他发消息我立马回复的规避点！」
+>
+> 即本节下面预告的 `basis` 开关**按原计划落地**（`'send-to-send' | 'end-to-start'`，
+> 命名沿用「若要修，从哪下手」里的写法）：
+>
+> - `computeSendGap({ lastSendAt, lastEndAt, basis, now, gapMs })`，返回值新增 `basis` 回显；
+> - `webcode-send-state.json` 的值从裸数字升成 `{ send, end }`，**旧格式照样读**
+>   （裸数字即 send、end 缺失），升级不丢基准；
+> - 设置页两个面（HTML 页 + 右栏 React 面板）都有口径下拉，`POST/GET settings` 双向归一化；
+> - 读数 `gapBasis` 进 metrics 与面板明细行（「距上次发出」/「距上次回复完成」文案随口径切换）；
+> - 默认**仍是 send-to-send**：改默认值等于静默改掉所有既有用户的行为，因此只新增选项。
+>
+> 护栏 `test/send-gap-basis.test.mjs`（纯函数 + 源码结构两段）；既有
+> `test/send-gap.test.mjs` 八条逐字未改、全部仍绿。
+>
+> 顺带修掉本节下方「判定与透出」没提到的一个真缺陷：药丸的**跳动**。
+> 旧实现把 `clearLiveWait` 放在等待 sleep 的 `finally` 里，于是等待一结束在途读数就
+> 消失，而账本要等整轮生成跑完才吸收——中间那几十秒药丸掉回上一轮的旧值、收束时
+> 再跳上去。现在正常路径保留在途读数（`endsAt` 已把它冻结），只有 abort 才清。
 
 ### 现状
 

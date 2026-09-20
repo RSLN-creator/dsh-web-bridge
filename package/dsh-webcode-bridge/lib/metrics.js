@@ -71,16 +71,36 @@ export function expectedRequestMetadata(modelId, { ui = 'classic', wantThink = n
  *
  * @param {object} o
  * @param {number|null} o.lastSendAt 上一次向该站点**发出**的 epoch 毫秒（无则 null）
+ * @param {number|null} [o.lastEndAt] 上一次**生成结束**的 epoch 毫秒（basis='end-to-start' 用）
+ * @param {'send-to-send'|'end-to-start'} [o.basis] 间隔基准（默认 send-to-send）
  * @param {number} o.now             当前 epoch 毫秒（显式传入，便于单测钉死）
  * @param {number} o.gapMs           设置值（毫秒，0 = 关闭）
- * @returns {{waitMs:number, sincePrevSendMs:number|null, skewed:boolean}}
+ * @returns {{waitMs:number, sincePrevSendMs:number|null, skewed:boolean, basis:string}}
  *   waitMs          本轮发送前还应等待的毫秒数
- *   sincePrevSendMs 距上次发出的实际间隔（首次为 null，用于右栏「距上次发送」）
+ *   sincePrevSendMs 距基准的实际间隔（首次为 null）——basis 决定它是「距上次发出」
+ *                   还是「距上次回复完成」
  *   skewed          落盘时间在未来（时钟回拨/跨机拷贝）——调用方应 warn 一行
+ *   basis           本次判定实际采用的基准（回显，便于读数核对）
+ *
+ * ## 两个基准的区别（0.16.31 新增 end-to-start）
+ *
+ * `send-to-send`（默认，0.14.0 起）：基准是上一轮**发出**的时刻。它防的是
+ * 「向站点发得太密」——站点的滑窗限流按请求到达计，与生成耗时无关，所以上一轮
+ * 跑得久时本轮**无需再等**（真机读数：一轮 20.9s 时 10000ms 间隔只剩 7609ms 可见）。
+ *
+ * `end-to-start`（0.16.31，用户要求）：基准是上一轮**生成结束**的时刻。它防的是
+ * 另一种模式——「它刚答完我立刻回」，即对话节奏上贴得太紧。此时上一轮跑了多久
+ * **不影响**本轮的等待：答完那一刻起重新数 N 秒。
+ *
+ * 两者不能互相替代，因此并存为可选项，默认逐字保持旧行为。
+ *
+ * 基准记录缺失时返回 `waitMs: 0`（无基准 = 首轮 = 无可回避），而不是拿另一个
+ * 基准凑一个数——凑出来的等待无法解释，也会让「读数可核对」这条纪律失守。
  */
-export function computeSendGap({ lastSendAt, now, gapMs } = {}) {
+export function computeSendGap({ lastSendAt, lastEndAt = null, basis = 'send-to-send', now, gapMs } = {}) {
   const gap = Math.max(0, Math.round(Number(gapMs) || 0));
-  const raw = Number(lastSendAt);
+  const mode = basis === 'end-to-start' ? 'end-to-start' : 'send-to-send';
+  const raw = Number(mode === 'end-to-start' ? lastEndAt : lastSendAt);
   const has = Number.isFinite(raw) && raw > 0;
   // 时钟回拨：基准在未来时既不能按原值等（可能白等几小时），也不能假装没发过
   // 而彻底不落盘。选择「按刚发过处理」——clamp 到 now，于是 waitMs = gap，
@@ -88,8 +108,8 @@ export function computeSendGap({ lastSendAt, now, gapMs } = {}) {
   const skewed = has && raw > now;
   const base = has ? Math.min(raw, now) : null;
   const sincePrevSendMs = base == null ? null : Math.max(0, Math.round(now - base));
-  if (gap <= 0 || base == null) return { waitMs: 0, sincePrevSendMs, skewed };
-  return { waitMs: Math.max(0, Math.round(base + gap - now)), sincePrevSendMs, skewed };
+  if (gap <= 0 || base == null) return { waitMs: 0, sincePrevSendMs, skewed, basis: mode };
+  return { waitMs: Math.max(0, Math.round(base + gap - now)), sincePrevSendMs, skewed, basis: mode };
 }
 
 /**
