@@ -20,18 +20,18 @@
 
 | 项 | 值 |
 | --- | --- |
-| 工作树版本 | **0.16.32**（未提交；`package.json` 已升到 0.16.32） |
-| 已装版本（profile） | web = 0.16.31，headless = 0.16.31（逐 profile 实测 `package.json`；**0.16.32 尚未打包**） |
-| 运行中的进程 | 3080 实测 `build.version` = **0.16.31**（`/__webcode/status` 读到） |
+| 工作树版本 | **0.16.32**（已提交 `f8e5097`） |
+| 已装版本（profile） | web = **0.16.32**，headless = **0.16.32**（逐 profile 实测 `package.json`；两处 `lib/agent-preset.js` sha256 `EE9AD8B7EAC7141C…` 与工作树**逐字相同**） |
+| 运行中的进程 | 3080 实测 `build.version` = **0.16.31** ⇒ **待重启**才加载 0.16.32 |
 | 上游 | `origin/main` = `fb7cd6e`（0.16.31 文档收口）；本轮 0.16.32 待提交/待推 |
 | 单测基线 | **70/70 测试文件通过，退出码 0**（0.16.32 实跑；0.16.31 时 69/69，本轮新增 `official-truncated-close`） |
 | 注释闸门 | **PASS**（0.16.32 实跑：126 文件 error 0 / warn 0） |
 | 文件规范闸门 | **PASS**（0.16.31 改名后实跑：无 BOM + 索引无死链 + Node 版本相容） |
-| 发布闸门 | 待跑（`verify-pack`） |
+| 发布闸门 | **PASS**（`verify-pack` 实跑：tarball 与工作树逐字相同 39/39 + 接线完好） |
 | 记账闸门 | **PASS**（0.16.32 实跑：version 0.16.32 / testFiles 70） |
 | 已装包核对 | 见下行「已装版本」 |
 | 真机验证（0.16.31） | 附件探针实测 `ok:true`（见 §0.16.31 一）；**「模型是否读到附件内容」尚未验证**，如实记 |
-| 下一阶段 | **打包 0.16.32 → 装两 profile → 重启 3080**，然后核 §0.16.32 的真机判据（新轮 `calls` 不再归零）。遗留：`parseAgentReply().text` 的语义缺口（§0.16.32 三，已挂账不修） |
+| 下一阶段 | **重启 3080** 加载 0.16.32，然后核 §0.16.32 的真机判据（新轮 `calls` 不再归零）。遗留：`parseAgentReply().text` 的语义缺口（§0.16.32 三，已挂账不修） |
 
 > **§0.16.10 真机判据（重启后逐条核）**：① `GET /__webcode/status` 的 `build.version` = **0.16.10**；
 > ② 让模型回复一段含 `<b>`、`<foo>`、`Array<T>` 或字面 `<tool_call>` 示例的正文，**逐字对比** harness
@@ -109,6 +109,22 @@ norm = '<calls><invoke name="grep">{…}</invoke><｜｜DSML｜｜ parameter …
 按 `long-term-issues.md` 的纪律记为**挂账**，等真出现「谁把 `.text` 当正文用」的场景再动。
 本条**不是**本轮引入的回归：它随 0.16.32 的端锚放宽一起出现（端锚可选 ⇒ 残骸留在了
 替换产物里），但泄漏面被上面两条外发判据挡住。
+
+### 四、打包与装机（本轮实跑）
+
+| 步 | 读数 |
+| --- | --- |
+| `pnpm pack` | 产出 `dsh-webcode-bridge-0.16.32.tgz` |
+| `verify-pack` | tarball 与工作树**逐字相同 39/39** + 接线完好（跨模块引用已钉住） |
+| 装 web profile | `dsh plugin --profile web add <tgz>` 退出 0，实测 `package.json` = 0.16.32 |
+| 装 headless profile | `dsh plugin --profile headless add <tgz>` 退出 0，实测 = 0.16.32 |
+| 已装副本核对 | 两处 `lib/agent-preset.js` 含 `END_ANCHOR_SRC` / `BODY_STOP_SRC` / 可选端锚，且 sha256 `EE9AD8B7EAC7141C…` 与工作树**相同**——修复随包落地，不是「装了个旧副本」 |
+
+**走的是 `dsh plugin add`（pnpm 通道），不是 `install-profiles.mjs`**：后者绕开 pnpm
+只写 `node_modules`、不改 profile 声明，任何一次 pnpm 通道都会把版本静默回退（该脚本
+自己的注释已第 3 次记下这个坑）。本轮实测 `dsh plugin add` 两条均退出 0。
+
+**装机 ≠ 生效**：3080 当前进程仍是 0.16.31，需重启才加载 0.16.32。
 
 ## 0.16.31（2026-09-20）—— DeepSeek 附件投递解禁 + 间隔 `end-to-start` 口径 + 药丸跳动修复
 
