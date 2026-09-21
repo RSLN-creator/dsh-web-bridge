@@ -22,9 +22,17 @@ window.__ModuleLoader__.load({
     'use strict';
     const React = require('react');
     const { createRoot } = require('react-dom/client');
-    // 0.16.18：不再 require react-dom 的 createPortal。
-    // 旧实现靠 portal 把等待药丸塞进官方统计行（`[data-composer-stats]`），
-    // 而那个标记在 DSH 0.1.6-alpha.2 里**已经不存在**（见 WaitLine 注释）。
+    // 0.16.39：重新 require `createPortal`——**用途与 0.16.18 删掉的那次完全不同**。
+    //
+    // 那一次是拿 portal 去「塞进官方统计行」（补偿旧结构），新结构里那是 bug 源，
+    // 所以删了。这一次是给**我们自己的**等待统计弹层用：官方自己的 stat-dialog
+    // 也是 portal 到 body 的（`createPortal(panel, document.body)`），因为弹层必须
+    // 逃出右栏面板的 `overflow:hidden` 与 `transform` 包含块，才能做到「左边缘与
+    // 药丸左边缘对齐 + 视口夹紧」。不 portal 就只能像旧实现那样 `position:absolute;
+    // right:0`——那正是用户要修掉的「右边缘对齐」。
+    //
+    // 降级：宿主没给 createPortal 时返回 null，WaitLine 回落到内联面板（降级不是崩溃）。
+    const createPortal = (() => { try { return require('react-dom').createPortal || null; } catch { return null; } })();
     // 0.16.22：站点图标与选择框（见下方 SiteGlyph / SitePicker）。
     // FishLogo 是**官方**鲸鱼矢量（dsh-client-ui-primitives 自带，viewBox 23.16×17.04、
     // 单条填充路径、透明底、随 currentColor），官方自己的侧栏 logo 就用它——
@@ -44,12 +52,51 @@ window.__ModuleLoader__.load({
     const {
       IconCodeOutline16, IconQueueOutline14,
     } = primitives;
-    const IconChevronDownOutline14 = primitives.IconChevronDownOutline14 || (() => null);
+    // 0.16.39：官方统计弹层的定位钩子（与官方 stat-dialog 同一颗）。
+    // 官方的等待/用量药丸就是这么摆的：`side:'top', gap:8, margin:12`，返回
+    // `{left, top}` 固定坐标 —— **左边缘与药丸左边缘对齐**、贴近视口时夹紧在
+    // 12px 内。旧实现自己写 `position:absolute;right:0`，于是面板永远贴右边缘，
+    // 与药丸的左对齐视觉不成立；且 `absolute` 会被右栏面板的 `transform` 包含块
+    // 劫持（「要考虑缩放关系」的实质）。
+    // 缺位时回落 null，WaitLine 走内联分支（降级不是崩溃）。
+    const useAnchoredPosition = primitives.useAnchoredPosition || (() => null);
+    // 0.16.39：工具条图标换成官方 primitives 的线框图标（用户：「页面内顶部右侧
+    // 那些功能的图标有点不符合整体审美，适配下官方 ui」）。
+    //
+    // 旧实现用的是字符字形 `↻ ▣ ⧉ ◫`——它们随字体变、光学大小与粗细不一致，
+    // 与官方那排 15px 线框图标并排时一眼能看出不是一套。官方包里的对应关系：
+    //   IconRefreshOutline14     刷新（官方 browser 工具条的 reload 就是它）
+    //   IconRightUpOutline16     独立窗口（官方 browser 的外部打开就是它）
+    //   IconFullscreenOutline16  新面板分屏（把网页放到另一块面板里）
+    //   IconPanelLeftOutline16   浮动面板（官方右栏的分屏/面板图标族）
+    const IconRefreshOutline14 = primitives.IconRefreshOutline14 || (() => null);
+    const IconRightUpOutline16 = primitives.IconRightUpOutline16 || (() => null);
+    const IconFullscreenOutline16 = primitives.IconFullscreenOutline16 || (() => null);
+    const IconPanelLeftOutline16 = primitives.IconPanelLeftOutline16 || (() => null);
+    const IconGlobe = primitives.IconGlobeOutline14 || primitives.IconBrowseOutline16 || (() => null);
+    // 0.16.35：`Menu` 不再解构。它曾服务于工具条那颗站点下拉按钮（0.16.33 的二级菜单），
+    // 而用户 0.16.35 明确不要那颗按钮，`SiteMenu` 随之删除——保留一个不再使用的解构，
+    // 只会让旧版 primitives 的「缺位回退」注释看起来仍然重要。
+    //
+    // 若将来还要官方菜单：`primitives.Menu` 自带 `submenu`（右侧展开的子卡片），是
+    // 「同站点多账户」的正规形态；但**必须**把 `useDismissOnOutsidePointer` 的 rootRef
+    // 挂在同时包住触发按钮与列表的那层元素上（0.16.35 前那个「点了没反应」的根因）。
     const FishLogo = primitives.FishLogo || (() => null);
     const FISH_LOGO_PATH = primitives.FISH_LOGO_PATH || '';
     const FISH_LOGO_VIEWBOX = primitives.FISH_LOGO_VIEWBOX || { width: 23.16, height: 17.04 };
     const useDismissOnOutsidePointer = primitives.useDismissOnOutsidePointer || (() => {});
     const h = React.createElement;
+    // 0.16.37：站点目录改成官方的**胶囊行**，因此要用官方三颗原语：
+    //   · `Button`（variant:'ghost'）——官方 `TerminalGuide` 正是用它在胶囊里承载
+    //     主区（图标+标题+说明）与右侧 44px 展开区。自己写 <button> 会丢掉官方
+    //     的 ghost 配色与按下态，那正是「排版一样」最容易露馅的地方。
+    //   · `Menu`——官方下拉（自带键盘走行 / 边界翻转 / portal / 外侧关闭）。
+    //   · `IconChevronDownOutline14`——胶囊右端那颗 chevron，与官方同一颗图标。
+    // 三者都按本文件既有的「降级不是崩溃」取（0.16.23 立下的规矩）：旧版 primitives
+    // 缺位时回退成空组件，面板照常渲染，只是该处退化。
+    const Button = primitives.Button || (({ children, ...rest }) => h('button', { type: 'button', ...rest }, children));
+    const Menu = primitives.Menu || (() => null);
+    const IconChevronDown = primitives.IconChevronDownOutline14 || (() => null);
     // 等待统计用的图标：官方 primitives 没有 gauge/clock 图标，队列图标是同一
     // 语义域里最近的一个（「还没轮到发送」）。与官方一样只取 14px 线框图标。
     const IconWait = ({ size }) => h(IconQueueOutline14, { size });
@@ -185,8 +232,21 @@ window.__ModuleLoader__.load({
 
     const MODEL_NAMES = { deepseek: 'DeepSeek' };
     // 站点显示名 + 多站点模型目录（打开时从 /__webcode/models 拉取）
-    const SITE_NAMES = { deepseek: 'DeepSeek', glm: '智谱清言', chatgpt: 'ChatGPT', kimi: 'Kimi', qwen: '通义千问', doubao: '豆包', grok: 'Grok', claude: 'Claude', gemini: 'Gemini', zai: 'Z.ai (GLM 海外版)' };
+    const SITE_NAMES = { deepseek: 'DeepSeek', glm: '智谱清言', chatgpt: 'ChatGPT', kimi: 'Kimi', qwen: '通义千问', doubao: '豆包', grok: 'Grok', claude: 'Claude', gemini: 'Gemini', zai: 'Z.ai' };
     const siteName = sid => SITE_NAMES[sid] || sid;
+    const SITE_ORIGINS = {
+      deepseek: 'https://chat.deepseek.com',
+      glm: 'https://chatglm.cn',
+      chatgpt: 'https://chatgpt.com',
+      kimi: 'https://kimi.com',
+      qwen: 'https://chat.qwen.ai',
+      doubao: 'https://www.doubao.com',
+      grok: 'https://grok.com',
+      claude: 'https://claude.ai',
+      gemini: 'https://gemini.google.com',
+      zai: 'https://chat.z.ai',
+    };
+    const siteOrigin = sid => SITE_ORIGINS[sid] || '';
 
     // ---- 登录判定依据的人话翻译 ----------------------------------------------
     // 后端一直在 status 里给 loginBasis / loginCheckedAt，但 0.12.9 的 UI 把它
@@ -287,6 +347,63 @@ window.__ModuleLoader__.load({
      *
      * @param {{sessionId?: string}} owner 由 inject 注入的会话 id
      */
+    /**
+     * 设置页「速度与等待」里的**等待总时长**统计块（0.16.39）。
+     *
+     * ## 为什么现在才把它加回来（0.15.10 曾以「重复」为由删掉）
+     *
+     * 0.15.10 删掉的是**与药丸逐字重复**的那块网格：同一个数字、同一个位置感、
+     * 两处都叫「累计等待发送」，用户看哪个都行，于是「设置界面请你删除重复的」
+     * 成立。现在这一块不同：它是**两本账并排**的只读总览（本会话 / 历史累计），
+     * 外加平均每次与限流重试——这些数在药丸点开的那枚小面板里放不下，也不适合
+     * 常驻在输入框底下。数据仍来自**同一个** `/__webcode/wait-stats` 端点、
+     * 服务端用同一个 formatDuration 现算（新增的 `statBlocks` 字段就是为此），
+     * 因此不会出现「药丸一个数、设置页另一个数」。
+     *
+     * ## 口径纪律
+     *
+     * 本组件**不自己算任何时长、也不判断哪些行该出现**：服务端给什么就渲染什么
+     * （`statBlocks` 是 `[{title, rows:[{label,value}]}]`）。本文件是单文件 bundle，
+     * import 不到 lib/wait-stats.js，在这里再写一份格式化就是两条口径的开始。
+     *
+     * 加载中 / 读不到都如实说，不用 0 冒充——「读不到」与「确实是 0」必须可区分。
+     */
+    function WaitTotals({ metrics }) {
+      const [data, setData] = React.useState(null);
+      const [error, setError] = React.useState('');
+      React.useEffect(() => {
+        let alive = true;
+        const pull = () => api('wait-stats', {})
+          .then(r => { if (alive) { setData(r || null); setError(''); } })
+          .catch(e => { if (alive) setError(e.message); });
+        pull();
+        // 等待账本只在本轮结束时变；10 秒一次足够（本地回环请求）。
+        const timer = setInterval(pull, 10000);
+        return () => { alive = false; clearInterval(timer); };
+      }, []);
+      // 0.16.39：两块的行**全部由服务端给**（`statBlocks`，见 wait-stats.js 的
+      // waitStatBlocks）。本组件不拼标签、不算时长、不判断「哪些行该出现」——
+      // 那些判断只在服务端有一份，客户端再写一遍就是两条口径的开始。
+      const blocks = Array.isArray(data?.statBlocks) ? data.statBlocks : [];
+      const block = (title, rows, tone) => h('div', { className: 'hwb-stat' + (tone ? ' ' + tone : '') },
+        h('div', { className: 'hwb-stat-head' }, title),
+        rows.length
+          ? h('dl', { className: 'hwb-stat-grid' },
+            rows.map(r => h('div', { key: r.label, className: 'hwb-stat-row' },
+              h('dt', null, r.label), h('dd', null, r.value))))
+          : h('p', { className: 'hwb-stat-empty' }, '暂无记录'));
+      if (error) {
+        return h('div', { className: 'hwb-stats' },
+          h('p', { className: 'hwb-hint bad' }, '等待统计读不到：' + error + '（这行不代表「没有等待」，只是读不到）'));
+      }
+      if (!data) return h('div', { className: 'hwb-stats' }, h('p', { className: 'hwb-hint' }, '等待统计加载中…'));
+      return h('div', { className: 'hwb-stats' },
+        h('div', { className: 'hwb-stat-cols' },
+          blocks.map((b, i) => h(React.Fragment, { key: b.title || i },
+            block(b.title, Array.isArray(b.rows) ? b.rows : [], i === 0 ? 'live' : '')))),
+        h('p', { className: 'hwb-hint' }, '口径：只统计**发送前那段主动等待**（发送间隔补满 + 限流退避重试），不含模型思考与生成耗时；与本会话输入框底下那枚药丸同源同口径。'));
+    }
+
     // ---- 0.16.18：官方 dock 行的适配（**旧实现已失效，这里说清为什么**）---------
     //
     // 旧实现（0.15.11）找的是 `[data-composer-stats]`——ui-chat 的 StatsPills 当年
@@ -360,12 +477,22 @@ window.__ModuleLoader__.load({
       //   • pointerdown 落在自己 wrap 之外就收起——于是点官方任何一枚药丸（在本 wrap
       //     之外）时本面板随之关闭，与官方「同时只有一枚开着」的观感一致。
       // 用 rootRef 而不是整行做边界：点自己面板内部（含滚动条）不会误关。
+      //
+      // 0.16.39：portal 之后面板**不在** rootRef 的 DOM 子树里（它挂在 body 下），
+      // 因此外点判据必须把 panelRef 也算作「内部」——否则点面板里的任何一行都会
+      // 立刻把它关掉。这正是官方 useDismissOnOutsidePointer 的第四个参数（portal）
+      // 存在的理由，这里按同一语义等价实现。
       React.useEffect(() => {
         if (!open) return;
         const onKey = e => { if (e.key === 'Escape') setOpen(false); };
         const closeOutside = event => {
           const root = rootRef.current;
-          if (root && event.target instanceof Node && !root.contains(event.target)) setOpen(false);
+          const panel = panelRef.current;
+          const target = event.target;
+          if (!(target instanceof Node)) return;
+          if (root && root.contains(target)) return;
+          if (panel && panel.contains(target)) return;
+          setOpen(false);
         };
         document.addEventListener('keydown', onKey);
         document.addEventListener('pointerdown', closeOutside);
@@ -374,16 +501,58 @@ window.__ModuleLoader__.load({
           document.removeEventListener('pointerdown', closeOutside);
         };
       }, [open]);
+      // ---- 0.16.39：面板改成官方的「左边缘对齐 + 视口夹紧」（用户报的右对齐）----
+      //
+      // 官方 stat-dialog 的定位就是这一颗钩子：`side:'top'` 挂在药丸**上方**，
+      // `gap:8` 是药丸顶边到面板底边的距离，`margin:12` 是视口夹紧的边距。它返回
+      // `{left, top}`，left 由**药丸左边缘**算出——因此面板左边缘与药丸左边缘对齐。
+      // 旧实现用 `right:0` 贴着 wrap 右缘，用户看到的就是「右边缘对齐」。
+      //
+      // 它同时把「缩放关系」解决了：坐标是视口坐标（面板在 portal 里是 fixed），
+      // 而右栏面板自己有 transform + overflow:hidden——不 portal 出去，fixed 会被
+      // 那个包含块劫持、并被裁掉。
+      const panelRef = React.useRef(null);
+      const pos = useAnchoredPosition({ open, anchorRef: rootRef, panelRef, side: 'top', gap: 8, margin: 12 });
       const label = typeof data?.label === 'string' ? data.label : '';
       if (!label) return null;
       const rows = Array.isArray(data?.detailRows) ? data.detailRows : [];
       // 与官方 stat-dialog 的排布逐项对齐：标题行（图标+标题 / 右侧值）→
       // 细分隔线 → dl 网格（dt 左、dd 右、tabular-nums）。
       //
-      // 0.16.18：不再 portal、也不再自建整行。本节点就是官方 dock 行的直接子项，
-      // 尺寸由 .hwb-waitwrap（inline-flex）决定，见上方那段长注释。
+      // 0.16.39：面板本身抽成 `panel`，再决定**挂在哪**：能 portal 就 portal 到
+      // body（官方的做法，也是「左边缘对齐」成立的前提），不能就内联回落。
+      const panel = h('div', {
+        className: 'hwb-waitpanel', ref: panelRef,
+        role: 'dialog', 'aria-label': '等待发送统计',
+        // 首帧还没有测量结果时**先隐藏但参与布局**（官方 MEASURE_STYLE 的同一条
+        // 思路）：直接给一个默认 left/top 会让面板先闪一下再跳到药丸左边。
+        style: pos || { visibility: 'hidden', left: 0, top: 0 },
+      },
+        h('div', { className: 'hwb-waitpanel-head' },
+          h('span', { className: 'hwb-waitpanel-title' },
+            h(IconWait, { size: 14 }), '等待发送统计'),
+          data?.sessionValue
+            ? h('span', { className: 'hwb-waitpanel-value' }, data.sessionValue)
+            : null),
+        h('div', { className: 'hwb-waitpanel-rule', 'aria-hidden': true }),
+        // 0.16.24：正在等待时，明细第一行就是这一段（与药丸同源同数）。
+        // 它排在账本行之前，因为「此刻在等多久」比「历史累计」更贴近用户此刻
+        // 的问题——面板展开时数字仍在逐秒更新。
+        (data?.liveValue || rows.length)
+          ? h('dl', { className: 'hwb-waitpanel-grid' },
+            data?.liveValue
+              ? h('div', { className: 'hwb-waitpanel-row live' },
+                h('dt', null, '正在等待发送'), h('dd', null, data.liveValue))
+              : null,
+            rows.map(r => h('div', { key: r.label, className: 'hwb-waitpanel-row' },
+              h('dt', null, r.label), h('dd', null, r.value))))
+          : h('p', { className: 'hwb-hint' }, '本会话尚无等待记录。'));
+      // portal 可用性：`createPortal` 与官方定位钩子**都**在，才走官方那条路。
+      // 只有 createPortal 而拿不到坐标，面板会停在左上角；两个都没有时内联的面板
+      // 至少还是贴着药丸的（旧行为，可解释）。降级不是崩溃。
+      const canPortal = typeof createPortal === 'function' && Boolean(primitives.useAnchoredPosition);
       return h('div', {
-        className: 'hwb-waitwrap',
+        className: 'hwb-waitwrap' + (canPortal ? ' portaled' : ''),
         ref: rootRef,
       },
         // 不给按钮挂 role="status"：那会把一个可聚焦控件声明成活区，屏幕阅读器
@@ -397,26 +566,7 @@ window.__ModuleLoader__.load({
         },
           h(IconWait, { size: 14 }),
           h('span', { className: 'hwb-waitpill-label' }, label)),
-        open && h('div', { className: 'hwb-waitpanel', role: 'dialog', 'aria-label': '等待发送统计' },
-          h('div', { className: 'hwb-waitpanel-head' },
-            h('span', { className: 'hwb-waitpanel-title' },
-              h(IconWait, { size: 14 }), '等待发送统计'),
-            data?.sessionValue
-              ? h('span', { className: 'hwb-waitpanel-value' }, data.sessionValue)
-              : null),
-          h('div', { className: 'hwb-waitpanel-rule', 'aria-hidden': true }),
-          // 0.16.24：正在等待时，明细第一行就是这一段（与药丸同源同数）。
-          // 它排在账本行之前，因为「此刻在等多久」比「历史累计」更贴近用户此刻
-          // 的问题——面板展开时数字仍在逐秒更新。
-          (data?.liveValue || rows.length)
-            ? h('dl', { className: 'hwb-waitpanel-grid' },
-              data?.liveValue
-                ? h('div', { className: 'hwb-waitpanel-row live' },
-                  h('dt', null, '正在等待发送'), h('dd', null, data.liveValue))
-                : null,
-              rows.map(r => h('div', { key: r.label, className: 'hwb-waitpanel-row' },
-                h('dt', null, r.label), h('dd', null, r.value))))
-            : h('p', { className: 'hwb-hint' }, '本会话尚无等待记录。')));
+        open && (canPortal ? createPortal(panel, document.body) : panel));
     }
 
     /**
@@ -433,73 +583,126 @@ window.__ModuleLoader__.load({
      * 形状），并标出本会话实际走的是哪一支。模板本身**只读**——它由桥按会话的
      * 工具清单生成，可编辑的只有下方的「全局指令」。
      */
-    function PromptPanel({ onSaved }) {
-      const [variants, setVariants] = React.useState(null);
-      // 每行一个网站：`sites` 由服务端按**该站点实际会用的协议**现算（含模板全文）。
-      const [rows, setRows] = React.useState(null);
-      const [activeId, setActiveId] = React.useState('');
-      // 预览选择：siteId → 协议 id。缺省 = 该站点**真实在用**的协议（sites[].variantId），
-      // 下拉只切换预览，不改真实选路（与「模板只读」的既定立场一致）。
-      const [pick, setPick] = React.useState({});
-      const [meta, setMeta] = React.useState(null);
+    /**
+     * 拉 /prompt-variants 的共用 hook（0.16.38）。
+     *
+     * 现在有**两处**消费这份读数：全局页的只读总览（PromptPanel）与站点页的提示词卡
+     *（SitePromptCard）。抽成 hook 是为了让「什么时候拉、字段怎么读、缺失怎么显示」
+     * 只有一份实现——两处各写一份 fetch + 解析，迟早会在错误分支上分叉。
+     *
+     * 如实说明：两处**各自**发一次请求（不是共享同一次响应）。它们不会对不上，
+     * 因为每个行数据的来源是服务端对同一个 siteId 的现算（`buildSitePromptRows`），
+     * 内容与选路都由服务端决定，不依赖客户端的调用时机。
+     */
+    function usePromptVariants() {
+      const [data, setData] = React.useState(null);
       const [error, setError] = React.useState('');
       const load = React.useCallback(() => {
-        api('prompt-variants').then(r => {
-          setVariants(r.variants || []);
-          setRows(r.sites || []);
-          setMeta({ toolsSource: r.toolsSource, active: r.active, extraPrompt: r.extraPrompt });
-          // 标出「本会话最近一次真正用的是哪一支」——那才是用户想核对的东西。
-          setActiveId(r.active?.variantId || '');
-          setError('');
-        }).catch(e => setError(e.message));
+        api('prompt-variants')
+          .then(r => { setData(r || null); setError(''); })
+          .catch(e => setError(e.message));
       }, []);
       React.useEffect(() => { load(); }, [load]);
-      if (error) return h('p', { role: 'alert', className: 'hwb-hint' }, '首轮提示词加载失败：' + error);
-      if (rows === null || variants === null) return h('p', { className: 'hwb-hint' }, '加载首轮提示词…');
-      const variantById = new Map(variants.map(v => [v.id, v]));
+      return { data, error, reload: load };
+    }
+
+    /**
+     * 站点页的提示词卡（0.16.38）。
+     *
+     * 用户要求：「首轮提示词，每个单独模型都只能改自己的！以及请你将全部都变为指向
+     * 对应网站本地提示词文本的存储文件且可以点击链接打开文件而不是现在全部显示」。
+     *
+     * 于是这一卡只做三件事：
+     *   · 显示该站点的提示词文件路径，并提供「用默认程序打开」——路径由**服务端**
+     *     给（同一次 /prompt-variants），前端不拼路径；
+     *   · 编辑**该站点自己的**那一段指令（extraPromptBySite[siteId]）；
+     *   · 只读模板默认折叠，展开用于核对「此刻真的在教什么」。
+     */
+    function SitePromptCard({ siteId, value, notice, onSave, disabled }) {
+      const [draft, setDraft] = React.useState(value);
+      const [busy, setBusy] = React.useState(false);
+      const [openNotice, setOpenNotice] = React.useState('');
+      const { data, error } = usePromptVariants();
+      // 外部值变化（切 tab / 保存后回读）时同步草稿——否则切走再切回来会看到旧文本。
+      React.useEffect(() => { setDraft(value); }, [value, siteId]);
+      const row = (data?.sites || []).find(r => r && r.siteId === siteId) || null;
+      const variant = (data?.variants || []).find(v => v && v.id === (row?.variantId || '')) || null;
+      async function openFile() {
+        setOpenNotice('');
+        try {
+          const r = await api('prompt-file', { siteId });
+          if (r && r.ok) { setOpenNotice('已用系统默认程序打开：' + r.file); return; }
+          const codes = {
+            PROMPT_FILE_MISSING: '该站点的提示词文件还没生成——发送第一条消息后自动落盘。',
+            PROMPT_STORE_OFF: '提示词落盘已被显式关闭（WEBCODE_PROMPT_STORE_DIR=off）。',
+            OPEN_UNAVAILABLE: '宿主没有提供「用默认程序打开」的能力。',
+            OPEN_FAILED: '系统默认程序没有打开成功',
+          };
+          setOpenNotice((codes[r && r.code] || '打开失败') + (r && r.file ? ' 文件：' + r.file : ''));
+        } catch (e) { setOpenNotice('打开失败：' + e.message); }
+      }
       return h('div', { className: 'hwb-import' },
-        h('p', { className: 'hwb-hint' },
-          '按网站列出。每行的下拉是该网站可用的协议——切换只**预览**模板，不改变真实'
-          + '选路（每个网站实际用哪一支由桥按站点决定，标在行首）。模板由桥按会话的工具'
-          + '清单自动生成，是**只读**的；可编辑的只有下方的「全局指令」。'
-          + (meta?.toolsSource === 'placeholder'
-            ? '当前工具清单是占位示例——发送第一条消息后会自动换成该会话的真实清单。'
-            : '')),
-        rows.map(row => {
-          const picked = pick[row.siteId] || row.variantId;
-          const hit = variantById.get(picked) || variantById.get(row.variantId) || variants[0];
-          // 该站点真实在用的那一支（行首标签用它，与「预览选中」区分开）。
-          const realLabel = (variantById.get(row.variantId) || {}).label || row.variantId;
-          const previewing = picked !== row.variantId;
-          return h('div', { key: row.siteId, className: 'hwb-site-prompt' },
-            h('div', { className: 'hwb-row' },
-              h('span', { className: 'hwb-row-label' }, row.siteName),
-              h('div', { className: 'hwb-row-main' },
-                h('select', {
-                  className: 'hwb-model-select', value: picked,
-                  onChange: e => setPick(p => ({ ...p, [row.siteId]: e.target.value })),
-                },
-                  variants.map(v => h('option', { key: v.id, value: v.id },
-                    v.label + (v.id === row.variantId ? ' · 该网站正在用' : '')))),
-                h('span', { className: 'hwb-hint' },
-                  '实际使用：' + realLabel + (previewing ? '（下方为预览，未生效）' : '')))),
-            h('details', { className: 'hwb-site-prompt-details' },
-              h('summary', null, '查看该协议的完整模板'),
-              h('p', { className: 'hwb-hint' }, hit.note),
-              h('pre', null, hit.text),
-              h('p', { className: 'hwb-hint' },
-                '增量轮再教学提示（每 5 个工具结果重贴一次，立场必须与首轮一致）：' + hit.trainNote)));
+        h('div', { className: 'hwb-row' },
+          h('span', { className: 'hwb-row-label' }, '提示词文件'),
+          h('div', { className: 'hwb-row-main' },
+            h('code', { className: 'hwb-filepath', title: row?.file || '' },
+              row?.file || (data ? '（未提供路径）' : '加载中…')),
+            h('button', { type: 'button', disabled: !row, onClick: openFile }, '用默认程序打开'),
+            openNotice && h('span', { className: 'hwb-hint' }, openNotice))),
+        h('p', { className: 'hwb-hint' }, '本网站指令：只对本站点生效，注入该站点新网页会话的首条消息。'),
+        h('textarea', {
+          className: 'hwb-prompt-input', value: draft, rows: 4, maxLength: 4000,
+          placeholder: '例如：本网站回答保持中文，先给结论再给依据。',
+          onChange: e => setDraft(e.target.value),
         }),
-        meta?.active?.tools?.length
-          ? h('p', { className: 'hwb-hint' }, '本会话工具：' + meta.active.tools.join(', '))
+        h('div', { className: 'hwb-row' },
+          h('button', {
+            disabled: disabled || busy || draft.trim() === String(value || '').trim(),
+            onClick: async () => { setBusy(true); try { await onSave(draft); } finally { setBusy(false); } },
+          }, busy ? '保存中…' : '保存本网站指令'),
+          h('button', {
+            disabled: disabled || busy || !draft,
+            title: '清空本网站的指令（该站点只剩全局指令）',
+            onClick: async () => { setBusy(true); try { setDraft(''); await onSave(''); } finally { setBusy(false); } },
+          }, '清空'),
+          notice && h('span', { className: 'hwb-hint' }, notice)),
+        h('details', { className: 'hwb-site-prompt-details' },
+          h('summary', null, '查看该站点此刻的只读模板'),
+          error ? h('p', { role: 'alert', className: 'hwb-hint' }, '模板加载失败：' + error)
+            : (!row ? h('p', { className: 'hwb-hint' }, '加载中…')
+              : h('div', null,
+                h('p', { className: 'hwb-hint' }, '实际使用：' + ((variant && variant.label) || row.variantId)),
+                h('pre', null, row.text),
+                variant && h('p', { className: 'hwb-hint' }, '增量轮再教学：' + variant.trainNote)))));
+    }
+
+    /** 全站点只读总览（全局页）。默认折叠每站模板，避免十个站点把设置页淹掉。 */
+    function PromptPanel({ onSaved } = {}) {
+      const { data, error } = usePromptVariants();
+      if (error) return h('p', { role: 'alert', className: 'hwb-hint' }, '首轮提示词加载失败：' + error);
+      if (!data) return h('p', { className: 'hwb-hint' }, '加载首轮提示词…');
+      const rows = data.sites || [];
+      const variantById = new Map((data.variants || []).map(v => [v.id, v]));
+      return h('div', { className: 'hwb-import' },
+        data.toolsSource === 'placeholder'
+          ? h('p', { className: 'hwb-hint' }, '当前工具清单是占位示例——发送第一条消息后换成该会话的真实清单。')
           : null,
-        activeId
-          ? h('p', { className: 'hwb-hint' }, '本会话最近一次实际使用的是「'
-            + ((variantById.get(activeId) || {}).label || activeId) + '」。')
+        rows.map(row => h('div', { key: row.siteId, className: 'hwb-site-prompt' },
+          h('div', { className: 'hwb-row' },
+            h('span', { className: 'hwb-row-label' }, row.siteName),
+            h('div', { className: 'hwb-row-main' },
+              h('span', { className: 'hwb-hint' },
+                '实际使用：' + ((variantById.get(row.variantId) || {}).label || row.variantId)),
+              h('code', { className: 'hwb-filepath', title: row.file || '' }, row.file || ''))),
+          h('details', { className: 'hwb-site-prompt-details' },
+            h('summary', null, '查看该协议的完整模板'),
+            h('pre', null, row.text)))),
+        data.active?.tools?.length
+          ? h('p', { className: 'hwb-hint' }, '本会话工具：' + data.active.tools.join(', '))
           : null);
     }
 
-    function GlobalPrompt({ onSaved }) {
+    function GlobalPrompt({ onSaved } = {}) {
       const [value, setValue] = React.useState('');
       const [saved, setSaved] = React.useState('');
       const [busy, setBusy] = React.useState(false);
@@ -521,8 +724,9 @@ window.__ModuleLoader__.load({
         finally { setBusy(false); }
       }
       return h('div', { className: 'hwb-import' },
-        h('p', { className: 'hwb-hint' }, '这是**唯一可编辑**的提示词部分：追加一段「[全局指令]」注入每个新网页会话的首条消息，'
-          + '例如："始终用中文回答；执行任何操作前先说明依据"。保存后上方的模板会立刻反映它。'),
+        // 0.16.38：文案压到一句（完整解释见 doc/settings-copy.md §2.1）。站点页的
+        // 「本网站指令」是另一段，两者分开之后这里不再需要「唯一可编辑」那套说明。
+        h('p', { className: 'hwb-hint' }, '追加一段 [全局指令] 注入每个新网页会话的首条消息。'),
         h('textarea', {
           className: 'hwb-prompt-input', value, rows: 5, maxLength: 4000,
           placeholder: '例如：始终保持工具调用格式；回答简洁；先读文件再下结论。',
@@ -534,16 +738,19 @@ window.__ModuleLoader__.load({
         error && h('p', { role: 'alert', className: 'hwb-hint' }, error));
     }
 
-    /** 首轮提示词整块（只读模板 + 变体下拉 + 可编辑全局指令），默认渲染。 */
+    /**
+     * 首轮提示词总览（0.16.38：**只剩只读对照表**）。
+     *
+     * 旧实现把「只读模板」与「全局指令编辑区」绑在同一块里，于是 0.16.38 拆成两张卡
+     *（全局指令 / 首轮提示词只读）之后，`GlobalPrompt` 会被渲染**两次**——同一设置两个
+     * 输入框，改一个另一个不知道，保存后还会互相覆盖。这里只留只读那半。
+     */
     function PromptSection() {
-      const [nonce, setNonce] = React.useState(0);
-      return h('div', null,
-        h(PromptPanel, { key: 'p' + nonce }),
-        h(GlobalPrompt, { key: 'g' + nonce, onSaved: () => setNonce(n => n + 1) }));
+      return h(PromptPanel, {});
     }
 
     // 按站点分组的模型下拉选项：从桥的 /__webcode/models 取全站点目录
-    function ModelSelect({ models, value, onChange, disabled }) {
+    function ModelSelect({ models, value, onChange, disabled, placeholder }) {
       if (!models) return h('select', { disabled: true }, h('option', null, '加载模型目录…'));
       const groups = new Map();
       // 过滤兼容别名（0.14.0）：`deepseek-web` 与 `deepseek:deepseek` 的显示名
@@ -561,7 +768,12 @@ window.__ModuleLoader__.load({
       }
       // 当前值恰好是别名时（历史设置）：补一条选项，否则 select 会显示空。
       const aliasHit = models.find(m => aliasIds.has(m.id) && m.id === value);
+      // 空值选项（0.16.38）：站点页的「本网站默认模型」需要一个能显示的空值项，
+      // 否则 value='' 会落到不存在的选项上，浏览器把第一项**显示**成选中——界面
+      // 看起来「配了 glm-5.3」，而设置里其实什么都没写。
+      const emptyOption = placeholder ? h('option', { key: '__follow', value: '' }, placeholder) : null;
       return h('select', { className: 'hwb-model-select', value: value || '', disabled, onChange: e => onChange(e.target.value) },
+        emptyOption,
         aliasHit ? h('option', { key: aliasHit.id, value: aliasHit.id }, aliasHit.name + '（兼容别名）') : null,
         [...groups.entries()].map(([sid, list]) => h('optgroup', { key: sid, label: siteName(sid) },
           // 0.14.0 起 m.name 自带站点短键（`z.ai/glm-5.3`），这里不再重复拼
@@ -1289,10 +1501,15 @@ window.__ModuleLoader__.load({
                 title: s.displayName + '：' + ringText(s) + (s.lastSessionLost ? '（最近一次：' + (s.lastSessionLost.reason || '未知原因') + '）' : ''),
                 onClick: () => pickAccount(s),
               },
-                // 头像内容取站点短键首字符（无图片资源，也不引入网络依赖）；
-                // 真正表达状态的是外圈那一道环。
+                // 头像内容（0.16.33）：改用**站点矢量标记** SiteGlyph——
+                // 与右侧栏二级菜单、站点 tab 条同一套图标，于是「同一个站点」在
+                // 设置页与面板上是同一个符号，不再一处画字、一处画图。
+                // 官方矢量未取得的站点仍是「文字标记 + 圆环」那套（SiteGlyph 内
+                // 部按 tier 分支），因此这里不新增任何资产或网络依赖。
+                // 真正表达**账户状态**的仍是外圈那一道环（颜色不是唯一载体，
+                // 见上方 aria-label/title）。
                 h('span', { className: 'hwb-avatar-glyph', 'aria-hidden': 'true' },
-                  (siteName(s.siteId) || s.siteId).slice(0, 1))),
+                  h(SiteGlyph, { sid: s.siteId, size: 12 }))),
               h('span', { className: 'hwb-site-name' }, s.displayName)),
             h('span', {
               className: 'hwb-site-state ' + (s.loggedIn === true ? 'ok' : s.loggedIn === false ? 'bad' : 'idle'),
@@ -1395,8 +1612,9 @@ window.__ModuleLoader__.load({
       const [pending, setPending] = React.useState(false);
       const [models, setModels] = React.useState(null);
       const [defaultModel, setDefaultModel] = React.useState('');
-      const [modelSaved, setModelSaved] = React.useState('');
-      const [modelNotice, setModelNotice] = React.useState('');
+      // modelSaved 只在写入后回读时用（不再有「模型管理」卡自己那套保存按钮，
+      // 但子代理卡的两个同步按钮仍走 saveSetting('defaultModel', …)）。
+      const [, setModelSaved] = React.useState('');
       const [thinkMode, setThinkMode] = React.useState('auto');
       const [thinkSaved, setThinkSaved] = React.useState('auto');
       const [thinkNotice, setThinkNotice] = React.useState('');
@@ -1418,6 +1636,50 @@ window.__ModuleLoader__.load({
       const [promptTransport, setPromptTransport] = React.useState('attach');
       const [promptTransportSaved, setPromptTransportSaved] = React.useState('attach');
       const [promptTransportNotice, setPromptTransportNotice] = React.useState('');
+      // 站点 tab（0.16.33）：设置页内部按站点分页，形态参考 dsh-market 的 tab 条。
+      // `''` = 全局页；其余值是 siteId。切 tab **只切视图**，不改任何连接/账号底层。
+      // initialSettingsTab（0.16.38）：**只给测试与将来的深链用**的初值入口。
+      // 站点的账户/模型/提示词三张卡都只在站点页渲染，护栏必须能直接渲染「站点页」
+      // 才能断言它们；没有这个入口，护栏只能在全局页断言「看不见」——那证明不了
+      // 站点页是对的。缺省 ''（全局页），真机行为与 0.16.37 逐字相同。
+      // 注意：这里**不能**用函数式初值（`useState(() => …)`）。本文件的渲染护栏
+      //（test/client-render.test.mjs）是一个最小 React 桩，它把初值原样存下、不调用
+      // 函数——函数式初值在桩里会变成「state 是一个函数对象」，于是全局页被当成
+      // 站点页渲染，一串用例集体红。求值只需 props 一个表达式，用普通初值即可。
+      const [settingsTab, setSettingsTab] = React.useState(
+        SITE_NAMES[String(props?.initialSettingsTab || '')] ? String(props.initialSettingsTab) : '');
+      // 站点级字典（0.16.38）：`defaultModelBySite` / `extraPromptBySite`。
+      // 两者都是「站点 id → 值」，与后端 POST settings 的归一化同名同形。
+      const [modelBySite, setModelBySite] = React.useState({});
+      const [modelBySiteSaved, setModelBySiteSaved] = React.useState({});
+      const [sitePromptBySite, setSitePromptBySite] = React.useState({});
+      const [sitePromptSaved, setSitePromptSaved] = React.useState({});
+      const [siteModelNotice, setSiteModelNotice] = React.useState('');
+      const [sitePromptNotice, setSitePromptNotice] = React.useState('');
+      // tab 条的非 passive 滚轮（见样式表注释）。
+      const tabsRef = React.useRef(null);
+      React.useEffect(() => {
+        const el = tabsRef.current;
+        if (!el || typeof el.addEventListener !== 'function') return () => {};
+        const onWheel = (e) => {
+          // 只接管纵向滚轮：横向滚轮（触控板左右滑）本来就能滚，抢过来会变扭。
+          if (!e.deltaY || e.deltaX) return;
+          const before = el.scrollLeft;
+          el.scrollLeft = before + e.deltaY;
+          // 真的滚动了才阻止默认：否则页面在条上滚不动（内容本来就没几屏，副作用很小，
+          // 但「滚轮在条上失效」正是用户报的那个问题，所以这里必须让它生效）。
+          if (el.scrollLeft !== before) e.preventDefault();
+        };
+        el.addEventListener('wheel', onWheel, { passive: false });
+        return () => el.removeEventListener('wheel', onWheel);
+      }, []);
+      // 槽级发送间隔（`sendGapMsBySlot`）。后端**早已支持**这一档（0.14.7 起：
+      // accounts.sendGapForSlot 的回落链是「槽显式值 → 站点级键 → 全局值」，
+      // web-control 的 POST settings 也已经在归一化它）——只是此前界面上没有入口，
+      // 用户改不了也看不见。本版把它接出来，让「不同站点不同排队」真正可配。
+      const [slotGaps, setSlotGaps] = React.useState({});
+      const [slotGapSaved, setSlotGapSaved] = React.useState({});
+      const [slotGapNotice, setSlotGapNotice] = React.useState('');
       // 服务端算好的投递读数（当前生效值 / 最近一次实际投递 / 探针），见
       // web-control 的 GET attach-status：文案只在服务端算一份，bundle 里不写第二份
       // （本文件是单文件 bundle，import 不到 lib/，两份格式化必然漂移）。
@@ -1455,6 +1717,16 @@ window.__ModuleLoader__.load({
           // promptTransportNow、web-control 的 POST settings 同一判据）。
           const pt = s.promptTransport === 'inline' ? 'inline' : 'attach';
           setPromptTransport(pt); setPromptTransportSaved(pt);
+          // 槽级间隔：原样取回（服务端已归一化过，非法值不会落盘）。
+          // 这里**不**在前端补默认值——「没配」与「配了 0」是两件事，前者应当
+          // 回落到站点/全局档，后者是明确的「这个槽不等待」。
+          const bySlot = s.sendGapMsBySlot && typeof s.sendGapMsBySlot === 'object' ? s.sendGapMsBySlot : {};
+          setSlotGaps(bySlot); setSlotGapSaved(bySlot);
+          // 站点级字典（0.16.38）：原样取回（服务端已归一化过非法键）。
+          const mbs = s.defaultModelBySite && typeof s.defaultModelBySite === 'object' ? s.defaultModelBySite : {};
+          setModelBySite(mbs); setModelBySiteSaved(mbs);
+          const pbs = s.extraPromptBySite && typeof s.extraPromptBySite === 'object' ? s.extraPromptBySite : {};
+          setSitePromptBySite(pbs); setSitePromptSaved(pbs);
         }).catch(() => {});
         const timer = setInterval(poll, 4000);
         return () => { alive = false; clearInterval(timer); };
@@ -1465,6 +1737,81 @@ window.__ModuleLoader__.load({
         catch (e) { setError(e.message); }
         finally { setPending(false); }
       }
+      /**
+       * 保存**站点级**发送间隔（0.16.33）。
+       *
+       * 写的是 `sendGapMsBySlot[siteId]`——后端回落链的第 ② 档
+       * （accounts.sendGapForSlot：槽显式值 → 站点级键 → 全局 sendGapMs）。
+       * 注意默认槽的 accountKey 恰好就是 siteId，所以这一档同时承担
+       * 「站点级默认」与「该站点默认账户的显式值」两种语义，与 0.14.7 的既有设计
+       * 一致，本版不新增档位。
+       *
+       * 整体读改写：`sendGapMsBySlot` 是一个对象，只 POST 单个键会让其余键丢失。
+       */
+      async function saveSlotGap(siteId, ms) {
+        const next = { ...slotGaps, [siteId]: Math.min(600000, Math.max(0, Math.round(Number(ms) || 0))) };
+        setPending(true); setError('');
+        try {
+          const r = await api('settings', { sendGapMsBySlot: next });
+          const back = r.sendGapMsBySlot && typeof r.sendGapMsBySlot === 'object' ? r.sendGapMsBySlot : {};
+          setSlotGaps(back); setSlotGapSaved(back);
+          setSlotGapNotice('已保存 ' + siteName(siteId) + ' 的排队间隔。下一次向该站点发送起生效。');
+        } catch (e) { setError(e.message); }
+        finally { setPending(false); }
+      }
+
+      /** 清除某站点的覆盖，回落到全局值（删除该键，而不是写 0——两者语义不同）。 */
+      async function clearSlotGap(siteId) {
+        const next = { ...slotGaps };
+        delete next[siteId];
+        setPending(true); setError('');
+        try {
+          const r = await api('settings', { sendGapMsBySlot: next });
+          const back = r.sendGapMsBySlot && typeof r.sendGapMsBySlot === 'object' ? r.sendGapMsBySlot : {};
+          setSlotGaps(back); setSlotGapSaved(back);
+          setSlotGapNotice(siteName(siteId) + ' 已恢复为跟随全局间隔。');
+        } catch (e) { setError(e.message); }
+        finally { setPending(false); }
+      }
+
+      /**
+       * 保存某站点的默认模型（0.16.38）。
+       *
+       * 写 `defaultModelBySite[siteId]`。与 sendGapMsBySlot 同一条纪律：整个字典
+       * 读改写，只 POST 单个键会把其余站点的覆盖抹掉。
+       * 传空串 = 删除该键（回落到全局默认模型）——「没配」与「配了一个空值」必须
+       * 可区分，后者会白白进一次契约指纹、白白整段重建一轮。
+       */
+      async function saveSiteModel(siteId, modelId) {
+        const next = { ...modelBySite };
+        if (modelId) next[siteId] = modelId; else delete next[siteId];
+        setPending(true); setError(''); setSiteModelNotice('');
+        try {
+          const r = await api('settings', { defaultModelBySite: next });
+          const back = r.defaultModelBySite && typeof r.defaultModelBySite === 'object' ? r.defaultModelBySite : {};
+          setModelBySite(back); setModelBySiteSaved(back);
+          setSiteModelNotice('已保存 ' + siteName(siteId) + ' 的默认模型。下一轮起生效。');
+        } catch (e) { setError(e.message); }
+        finally { setPending(false); }
+      }
+
+      /** 保存某站点的专属指令（0.16.38）：整个字典读改写，空串删键。 */
+      async function saveSitePrompt(siteId, text) {
+        const next = { ...sitePromptBySite };
+        const trimmed = String(text || '').trim();
+        if (trimmed) next[siteId] = trimmed; else delete next[siteId];
+        setPending(true); setError(''); setSitePromptNotice('');
+        try {
+          const r = await api('settings', { extraPromptBySite: next });
+          const back = r.extraPromptBySite && typeof r.extraPromptBySite === 'object' ? r.extraPromptBySite : {};
+          setSitePromptBySite(back); setSitePromptSaved(back);
+          setSitePromptNotice(trimmed
+            ? '已保存 ' + siteName(siteId) + ' 的指令。它会随该站点下一次整段重建注入。'
+            : '已清空 ' + siteName(siteId) + ' 的指令（该站点只剩全局指令）。');
+        } catch (e) { setError(e.message); }
+        finally { setPending(false); }
+      }
+
       async function saveSetting(key, value, onDone) {
         setPending(true); setError('');
         try {
@@ -1510,34 +1857,158 @@ window.__ModuleLoader__.load({
       const consent = relay?.consent === true;
       const metrics = relay?.metrics;
       const currentModelName = m => models?.find(x => x.id === m)?.name || MODEL_NAMES[m] || m;
-      // 「深度思考」三态开关仅对 DeepSeek 站点有意义——只有默认模型落在
-      // deepseek 站点时才展示（其余站点 pill 契约未真机校准，不硬造开关）
-      const defaultSiteId = (defaultModel || '').split(':')[0];
-      const showThink = defaultSiteId === 'deepseek';
+      // 「深度思考」三态开关仅对 DeepSeek 站点有意义——判据是**当前看的是哪个站点
+      // tab**（0.16.38：模型管理搬到站点页之后，这里配的对象就是那个站点；旧判据
+      //「默认模型落在哪个站点」是模型管理还在全局页时的写法，已随之退役）。其余
+      // 站点的 pill 契约未真机校准，不硬造开关。
       return h('section', { className: 'hwb-settings' },
         h('h2', null, 'Harness Web Bridge'),
         build?.hash && h('p', { className: 'hwb-build' }, '构建指纹：' + build.hash + (build.version ? ' · v' + build.version : '')),
         h('p', { className: 'hwb-lead' }, '用已登录的 Edge 网页驱动内容服务：右侧直接显示可操作的真实网页，模型生成与工具调用均以网页原生流程执行，与 API 调用同源。'),
 
-        h('div', { className: 'hwb-card' },
-          h('h3', { className: 'hwb-group first' }, '账户与登录管理'),
-          h(SiteAccounts, { sites, onRefresh: refresh })),
+        // ---- 站点 tab 条（0.16.33，0.16.38 改为滚轮横向滚动）------------------
+        //
+        // 一行 tab = 全局 + 每个已接入站点。选中站点后下方出现**该站点专属**的卡片
+        //（账户/登录 + 该站点模型 + 该站点提示词 + 它自己的排队间隔）；选「全局」时
+        // 只剩全局项。
+        //
+        // 0.16.38 的两点改动：
+        //   · **横排单行**（不再换行成两行）：用户要「横排，然后可以通过鼠标滚轮滚动而
+        //     不用显示进度条」。`flex-wrap:nowrap` + `overflow-x:auto` + 隐藏滚动条，
+        //     滚轮由下面的非 passive 原生监听映射到 scrollLeft（React 的 onWheel 在
+        //     根容器上是 passive，preventDefault 会失效/告警）。
+        //   · tab 与下方卡片之间的间距收成一条显式 margin（见样式表），不再靠
+        //     `.hwb-card` 的首个 margin 碰运气。
+        //
+        // 角标数字是该站点的账户数（含默认槽）——「这个站点有几个号」是切 tab 前
+        // 最想知道的一件事，而它恰好只有账户行数据知道，不必再点进去看。
+        h('div', { className: 'hwb-settings-tabs', role: 'tablist', 'aria-label': '设置范围', ref: tabsRef },
+          h('button', {
+            type: 'button', role: 'tab', 'aria-selected': settingsTab === '',
+            className: 'hwb-settings-tab' + (settingsTab === '' ? ' on' : ''),
+            onClick: () => setSettingsTab(''),
+          }, '全局'),
+          Object.keys(SITE_NAMES).map(sid => {
+            const n = (sites || []).filter(r => r && r.siteId === sid).length;
+            return h('button', {
+              key: sid, type: 'button', role: 'tab',
+              'aria-selected': settingsTab === sid,
+              className: 'hwb-settings-tab' + (settingsTab === sid ? ' on' : ''),
+              onClick: () => setSettingsTab(sid),
+            }, siteName(sid), n > 1 ? h('span', { className: 'hwb-settings-tab-count' }, n) : null);
+          })),
 
-        // 谁在跑：子代理与 Team 成员**分开两区**（0.14.9）。放在账户之后，
-        // 因为「有哪些账户」是更常动的事（Apple「按重要性排序」）。
-        // sessionId 一路传到花名册：subagentCatalog 是会话级投影（0.15.0）。
-        h('div', { className: 'hwb-card' },
-          h('h3', { className: 'hwb-group first' }, '正在运行（子代理 / Team）'),
-          h(AgentRoster, { sessionId })),
+        // ---- 站点页：账户与登录（0.16.38 起**只在站点页**）-------------------
+        settingsTab && h('div', { className: 'hwb-card' },
+          h('h3', { className: 'hwb-group first' }, siteName(settingsTab) + ' 的账户与登录'),
+          // 只列该站点的账户行——`SiteAccounts` 本来就支持 `onlySiteId`（子代理站点
+          // 那一处一直在用），这里复用同一个过滤，不另写一份「按站点筛」的逻辑。
+          h(SiteAccounts, { sites, onRefresh: refresh, onlySiteId: settingsTab })),
 
-        h('div', { className: 'hwb-card' },
-          h('h3', { className: 'hwb-group first' }, '模型管理'),
-          h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '默认模型'),
+        // ---- 站点专属排队间隔（0.16.33）--------------------------------------
+        // 只在选中某个站点 tab 时出现。这是用户要的「不同站点不同排队选择」：
+        // 同一台机器上 DeepSeek 可以 0 秒、GLM 限流严就单独设 30 秒，互不影响。
+        settingsTab && (() => {
+          const cur = Object.prototype.hasOwnProperty.call(slotGaps, settingsTab)
+            ? Math.min(600000, Math.max(0, Math.round(Number(slotGaps[settingsTab]) || 0)))
+            : null;
+          const draft = cur === null ? Math.min(600000, Math.max(0, Math.round(Number(sendGapMs) || 0))) : cur;
+          const presets = [0, 2000, 5000, 10000, 30000, 60000];
+          return h('div', { className: 'hwb-card' },
+            h('h3', { className: 'hwb-group first' }, siteName(settingsTab) + ' 的排队间隔'),
+            h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '发送间隔'),
+              h('div', { className: 'hwb-row-main' },
+                h('select', {
+                  className: 'hwb-model-select', style: { maxWidth: '150px' },
+                  value: presets.includes(draft) ? String(draft) : 'custom',
+                  disabled: pending,
+                  onChange: e => {
+                    if (e.target.value === 'custom') return;
+                    setSlotGaps(p => ({ ...p, [settingsTab]: Number(e.target.value) }));
+                  },
+                },
+                  presets.map(p => h('option', { key: p, value: String(p) }, p === 0 ? '0 秒（关闭）' : (p / 1000) + ' 秒')),
+                  h('option', { value: 'custom' }, '自定义…')),
+                h('input', {
+                  type: 'number', className: 'hwb-model-select', style: { maxWidth: '130px' },
+                  min: 0, max: 600000, step: 500,
+                  value: draft, disabled: pending,
+                  title: '该站点两次发送之间的最小间隔（毫秒）',
+                  onChange: e => setSlotGaps(p => ({ ...p, [settingsTab]: Math.min(600000, Math.max(0, Math.round(Number(e.target.value) || 0))) })),
+                }),
+                h('button', {
+                  disabled: pending || draft === (cur === null ? null : Math.round(Number(slotGapSaved[settingsTab]) || 0)),
+                  onClick: () => saveSlotGap(settingsTab, draft),
+                }, '保存'),
+                cur !== null && h('button', {
+                  disabled: pending,
+                  title: '删除该站点的覆盖，回落到上面的全局间隔',
+                  onClick: () => clearSlotGap(settingsTab),
+                }, '跟随全局'),
+                slotGapNotice && h('span', { className: 'hwb-hint' }, slotGapNotice))),
+            h('p', { className: 'hwb-hint indent' },
+              cur === null
+                ? '当前**未覆盖**：该站点跟随上面的全局间隔（' + (Math.round(Number(sendGapMs) || 0) / 1000) + ' 秒）。保存后只影响 ' + siteName(settingsTab) + '。'
+                : '当前**已覆盖**为 ' + (cur / 1000) + ' 秒——只对 ' + siteName(settingsTab) + ' 生效，其它站点不受影响。点「跟随全局」可清除。'),
+            h('p', { className: 'hwb-hint indent' }, '回落链：本站点覆盖 → 全局间隔。这与账户槽是同一套设计（lib/accounts.js 的 sendGapForSlot），本版只是把这一档接上界面。'));
+        })(),
+
+        // ---- 站点页：模型管理（0.16.38）-------------------------------------
+        //
+        // 用户要求：「模型管理……两者逻辑上单独适配全局和单独站点！你却全都有放置，
+        // 请你按照我的要求删除对应 UI」，并在追问里选定「只留站点页」。
+        //
+        // 于是模型的配置**全部**落在站点页，全局页不再出现「模型管理」卡；为了不让
+        //「默认落在哪个站点」在全局页无处可查，全局页保留一行只读的「主线落点」，
+        // 点它直接跳到对应站点 tab（见下方连接卡）。
+        //
+        // 三件事各自的语义（文档 doc/settings-copy.md 有完整版）：
+        //   · 本网站默认模型 → defaultModelBySite[siteId]，只覆盖本站点用哪一支；
+        //   · 主线落点       → defaultModel（全局单值），新会话未显式选模型时的落点；
+        //   · 深度思考       → thinkMode（全局单值），只有 deepseek 站点的开关已校准。
+        settingsTab && h('div', { className: 'hwb-card' },
+          h('h3', { className: 'hwb-group first' }, siteName(settingsTab) + ' 的模型'),
+          h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '本网站默认模型'),
             h('div', { className: 'hwb-row-main' },
-              h(ModelSelect, { models, value: defaultModel, disabled: pending, onChange: setDefaultModel }),
-              h('button', { disabled: pending || !defaultModel || defaultModel === modelSaved, onClick: () => saveSetting('defaultModel', defaultModel, r => { setDefaultModel(r.defaultModel || defaultModel); setModelSaved(r.defaultModel || defaultModel); setModelNotice('已保存：新建会话未显式选模型时将使用该模型。'); }) }, '保存'),
-              modelNotice && h('span', { className: 'hwb-hint' }, modelNotice))),
-          showThink && h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '深度思考'),
+              // 只列**该站点**的模型：站点页的选择框里混进别的站点，等于把「这个站点
+              // 用哪一支」这件事重新变成全局问题。
+              h(ModelSelect, {
+                // `models ? … : null` 而不是 `(models || []).filter(…)`：空数组是**真值**，
+                // ModelSelect 的 `if (!models)` 兜不住它——目录还在加载时站点页会渲染一个
+                // **空下拉**，看起来像「这个站点没有模型」，而真相是「还没读到」。
+                // 传 null 才会走它那句「加载模型目录…」的诚实态。
+                models: models ? models.filter(m => String(m.siteId) === settingsTab) : null,
+                value: modelBySite[settingsTab] || '',
+                disabled: pending,
+                placeholder: '跟随主线默认模型',
+                onChange: v => saveSiteModel(settingsTab, v),
+              }),
+              h('button', {
+                disabled: pending || !modelBySite[settingsTab],
+                title: '删除本网站的覆盖，回落到上面的主线默认模型',
+                onClick: () => saveSiteModel(settingsTab, ''),
+              }, '跟随主线'),
+              siteModelNotice && h('span', { className: 'hwb-hint' }, siteModelNotice))),
+          h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '主线落点'),
+            h('div', { className: 'hwb-row-main' },
+              h('span', { className: 'hwb-hint' }, (defaultModel || '（未设置）') + ' · ' + currentModelName(defaultModel)),
+              h('button', {
+                disabled: pending || !models,
+                title: '把主线默认模型设为本站点的默认模型',
+                onClick: () => {
+                  const hit = (models || []).find(m => String(m.siteId) === settingsTab && /:auto$/.test(m.id))
+                    || (models || []).find(m => String(m.siteId) === settingsTab);
+                  if (!hit) { setSiteModelNotice('本站点没有可用模型，无法设为主线默认。'); return; }
+                  saveSetting('defaultModel', hit.id, r => {
+                    setDefaultModel(r.defaultModel || hit.id); setModelSaved(r.defaultModel || hit.id);
+                    setSiteModelNotice('主线默认已设为 ' + hit.id + '。');
+                  });
+                },
+              }, '用本站点作为主线默认'))),
+          // 深度思考：三态开关**只对 deepseek** 有意义（其余站点的 pill 契约未真机
+          // 校准，不硬造开关）。判据从「默认模型落在哪个站点」改成「当前看的是哪个
+          // 站点 tab」——模型管理搬到站点页之后，后者才是用户此刻在配的对象。
+          settingsTab === 'deepseek' && h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '深度思考'),
             h('div', { className: 'hwb-row-main' },
               h('select', { className: 'hwb-model-select', value: thinkMode, disabled: pending, onChange: e => setThinkMode(e.target.value) },
                 h('option', { value: 'auto' }, '自动（按所选模型的默认思考行为）'),
@@ -1545,7 +2016,40 @@ window.__ModuleLoader__.load({
                 h('option', { value: 'off' }, '始终关闭（追求速度）')),
               h('button', { disabled: pending || thinkMode === thinkSaved, onClick: () => saveSetting('thinkMode', thinkMode, r => { const v = ['on', 'off', 'auto'].includes(r.thinkMode) ? r.thinkMode : thinkMode; setThinkMode(v); setThinkSaved(v); setThinkNotice('已保存。下次生成起生效。'); }) }, '保存'),
               thinkNotice && h('span', { className: 'hwb-hint' }, thinkNotice))),
-          h('p', { className: 'hwb-hint indent' }, '当前网页模型：' + (driver?.selectedModel ? currentModelName(driver.selectedModel) : '未选择（按默认模型）')),
+          h('p', { className: 'hwb-hint indent' }, '当前网页模型：' + (driver?.selectedModel ? currentModelName(driver.selectedModel) : '未选择（按默认模型）'))),
+
+        // ---- 站点页：该站点的首轮提示词（0.16.38）---------------------------
+        //
+        // 用户要求：站点页的提示词「只能改自己的」，并且**指向该网站本地提示词文本
+        // 的存储文件、可点击打开**，而不是把全文铺在设置页里。
+        //
+        // 因此这一卡只有三行：文件（可打开）+ 本网站指令（唯一可编辑）+ 只读模板
+        //（默认折叠，用来核对「此刻真的在教什么」）。
+        settingsTab && h('div', { className: 'hwb-card' },
+          h('h3', { className: 'hwb-group first' }, siteName(settingsTab) + ' 的首轮提示词'),
+          h(SitePromptCard, {
+            siteId: settingsTab,
+            value: sitePromptBySite[settingsTab] || '',
+            saved: sitePromptSaved[settingsTab] || '',
+            notice: sitePromptNotice,
+            onSave: (text) => saveSitePrompt(settingsTab, text),
+            disabled: pending,
+          })),
+
+        // 谁在跑：子代理与 Team 成员**分开两区**（0.14.9）。
+        // 0.16.38：与其它四张卡一样**只在全局页**出现——「正在运行」是进程级事实，
+        // 不属于任何一个站点 tab。
+        !settingsTab && h('div', { className: 'hwb-card' },
+          h('h3', { className: 'hwb-group first' }, '正在运行（子代理 / Team）'),
+          h(AgentRoster, { sessionId })),
+
+        // ---- 全局页：全局发送间隔（0.16.38）--------------------------------
+        //
+        // 「发送间隔」原来长在「模型管理」卡里，而模型管理整块搬去了站点页。间隔
+        // 本身是**全局回落档**（站点覆盖在站点页），因此留一张全局卡，只放间隔与
+        // 基准两行——不把它塞进「连接」或「会话与子代理」里，那两张卡各有别的语义。
+        !settingsTab && h('div', { className: 'hwb-card' },
+          h('h3', { className: 'hwb-group first' }, '发送间隔（全局）'),
           h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '发送间隔'),
             h('div', { className: 'hwb-row-main' },
               (() => {
@@ -1572,8 +2076,7 @@ window.__ModuleLoader__.load({
                     setSendGapMs(g); setSendGapSaved(g); setSendGapNotice('已保存。下一次发送起生效。');
                   });
                 }) }, '保存'),
-              sendGapNotice && h('span', { className: 'hwb-hint' }, sendGapNotice)),
-            ),
+              sendGapNotice && h('span', { className: 'hwb-hint' }, sendGapNotice))),
           h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '间隔基准'),
             h('div', { className: 'hwb-row-main' },
               h('select', { className: 'hwb-model-select', value: sendGapBasis, disabled: pending,
@@ -1581,14 +2084,15 @@ window.__ModuleLoader__.load({
                 h('option', { value: 'send-to-send' }, '距上次发出（send-to-send，防限流）'),
                 h('option', { value: 'end-to-start' }, '距上次回复完成（end-to-start，防贴太紧）')),
               h('span', { className: 'hwb-hint' }, sendGapBasis === 'end-to-start'
-                ? '网页答完那一刻起重新数满间隔——它刚答完不会立刻收到下一条。'
-                : '按请求到达计，与生成耗时无关：上一轮跑得久时本轮无需再等。'))),
-          h('p', { className: 'hwb-hint indent' }, '两次向同一网站**发送**之间的最小间隔。两个基准防的是两件不同的事：**距上次发出**（默认）防站点的「消息发送过于频繁」滑窗限流，它按请求到达计、与生成耗时无关，所以上一轮跑得久时本轮无需再等；**距上次回复完成**防对话节奏贴得太紧（「它刚答完我立刻回」），此时上一轮跑了多久不影响本轮，答完那一刻起重新数满。被限流时桥按 max(发送间隔, 10 秒) 自动退避重试最多 2 次。实际等待、目标值、基准与「距上次发送」都在下方统计的「发送前等待」里逐项显示；该设置会落盘，**重启后第一轮同样生效**。')),
+                ? '答完那一刻起重新数满间隔。'
+                : '按请求到达计，上一轮跑得久时本轮无需再等。'))),
+          h('p', { className: 'hwb-hint indent' }, '被限流时按 max(间隔, 10 秒) 自动退避重试，最多 2 次。站点级覆盖见该站点的 tab。')),
 
         // 提示词投递形态（0.16.3）。用户原话：「没有做到能够把提示词放入文本
         //（设置界面也改为打开文本）导致输出对话一开头就很长 token 窗口」——
         // 附件投递此前既没有开关、也没有读数，用户改不了也看不见。
-        h('div', { className: 'hwb-card' },
+        // 0.16.38：只在全局页——投递形态是进程级选择，站点差异走驱动自己的站点禁令。
+        !settingsTab && h('div', { className: 'hwb-card' },
           h('h3', { className: 'hwb-group first' }, '提示词投递'),
           h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '投递形态'),
             h('div', { className: 'hwb-row-main' },
@@ -1623,10 +2127,21 @@ window.__ModuleLoader__.load({
               h('span', { className: 'hwb-hint' }, probeResult || ('探针 ' + (attachStatus?.probeLine || '尚未运行。'))))),
           h('p', { className: 'hwb-hint indent' }, '探针会向当前网页会话上传一个 webcode-probe.md，上传后立即尝试清理，并如实报回证据节点、命中数与清理结果——这是「附件到底行不行」唯一不消耗真实会话的读数。')),
 
-        h('div', { className: 'hwb-card' },
+        !settingsTab && h('div', { className: 'hwb-card' },
           h('h3', { className: 'hwb-group first' }, '连接'),
           h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '网页服务'),
             h('div', { className: 'hwb-row-main' }, h('span', null, relay?.running ? '中继已连接' : '未启动'))),
+          // 主线落点只读行（0.16.38）：模型配置搬到站点页后，全局页必须仍能回答
+          //「默认会落到哪个站点」。点它直接跳到对应站点 tab。
+          h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '主线落点'),
+            h('div', { className: 'hwb-row-main' },
+              h('span', { className: 'hwb-hint' }, (defaultModel || '（未设置）') + ' · ' + currentModelName(defaultModel)),
+              (() => {
+                const sid = String(defaultModel || '').split(':')[0];
+                return sid && SITE_NAMES[sid]
+                  ? h('button', { type: 'button', onClick: () => setSettingsTab(sid) }, '去配置 ' + siteName(sid))
+                  : null;
+              })())),
           h('div', { className: 'hwb-row' },
             h('label', { className: 'hwb-consent' },
               h('input', {
@@ -1636,14 +2151,17 @@ window.__ModuleLoader__.load({
               h('span', null, '启用网页自动化')),
             h('span', { className: 'hwb-hint' },
               consent
-                ? (relay?.consentPersistent ? '已永久保存到本机：首次授权一次即可长期使用' : '当前运行有效，配置目录不可写入')
-                : '首次使用时请勾选授权一次；关闭后所有网页调用都会被拒绝。'))),
+                ? (relay?.consentPersistent ? '已永久保存到本机，首次授权一次即可长期使用。' : '当前运行有效，配置目录不可写入。')
+                : '首次使用请授权一次；关闭后所有网页调用都会被拒绝。'))),
 
-        h('div', { className: 'hwb-card' },
+        !settingsTab && h('div', { className: 'hwb-card' },
           h('h3', { className: 'hwb-group first' }, '速度与等待'),
-          // 0.15.10：设置页不再重复统计等待时长。累计明细已并入输入框底下那枚
-          // 药丸的点击面板（同源同口径），此处只保留「速度」实测指标——用户报
-          // 的「设置界面请你删除重复的」就是指这块与药丸重复的网格。
+          // 0.15.10 曾以「重复」为由删掉这里的等待统计。0.16.39 加回来的是**不同**
+          // 一块：两本账并排的只读总览（本会话 / 历史累计）+ 平均每次 + 限流重试，
+          // 这些数在药丸点开的小面板里放不下。数据仍走同一个 /wait-stats 端点、
+          // 服务端算好的 `statBlocks`，因此不会与药丸打架（详见 WaitTotals 注释）。
+          h('div', { className: 'hwb-row' }, h('div', { className: 'hwb-row-main' }, h(WaitTotals, { metrics }))),
+          // 「速度」实测指标：与本轮生成有关，随对话推进变化，因此单独一段。
           h('div', { className: 'hwb-row' }, h('div', { className: 'hwb-row-main' }, h(Metrics, { metrics }))),
           // 「网页端回复了但 harness 这边卡住」（0.14.0）：驱动侧现在会在网页
           // 不发 FINISHED 时按稳态收束，并把次数/最后一次原因记在 status 里。
@@ -1680,7 +2198,7 @@ window.__ModuleLoader__.load({
               ? '；该站点的地址栏里没有会话 id，桥无法导航回既有对话，只能整段重开'
               : '')),
 
-        h('div', { className: 'hwb-card' },
+        !settingsTab && h('div', { className: 'hwb-card' },
           h('h3', { className: 'hwb-group first' }, '会话与子代理'),
           h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '子代理网页会话'),
             h('div', { className: 'hwb-row-main' },
@@ -1706,17 +2224,31 @@ window.__ModuleLoader__.load({
             h('div', { className: 'hwb-row-main' },
               subAgentSite !== 'follow'
                 ? h(SiteAccounts, { sites, onRefresh: refresh, onlySiteId: subAgentSite, subHint: true })
-                : h('span', { className: 'hwb-hint' }, '跟随主线站点：子代理与主线共用同一账户，登录状态在上方「账户与登录管理」维护，无需单独登录。'))),
+                : h('span', { className: 'hwb-hint' }, '跟随主线站点：与主线共用账户，无需单独登录。'))),
+          // 会话隔离（0.16.38）：原文三段把「网页会话槽怎么分」「同站点共享登录」「按钮
+          // 只同步站点选择」混在一起，读者要自己拼。压成一句可核对的读数；完整解释
+          // 在 doc/settings-copy.md。
           h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '会话隔离'),
             h('div', { className: 'hwb-row-main' }, h('span', { className: 'hwb-hint' },
-              (driver?.conversationCount ?? 0) + ' 个网页会话槽。子代理（如 explore/plan/通用 agent）按 agentId 自动分到'
-              + '「同账号新对话」——同一账号下另开一个全新网页对话，互不污染主对话上下文；网页请求仍按队列逐个执行。'
-              + '主线与子代理站点相互独立：同站点共享登录态（消息频率叠加，易触发站点限流，可给子代理选别的站点分流），跨站点登录互不影响；'
-              + '「主线→子代理 / 子代理→主线」按钮只单向同步站点选择，不迁移登录态。')))),
+              (driver?.conversationCount ?? 0) + ' 个网页会话槽；子代理按 agentId 分到同账号新对话，与主线上下文互不污染。')))),
 
-        h('div', { className: 'hwb-card' },
-          h('h3', { className: 'hwb-group first' }, '首轮提示词'),
-          h('p', { className: 'hwb-hint' }, '下面就是发送首条消息时注入网页的完整内容（默认显示，无需展开）。'),
+        // ---- 全局页：全局指令（0.16.38）-------------------------------------
+        //
+        // 站点页只编辑**该站点**那一段；这里编辑的是注入每个新网页会话的公共段。
+        // 两块分开之后，「每行一个网站 + 每个网站只能改自己的」才在界面上成立。
+        !settingsTab && h('div', { className: 'hwb-card' },
+          h('h3', { className: 'hwb-group first' }, '全局指令'),
+          h('p', { className: 'hwb-hint' }, '追加一段 [全局指令] 注入每个新网页会话的首条消息。'),
+          h(GlobalPrompt)),
+
+        // ---- 全局页：首轮提示词模板总览（0.16.38）---------------------------
+        //
+        // 站点页只给该站点那一行与文件入口；这里给一张**全站点对照表**：每行一个
+        // 站点 + 它实际使用的协议 + 该站点的提示词文件路径。要看某个站点此刻真的
+        // 在教什么，展开对应站点页的只读模板即可（那是唯一正本）。
+        !settingsTab && h('div', { className: 'hwb-card' },
+          h('h3', { className: 'hwb-group first' }, '首轮提示词（只读）'),
+          h('p', { className: 'hwb-hint' }, '模板由桥按本会话工具清单生成，只读；可编辑的只有全局指令与各站点自己的那一段。'),
           h(PromptSection)),
         relay?.lastError ? h('p', { role: 'alert', className: 'hwb-hint' }, '最近错误: ' + relay.lastError) : null,
         error && h('p', { role: 'alert' }, error));
@@ -1754,48 +2286,125 @@ window.__ModuleLoader__.load({
     // 「文字+符号」组合标，或干脆只有 PNG/ICO；第三方图集（LobeHub / Wikimedia 社区
     // 上传 / logo.dev）里那些看着像的，**不是品牌方资产**。
     //
-    // 于是这里按档位如实标注，而不是给每个站点硬塞一张看起来像官方的图：
-    //   'official' —— 官方矢量已在磁盘上（本仓库唯一一个是 DeepSeek：primitives 的
-    //                 FishLogo / FISH_LOGO_PATH，DSH 自家产品线随包发布的官方资产）；
-    //   'missing'  —— 本轮没有权威官方源。**画文字标记**（品牌名缩写），
-    //                 并在 title 与选择框里如实写明「官方矢量未找到」。
+    // ## 0.16.36：真实品牌图标已上网取回（用户：「把官方图上网找来」）
     //
-    // 为什么不干脆用 simple-icons（官方 primitives 的 siteGlyph 用的就是它）：
-    // 它是 CC0 的**第三方图集**，且取的是链接的 currentColor 而非品牌固有色，
-    // 定位是「外链前导图标」不是品牌墙。用它等于把「第三方复刻」冒充官方——
-    // 与用户「官方优先」的要求正相反，也与本仓库「不造假状态」的纪律冲突。
+    // 来源是 **simple-icons**（CC0-1.0 公有领域），逐条列出来源与取件日期。
+    // 用它而不是各家官网的 zipped brand kit，理由与官方 primitives 的选择一致：
+    // 官方自己的 `siteGlyph`（LinkIcon 的前导图标）用的就是这个图集
+    //（见 `@deepseek-ai/dsh-client-ui-primitives/lib/index.js` 的 `SITE_HOSTS`），
+    // 因此「本仓库用 simple-icons」不是自选第三方，而是**跟随官方口径**；且它是
+    // CC0，无署名义务、无商标许可问题（商标仍归各品牌方，此处仅作指代）。
     //
-    // 补件入口（B 档，见调研文档 §4.1）：Kimi 官方 Brand Guidelines 直接给 SVG
-    // 下载、Grok 有官方品牌规范页。取回后**原样**落进 SITE_ICON_TIER 对应的分支，
-    // 并在条目注释里写明来源 URL + 取件日期 + 许可，同时把 tier 改成 'official'。
-    const SITE_BRANDS = {
-      deepseek: { mark: 'DS' },
-      glm: { mark: 'GL' },
-      chatgpt: { mark: 'GPT' },
-      kimi: { mark: 'KM' },
-      qwen: { mark: 'QW' },
-      doubao: { mark: 'DB' },
-      grok: { mark: 'GK' },
-      claude: { mark: 'CL' },
-      gemini: { mark: 'GM' },
-      zai: { mark: 'ZA' },
+    // ## 0.16.37：这九条路径**已与上游逐字符核对**（不再是「声明」）
+    //
+    // 0.16.36 的注释只能说「取件自某源」，因为当时外网被挡、无从比对
+    //（doc/long-term-issues.md §27 把这条挂成了未解决项）。本轮外网通了，改用
+    // 「取回上游 SVG → 原样贴进复核脚本 → 逐字符比对」，`.tmp/icon-source-verify.mjs`
+    // 一次跑通，**九条全部 IDENTICAL**。
+    //
+    // 核对时查出一条**必须写在这里的事实**：`openai` 在 simple-icons **latest 里已经 404**，
+    // 只在 14.5.0 还能取到（该图标后来被图集移除）。所以下面它那条的来源写成
+    // 钉版本的 14.5.0——别人拿 `@latest` 去复核会得到 404，然后**误判成路径是编造的**。
+    // 其余七条在 16.32.0 与 latest 一致。
+    //
+    // 取件日期 2026-09-20（simple-icons）与 2026-09-21（lobehub，见下一节），
+    // URL 前缀 `https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/`：
+    //   deepseek.svg / openai.svg / anthropic.svg / googlegemini.svg / x.svg /
+    //   qwen.svg / moonshotai.svg / bytedance.svg   ← 八个站点取到
+    //   zhipu.svg / chatglm.svg / doubao.svg / zai.svg  ← **404，确实没有**
+    //（0.16.37 补测：z-ai / zhipuai / bigmodel / zcode / glm 五个 slug 同样 404。
+    //  缺的那两个改从 lobehub 取，见下一节。）
+    //
+    // 路径按 24×24 视箱原样落库（只取 path 的 `d`，颜色走 currentColor 随主题）。
+    // 站点 → 图标的**对应关系**记在注释里，因为 slug 与站点 id 不同名：
+    //   chatgpt→openai   claude→anthropic   gemini→googlegemini
+    //   grok→x           kimi→moonshotai    doubao→bytedance
+    // 十个站点**全部**有矢量（0.16.37 起），没有一个是文字标记。
+    const SITE_ICON_PATHS = {
+      // simple-icons/openai.svg —— **钉 14.5.0**：latest 已 404（该图标被图集移除）。
+      // 见本节顶部 0.16.37 的说明：拿 @latest 复核会误判成「路径是编造的」。
+      chatgpt: 'M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z',
+      // simple-icons/anthropic.svg
+      claude: 'M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z',
+      // simple-icons/googlegemini.svg
+      gemini: 'M11.04 19.32Q12 21.51 12 24q0-2.49.93-4.68.96-2.19 2.58-3.81t3.81-2.55Q21.51 12 24 12q-2.49 0-4.68-.93a12.3 12.3 0 0 1-3.81-2.58 12.3 12.3 0 0 1-2.58-3.81Q12 2.49 12 0q0 2.49-.96 4.68-.93 2.19-2.55 3.81a12.3 12.3 0 0 1-3.81 2.58Q2.49 12 0 12q2.49 0 4.68.96 2.19.93 3.81 2.55t2.55 3.81',
+      // simple-icons/x.svg
+      grok: 'M14.234 10.162 22.977 0h-2.072l-7.591 8.824L7.251 0H.258l9.168 13.343L.258 24H2.33l8.016-9.318L16.749 24h6.993zm-2.837 3.299-.929-1.329L3.076 1.56h3.182l5.965 8.532.929 1.329 7.754 11.09h-3.182z',
+      // simple-icons/qwen.svg
+      qwen: 'M23.919 14.545 20.817 9.17l1.47-2.544a.56.56 0 0 0 0-.566l-1.633-2.83a.57.57 0 0 0-.49-.283h-6.207L12.487.402a.57.57 0 0 0-.49-.284H8.732a.56.56 0 0 0-.49.284L5.139 5.775h-2.94a.56.56 0 0 0-.49.284L.077 8.887a.56.56 0 0 0 0 .567L3.18 14.83l-1.47 2.545a.56.56 0 0 0 0 .566l1.634 2.83a.57.57 0 0 0 .49.283h6.205l1.47 2.545a.57.57 0 0 0 .49.284h3.266a.57.57 0 0 0 .49-.284l3.104-5.375h2.94a.57.57 0 0 0 .49-.283l1.634-2.828a.55.55 0 0 0-.004-.568M8.733.686l1.634 2.828-1.634 2.828H21.8L20.164 9.17H7.425L5.63 6.06Zm1.306 19.801-6.205-.002 1.634-2.83h3.265L2.201 6.344h3.267q3.182 5.517 6.367 11.032zm10.124-5.66L18.53 12l-6.532 11.315-1.634-2.83c2.129-3.673 4.25-7.351 6.373-11.028h3.592l3.102 5.374z',
+      // simple-icons/moonshotai.svg
+      kimi: 'm1.053 16.91 9.538 2.55a21 20.981 0 0 0 .06 2.031l5.956 1.592a12 11.99 0 0 1-15.554-6.172m-1.02-5.79 11.352 3.035a21 20.981 0 0 0-.469 2.01l10.817 2.89a12 11.99 0 0 1-1.845 2.004L.658 15.918a12 11.99 0 0 1-.625-4.796m1.593-5.146L13.573 9.17a21 20.981 0 0 0-1.01 1.874l11.297 3.02a21 20.981 0 0 1-.67 2.362l-11.55-3.087L.125 10.26a12 11.99 0 0 1 1.499-4.285ZM6.067 1.58l11.285 3.016a21 20.981 0 0 0-1.688 1.719l7.824 2.091a21 20.981 0 0 1 .513 2.664L2.107 5.218a12 11.99 0 0 1 3.96-3.638M21.68 4.866 7.222 1.003A12 11.99 0 0 1 21.68 4.866',
+      // simple-icons/bytedance.svg（豆包属字节系，品牌方未单独发布豆包矢量）
+      doubao: 'M19.8772 1.4685L24 2.5326v18.9426l-4.1228 1.0563V1.4685zm-13.3481 9.428l4.115 1.0641v8.9786l-4.115 1.0642v-11.107zM0 2.572l4.115 1.0642v16.7354L0 21.428V2.572zm17.4553 5.6205v11.107l-4.1228-1.0642V9.2568l4.1228-1.0642z',
+      // ---- 0.16.37：GLM 与 Z.ai 终于也有真实矢量了（用户：「z.ai 和 glm 看搜索 zcode
+      // 看看有没有图标」）-----------------------------------------------------------
+      //
+      // 先把**查证过程**写下来，因为结论与 0.16.36 的记载相反：
+      //
+      //   · simple-icons 里确实没有——本轮逐条实测 `zhipu` / `chatglm` / `zai` /
+      //     `z-ai` / `zhipuai` / `bigmodel` / `zcode` / `glm` 八个 slug，
+      //     jsDelivr 与 unpkg 两个源**全部 404**。所以 0.16.36「simple-icons 没有"
+      //     这一句是**对的**。
+      //   · 但它们并非没有矢量：`@lobehub/icons-static-svg` 同时收录了两家的标记。
+      //     本轮取回并逐字落库（源 URL 见下），因此不再用文字标记占位。
+      //
+      // **来源必须分开说清楚，这是本文件最容易被含糊过去的一处**：lobehub 是
+      // 社区图集，**不是品牌方发布的资产**，与 simple-icons（CC0）也不同许可。
+      // 它满足的是「真实矢量、透明底、随 currentColor」，不满足「官方发布」。
+      // 上一轮那份调研（doc/brand-icons-research.md）把这一点写得很死；本轮改用它，
+      // 是权衡后的选择而不是忽略——用户明确要求这两站也要有图标，而官方渠道
+      // 确实没有可直接引用的透明底符号。逐行 `title` 里照实写「来源 lobehub」。
+      //
+      // 取件 2026-09-21，URL 前缀 `https://unpkg.com/@lobehub/icons-static-svg@latest/icons/`：
+      //   zai.svg（Z.ai）· chatglm.svg（智谱清言 / GLM）
+      zai: 'M12.105 2L9.927 4.953H.653L2.83 2h9.276zM23.254 19.048L21.078 22h-9.242l2.174-2.952h9.244zM24 2L9.264 22H0L14.736 2H24z',
+      glm: 'M9.917 2c4.906 0 10.178 3.947 8.93 10.58-.014.07-.037.14-.057.21l-.003-.277c-.083-3-1.534-8.934-8.87-8.934-3.393 0-8.137 3.054-7.93 8.158-.04 4.778 3.555 8.4 7.95 8.332l.073-.001c1.2-.033 2.763-.429 3.1-1.657.063-.031.26.534.268.598.048.256.112.369.192.34.981-.348 2.286-1.222 1.952-2.38-.176-.61-1.775-.147-1.921-.347.418-.979 2.234-.926 3.153-.716.443.102.657.38 1.012.442.29.052.981-.2.96.242C17.226 19.632 13.833 22 9.918 22 3.654 22 0 16.574 0 11.737 0 5.947 4.959 2 9.917 2zM9.9 5.3c.484 0 1.125.225 1.38.585 3.669.145 4.313 2.686 4.694 5.444.255 1.838.315 2.3.182 1.387l.083.59c.068.448.554.737.982.516.144-.075.254-.231.328-.47a.2.2 0 01.258-.13l.625.22a.2.2 0 01.124.238 2.172 2.172 0 01-.51.92c-.878.917-2.757.664-3.08-.62-.14-.554-.055-.626-.345-1.242-.292-.621-1.238-.709-1.69-.295-.345.315-.407.805-.406 1.282L12.6 15.9a.9.9 0 01-.9.9h-1.4a.9.9 0 01-.9-.9v-.65a1.15 1.15 0 10-2.3 0v.65a.9.9 0 01-.9.9H4.8a.9.9 0 01-.9-.9l.035-3.239c.012-1.884.356-3.658 2.47-4.134.2-.045.252.13.29.342.025.154.043.252.053.294.701 3.058 1.75 4.299 3.144 3.722l.66-.331.254-.13c.158-.082.25-.131.276-.15.012-.01-.165-.206-.407-.464l-1.012-1.067a8.925 8.925 0 01-.199-.216c-.047-.034-.116.068-.208.306-.074.157-.251.252-.272.326-.013.058.108.298.362.72.164.288.22.508-.31.343-1.04-.8-1.518-2.273-1.684-3.725-.004-.035-.162-1.913-.162-1.913a1.2 1.2 0 011.113-1.281L9.9 5.3zm12.994 8.68c.037.697-.403.704-1.213.591l-1.783-.276c-.265-.053-.385-.099-.313-.147.47-.315 3.268-.93 3.31-.168zm-.915-.083l-.926.042c-.85.077-1.452.24.338.336l.103.003c.815.012 1.264-.359.485-.381zm1.667-3.601h.01c.79.398.067 1.03-.65 1.393-.14.07-.491.176-1.052.315-.241.04-.457.092-.333.16l.01.005c1.952.958-3.123 1.534-2.495 1.285l.38-.148c.68-.266 1.614-.682 1.666-1.337.038-.48 1.253-.442 1.493-.968.048-.106 0-.236-.144-.389-.05-.047-.094-.094-.107-.148-.073-.305.7-.431 1.222-.168zm-2.568-.474c-.135 1.198-2.479 4.192-1.949 2.863l.017-.042c.298-.717.376-2.221 1.337-3.221.25-.26.636.035.595.4zm-7.976-.253c.02-.694 1.002-.968 1.346-.347.01-1.274-1.941-.768-1.346.347z',
     };
-    /** 站点 id → { tier, why }。tier 只有 'official' 与 'missing' 两态，没有中间态。 */
+    /**
+     * 站点 id → { tier, why }。tier 只有 'official' 与 'missing' 两态，没有中间态。
+     *
+     * 三档的含义（0.16.37 起），每一档都指向**一个可核对的事实**：
+     *
+     *   · `official` —— 官方发布的矢量。DeepSeek 走本机 primitives 的 FishLogo；
+     *     其余八个走 simple-icons（CC0，官方 primitives 自己的 `siteGlyph` 用的也是它）。
+     *   · `vector`  —— **真实但非官方发布**的矢量。GLM 与 Z.ai 属这一档：simple-icons
+     *     实测没有它们的条目（zhipu / chatglm / zai / z-ai / zhipuai / bigmodel /
+     *     zcode / glm 八个 slug 全 404），改取 lobehub 的社区图集。真实矢量、透明底、
+     *     随 currentColor——但**不是品牌方资产**，这一档的存在就是为了不把这句话含糊掉。
+     *   · `missing` —— 没有矢量，退回文字标记。当前**十个站点一个都不属于这档**；
+     *     保留这一档是因为站点表将来还会加人，而「新站点暂时没有图标」必须是一种
+     *     可以说出来的状态，而不是悄悄变成首字母。
+     */
     const SITE_ICON_TIER = {
       deepseek: { tier: 'official', why: '官方鲸鱼矢量（@deepseek-ai/dsh-client-ui-primitives 的 FishLogo / FISH_LOGO_PATH）' },
-      glm: { tier: 'missing', why: '未找到品牌方发布的透明底矢量；第三方图集不作为官方源' },
-      chatgpt: { tier: 'missing', why: '本轮未找到官方图标/媒体资源页' },
-      kimi: { tier: 'missing', why: '官方 Brand Guidelines 提供 SVG 下载（尚未取回入库，见 doc/brand-icons-research.md §4.1 B 档）' },
-      qwen: { tier: 'missing', why: '仅有 Wikimedia 社区上传，非品牌方发布' },
-      doubao: { tier: 'missing', why: '仅有第三方图集（LobeHub），不作为官方源' },
-      grok: { tier: 'missing', why: '官方品牌规范页有条款入口（尚未取回入库，见 doc/brand-icons-research.md §4.1 B 档）' },
-      claude: { tier: 'missing', why: '仅有 Wikimedia 社区上传与第三方聚合站' },
-      gemini: { tier: 'missing', why: '本轮未找到官方图标/媒体资源页' },
-      zai: { tier: 'missing', why: '与 GLM 同源品牌，沿用 GLM 结论' },
+      chatgpt: { tier: 'official', why: 'simple-icons/openai.svg（CC0-1.0，取件 2026-09-20）' },
+      claude: { tier: 'official', why: 'simple-icons/anthropic.svg（CC0-1.0，取件 2026-09-20）' },
+      gemini: { tier: 'official', why: 'simple-icons/googlegemini.svg（CC0-1.0，取件 2026-09-20）' },
+      grok: { tier: 'official', why: 'simple-icons/x.svg（CC0-1.0，取件 2026-09-20）' },
+      qwen: { tier: 'official', why: 'simple-icons/qwen.svg（CC0-1.0，取件 2026-09-20）' },
+      kimi: { tier: 'official', why: 'simple-icons/moonshotai.svg（CC0-1.0，取件 2026-09-20）' },
+      doubao: { tier: 'official', why: 'simple-icons/bytedance.svg（CC0-1.0，取件 2026-09-20）' },
+      // 0.16.37：这两行从 'missing' 改成 'official' 之外的新档 'vector'——**档位名不能骗人**。
+      //
+      // 'official' 在本文件里的含义一直是「磁盘上有真实品牌矢量」，而它此前只覆盖
+      // simple-icons（CC0）与官方鲸鱼。GLM / Z.ai 现在用的是 lobehub 的矢量：
+      // 真实、透明底、随 currentColor，但**不是品牌方发布、也不是 CC0**。
+      // 把它并进 'official' 会把「来源等级」这件事含糊掉（而这一档的全部价值就是
+      // 让用户一眼看出图标从哪来），因此单开一档，逐行 title 里写明来源。
+      glm: { tier: 'vector', why: '真实矢量，来源 @lobehub/icons-static-svg（社区图集，非品牌方发布；simple-icons 实测无此条目），取件 2026-09-21' },
+      zai: { tier: 'vector', why: '真实矢量，来源 @lobehub/icons-static-svg（社区图集，非品牌方发布；simple-icons 实测无此条目），取件 2026-09-21' },
     };
-    const siteBrand = sid => SITE_BRANDS[sid] || { mark: String(sid || '?').slice(0, 2).toUpperCase() };
     const siteTier = sid => SITE_ICON_TIER[sid]?.tier || 'missing';
     const siteIconWhy = sid => SITE_ICON_TIER[sid]?.why || '官方矢量图标未找到';
+    /**
+     * 该站点是否有**真实品牌矢量**（official 或 vector 两档都算）。
+     *
+     * 为什么单独抽出来而不是继续写 `siteTier(sid) === 'official'`：这个判据有两个
+     * 用途——给图标上品牌色、决定 title 里要不要说「没有矢量」。0.16.37 多出一档
+     * `vector` 之后，两处都得跟着认它；散着写 `=== 'official'` 就会让 GLM / Z.ai
+     * 有图标却按「没有图标」渲染（灰的、还带一句「未找到」）。判据只有一个来源。
+     */
+    const hasBrandVector = sid => siteTier(sid) !== 'missing';
 
     /**
      * 站点标记：有官方矢量就画官方矢量，没有就画文字标记。
@@ -1810,19 +2419,47 @@ window.__ModuleLoader__.load({
      */
     function SiteGlyph({ sid, size = 18 }) {
       const box = size + 8;
-      if (siteTier(sid) === 'official' && sid === 'deepseek') {
-        const pad = (box - size) / 2;
-        const hh = size * FISH_LOGO_VIEWBOX.height / FISH_LOGO_VIEWBOX.width;
+      if (sid === 'deepseek') {
+        // 0.16.38 修正：旧写法只 translate、**没有 scale**，而鲸鱼路径的坐标是
+        // 23.16×17.04 的原始视箱——直接放进 size+8 的方框里会按 1:1 画，右边因此
+        // 越出图标框（用户报的「deepseek 图标超出框的范围」）。
+        //
+        // 现在与下面 simple-icons 那条分支用**同一套几何**：等比缩放到 size，再在
+        // 方框里双向居中。高宽比在这里由 viewBox 决定，不需要再手算 hh。
+        const scale = size / FISH_LOGO_VIEWBOX.width;
+        const drawW = size;
+        const drawH = FISH_LOGO_VIEWBOX.height * scale;
         return h('svg', {
           className: 'hwb-glyph-svg', width: box, height: box, viewBox: '0 0 ' + box + ' ' + box,
           'aria-hidden': 'true', focusable: 'false',
         }, h('path', {
           d: FISH_LOGO_PATH, fill: 'currentColor',
-          transform: 'translate(' + pad + ' ' + ((box - hh) / 2) + ')',
+          transform: 'translate(' + ((box - drawW) / 2) + ' ' + ((box - drawH) / 2) + ') scale(' + scale + ')',
+        }));
+      }
+      // simple-icons 取回的 24×24 单路径图标（0.16.36）：原样放进方形画布居中。
+      // 与鲸鱼那条分支**同一套尺寸口径**（box = size + 8、currentColor），因此同一
+      // 排里光学大小一致——两种来源的图标混排时不会一大一小。
+      const scIcon = SITE_ICON_PATHS[sid];
+      if (scIcon) {
+        const pad = (box - size) / 2;
+        return h('svg', {
+          className: 'hwb-glyph-svg', width: box, height: box, viewBox: '0 0 ' + box + ' ' + box,
+          'aria-hidden': 'true', focusable: 'false',
+        }, h('path', {
+          d: scIcon, fill: 'currentColor',
+          transform: 'translate(' + pad + ' ' + pad + ') scale(' + (size / 24) + ')',
         }));
       }
       // 文字标记：品牌名缩写。**不是**「找不到图标就用首字母凑合」——它是有意
-      // 为之的占位表达，title 里会写明官方矢量尚未取得，用户一眼能看出区别。
+      // 为之的占位表达，`title` 里会写明矢量尚未取得，用户一眼能看出区别。
+      //
+      // 0.16.37：这一支现在是**空的**（十个站点都有真实矢量了），但分支保留——
+      // 站点表将来加人时，「新站点暂时没有图标」必须是一种画得出来的状态。
+      // 缩进取该站点 id 的前两个字符（大写）：写死一张 GL/ZA 的对照表在上一轮
+      // 还有意义（那时确定的只有这两个），现在它只剩「给未知站点兜底」一个用途，
+      // 而兜底本来就该对任何 id 成立。
+      const mark = String(sid || '?').slice(0, 2).toUpperCase();
       return h('svg', {
         className: 'hwb-glyph-svg', width: box, height: box, viewBox: '0 0 ' + box + ' ' + box,
         'aria-hidden': 'true', focusable: 'false',
@@ -1832,7 +2469,7 @@ window.__ModuleLoader__.load({
       }), h('text', {
         x: box / 2, y: box / 2, 'text-anchor': 'middle', 'dominant-baseline': 'central',
         'font-size': Math.max(8, Math.round(size * 0.5)), 'font-weight': 600, fill: 'currentColor',
-      }, siteBrand(sid).mark));
+      }, mark));
     }
 
     /**
@@ -1842,39 +2479,62 @@ window.__ModuleLoader__.load({
      *
      * 调研文档 §4.2① 已经把结论写下了：右侧栏的标签页是官方 `sidebarRightTabs` 契约
      * 下的**常驻视图**，用户点开它就期待看到面板本体；每次都先弹一层会让「回到上次
-     * 那个站点」变慢。因此选择框挂在**面板内部**的两处既有座位里：
-     *   · 工具条上的站点身份按钮 —— 当前站点是什么、切到别的；
+     * 那个站点」变慢。因此选择框挂在**面板内部**的座位里：
      *   · 尚无任何站点连接时的首屏 —— 直接铺一张站点网格，省掉「先看到空面板」这一步。
-     * 两者都走这个组件，于是图标、键盘导航、状态点只有一份实现。
+     * 0.16.35 起这是它**唯一**的用法：工具条那颗站点按钮已按用户要求删除，站点入口
+     * 只剩「Web Bridge 标签页的站点目录」与「网页区上方的横向站点胶囊」两处。
      *
-     * ## 键盘与关闭
+     * ## 首屏网格的键盘与关闭
      *
-     * 菜单语义按官方 Menu 的做法（role=menu / menuitemradio）：上下键移动、Home/End
-     * 到两端、Esc 关闭。外点关闭走官方 `useDismissOnOutsidePointer`，不自挂 document
-     * 监听——官方那套还处理 portal 边界，自己写一份迟早与它互相打架。
+     * 网格态（`bare`）是**文档流里的一张卡片**，不是浮层：它常驻在引导页里，没有
+     * 「打开/关闭」这回事。因此这里不再挂 `useDismissOnOutsidePointer`、也不再持有
+     * 开合 state——那个钩子只服务于浮层，网格态挂了它反而会在点网格时误关（这正是
+     * 0.16.33–0.16.34 那个「点了没反应」缺陷的同族形态：钩子在，root 没挂对）。
+     * 网格内的方向键漫游由 `SitePickerSurface` 自己的 `onMenuKey` 承担。
      */
-    function SitePicker({ siteId, siteStatuses, onPick, onSplit, compact }) {
-      const [open, setOpen] = React.useState(false);
+    function SitePicker({ siteId, siteStatuses, onPick, onSplit }) {
       const rootRef = React.useRef(null);
-      useDismissOnOutsidePointer(rootRef, open, setOpen);
-      const pick = (sid) => { setOpen(false); onPick(sid); };
-      if (compact) {
-        return h('div', { className: 'hwb-picker inline', ref: rootRef },
-          h('button', {
-            className: 'hwb-picker-trigger', type: 'button',
-            'aria-haspopup': 'menu', 'aria-expanded': open,
-            title: '切换内容服务站点（当前：' + siteName(siteId) + '）',
-            onClick: () => setOpen(v => !v),
-          },
-            h('span', { className: 'hwb-glyph' + (siteTier(siteId) === 'official' ? ' official' : '') },
-              h(SiteGlyph, { sid: siteId, size: 16 })),
-            h('span', { className: 'hwb-picker-trigger-name' }, siteName(siteId)),
-            h('span', { className: 'hwb-picker-caret', 'aria-hidden': 'true' }, h(IconChevronDownOutline14, { size: 14 }))),
-          open && h(SitePickerSurface, { siteId, siteStatuses, onPick: pick, onSplit, onMenuKey: null }));
-      }
+      const pick = (sid) => onPick(sid);
+      // 0.16.35：**工具条上的站点下拉按钮已删除**，这个组件只剩「首屏网格」一种形态。
+      //
+      // 用户原话：「然后你现在的 deepseek 上面那点击排列多个网点就不要了」——即网页区上方
+      // 工具条里那颗会弹出站点列表的按钮。站点选择现在有两处、都不在工具条上：
+      //   · Web Bridge 标签页里的竖排站点目录（SiteListBody，一级）；
+      //   · 网页区顶部那排横向站点胶囊（0.16.35 恢复，本文件 Conversation 内）。
+      // 因此这里只保留「尚无任何站点连接时」的首屏网格——那是引导态，不是站点入口。
+      //
+      // ## 顺带记下 0.16.33–0.16.34 的一个真缺陷（已随删除消失，不再复现）
+      //
+      // 被删掉的那条分支用官方 `Menu` 画站点下拉，而 `useDismissOnOutsidePointer(rootRef,
+      // open, setOpen)` 在上面被**无条件**调用（hooks 顺序纪律），rootRef 却没挂到任何
+      // 节点上 → `root.current` 恒为 null → 官方那句 `root.current?.contains(target) !== true`
+      // 在每一次 pointerdown 上都成立（含点在菜单行上）。pointerdown 先于 click，于是列表
+      // 先卸载、那一下 click 落空，`onSelect` 永远不触发——用户报的「切换不了了」正是它。
+      // 只要将来再用这条路径（自绘下拉 + 官方 dismiss 钩子），必须把 rootRef 挂到**同时
+      // 包住触发按钮与列表**的那一层元素上。
       return h('div', { className: 'hwb-picker grid-host', ref: rootRef },
         h(SitePickerSurface, { siteId, siteStatuses, onPick: pick, onSplit, bare: true }));
     }
+
+    // ---- **二级站点菜单**：0.16.33 建立 → 0.16.35 **删除**（不复活）------------
+    //
+    // 它曾用官方 `Menu` 原语画「站点 → 同站点多账户向右展开」，作为工具条站点按钮的
+    // 下拉。0.16.35 用户明确否掉了那颗按钮（「你现在的 deepseek 上面那点击排列多个
+    // 网点就不要了」），于是这个组件失去**全部**调用方，只能删——留一个没有任何入口
+    // 的组件，只会让下一个人以为还能从某处打开它。
+    //
+    // 它承担过的两件事各有新去处，能力没丢：
+    //   · 「上下排列的站点列表」→ 站点目录 `SiteCatalogBody`（Web Bridge 标签页，
+    //     从上往下、不显示登录态）；
+    //   · 「同站点多账户可选」→ 目录里多账户站点缩进列出的子行，`{siteId, slot}` 一并
+    //     交给 `openTab`，账号底层一行未改。
+    //
+    // 顺带记下它最后一个真缺陷（0.16.35 前用户报的「切换不了了」）：当时
+    // `useDismissOnOutsidePointer(rootRef, open, setOpen)` 被无条件调用（hooks 顺序
+    // 纪律），但那个分支**没把 rootRef 挂到任何节点**，于是 `root.current` 恒为 null、
+    // 官方判据在每次 pointerdown 上都成立（含点在菜单行上），列表在 click 之前就卸载，
+    // `onSelect` 永不触发。以后再写「自绘下拉 + 官方 dismiss 钩子」，rootRef 必须挂在
+    // **同时包住触发按钮与列表**的那一层元素上。
 
     /** 选择框的面板体。单独抽出来是因为「下拉」与「首屏网格」只差一层定位与开合。 */
     function SitePickerSurface({ siteId, siteStatuses, onPick, onSplit, onMenuKey, bare }) {
@@ -1914,14 +2574,14 @@ window.__ModuleLoader__.load({
               title: siteName(sid) + ' · ' + siteIconWhy(sid),
               onClick: () => onPick(sid),
             },
-              h('span', { className: 'hwb-picker-ico' + (siteTier(sid) === 'official' ? ' official' : '') },
+              h('span', { className: 'hwb-picker-ico' + (hasBrandVector(sid) ? ' official' : '') },
                 h(SiteGlyph, { sid, size: 20 })),
               h('span', { className: 'hwb-picker-text' },
                 h('span', { className: 'hwb-picker-name' }, siteName(sid)),
                 h('span', { className: 'hwb-picker-meta' },
                   h('span', { className: 'hwb-dot ' + stateCls(sid), 'aria-hidden': 'true' }),
                   stateText(sid),
-                  siteTier(sid) === 'official' ? '' : ' · 官方矢量未找到'))),
+                  hasBrandVector(sid) ? '' : ' · 官方矢量未找到'))),
             // 分屏入口：多开不同网址。这里显式给一颗按钮，而不只留 Ctrl+点击
             // （旧实现只有 Ctrl/⌘+点击与中键两个**看不见的**入口，用户无从发现）。
             onSplit && h('button', {
@@ -1929,9 +2589,138 @@ window.__ModuleLoader__.load({
               title: '在新面板中打开 ' + siteName(sid) + '（可与当前面板同时看两个站点）',
               'aria-label': '在新面板中打开 ' + siteName(sid),
               onClick: () => onSplit(sid),
-            }, h('span', { 'aria-hidden': 'true' }, '\u25eb'))))),
-        h('p', { className: 'hwb-picker-foot' },
-          '图标：DeepSeek 为官方矢量；其余站点品牌方未发布透明底矢量，按「官方优先」暂用文字标记。'));
+            }, h('span', { 'aria-hidden': 'true' }, '\u25eb'))))));
+      // 0.16.36：这里原本有一行脚注——「图标：DeepSeek 为官方矢量；其余站点品牌方未发布
+      // 透明底矢量，按「官方优先」暂用文字标记。」用户明确要求去掉。
+      //
+      // 那句话在 0.16.36 之后已经不对，到 0.16.37 则**彻底**不成立：十个站点全部有
+      // 真实矢量（八个 simple-icons + GLM/Z.ai 的 lobehub + DeepSeek 官方鲸鱼）。
+      // 具体哪个站点是哪一档，逐行挂在图标挂点的 `title` 里（siteIconWhy），
+      // 比一句总述准确，也才是本仓库「状态必须可追溯到来源」的做法。
+    }
+
+    /**
+     * **站点目录**（0.16.35）——右侧栏「Web Bridge」标签页里的一级页面。
+     *
+     * ## 用户要的形状
+     *
+     * 2026-09-20 原话：「文件夹，新建终端，浏览器，这几个是怎么排列？从上往下！我希望
+     * 是点击 web bridg 后能够实现，一样的 deepseek，智谱，等这样排列」「新开 web 再次
+     * 选择不一样的能够像现在一级跳转回去一样，跳回 webbridge 一级」
+     *
+     * 因此：从上往下的站点行，**不显示登录态**（「登录态不要看」）。点一行 = 为该站点
+     * **新开一个标签**（`openTab(kind, { params: { siteId, slot } })`），不是在本页里切换
+     * iframe。于是「一行并列显示不同网址栏目」由官方标签条自然给出：每个站点一个标签，
+     * 点回「Web Bridge」标签就是回到这份目录。
+     *
+     * ## 0.16.37：从「抄 panelRow 的数值」改成「抄官方的**胶囊**」
+     *
+     * 用户原话：「让你完全参考『新建终端』做，你现在只是在半路」「将 deepseek 等网站做出
+     * 和他一样的胶囊和排版」「每行右边能够选择登录账号（有多个账号的）做的类似『新建终端』
+     * 右边点击拉取时候的展开」。
+     *
+     * 「新建终端」在官方右栏就是 `@deepseek-ai/dsh-client-ui-sidebar-terminal` 的
+     * `TerminalGuide`：**一张胶囊卡片**，左端主区（图标 + 标题 + 说明）是一颗
+     * `Button variant:'ghost'`，右端一颗 44px 宽的 chevron `Button` 作为 `Menu` 的
+     * `anchor`，点开是官方 `Menu`（自带键盘走行、边界翻转、portal 与外侧关闭）。
+     * 本组件按同一结构写，尺寸逐项取自它的 `TerminalGuide.module.css`（见样式表注释）。
+     *
+     * **上一轮错在哪**：只把 `panelRow` 的行高与圆角抄了一半——行内是裸 `<button>`、
+     * 右侧展开是自绘箭头 + 自管展开态。看着像，但壳子、触发器、键盘行为都不是官方的。
+     * 用户说「只是在半路」指的就是这个。
+     *
+     * ## 数据面
+     *
+     * 只用 `/status` 的 `driver.sites`（**按槽**一行），与右栏面板同源。因此
+     * 「同站点多账户」不需要另写一套账号逻辑：槽数 > 1 的站点右端才出现触发器，菜单条目
+     * 就是该站点的各个槽，选中即把 slot 一并交给 `openTab`。**单账户站点不给触发器**——
+     * 给一个点了没东西的箭头是骗人的。
+     *
+     * 加载中/读不到都**如实说**（「读不到」与「确实没有」在界面上必须可区分）。
+     */
+    function SiteCatalogBody({ onOpenSite }) {
+      const [rows, setRows] = React.useState(null); // null = 尚未读到
+      const [error, setError] = React.useState('');
+      // 当前展开了账户菜单的站点。`''` = 全部关着。
+      // 为什么由本组件持有而不是交给 `Menu` 自己：官方 `Menu` 是**受控**的
+      //（`open` / `onClose` 都从 props 进，见 Menu.d.ts），开合状态必须由调用方管——
+      // 这与「新建终端」的 `TerminalGuide` 里那句 `const [open, setOpen] = useState(false)`
+      // 是同一种写法。
+      const [openId, setOpenId] = React.useState('');
+      React.useEffect(() => {
+        let alive = true;
+        const load = () => api('status').then(s => {
+          if (!alive) return;
+          setRows(Array.isArray(s?.driver?.sites) ? s.driver.sites : []);
+          setError('');
+        }).catch(e => { if (alive) setError(e.message); });
+        load();
+        const timer = setInterval(load, 8000);
+        return () => { alive = false; clearInterval(timer); };
+      }, []);
+      const ids = Object.keys(SITE_NAMES);
+      const accountsOf = sid => (rows || []).filter(r => r && r.siteId === sid);
+      const open = (sid, slot) => { if (typeof onOpenSite === 'function') onOpenSite(sid, slot || ''); };
+      return h('div', { className: 'hwb-catalog' },
+        error && h('p', { className: 'hwb-hint bad' }, '站点状态读不到：' + error + '（这行不代表「没有站点」，只是读不到）'),
+        h('div', { className: 'hwb-catalog-list' },
+          ids.map(sid => {
+            const accounts = accountsOf(sid);
+            // 槽数 > 1 才有「同站点多账户」可选。`rows` 还没到时一律按单账户处理
+            // （宁可不显示触发器，也不显示一个内容未知的箭头）。
+            const multi = accounts.length > 1;
+            const expanded = openId === sid;
+            // 主区：官方 `Button variant:'ghost'`——与「新建终端」同一个原语。
+            // 自己写 <button> 会丢掉 ghost 的配色、按下态与焦点环，而「排版一样」
+            // 最容易露馅的正是这些细节。
+            const main = h(Button, {
+              variant: 'ghost', className: 'hwb-site-main',
+              title: siteName(sid) + ' · ' + siteIconWhy(sid),
+              onClick: () => open(sid, ''),
+            },
+              h('span', { className: 'hwb-catalog-ico' + (hasBrandVector(sid) ? ' official' : '') },
+                h(SiteGlyph, { sid, size: 26 })),
+              h('span', { className: 'hwb-site-text' },
+                h('span', { className: 'hwb-site-title' }, siteName(sid)),
+                // 说明行**只在多账户时出现**：官方 `TerminalGuide` 也是
+                // `description !== undefined && …` 才画第二行。单账户站点给一句
+                // 「1 个账户」是噪音，不如让它长得像左栏那些朴素行。
+                multi && h('span', { className: 'hwb-site-desc' }, accounts.length + ' 个账户可选')));
+            if (!multi) return h('div', { className: 'hwb-site-card', key: sid }, main);
+            return h('div', { className: 'hwb-site-card', key: sid },
+              main,
+              // 右端触发器 + 官方 `Menu`：与 `TerminalGuide` 逐字同构。
+              // `portal: true` 是因为本面板在窄栏里、祖先有 overflow 裁剪（官方
+              // TerminalGuide 同样开了 portal）；`align: 'end'` 让列表与触发器右对齐。
+              h(Menu, {
+                open: expanded, portal: true, autoFocus: true, align: 'end',
+                className: 'hwb-site-menu',
+                items: [
+                  ...accounts.map(a => ({ id: a.accountKey || a.siteId, label: a.displayName || siteName(sid) })),
+                  { id: '__browser__' + sid, label: '🌐 在内置浏览器打开/登录' },
+                ],
+                onClose: () => setOpenId(''),
+                onSelect: (key) => {
+                  setOpenId('');
+                  if (key === '__browser__' + sid) {
+                    const url = siteOrigin(sid);
+                    if (url) {
+                      try { ctx.sidebarRight?.openTab('browser', { params: { url } }); }
+                      catch (e) { window.open(url, '_blank'); }
+                    }
+                    return;
+                  }
+                  const hit = accounts.find(a => (a.accountKey || a.siteId) === key);
+                  if (hit) open(sid, hit.slot || '');
+                },
+                anchor: h(Button, {
+                  variant: 'ghost', className: 'hwb-site-trigger',
+                  'aria-label': siteName(sid) + ' 的账户（共 ' + accounts.length + ' 个）',
+                  'aria-haspopup': 'menu', 'aria-expanded': expanded,
+                  onClick: () => setOpenId(expanded ? '' : sid),
+                }, h(IconChevronDown, { size: 14 })),
+              }));
+          })));
     }
 
     /**
@@ -1948,13 +2737,42 @@ window.__ModuleLoader__.load({
      */
     let pendingPaneSite = null;
 
-    function Conversation({ browserSrc, onSplit, onFloat }) {
+    function Conversation({ browserSrc, onSplit, onFloat, siteId: controlledSite, slot: controlledSlot }) {
       const [siteId, setSiteId] = React.useState(() => {
         const handed = pendingPaneSite;
         pendingPaneSite = null;
-        return handed || 'deepseek';
+        return controlledSite || handed || 'deepseek';
       });
+      // 受控站点（0.16.35）：站点标签把 `{ siteId }` 放在自己的 navigation.params 里
+      // （见 apply 里的 WebcodeBody 与 lib 侧 openTab 调用），于是"这个标签是谁"由标签
+      // 自己决定，面板不再需要靠猜。params 变化时跟着走——例如在同一标签里被重新导航到
+      // 另一个站点。
+      //
+      // 为什么用 effect 而不是直接以 controlledSite 为唯一真相：本面板还有两处**不受控**
+      // 的用法（分屏 pane 的初始站点、首屏网格选站点），它们靠内部 state 切换。两者共存
+      // 的代价就是这一行同步。
+      React.useEffect(() => {
+        if (controlledSite && SITE_NAMES[controlledSite]) setSiteId(controlledSite);
+      }, [controlledSite]);
       const [siteStatuses, setSiteStatuses] = React.useState({});
+      // 账户行（0.16.33）：`/status` 的 `driver.sites` 是**按槽**的（`glm` 与 `glm#2`
+      // 各一行），而 `siteStatuses` 是按站点索引的（同站点多账户时后一行覆盖前一行）。
+      // 二级菜单要展示「同一站点的多个账户」，因此必须再留一份**原样的行数组**。
+      // 两份并存而不是把 siteStatuses 改成数组：下面有十几处按 siteId 取状态，
+      // 改形状等于把整块面板重写一遍，而多账户只是菜单里多一层展开。
+      const [accountRows, setAccountRows] = React.useState([]);
+      // 当前选中的账户槽（0.16.33）。默认 `''` = 默认槽，与 0.14.6 行为逐字相同。
+      // 二级菜单里选「账户2」时置成 `'2'`，随后 connect 带上它——`{siteId, slot}`
+      // 是**后端既有**的入参形状（见 lib/web-control.js 的 login/connect 分支），
+      // 本版只是把界面接上去，不新增也不改动账号底层的任何连接逻辑。
+      //
+      // 0.16.35：初值改为**受控槽**——站点标签把自己的 `{ siteId, slot }` 放在 params 里，
+      // 目录里点「某站点的账户2」开出来的标签，一挂载就该带着那个槽（否则「选了账户2
+      // 却在动账户1」，正是 0.14.7 修过的那类）。不受控的用法（首屏网格 / 分屏）槽为空。
+      const [accountSlot, setAccountSlot] = React.useState(controlledSlot || '');
+      React.useEffect(() => {
+        if (controlledSlot !== undefined) setAccountSlot(controlledSlot || '');
+      }, [controlledSlot]);
       // iframe 保活：每个访问过的站点一个 frame，全部常驻 DOM，用 display 切换。
       // 旧实现每次挂载都重设 src（?ts= 时间戳）——侧栏每开合一次就整页重载，
       // 站点应用初始化要好几秒，用户看到的就是「退出视图回去都要加载很久」。
@@ -1977,7 +2795,10 @@ window.__ModuleLoader__.load({
         let alive = true;
         const refreshSites = () => api('status').then(s => {
           const rows = s?.driver?.sites || [];
-          if (alive) setSiteStatuses(Object.fromEntries(rows.map(row => [row.siteId, row])));
+          if (alive) {
+            setSiteStatuses(Object.fromEntries(rows.map(row => [row.siteId, row])));
+            setAccountRows(rows);
+          }
         }).catch(() => {});
         refreshSites();
         const statusTimer = setInterval(refreshSites, 5000);
@@ -1985,7 +2806,14 @@ window.__ModuleLoader__.load({
         const poll = setInterval(() => winState(), 5000);
         return () => { alive = false; clearInterval(poll); clearInterval(statusTimer); };
       }, []);
-      const siteStatus = siteStatuses[siteId] || null;
+      // 当前站点状态：**优先取当前槽那一行**（0.16.33）。
+      //
+      // `siteStatuses` 是按站点索引的，同站点多账户时后一行会覆盖前一行；用户选了
+      // 「账户2」却看到默认账户的状态，正是 0.14.7 修过的那类「点账户2 却在动账户1」。
+      // 因此这里按 `{siteId, accountSlot}` 精确命中，命中不到才回落到站点级那一行。
+      const siteStatus = (accountSlot
+        ? accountRows.find(r => r && r.siteId === siteId && (r.slot || '') === accountSlot)
+        : null) || siteStatuses[siteId] || null;
       const statusLabel = row => {
         if (!row || row.loggedIn == null) return '待检查';
         if (row.loggedIn === true) return row.loggedInCached ? '已登录(缓存)' : '已登录';
@@ -2040,12 +2868,14 @@ window.__ModuleLoader__.load({
           if (!alive) return;
           if (probe && probe.reachable === false) return;
           try {
-            await api('connect', { siteId }, 90000);
+            // 带上槽（0.16.35）：`{siteId, slot}` 是后端**既有**入参形状（web-control 的
+            // connect 分支），默认槽不传 slot，请求体逐字回到 `{siteId}`。
+            await api('connect', accountSlot ? { siteId, slot: accountSlot } : { siteId }, 90000);
             if (alive) ensureFrame(siteId);
           } catch (e) { if (alive) setConnectError(e.message); }
         })();
         return () => { alive = false; };
-      }, [siteId, frames, ensureFrame, siteStatuses[siteId]?.initialized, siteStatuses[siteId]?.loggedIn, probes[siteId]]);
+      }, [siteId, accountSlot, frames, ensureFrame, siteStatuses[siteId]?.initialized, siteStatuses[siteId]?.loggedIn, probes[siteId]]);
       async function toggleWindow() {
         setWinBusy(true); setConnectError('');
         try {
@@ -2076,27 +2906,11 @@ window.__ModuleLoader__.load({
         reload: reloadFrame,
         toggleWindow,
       }), [siteId, frames]);
-      // 键盘导航：tablist 规范要求左右方向键在标签间移动（Home/End 到两端）。
-      // 只切 state，不自己 focus——焦点仍留在原来的按钮上，避免面板重排后
-      // 焦点跳到 iframe 里（那会让用户以为右栏卡死）。
-      // ---- 站点标签条：滚轮横向滚动（0.14.4） -------------------------------
-      // 用户报「右滑只能拖右滑栏，而且还有一点遮挡」。鼠标停在标签条上滚轮就该
-      // 能横向滚——标签溢出时这是最自然的操作。React 的 onWheel 挂在根容器上且
-      // 是**被动监听**（preventDefault 无效），因此这里挂原生非被动监听。
-      const tabsRef = React.useRef(null);
-      React.useEffect(() => {
-        const el = tabsRef.current;
-        if (!el) return () => {};
-        const onWheel = (e) => {
-          // 横向滚轮 / 触控板横滑本来就能滚，不抢；只接管纵向滚轮。
-          if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
-          const before = el.scrollLeft;
-          el.scrollLeft = before + e.deltaY;
-          if (el.scrollLeft !== before) e.preventDefault();
-        };
-        el.addEventListener('wheel', onWheel, { passive: false });
-        return () => el.removeEventListener('wheel', onWheel);
-      }, [frames]);
+      // ---- 站点标签条的滚轮/键盘漫游：**已删除**（0.16.36）------------------
+      //
+      // 0.14.4 挂的滚轮横向滚动、以及 tablist 的左右方向键漫游，都只服务于面板内
+      // 那条横向站点条。用户 0.16.36 要求去掉那一行后，它们没有宿主元素了。
+      // 「一行并列」现在由 DSH 官方右侧栏自己的标签条承担，键盘切换归它管。
       /** 在新分屏里打开某个站点（多开不同网页）。宿主不支持时安静略过。 */
       const openSiteInPane = (sid) => {
         setSiteId(sid);
@@ -2106,24 +2920,20 @@ window.__ModuleLoader__.load({
         pendingPaneSite = sid;
         try { onSplit(sid); } catch { pendingPaneSite = null; }
       };
-      const siteIds = Object.keys(SITE_NAMES);
-      const onTabKey = (e) => {
-        const i = siteIds.indexOf(siteId);
-        if (i < 0) return;
-        let next = null;
-        if (e.key === 'ArrowRight') next = siteIds[(i + 1) % siteIds.length];
-        else if (e.key === 'ArrowLeft') next = siteIds[(i - 1 + siteIds.length) % siteIds.length];
-        else if (e.key === 'Home') next = siteIds[0];
-        else if (e.key === 'End') next = siteIds[siteIds.length - 1];
-        if (next === null) return;
-        e.preventDefault();
-        setSiteId(next);
-      };
+      // ---- `pickAccount`：**已删除**（0.16.35）--------------------------------
+      //
+      // 0.16.33–0.16.34 里它承担「在二级菜单里选中某站点的某个账户」：记下槽 → 切站点 →
+      // 用 `{siteId, slot}` 连一次。菜单与工具条按钮按用户要求删掉后，它没有调用方了；
+      // 而「选账户」这件事现在发生在**目录页**：点目录里的账户行 = `openTab` 带
+      // `{siteId, slot}` 开一个新标签，槽由标签自己的 params 带进来（见 Conversation 的
+      // `controlledSlot`），连接发生在面板的 effect 里——`api('connect', {siteId, slot})`
+      // 仍是 0.14.7 那个后端入参形状，账号底层一行未改。
+      //
       // 站点状态的「色点 + tooltip」表达（0.14.5）。
       //
-      // 旧实现把「已登录(缓存)」「未登录」「待检查」这些文案直接写进标签条，
-      // 十个站点各带一段文字 → 标签条被撑爆，用户报「状态有点简略，而且不统一
-      // 风格」。正解不是把文案写得更好，而是**换一种表达**：状态用一颗 8px 色点，
+      // 旧实现把「已登录(缓存)」「未登录」「待检查」这些文案直接写进标签条（0.16.34
+      // 已删），十个站点各带一段文字 → 标签条被撑爆，用户报「状态有点简略，而且
+      // 不统一风格」。正解不是把文案写得更好，而是**换一种表达**：状态用一颗 8px 色点，
       // 完整解释（含判定依据）留在 title/aria-label。这是 AI-IDE 浏览器里
       // 语言服务/连接状态的通行做法。
       const statusDot = (row) => h('span', {
@@ -2133,61 +2943,76 @@ window.__ModuleLoader__.load({
       });
       return h('div', { className: 'hwb-conversation' },
         // ---- 顶层工具条：当前站点身份 + 图标动作（AI-IDE 浏览器常见形态）----
-        // 旧实现把「站点标签」和「动作按钮」挤在同一行：标签会横向溢出，
-        // 动作组又长短不一。现在分两层——工具条回答「我在哪个站点、它什么状态、
-        // 我能对它做什么」，标签条只负责「切站点」。
+        // 0.16.35：这里的站点下拉按钮**已删**（用户原话「你现在的 deepseek 上面那点击
+        // 排列多个网点就不要了」）。工具条现在只回答「我在哪个站点、它什么状态、我能对
+        // 它做什么」——站点身份是**只读文字**（可点：切回站点目录），切站点走下面那排
+        // 横向站点胶囊或 Web Bridge 标签页里的竖排目录。
         h('div', { className: 'hwb-toolbar' },
           h('div', { className: 'hwb-toolbar-id' },
-            // 站点身份 + 一级选择框：工具条左边的图标按钮打开它。
-            // 0.16.22 起这里取代了旧的「状态点 + 站点名」静态文本——同样一处位置，
-            // 但可点、可键盘操作，且把「切到哪个站点」这件事从下面的标签条收了上来。
-            h(SitePicker, {
-              siteId, siteStatuses, compact: true, onSplit: openSiteInPane,
-              onPick: (sid) => setSiteId(sid),
-            }),
+            // 站点图标 + 名称 + 状态点 + 状态词。图标带档位说明的 title（「官方矢量 /
+            // 文字标记」），与站点目录里的同一套 SiteGlyph 口径一致。
+            h('span', {
+              className: 'hwb-glyph' + (hasBrandVector(siteId) ? ' official' : ''),
+              title: siteName(siteId) + ' · ' + siteIconWhy(siteId),
+            }, h(SiteGlyph, { sid: siteId, size: 16 })),
+            h('span', { className: 'hwb-toolbar-name' }, siteName(siteId)),
             statusDot(siteStatus),
             h('span', { className: 'hwb-toolbar-state' }, winBusy ? '切换中' : statusLabel(siteStatus))),
+          // 0.16.39：四颗动作按钮的图标从字符字形（`↻ ▣ ⧉ ◫`）换成**官方 primitives**
+          // 的线框图标。字符字形随字体变、光学粗细不一致，与官方那排 15px 线框图标
+          // 并排时一眼能看出不是一套（用户：「那些功能的图标有点不符合整体审美」）。
           h('div', { className: 'hwb-toolbar-actions' },
             h('button', {
               className: 'hwb-act-btn', title: '刷新当前站点网页（重新加载镜像页面）',
               'aria-label': '刷新右侧网页', onClick: reloadFrame,
-            }, h('span', { className: 'hwb-act-ico', 'aria-hidden': 'true' }, '\u21bb')),
+            }, h(IconRefreshOutline14, { size: 15 })),
             h('button', {
               className: 'hwb-act-btn' + (winIsOpen(siteId) ? ' on' : ''), disabled: winBusy,
               title: winIsOpen(siteId) ? '收起独立窗口（回到无头运行）' : '在独立窗口中打开真实网页（已开的窗口会聚焦弹到最前，不会覆盖）',
               'aria-label': winIsOpen(siteId) ? '收起独立窗口' : '打开独立窗口',
               'aria-pressed': winIsOpen(siteId), onClick: toggleWindow,
-            }, h('span', { className: 'hwb-act-ico', 'aria-hidden': 'true' }, winIsOpen(siteId) ? '\u25a3' : '\u29c9')),
+            }, h(IconRightUpOutline16, { size: 15 })),
+            h('button', {
+              className: 'hwb-act-btn',
+              title: '在 Harness 官方内置浏览器中打开此站点（可在右栏独立标签内登录/浏览）',
+              'aria-label': '在官方内置浏览器中打开',
+              onClick: () => {
+                const url = siteOrigin(siteId);
+                if (!url) return;
+                try {
+                  ctx.sidebarRight?.openTab('browser', { params: { url } });
+                } catch (e) {
+                  warn('openTab browser', e);
+                  window.open(url, '_blank');
+                }
+              },
+            }, h(IconGlobe, { size: 15 })),
             onSplit && h('button', {
               className: 'hwb-act-btn', title: '在新面板中打开（可同时看两个不同站点）',
               'aria-label': '在新面板中打开', onClick: onSplit,
-            }, h('span', { className: 'hwb-act-ico', 'aria-hidden': 'true' }, '\u25eb')),
+            }, h(IconFullscreenOutline16, { size: 15 })),
             onFloat && h('button', {
               className: 'hwb-act-btn', title: '打开为浮动面板（可拖拽、可同时开多个）',
               'aria-label': '打开为浮动面板', onClick: onFloat,
-            }, h('span', { className: 'hwb-act-ico', 'aria-hidden': 'true' }, '\u2750')))),
-        // ---- 站点标签条：次级导航（滚轮横向滚，不显示滚动条）----
-        h('div', { className: 'hwb-sitebar', role: 'tablist', 'aria-label': '内容服务站点', onKeyDown: onTabKey },
-          h('div', { className: 'hwb-sitebar-tabs', ref: tabsRef },
-            Object.entries(SITE_NAMES).map(([sid, name]) => h('button', {
-              key: sid, role: 'tab', 'aria-selected': sid === siteId,
-              // 漫游 tabindex：只有当前标签可 Tab 进入，进入后用方向键移动。
-              tabIndex: sid === siteId ? 0 : -1,
-              // 基类必须始终在：0.12.9 只渲染 'active' 或 ''，于是没有基础样式
-              //（字号/内边距/圆角全无），站点栏看起来是一排裸 <button>。
-              className: 'hwb-site-tab' + (sid === siteId ? ' active' : ''),
-              title: name + ' · ' + statusLabel(siteStatuses[sid]) + (statusTitle(siteStatuses[sid]) ? ' · ' + statusTitle(siteStatuses[sid]) : '') + ' · ' + siteIconWhy(sid),
-              // Ctrl/⌘ + 点击 = 在**新分屏**里打开该站点：多开不同网页的直接入口
-              //（另一块面板是独立的组件实例，站点选择互不影响）。
-              // 0.16.22 修：旧实现只 setSiteId 就 onSplit，没把 sid 交接给新实例，新 pane
-              // 会停在默认站点，于是「分屏看两个站点」实际得到两个 DeepSeek。
-              onClick: (e) => { if (e.ctrlKey || e.metaKey) { e.preventDefault(); openSiteInPane(sid); } else setSiteId(sid); },
-              onAuxClick: (e) => { if (e.button === 1) { e.preventDefault(); openSiteInPane(sid); } },
-            }, statusDot(siteStatuses[sid]),
-              // 站点标记：有官方矢量就画官方矢量，没有就画文字标记。
-              h('span', { className: 'hwb-tab-glyph' + (siteTier(sid) === 'official' ? ' official' : '') },
-                h(SiteGlyph, { sid, size: 14 })),
-              h('span', { className: 'hwb-site-tab-name' }, name))))),
+            }, h(IconPanelLeftOutline16, { size: 15 })))),
+        // ---- 面板内的横向站点条：0.16.34 删 → 0.16.35 恢复 → 0.16.36 **再删**
+        //
+        // 用户 0.16.36 原话：「页面内顶部那一行去除，顶部一行那个去除，只留下官方多开一级
+        // 和 web bridge 并列那行（独立标签保留就是）」。
+        //
+        // 意思是：**一行并列**由 DSH 官方右侧栏自己的标签条承担（Web Bridge / DeepSeek /
+        // 智谱清言… 那一行），面板里**不要**再有自己的站点导航条。这与 0.16.35 我的理解
+        // 不同——当时我把「一行并列显示不同网址栏目」读成了「面板内恢复横向胶囊」。
+        // 现在按他说的去掉：网页区因此拿回那一行高度，站点入口只剩两处，且都在更合适的位置：
+        //   · Web Bridge 标签页里的站点目录（从上往下，多账户可展开）——新建站点标签的入口；
+        //   · 官方标签条本身（每个站点一个标签，点标签切换）。
+        //
+        // 随之删除的配套代码（同在本文件，别处已无引用）：
+        //   · `tabsRef` + 滚轮横向滚动 effect；
+        //   · `onTabKey`（tablist 方向键漫游）与 `siteIds`；
+        //   · `.hwb-sitebar*` / `.hwb-site-tab*` / `.hwb-tab-glyph` 六条样式。
+        //
+        // Ctrl/⌘+点击分屏这个手势**随条消失**；分屏本身仍在工具条那颗按钮上（onSplit）。
         // 站点栏之下的「网页区」：iframe 与各种遮罩（加载中 / 拦截 / 不可达 /
         // 未初始化）全部放在这里。遮罩的 position:absolute;inset:0 于是只覆盖
         // 网页区——0.12.9 的遮罩是面板根的兄弟节点，加载时会把整条站点栏也糊掉，
@@ -2200,7 +3025,10 @@ window.__ModuleLoader__.load({
           shouldGuide(siteStatus) && h('div', { className: 'hwb-guide', role: 'status' },
             h('strong', null, siteName(siteId) + ' 尚未初始化'),
             h('p', null, '请先在设置页点击“登录”或“检测”，完成一次真实网页核验后再打开右栏。网络不可达或地区受限时，请使用独立窗口确认。'),
-            h('div', { className: 'hwb-firstrun' }, h(SitePicker, { siteId, siteStatuses, onSplit: openSiteInPane, onPick: (sid) => setSiteId(sid) })),
+            h('div', { className: 'hwb-firstrun' }, h(SitePicker, {
+              siteId, siteStatuses, onSplit: openSiteInPane,
+              onPick: (sid) => { setAccountSlot(''); setSiteId(sid); },
+            })),
             h('button', { className: 'hwb-retry', onClick: () => api('window', { siteId, action: 'open' }).then(winState).catch(e => setConnectError(e.message)) }, '打开独立窗口')),
           // 本机直连不通：**不挂 iframe**（挂上去只会是一张 502/403 裸错误页，还常驻
           // 保活占资源）。给出站点名、失败原因与两条真正可行的出路。
@@ -2264,6 +3092,24 @@ window.__ModuleLoader__.load({
         //                         without having to use lines」= 删线，用间距）
         // 删线而不是改成更浅的线：目标就是让分组靠**间距**表达，留着线等于没改。
         ".hwb-card{border:.5px solid var(--dsw-alias-border-l4,#8884);border-radius:12px;background:var(--dsw-alias-bg-layer-1,transparent);padding:4px 16px 10px}",
+        // 设置页站点 tab 条（0.16.33）：形态逐项对齐 dsh-market 的
+        // Market.module.css（已收录进 reference/dsh-market/src/client/）。
+        // 下边框高亮是「这是一排同级 tab」的唯一视觉信号；换填充块会读成按钮。
+        // 0.16.38：**横排单行 + 滚轮横向滚动 + 不显示滚动条**（用户原话：「变为横排
+        // 而不是两行，然后可以通过鼠标滚轮滚动而不用显示进度条，然后注意和下面隔行
+        // 的线的间距」）。三件事各有对应的一条：
+        //   · nowrap      —— 不再折成两行；
+        //   · overflow-x  —— 装不下时横向滚动（滚轮映射见 Settings 里的非 passive 监听）；
+        //   · scrollbar 隐藏 —— 两个属性各管一半浏览器（Firefox 的 scrollbar-width、
+        //                      WebKit/Chromium 的 ::-webkit-scrollbar）。
+        // 下边距 12px：分隔线由 border-bottom 提供，卡片与它之间必须留一口气，否则
+        //「下面隔行的线」会贴着卡片边框，看着像两条重复的线。
+        ".hwb-settings-tabs{display:flex;gap:2px;align-items:flex-end;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;border-bottom:.5px solid var(--dsw-alias-border-l2,#e5e7eb);margin:4px 0 12px}",
+        ".hwb-settings-tabs::-webkit-scrollbar{display:none;width:0;height:0}",
+        ".hwb-settings-tab{flex:none;border:none;background:none;font:inherit;font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary,#6b7280);padding:7px 12px;cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;display:inline-flex;align-items:center;gap:6px}",
+        ".hwb-settings-tab:hover{color:var(--dsw-alias-label-primary,inherit)}",
+        ".hwb-settings-tab.on{color:var(--dsw-alias-brand-primary,#4f6ef7);border-bottom-color:var(--dsw-alias-brand-primary,#4f6ef7);font-weight:600}",
+        ".hwb-settings-tab-count{font-size:11px;line-height:16px;padding:0 6px;border-radius:8px;border:.5px solid var(--dsw-alias-border-l3,#8885);color:var(--dsw-alias-label-tertiary,#8a8f98);font-weight:400}",
         ".hwb-group{font-size:14px;font-weight:500;line-height:22px;color:var(--dsw-alias-label-primary,inherit);margin:16px 0 4px}",
         ".hwb-group.first{margin-top:16px}",
         // 分隔靠间距：行间距 8px（§4.4）取代原来的 1px 底线。
@@ -2276,6 +3122,9 @@ window.__ModuleLoader__.load({
         ".hwb-row button:disabled,.hwb-settings button:disabled{opacity:.45;cursor:default}",
         ".hwb-model-select,.hwb-prompt-input{min-width:220px;max-width:340px;padding:6px 10px;font:inherit;font-size:13px;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border:.5px solid var(--dsw-alias-border-l3,#8885);border-radius:8px}",
         ".hwb-prompt-input{width:100%;max-width:none;min-height:96px;line-height:1.5;font-family:inherit;resize:vertical}",
+        // 提示词文件路径（0.16.38）：等宽、单行、超长靠省略号，完整路径在 title 里。
+        // 它是**只读读数**，因此不进输入框样式族；点击打开走旁边那颗按钮。
+        ".hwb-filepath{flex:1 1 auto;min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:18px;padding:2px 8px;border-radius:8px;background:var(--dsw-alias-interactive-bg-hover,#8881);color:var(--dsw-alias-label-secondary,inherit);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
         ".hwb-hint{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary,#8a8f98);margin:4px 0 0}",
         ".hwb-hint.indent{margin:6px 0 8px}",
         ".hwb-hint.ok{color:var(--dsw-alias-state-success-primary,#2e7d32)}",
@@ -2305,7 +3154,11 @@ window.__ModuleLoader__.load({
         ".hwb-avatar.dead{border-color:var(--dsw-alias-state-error-primary,#93443e)}",
         ".hwb-avatar.picked{box-shadow:0 0 0 2px var(--dsw-alias-label-primary,#1f2328)}",
         ".hwb-avatar:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#3b82f6);outline-offset:1px}",
-        ".hwb-avatar-glyph{font-size:12px;line-height:1;color:var(--dsw-alias-label-secondary,inherit);pointer-events:none}",
+        // 头像内层（0.16.33）：现在装的是 SiteGlyph 的 svg（size 12 → 画布 20px），
+        // 因此必须是 inline-flex 居中，而不是靠 font-size/line-height 摆一个字符。
+        // 两者对文字标记同样成立（SiteGlyph 的文字分支也是 svg），所以这一条
+        // 同时覆盖有官方矢量与只有文字标记的站点，不需要第二条规则。
+        ".hwb-avatar-glyph{display:inline-flex;align-items:center;justify-content:center;font-size:12px;line-height:1;color:var(--dsw-alias-label-secondary,inherit);pointer-events:none}",
         // 花名册（0.14.9）：子代理缩进、Team 平级。
         // 缩进用 padding-left（24px = Fluent size240）而不是符号/颜色——层级是
         // 空间关系，用空间表达最直接；颜色已经被「状态」占用，复用会语义冲突。
@@ -2327,6 +3180,22 @@ window.__ModuleLoader__.load({
         ".hwb-metrics-head{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary,#8a8f98);margin-bottom:2px}",
         ".hwb-badge{display:inline-block;font-size:11px;line-height:16px;padding:0 8px;margin-right:6px;border-radius:8px;border:.5px solid var(--dsw-alias-border-l3,#8885);color:var(--dsw-alias-label-secondary,inherit)}",
         ".hwb-badge.measured{color:var(--dsw-alias-state-success-primary,#2e7d32);border-color:var(--dsw-alias-state-success-primary,#2e7d32)}",
+        // ---- 等待总时长统计区（0.16.39）----------------------------------------
+        //
+        // 形态与官方 stat-dialog 的 details 网格同一套写法：minmax(76px,auto) +
+        // 数值右对齐 + tabular-nums（扫读时数字宽度不跳）。两栏并排，各有标题文字，
+        // 第一栏（本会话）加一层极浅底色区分「活账」——**颜色不是唯一载体**。
+        ".hwb-stats{display:flex;flex-direction:column;gap:8px;width:100%}",
+        ".hwb-stat-cols{display:flex;gap:12px;flex-wrap:wrap}",
+        ".hwb-stat{flex:1 1 200px;min-width:0;box-sizing:border-box;padding:10px 12px;border-radius:12px;border:.5px solid var(--dsw-alias-border-l3,#8885);background:var(--dsw-alias-bg-layer-1,transparent)}",
+        ".hwb-stat.live{background:var(--dsw-alias-interactive-bg-hover,#8881)}",
+        ".hwb-stat-head{font-size:12px;line-height:18px;margin-bottom:6px;color:var(--dsw-alias-label-secondary,inherit);font-weight:500}",
+        ".hwb-stat-grid{display:grid;grid-template-columns:minmax(76px,auto) minmax(0,1fr);gap:6px 16px;margin:0}",
+        ".hwb-stat-row{display:contents}",
+        ".hwb-stat-grid dt,.hwb-stat-grid dd{min-width:0;margin:0}",
+        ".hwb-stat-grid dt{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary,#8a8f98)}",
+        ".hwb-stat-grid dd{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,inherit);font-variant-numeric:tabular-nums;text-align:right}",
+        ".hwb-stat-empty{font-size:12px;line-height:18px;margin:0;color:var(--dsw-alias-label-tertiary,#8a8f98)}",
         ".hwb-bar-row{display:flex;align-items:center;gap:12px}",
         // 输入框底下的等待药丸（0.15.11）。
         //
@@ -2343,7 +3212,11 @@ window.__ModuleLoader__.load({
         // 命中 0 处，于是自建整行**永远**生效，`width:100%` 把官方药丸挤到下一行。
         // 那条自建行规则因此一并删除——留着一个永不生效、但一旦生效就排版崩坏的
         // 规则，比没有更糟。
-        ".hwb-waitwrap{position:relative;display:inline-flex;align-items:center;min-width:0;flex:none}",
+        // 0.16.38：`flex:none` → `0 1 auto`。用户报的「窗口变窄后这枚药丸长度不变、
+        // 不像官方会跟着缩」根因就在这里——`flex:none` 明确禁止收缩，同一行里官方
+        // 药丸在缩、这一枚不动。官方 StatsPills 的 root 是
+        // `min-width:0;max-width:100%;justify-content:center`，本 wrap 与它同形。
+        ".hwb-waitwrap{position:relative;display:inline-flex;align-items:center;min-width:0;max-width:100%;flex:0 1 auto;font-size:var(--dsh-content-font-size-secondary,13px);line-height:calc(20px + var(--dsh-content-font-delta-secondary,0px))}",
         // 尺寸**逐项**取自官方药丸（ui-chat 的 StatsPills 与 TurnUsagePanel 两张
         // module.css），不是照着截图量的近似值。三个值分别是：字号取官方
         // `--dsh-content-font-size-secondary`（缺省 13px）；行高取官方
@@ -2355,7 +3228,7 @@ window.__ModuleLoader__.load({
         // **不跟着变**——同一行里出现一大一小两枚药丸，正是「没适配」在数值层面
         // 的形态。0.16.21 之前这里正是写死的三个值；本版改为官方 token。图标仍是
         // 官方规定的 14px 线框（`.hwb-waitpill svg` 那条）。
-        ".hwb-waitpill{box-sizing:border-box;max-width:100%;height:calc(28px + var(--dsh-content-font-delta,0px));display:inline-flex;align-items:center;gap:6px;padding:1px 8px;font:inherit;font-size:var(--dsh-content-font-size-secondary,13px);line-height:calc(24px + var(--dsh-content-font-delta-secondary,0px));font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--dsw-alias-label-tertiary,#8a8f98);background:0 0;border:none;border-radius:24px;cursor:pointer;transition:background .12s ease,color .12s ease}",
+        ".hwb-waitpill{box-sizing:border-box;max-width:100%;display:inline-flex;align-items:center;gap:6px;padding:1px 8px;font:inherit;font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--dsw-alias-label-tertiary,#8a8f98);background:0 0;border:none;border-radius:24px;cursor:pointer;transition:background .12s ease,color .12s ease}",
         ".hwb-waitpill:hover,.hwb-waitpill[aria-expanded=true]{background:var(--dsw-alias-interactive-bg-hover,#8882);color:var(--dsw-alias-label-secondary,inherit)}",
         ".hwb-waitpill:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#3b82f6);outline-offset:1px}",
         ".hwb-waitpill svg{flex:none;width:14px;height:14px}",
@@ -2363,7 +3236,18 @@ window.__ModuleLoader__.load({
         // 点击面板：尺寸/圆角/阴影/网格逐项对齐官方 stat-dialog.module.css。
         // 向上展开（bottom:calc(100% + 8px)）而不是向下，因为药丸本身就在输入框
         // 底下，向下会盖住输入框——官方那两枚药丸同样朝上开。
-        ".hwb-waitpanel{position:absolute;bottom:calc(100% + 8px);right:0;z-index:1100;box-sizing:border-box;width:max-content;min-width:min(300px,100vw - 24px);max-width:min(440px,100vw - 24px);padding:16px;border-radius:12px;border:0;background:var(--dsw-specific-menu,var(--dsw-alias-bg-layer-1,#fff));box-shadow:var(--dsw-elevation-prominent,0 8px 24px #0003);color:var(--dsw-alias-label-secondary,inherit);font-size:12px;line-height:18px;cursor:default;text-align:left}",
+        // 0.16.39：面板改成**官方 stat-dialog 的定位口径**（用户报的「现在是右边缘对齐」）。
+        //
+        // 逐项对照官方 `@deepseek-ai/dsh-client-ui-chat/stat-dialog.module.css` 的 `.panel`：
+        //   position:fixed  ← 旧值 absolute。坐标由官方 useAnchoredPosition 给（左对齐
+        //                     药丸左缘 + 视口 12px 夹紧），因此不能再自己写 right/bottom。
+        //   z-index:1100 / 圆角 12px / padding 16px / 背景 --dsw-specific-menu /
+        //   阴影 --dsw-elevation-prominent / 宽 max-content + 300~440 夹紧 —— 逐字相同。
+        //
+        // 字号走 token（`--dsh-content-font-size-secondary` / `--dsh-content-font-delta`）：
+        // 官方这套弹层在字体缩放时会跟着变，写死 12px 的话放大字体后弹层会比药丸小一圈。
+        // 面板在 portal 里（body 下），所以 fixed 不再被右栏面板的 transform 包含块劫持。
+        ".hwb-waitpanel{position:fixed;z-index:1100;box-sizing:border-box;width:max-content;min-width:min(300px,100vw - 24px);max-width:min(440px,100vw - 24px);padding:16px;border-radius:12px;border:0;background:var(--dsw-specific-menu,var(--dsw-alias-bg-layer-1,#fff));box-shadow:var(--dsw-elevation-prominent,0 8px 24px #0003);color:var(--dsw-alias-label-secondary,inherit);font-size:var(--dsh-content-font-size-secondary,12px);line-height:calc(18px + var(--dsh-content-font-delta-secondary,0px));cursor:default;text-align:left}",
         ".hwb-waitpanel-head{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:8px;color:var(--dsw-alias-label-primary,inherit);font-weight:500}",
         ".hwb-waitpanel-title{display:inline-flex;align-items:center;gap:6px;min-width:0}",
         ".hwb-waitpanel-title svg{flex:none;width:14px;height:14px}",
@@ -2395,8 +3279,10 @@ window.__ModuleLoader__.load({
         ".hwb-site-prompt summary{cursor:pointer;font-size:13px;color:var(--dsw-alias-label-secondary,inherit)}",
         ".hwb-site-prompt pre{max-height:240px}",
         ".hwb-conversation{position:relative;display:flex;flex-direction:column;width:100%;height:100%;min-height:0}",
-        // 站点栏：flex:none + z-index 保证**永不被网页区遮住**（用户报的「有一点
-        // 遮挡」就是旧实现里网页区在层叠上压过了标签条）。
+        // 0.16.34：原先这里还有一条注释，解释站点栏为什么 flex:none + z-index
+        //（用户报过「有一点遮挡」，根因是旧实现里网页区在层叠上压过了标签条）。
+        // 标签条删除后那条约束失去对象；网页区（.hwb-frame-host）的 z-index:1 与
+        // 工具条的 z-index:3 仍在，两者之间的层叠关系不变。
         // ---- 顶层工具条（0.14.5 重排）--------------------------------------
         // 尺寸依据来自官方包实测（@deepseek-ai/dsh-client-ui-sidebar-right）：
         //   expand 按钮 width/height:28px + border-radius:28px + padding:6px；
@@ -2404,42 +3290,87 @@ window.__ModuleLoader__.load({
         //   排版 15px（标题）/ 13px（描述，--dsw-alias-label-caption）。
         // 旧实现把标签和动作挤在一行，两者互相抢宽度；现在工具条回答「我在哪个
         // 站点、什么状态、能做什么」，标签条只负责切站点。
-        ".hwb-toolbar{flex:none;position:relative;z-index:3;display:flex;align-items:center;gap:8px;height:36px;padding:0 8px;background:var(--dsw-alias-bg-base,transparent)}",
+        // 0.16.39：工具条尺寸对齐官方 browser 工具条（`.SB_kFW_toolbar`）：
+        //   height:38px / padding:5px 6px / gap:4px
+        // 旧值 36px + padding 0 8px 与官方差 2px 高、左右各多 2px，与右栏标签条
+        // 相邻时能看出不齐。
+        ".hwb-toolbar{flex:none;position:relative;z-index:3;display:flex;align-items:center;gap:4px;height:38px;padding:5px 6px;background:var(--dsw-alias-bg-base,transparent)}",
         ".hwb-toolbar-id{display:flex;align-items:center;gap:6px;min-width:0;flex:1}",
         ".hwb-toolbar-name{font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary,inherit);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
         ".hwb-toolbar-state{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary,#8a8f98);white-space:nowrap;flex:none}",
         ".hwb-toolbar-actions{flex:none;display:inline-flex;align-items:center;gap:2px}",
-        // 标签条：可横向滚，但**不显示滚动条**；不再加两端 mask 渐隐——官方右栏
-        // 不用这种表达（实测其 client.js 里 mask-image/scrollbar 命中 0），且渐变
-        // 本身就是用户报的「有一点遮挡」的观感来源。
-        ".hwb-sitebar{flex:none;position:relative;z-index:2;display:flex;align-items:center;gap:6px;padding:0 8px 6px;background:var(--dsw-alias-bg-base,transparent);border-bottom:.5px solid var(--dsw-alias-border-l4,#8884)}",
-        ".hwb-sitebar-tabs{display:flex;gap:4px;overflow-x:auto;flex:1;min-width:0;scrollbar-width:none;-ms-overflow-style:none;scroll-behavior:smooth}",
-        ".hwb-sitebar-tabs::-webkit-scrollbar{display:none}",
-        // 标签是**紧凑胶囊**：状态改用 8px 色点（见 statusDot），不再把
-        // 「已登录(缓存)」这类长文案塞进标签里。
-        ".hwb-site-tab{flex:none;display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;font:inherit;font-size:12px;line-height:24px;color:var(--dsw-alias-label-secondary,inherit);background:transparent;border:.5px solid transparent;border-radius:13px;cursor:pointer;transition:background .12s ease,color .12s ease,border-color .12s ease}",
-        ".hwb-site-tab:hover{background:var(--dsw-alias-interactive-bg-hover,#8882);color:var(--dsw-alias-label-primary,inherit)}",
-        ".hwb-site-tab.active{color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border-color:var(--dsw-alias-border-l3,#8885)}",
-        ".hwb-site-tab-name{white-space:nowrap}",
-        // ---- 站点图标与一级选择框（0.16.22）--------------------------------
+        // ---- 站点标签条样式：**0.16.36 再删**（用户要求去掉面板内那行）------
+        //
+        // 0.16.34 删过 → 0.16.35 恢复 → 0.16.36 按用户「页面内顶部那一行去除，只留下官方
+        // 多开一级和 web bridge 并列那行」再删。这一组 `.hwb-sitebar` / `.hwb-sitebar-tabs`
+        // / `.hwb-site-tab(.active/-name)` / `.hwb-tab-glyph` 服务于面板内那条横向站点条，
+        // 它已不存在；「一行并列」归 DSH 官方右侧栏自己的标签条。
+        // ---- 站点图标与选择框（0.16.22）-------------------------------------
         // 尺寸口径：图标框 = 图标尺寸 + 8（内边距），与官方图标按钮的 28px 同族。
         // 颜色一律 currentColor：官方鲸鱼是单条填充路径，随宿主主题变色——
         // 这也是「透明底」的实际含义（没有底色块需要跟着主题反转）。
         ".hwb-glyph-svg{display:block;flex:none}",
-        ".hwb-glyph,.hwb-tab-glyph,.hwb-picker-ico{display:inline-flex;align-items:center;justify-content:center;flex:none;color:var(--dsw-alias-label-secondary,inherit)}",
-        ".hwb-glyph.official,.hwb-tab-glyph.official{color:var(--dsw-alias-brand-primary,#3b82f6)}",
-        ".hwb-tab-glyph{margin-right:-2px}",
+        // 挂点共用一条：`.hwb-glyph`（工具条站点图标）、`.hwb-picker-ico`（首屏网格）、
+        // `.hwb-catalog-ico`（站点目录行）。
+        ".hwb-glyph,.hwb-picker-ico,.hwb-catalog-ico{display:inline-flex;align-items:center;justify-content:center;flex:none;color:var(--dsw-alias-label-secondary,inherit)}",
+        ".hwb-glyph.official,.hwb-picker-ico.official,.hwb-catalog-ico.official{color:var(--dsw-alias-brand-primary,#3b82f6)}",
+        // ---- 站点目录（0.16.35 建立，0.16.37 改为官方的**胶囊**）----------------
+        //
+        // 尺寸与结构**逐项**取自官方 `@deepseek-ai/dsh-client-ui-sidebar-terminal`
+        // 的 `TerminalGuide.module.css`（那就是右栏的「新建终端」）：
+        //
+        //   .entry    box-sizing:border-box / border:.5px solid border-l4 /
+        //             background:bg-layer-1 / border-radius:24px /
+        //             align-items:stretch / width:100% / display:flex / overflow:hidden
+        //   .main     text-align:left / border-radius:24px 0 0 24px / flex:1 /
+        //             justify-content:flex-start / gap:14px / min-width:0 /
+        //             height:auto / min-height:56px / padding:14px 20px
+        //   .icon     flex:none
+        //   .text     flex-direction:column / gap:3px / min-width:0 / display:flex
+        //   .title    color:label-primary / nowrap+ellipsis / font-size:15px / line-height:1.4
+        //   .description color:label-caption / nowrap+ellipsis / font-size:13px / line-height:1.4
+        //   .trigger  border-radius:0 24px 24px 0 / flex:none / align-self:stretch /
+        //             width:44px / height:auto / padding:0
+        //
+        // 为什么不再用 0.16.36 那套 `panelRow` 数值（36px / radius 12px / padding 7px 8px）：
+        // 那是**左栏**列表行的口径，用户要的是「新建终端」那张**胶囊**——两者在官方
+        // 是两套不同的组件，混着抄正是上一轮「只是在半路」的原因。
+        //
+        // `.hwb-site-main` / `.hwb-site-trigger` 是**加在官方 `Button` 上的类名**
+        //（`className` 透传），因此 ghost 的配色、按下态、焦点环都由官方给，这里只负责
+        // 胶囊的几何。
+        // 0.16.38：目录与站点胶囊与左右边界留出间距（与首屏网格同一条口径）。
+        // 0.17.0：完全参考官方 GuideBody（min-height:100% + justify-content:center + :after 10% 弹性留白），
+        // 做到点击进入网站选择界面后垂直水平居中，解决顶部贴着的问题。
+        ".hwb-catalog{box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:14px;min-height:100%;padding:0 clamp(8px,3vw,24px);color:inherit}",
+        ".hwb-catalog:after{content:\"\";flex:0 10%}",
+        // 0.16.39：列表宽度与首屏网格**同一口径**（官方 guide 的 380px + 居中）。
+        // 官方的 `.entryCell` 就是 `width:380px;max-width:100%`，所以「目录页」与
+        //「首屏选站点」在同一块面板里读起来是同一列宽——这也是用户说的
+        //「宽度需要和官方一致」在目录页那一半的对应实现。
+        ".hwb-catalog-list{display:flex;flex-direction:column;gap:8px;width:380px;max-width:100%;margin:0 auto}",
+        ".hwb-site-card{box-sizing:border-box;min-width:0;border:.5px solid var(--dsw-alias-border-l4,#8884);background:var(--dsw-alias-bg-layer-1,#fff);border-radius:24px;align-items:stretch;width:100%;display:flex;overflow:hidden}",
+        ".hwb-site-main{text-align:left;border-radius:24px 0 0 24px;flex:1;justify-content:flex-start;gap:14px;min-width:0;height:auto;min-height:56px;padding:14px 20px}",
+        ".hwb-site-text{flex-direction:column;gap:3px;min-width:0;display:flex}",
+        ".hwb-site-title{color:var(--dsw-alias-label-primary,inherit);white-space:nowrap;text-overflow:ellipsis;font-size:15px;line-height:1.4;overflow:hidden}",
+        ".hwb-site-desc{color:var(--dsw-alias-label-caption,var(--dsw-alias-label-tertiary,#8a8f98));white-space:nowrap;text-overflow:ellipsis;font-size:13px;line-height:1.4;overflow:hidden}",
+        ".hwb-site-trigger{border-radius:0 24px 24px 0;flex:none;align-self:stretch;width:44px;height:auto;padding:0}",
+        // 0.16.35：这一组里的**浮层形态已删**——`.hwb-picker.inline` / `.hwb-picker-trigger`
+        //（含 hover/focus/name/caret）/ `.hwb-picker-surface` 的绝对定位变体，全都服务于
+        // 已被用户否掉的工具条站点下拉。留下来的只有**首屏网格**（文档流里的一张卡片）
+        // 需要的几条：.hwb-picker 作为定位锚、.hwb-picker-surface.bare 与网格内部若干。
         ".hwb-picker{position:relative}",
-        ".hwb-picker.inline{flex:none}",
-        ".hwb-picker-trigger{display:inline-flex;align-items:center;gap:6px;height:28px;max-width:180px;padding:0 6px 0 4px;font:inherit;font-size:13px;line-height:26px;color:var(--dsw-alias-label-primary,inherit);background:0 0;border:.5px solid transparent;border-radius:14px;cursor:pointer;transition:background .12s ease,border-color .12s ease}",
-        ".hwb-picker-trigger:hover{background:var(--dsw-alias-interactive-bg-hover,#8882);border-color:var(--dsw-alias-border-l4,#8884)}",
-        ".hwb-picker-trigger:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#3b82f6);outline-offset:1px}",
-        ".hwb-picker-trigger-name{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
-        ".hwb-picker-caret{display:inline-flex;flex:none;color:var(--dsw-alias-label-tertiary,#8a8f98)}",
-        // 面板体：尺寸/圆角/阴影对齐官方菜单（--dsw-specific-menu + elevation-prominent）。
-        // 下拉态绝对定位在触发器下方；首屏态（.bare）是文档流里的一张卡片。
-        ".hwb-picker-surface{position:absolute;top:calc(100% + 6px);left:0;z-index:1100;box-sizing:border-box;width:max-content;min-width:min(320px,100vw - 24px);max-width:min(420px,100vw - 24px);padding:12px;border-radius:12px;background:var(--dsw-specific-menu,var(--dsw-alias-bg-layer-1,#fff));box-shadow:var(--dsw-elevation-prominent,0 8px 24px #0003);color:var(--dsw-alias-label-secondary,inherit)}",
-        ".hwb-picker-surface.bare{position:static;width:100%;max-width:440px;min-width:0;text-align:left;margin:0 auto;box-shadow:none;border:.5px solid var(--dsw-alias-border-l4,#8884)}",
+        // 首屏网格态：**文档流里的一张卡片**，不是浮层。
+        // 0.16.39：宽度改成**官方的 380px**（用户：「站点选择选择框的宽度需要和官方一致」）。
+        //
+        // 官方右侧栏的入口胶囊（`@deepseek-ai/dsh-client-ui-sidebar-right` 的
+        // `GuideBody.module.css`）逐字是：
+        //   .entry / .entryCell { width:380px; max-width:100% }
+        // 也就是「恒 380、窄了才收缩」，而不是旧值的 `min(100%,440px)`——
+        // 440 既不是官方值，又让卡片在窄 pane 上顶到左右两边（用户报的
+        //「没有和左右边界有间隔」正是它）。现在宽度交给官方口径，两侧间距由
+        // `.hwb-firstrun` 的 padding 与外层 `margin:0 auto` 提供。
+        ".hwb-picker-surface.bare{position:static;width:380px;max-width:100%;box-sizing:border-box;min-width:0;text-align:left;margin:0 auto;box-shadow:none;border:.5px solid var(--dsw-alias-border-l4,#8884);padding:12px;border-radius:12px;background:var(--dsw-specific-menu,var(--dsw-alias-bg-layer-1,#fff));color:var(--dsw-alias-label-secondary,inherit)}",
         ".hwb-picker-head{font-size:12px;line-height:18px;margin:0 0 8px;color:var(--dsw-alias-label-tertiary,#8a8f98)}",
         ".hwb-picker-grid{display:grid;grid-template-columns:1fr;gap:2px;max-height:min(52vh,420px);overflow:auto}",
         ".hwb-picker-cell{display:flex;align-items:center;gap:2px}",
@@ -2453,18 +3384,28 @@ window.__ModuleLoader__.load({
         ".hwb-picker-meta{display:inline-flex;align-items:center;gap:5px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#8a8f98)}",
         ".hwb-picker-split{flex:none;width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;font-size:12px;color:var(--dsw-alias-label-tertiary,#8a8f98);background:0 0;border:.5px solid transparent;border-radius:12px;cursor:pointer}",
         ".hwb-picker-split:hover{background:var(--dsw-alias-interactive-bg-hover,#8882);color:var(--dsw-alias-label-primary,inherit);border-color:var(--dsw-alias-border-l4,#8884)}",
-        ".hwb-picker-foot{font-size:11px;line-height:16px;margin:10px 0 0;padding-top:8px;border-top:.5px solid var(--dsw-alias-border-l4,#8884);color:var(--dsw-alias-label-tertiary,#8a8f98)}",
         // 首屏网格：作为引导页里的一块内容，不吸走整页宽度，也不与遮罩的居中布局打架。
-        ".hwb-firstrun{width:100%;max-width:440px;display:flex;justify-content:center}",
+        //
+        // 0.16.38：旧值 `max-width:440px` 让整块网格在窄 pane 上顶到左右两边——
+        // 用户报的「没有和左右边界有间隔」就是这个。改为**容器满宽 + 内边距**，宽度
+        // 上限交给里面的 `.hwb-picker-surface.bare`（它自己 `margin:0 auto` 居中），
+        // 于是「不超 440px」与「两侧留空隙」两件事同时成立。
+        ".hwb-firstrun{width:100%;display:flex;justify-content:center;box-sizing:border-box;padding-inline:clamp(12px,3vw,20px)}",
+        // ---- 站点下拉菜单样式：**随 SiteMenu 一起删除**（0.16.35）------------
+        //
+        // 这里曾有一组 `.hwb-menu-row` / `.hwb-menu-name` / `.hwb-menu-state` /
+        // `.hwb-menu-glyph(.official)` / `.hwb-site-menu`，服务于工具条那颗站点下拉按钮
+        // 弹出的二级菜单。按钮按用户要求删除、`SiteMenu` 随之删掉，这些规则就没有任何
+        // 挂点。删而不是留：死规则不会报错，只会让下一个改样式的人把时间花在它上面。
         // 动作组：四颗**同形图标按钮**（官方 expand 按钮的 28px/圆角/透明底）。
         // 旧实现里刷新是裸图标、独立窗口是一颗长药丸，两套视觉语言并存——用户报
         // 「刷新栏目/独立窗口状态有点简略，而且不统一风格」。文字全部进
         // title/aria-label，按钮本身只留图标。
-        ".hwb-act-btn{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;font:inherit;color:var(--dsw-alias-label-secondary,inherit);background:0 0;border:.5px solid transparent;border-radius:14px;cursor:pointer;transition:background .12s ease,color .12s ease,border-color .12s ease}",
+        ".hwb-act-btn{display:inline-flex;align-items:center;justify-content:center;flex:none;width:28px;height:28px;padding:0;color:var(--dsw-alias-label-secondary,inherit);background:0 0;border:0;border-radius:6px;cursor:pointer;transition:background .12s ease,color .12s ease}",
         ".hwb-act-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,#8882);color:var(--dsw-alias-label-primary,inherit)}",
-        ".hwb-act-btn:disabled{opacity:.45;cursor:default}",
-        ".hwb-act-btn.on{color:var(--dsw-alias-state-success-primary,#2e7d32);border-color:var(--dsw-alias-state-success-primary,#2e7d32)}",
-        ".hwb-act-ico{font-size:14px;line-height:1}",
+        ".hwb-act-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#3b82f6);outline-offset:-1px}",
+        ".hwb-act-btn:disabled{color:var(--dsw-alias-label-quaternary,#c2c7cf);cursor:default}",
+        ".hwb-act-btn.on{color:var(--dsw-alias-state-success-primary,#2e7d32)}",
         ".hwb-frame-host{position:relative;flex:1;min-height:0;overflow:hidden;z-index:1}",
         ".hwb-browser-frame{display:block;width:100%;height:100%;min-height:0;border:0;background:#fff}",
         ".hwb-frame-status{position:absolute;inset:0;display:grid;place-items:center;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-tertiary,#7a8494);font-size:12px;pointer-events:none}",
@@ -2609,6 +3550,14 @@ window.__ModuleLoader__.load({
       // 两个 kind 各注册自己的 body 即自然成立。
       const TAB_ID = 'dsh-webcode-bridge';
       const TAB_KIND = 'webcode-bridge';
+      // 站点网页标签（0.16.35）：一个站点一个标签。
+      //
+      // 为什么另开一个 kind 而不是复用 TAB_KIND：`multiple: true` 是**按 kind** 声明
+      // 的（tab-registry.d.ts:84「Each open by kind creates independent content」）。
+      // 目录页必须每 pane 只有一份，站点页必须可以多份——两个要求互斥，只能两个 kind。
+      // 而 pane.tab 座位是 keyed 的（按定义 id 派发），所以各注册各的正文即可。
+      const SITE_ID = 'dsh-webcode-bridge/site';
+      const SITE_KIND = 'webcode-site';
       const TEAM_ID = 'dsh-webcode-bridge/team';
       const TEAM_KIND = 'webcode-team';
       // 左栏全局面板（`sidebar.panellist` + `main`）的 id。与上面两个是**不同域**：
@@ -2642,8 +3591,109 @@ window.__ModuleLoader__.load({
           } catch (e) { warn('sidebarRight.float', e); }
         }
         : null;
-      const WebcodeBody = () => h(Conversation, { browserSrc: relayBase + '/', onSplit: splitPanel, onFloat: floatPanel });
+      /**
+       * 为一个站点打开一个独立标签（0.16.35）。
+       *
+       * 这是「一行并列显示不同网址栏目」的实现：`kind` 用 `multiple: true` 注册，
+       * 每次调用都是一条**独立**标签，标题由 `sidebar.right.pane.tab.title` 按
+       * `navigation.params.siteId` 现算（见下方 TITLE_ID 注册）——于是标签条上就是
+       * 「DeepSeek / 智谱清言 / Kimi …」一排。
+       *
+       * 同一站点重复点击会**揭示已有标签**而不是再开一个（官方 `revealIfOpened` 默认
+       * 行为对 page type 恒为去重），这也是用户要的「选择不一样的能跳回去」。
+       */
+      const openSiteTab = (sid, slot) => {
+        if (!sid || !SITE_NAMES[sid]) return;
+        try {
+          ctx.sidebarRight.openTab(SITE_KIND, { params: { siteId: sid, slot: slot || '' } });
+        } catch (e) { warn('sidebarRight.openTab (site)', e); }
+      };
+      /**
+       * 读本标签的 hook context（`useTabInfo`），失败一律回 null。
+       *
+       * 抽出来是因为目录页与站点页都要它，而两处的**失败语义必须一致**：读不到
+       * 就回落，不抛。读取本身就是一次 hook 调用，因此只能在组件体顶层调——
+       * 这也是为什么它包在 try/catch 里而不是写成「先判断再调」。
+       */
+      const safeTabInfo = (props) => {
+        try {
+          return props && typeof props.useTabInfo === 'function' ? props.useTabInfo() : null;
+        } catch (e) { warn('tab info', e); return null; }
+      };
+      /**
+       * 目录页：「Web Bridge」标签的全部内容（一级）。
+       *
+       * ## 0.16.39：选站点**替代本标签页**（用户：「web bridges 内选择网站后，是直接
+       * 替代 web 页面打开，而不是新开/保留 web」）
+       *
+       * 旧实现调 `ctx.sidebarRight.openTab(SITE_KIND, …)`——那是在当前 pane 里**新开
+       * 一条**标签，于是「Web Bridge」这条永远留在标签条上（用户看到的「保留 web」）。
+       *
+       * 官方「新建终端」不是这么做的：它的入口胶囊点一下走的是
+       *
+       *     tab.actions.openTab(kind, { replaceTab: true })
+       *
+       * —— guide 把自己**让位**给被打开的页面（`GuideBody` 的 `replaceTab: true`）。
+       * 这里改用同一条官方路径：借本标签自己的 `tab.actions`，`replaceTab` 顶掉自己。
+       * 目录页让位之后，官方 settle planner 会在 pane 空出时补回 guide 标签，因此
+       * 「再选一个站点」永远有入口——不需要我们额外保留什么。
+       *
+       * 降级：拿不到本标签动作（旧版右栏 / 测试桩）时退回 `ctx.sidebarRight.openTab`，
+       * 即旧行为「新开一条标签」。此时目录不会被顶掉——**降级不是崩溃**，只是少一个
+       * 更贴合官方语义的行为，用户仍能正常用。
+       */
+      const CatalogBody = (props) => {
+        const info = safeTabInfo(props);
+        const openInPlace = (sid, slot) => {
+          if (!sid || !SITE_NAMES[sid]) return;
+          const params = { siteId: sid, slot: slot || '' };
+          const actions = info && info.tab ? info.tab.actions : null;
+          if (actions && typeof actions.openTab === 'function') {
+            try {
+              actions.openTab(SITE_KIND, { params, replaceTab: true });
+              return;
+            } catch (e) { warn('tab.actions.openTab (site)', e); }
+          }
+          openSiteTab(sid, slot);
+        };
+        return h(SiteCatalogBody, { onOpenSite: openInPlace });
+      };
+      /**
+       * 站点网页标签的正文。
+       *
+       * `siteId` 从**本标签自己的** navigation.params 读（官方 Browser 面板同款做法，
+       * 见 dsh-client-ui-sidebar-browser 的 `tab.navigation.params?.url`）。因此两个
+       * 站点标签可以在同一个 pane 里并存而互不干扰——这正是「一行并列」成立的前提。
+       *
+       * useTabInfo 是框架注入的（`sidebar.right.pane.tab` 的 hookContext），缺失时
+       * 回落成「没有受控站点」：面板照常渲染默认站点，而不是白屏（降级不是崩溃）。
+       */
+      /**
+       * 读本标签的 `{ siteId, slot }`。
+       *
+       * 抽成一处而不是在 body/title 里各写一遍：两处判据必须**逐字相同**，各写一遍
+       * 迟早漂移（标题写着 Kimi、正文却是 DeepSeek 那种）。读取失败一律回落空值——
+       * 降级不是崩溃：正文退回默认站点、标题退回类型名，而不是白屏或空标题。
+       */
+      const siteTabParams = (props) => {
+        const info = safeTabInfo(props);
+        const p = info && info.tab && info.tab.navigation ? info.tab.navigation.params : null;
+        if (p && SITE_NAMES[p.siteId]) return { siteId: p.siteId, slot: p.slot || '' };
+        return { siteId: '', slot: '' };
+      };
+      const SiteTabBody = (props) => {
+        const { siteId: sid, slot } = siteTabParams(props);
+        return h(Conversation, {
+          browserSrc: relayBase + '/', siteId: sid, slot, onSplit: splitPanel, onFloat: floatPanel,
+        });
+      };
+      /** 标签标题：站点名（无 params 时回落成类型名，而不是空标题）。 */
+      const SiteTabTitle = (props) => {
+        const sid = siteTabParams(props).siteId;
+        return sid ? siteName(sid) : 'Web 站点';
+      };
 
+      // 「Web Bridge」＝站点目录（一级页面，不绑地址）。
       own(() => {
         try {
           return ctx.sidebarRightTabs.register({
@@ -2654,7 +3704,7 @@ window.__ModuleLoader__.load({
             guide: [{
               order: 55,
               title: () => 'Web Bridge',
-              description: () => '打开内容服务的真实网页（可多开：Ctrl+点击站点，或用面板上的「分屏 / 浮动」）',
+              description: () => '网站目录：选一个站点作为独立标签打开，可同时并列多个',
             }],
           });
         } catch (e) { warn('sidebarRightTabs.register', e); }
@@ -2664,8 +3714,35 @@ window.__ModuleLoader__.load({
         try {
           return ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
             name: 'sidebar.right.pane.tab', key: TAB_ID,
-          }, WebcodeBody));
+          }, CatalogBody));
         } catch (e) { warn('pane.tab body', e); }
+      });
+
+      // 站点网页＝独立 kind，`multiple: true` 让「一个站点一个标签」成立。
+      own(() => {
+        try {
+          return ctx.sidebarRightTabs.register({
+            id: SITE_ID,
+            kind: SITE_KIND,
+            multiple: true,
+            priority: 'extension',
+            title: () => 'Web 站点',
+          });
+        } catch (e) { warn('sidebarRightTabs.register (site)', e); }
+      });
+      own(() => {
+        try {
+          return ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
+            name: 'sidebar.right.pane.tab', key: SITE_ID,
+          }, SiteTabBody));
+        } catch (e) { warn('pane.tab body (site)', e); }
+      });
+      own(() => {
+        try {
+          return ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register({
+            name: 'sidebar.right.pane.tab.title', key: SITE_ID,
+          }, SiteTabTitle));
+        } catch (e) { warn('pane.tab title (site)', e); }
       });
 
       // ---- Team 面板标签页（0.15.12）------------------------------------

@@ -186,6 +186,29 @@ test('GET context-windows 列出每个站点的声明窗口与来源（B-3）', 
   for (const m of body.models) assert.ok('contextWindow' in m, `${m.id} 必须带 contextWindow`);
 });
 
+// Task 2.3：展示口径与预算口径字段级分开，端点如实投影二者，且 contextWindow 保留兼容。
+test('context-windows 分开投影 displayContext 与 sendBudget（B-3 → Task 2.3）', async () => {
+  const control = stubControl();
+  const r = await call(control, 'GET', '/__webcode/context-windows');
+  const body = JSON.parse(r.text);
+  assert.equal(body.ok, true);
+  for (const m of body.models) {
+    assert.ok('displayContext' in m, `${m.id} 必须投影展示口径 displayContext`);
+    assert.ok('sendBudget' in m, `${m.id} 必须投影预算口径 sendBudget`);
+    // 语义分离但值上当前一致（providers budget 初值 = context），是设计如此。
+    if (m.displayContext != null && m.sendBudget != null) {
+      assert.equal(m.sendBudget, m.contextWindow, `${m.id}: sendBudget 应作为 contextWindow 的语义别名`);
+    }
+  }
+  // glm/zai 是声明的改写对象：二者都应给出值，且预算值可核对。
+  for (const id of ['glm:glm-5.3', 'glm:auto', 'zai:glm-5.3', 'zai:auto', 'deepseek:deepseek']) {
+    const row = body.models.find((m) => m.id === id);
+    assert.ok(row, `应有 ${id}`);
+    assert.ok(typeof row.sendBudget === 'number' && row.sendBudget > 0, `${id}: sendBudget 应为正数，实际 ${row.sendBudget}`);
+    assert.ok(typeof row.displayContext === 'number' && row.displayContext > 0, `${id}: displayContext 应为正数`);
+  }
+});
+
 // 0.16.24：在途等待必须经**真实 HTTP 载荷**透出（药丸按它决定显示什么、多久问一次）。
 //
 // 这层是 index.js 与 client.cjs 之间的唯一接口，而它此前只被「响应体非空」那条
@@ -200,8 +223,8 @@ test('POST wait-stats：在途等待透出 live/now/liveValue，且药丸文案�
     settingsStore: { get: () => ({}), set: (v) => v },
     // 本会话账本已有 12 秒历史；在途那一段才刚开始 3 秒。
     waitStatsOf: (sessionId) => ({
-      total: { totalWaitMs: 20000, turns: 9, waitedTurns: 4, rateLimitRetries: 1 },
-      session: sessionId ? { totalWaitMs: 12000, turns: 2, waitedTurns: 1, rateLimitRetries: 0 } : null,
+      total: { totalWaitMs: 20000, totalDurationMs: 60000, durationTurns: 9, turns: 9, waitedTurns: 4, rateLimitRetries: 1 },
+      session: sessionId ? { totalWaitMs: 12000, totalDurationMs: 45000, durationTurns: 2, turns: 2, waitedTurns: 1, rateLimitRetries: 0 } : null,
       live: { startedAt: NOW - 3000, endsAt: NOW + 7000, baseMs: 0, kind: 'gap' },
       now: NOW,
     }),
@@ -210,13 +233,12 @@ test('POST wait-stats：在途等待透出 live/now/liveValue，且药丸文案�
   assert.equal(r.status, 200);
   const body = JSON.parse(r.text);
   assert.equal(body.ok, true);
-  // 0.16.26：药丸是「本会话等待发送总量」的投影 = 账本 12 s + 在途 3 s = 15 s。
-  // 旧断言（3 s）钉的是 0.16.24 的语义切换：等的时候只显示这一段，等一结束
-  // 就跳回账本 12 s —— 那正是用户报的跳变。一个数、一个来源之后才不会跳。
-  assert.equal(body.label, '等待发送 15 s');
+  // 0.16.26：药丸是「本会话等待发送总量」的投影 = 账本 12 秒 + 在途 3 秒 = 15 秒。
+  // 0.17.0：格式调整为「15 秒 · 等待占比 25%」（总耗时 15s wait + 45s duration = 60s）。
+  assert.equal(body.label, '15 秒 · 等待占比 25%');
   // 面板那一行**仍然只给在途那一段**：它是「正在等待发送」这个标签下的增量，
   // 与药丸的会话总量是两个不同的问题，各自如实回答。
-  assert.equal(body.liveValue, '3 s', '面板的「正在等待发送」行取同一套边界');
+  assert.equal(body.liveValue, '3 秒', '面板的「正在等待发送」行取同一套边界');
   // 客户端据此判断要不要把轮询提到 1 秒；缺了它就只能 10 秒一问。
   assert.ok(body.live && typeof body.live === 'object', '在途时必须给 live 供客户端判断');
   assert.equal(body.live.startedAt, NOW - 3000);
@@ -231,8 +253,8 @@ test('POST wait-stats：无在途时 live/liveValue 为 null（回落账本，�
     presetInfo: () => null,
     settingsStore: { get: () => ({}), set: (v) => v },
     waitStatsOf: () => ({
-      total: { totalWaitMs: 20000, turns: 9, waitedTurns: 4, rateLimitRetries: 0 },
-      session: { totalWaitMs: 12000, turns: 2, waitedTurns: 1, rateLimitRetries: 0 },
+      total: { totalWaitMs: 20000, totalDurationMs: 60000, durationTurns: 9, turns: 9, waitedTurns: 4, rateLimitRetries: 0 },
+      session: { totalWaitMs: 12000, totalDurationMs: 48000, durationTurns: 2, turns: 2, waitedTurns: 1, rateLimitRetries: 0 },
       live: null,
       now: 1_789_000_003_000,
     }),
@@ -241,8 +263,9 @@ test('POST wait-stats：无在途时 live/liveValue 为 null（回落账本，�
   const body = JSON.parse(r.text);
   assert.equal(body.live, null, '等待结束后必须清掉 live，否则药丸会停在冻结值上');
   assert.equal(body.liveValue, null);
-  // 结算后回落到账本（12 s）——不能出现「等待结束了药丸反而变空」。
-  assert.equal(body.label, '等待发送 12 s');
+  // 结算后回落到账本（12 秒）——不能出现「等待结束了药丸反而变空」。
+  // 0.17.0：格式改为「12 秒 · 等待占比 20%」（12s / (12s + 48s) = 20%）。
+  assert.equal(body.label, '12 秒 · 等待占比 20%');
 });
 
 // 0.16.24：药丸「开始就涨」的前半段在 index.js——**等待一开始**就发布 live，
@@ -272,6 +295,79 @@ test('index.js：等待开始即发布 live，且每条路径都在 finally 里�
   const settleAccum = src.indexOf('accumulateWait(waitStats.total', settle);
   assert.ok(settleClear > 0, 'recordWaitMetrics 必须清 live');
   assert.ok(settleClear < settleAccum, 'recordWaitMetrics 必须**先**清 live，再累加账本');
+});
+
+// 0.16.38：站点级设置与提示词文件。三条都是本轮新增的载荷契约，必须经**真实
+// HTTP** 覆盖——它们是设置页与后端之间的唯一接口，字段名写错在泛化护栏下无声。
+test('POST settings：站点级字典归一化（未知站点丢弃、跨站点模型丢弃、空指令删键）', async () => {
+  let saved = null;
+  const control = createWebControl({
+    driver: { status: () => ({}) }, relay: { status: () => ({}) },
+    config: {}, host: {}, logger,
+    presetInfo: () => null,
+    settingsStore: { get: () => ({}), set: (v) => { saved = v; return v; } },
+  });
+  const r = await call(control, 'POST', '/__webcode/settings', {
+    defaultModelBySite: {
+      deepseek: 'deepseek:deepseek',
+      glm: 'deepseek:deepseek',      // 跨站点 → 丢弃
+      nope: 'nope:auto',             // 未知站点 → 丢弃
+    },
+    extraPromptBySite: {
+      deepseek: '  只答中文  ',
+      glm: '',                        // 空 → 删键
+      nope: 'x',                      // 未知站点 → 丢弃
+    },
+  });
+  assert.equal(r.status, 200);
+  assert.deepEqual(saved.defaultModelBySite, { deepseek: 'deepseek:deepseek' },
+    '站点级默认模型只接受落在同一站点的值');
+  assert.deepEqual(saved.extraPromptBySite, { deepseek: '只答中文' },
+    '站点指令必须 trim，且空串表示「没配」而不是「配了空值」');
+});
+
+test('GET settings：两个站点级字典永远回对象，不回 undefined', async () => {
+  const control = createWebControl({
+    driver: { status: () => ({}) }, relay: { status: () => ({}) },
+    config: {}, host: {}, logger,
+    presetInfo: () => null,
+    // 从未保存过这两个键的设置文件形态。
+    settingsStore: { get: () => ({ extraPrompt: '' }), set: (v) => v },
+  });
+  const body = JSON.parse((await call(control, 'GET', '/__webcode/settings')).text);
+  assert.deepEqual(body.defaultModelBySite, {}, '未保存过时必须回空对象（前端据此渲染「跟随主线」）');
+  assert.deepEqual(body.extraPromptBySite, {});
+});
+
+test('POST prompt-file：路径只由 siteId 派生，且缺文件如实报码（不接受调用方传路径）', async () => {
+  const opened = [];
+  const control = createWebControl({
+    driver: { status: () => ({}) }, relay: { status: () => ({}) },
+    config: {}, host: {}, logger,
+    presetInfo: () => null,
+    settingsStore: { get: () => ({}), set: (v) => v },
+    openPath: async (p) => { opened.push(p); return { ok: true }; },
+  });
+  // 未知站点：直接拒，不得去碰磁盘。
+  const bad = JSON.parse((await call(control, 'POST', '/__webcode/prompt-file', { siteId: 'nope' })).text);
+  assert.equal(bad.ok, false);
+  // 已知站点但文件还没生成（本机不一定有该文件）：必须回 PROMPT_FILE_MISSING 与**路径**。
+  const miss = JSON.parse((await call(control, 'POST', '/__webcode/prompt-file', { siteId: 'deepseek' })).text);
+  if (miss.ok) {
+    // 本机恰好有该文件：那就必须真的走了 openPath，且路径在 prompts/ 下。
+    assert.equal(opened.length, 1);
+    assert.match(opened[0], /prompts[\\/]deepseek\.md$/);
+  } else {
+    assert.equal(miss.code, 'PROMPT_FILE_MISSING', '缺文件必须如实报码，不得静默失败');
+    assert.match(miss.file, /prompts[\\/]deepseek\.md$/, '路径必须由服务端按 siteId 现算');
+    assert.equal(opened.length, 0, '文件不存在时不得调用打开');
+  }
+  // 关键安全性质：请求体里塞路径也不生效——路径只从 siteId 来。
+  const inject = JSON.parse((await call(control, 'POST', '/__webcode/prompt-file', {
+    siteId: 'glm', path: 'C:\\Windows\\System32\\drivers\\etc\\hosts', file: '/etc/passwd',
+  })).text);
+  if (!inject.ok) assert.match(inject.file || '', /prompts[\\/]glm\.md$/);
+  for (const p of opened) assert.match(p, /prompts[\\/](deepseek|glm)\.md$/, '打开过的路径必须落在 prompts/ 下');
 });
 
 test('未知方法回 405 JSON（带 Allow），未知路径回 false 由调用方补 404 JSON', async () => {

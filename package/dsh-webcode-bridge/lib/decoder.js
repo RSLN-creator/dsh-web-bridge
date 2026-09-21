@@ -555,7 +555,7 @@
   //   帧各带全文）。这里按 part:content 槽位做累积差分，只外发新增后缀；
   //   纯增量流（t 恒为新增后缀）与累积流在 diff 下语义一致，两种都兼容。
   class GlmDecoder extends JsonLinesDecoder {
-    constructor(options) { super(options); this.seen = new Map(); }
+    constructor(options) { super(options); this.seen = new Map(); this.glmSegBuf = ''; }
     push(chunk) {
       this.buf += chunk;
       this.buf = this.buf.replace(/\r\n/g, '\n');
@@ -592,6 +592,12 @@
           const c = part.content[ci];
           if (!isRecord(c)) continue;
           const type = String(c.type || '');
+          // GLM 内置工具轮边界（真机 2026-09-21 抓帧）：`tool_calls`（发起调用）、
+          // `tool_result`（工具执行结果）本身不带正文，但它们**切断了文本段**——
+          // 工具结束后模型输出「新段落」，站点先把该段落拆成多个短碎片、随后把整段
+          // 作为一帧完整快照重发（f29/f30 与 f20-f28 碎片拼接逐字相同）。因此遇
+          // 工具帧即把「本段落累积」清零：快照逐步被碎片累积、到达时间接判重。
+          if (type === 'tool_calls' || type === 'tool_result') { this.glmSegBuf = ''; continue; }
           if (type === 'think') {
             // GLM-5.3 思考内容：content[].type='think'，字段名 think。过程中为纯增量
             // delta（真机抓包：28078 字符思维链拆成 861 个 delta），finish 帧却带
@@ -621,8 +627,36 @@
               // 比已发内容更短的帧 = 迟到的旧帧，丢弃
               continue;
             } else {
-              // 与已发内容无前缀关系 = 新片段（glm-free-api 的增量语义），追加
+              // 与已发内容无前缀关系 = 新片段（glm-free-api 的增量语义），追加。
+              // 真机 raw-frames（2026-09-21，工具轮 execute_sandbox_code）证实：GLM
+              // **不是纯增量也不是纯累积，而是「增量碎片 → 完整快照补全」混合**。
+              // 且存在两种快照形态：
+              //   形态 A：工具后碎片拼出**整段**，再把该整段本身作为快照重发（f 与
+              //           SNAP 逐字相同）——旧代码 `t === glmSegBuf` 拦截这一种。
+              //   形态 B（2026-09-21 第二次抓帧 1789973933106 新增）：碎片只拼出
+              //           **段首**（如「…3¹² = (」），随后站点发一帧从头含到结尾的
+              //           完整快照（拼上剩余「(3⁶)² = 729² = 531441」），再原样重发
+              //           该快照一次。形态 B 的完整快照以 glmSegBuf 为**前缀**但比其
+              //           长，旧 `===` 拦不住 → 补齐剩余被当成新段 emit → 整段播两遍。
+              // 判别（覆盖两形态）：
+              //   若 t 恰等于自工具轮以来的碎片累积 → 形态 A 重复快照，丢弃；
+              //   若 t 以累积为前缀且更长（= 假「新增」其实是快照补全）→ 只补发剩余，
+              //     并把累积更新为完整快照，使随后的原样重发帧命中 `===`。
+              // 注意：真「同一前缀更长」的**纯新增**（f20 后接 f21 那种增量续写）走上面
+              // 的 startsWith(prev) 分支，不会进这里；能进到这里的都是与 seen 无前缀
+              // 关系的独立新段，用 glmSegBuf 前缀判定不会误伤增量。
+              if (this.glmSegBuf) {
+                if (t === this.glmSegBuf) { this.seen.set(key, prev + t); continue; }
+                if (t.length > this.glmSegBuf.length && t.startsWith(this.glmSegBuf)) {
+                  const add = t.slice(this.glmSegBuf.length);
+                  this.seen.set(key, prev + add);
+                  this.glmSegBuf = t;
+                  this.emitText(add);
+                  continue;
+                }
+              }
               this.seen.set(key, prev + t);
+              this.glmSegBuf += t;
               this.emitText(t);
             }
           } else if (type === 'image' && Array.isArray(c.image)) {
@@ -678,10 +712,10 @@
     }
   }
   const DoubaoDecoder = makeJsonLineDecoder({
-    pickText: (j) => str(j.event_data) ?? str(j.text) ?? str(j.delta?.message?.content?.text),
-    pickThink: (j) => str(j.reasoning) ?? str(j.thinking),
+    pickText: (j) => str(j.event_data) ?? str(j.text) ?? str(j.delta?.message?.content?.text) ?? str(j.delta?.content) ?? str(j.message?.content),
+    pickThink: (j) => str(j.reasoning) ?? str(j.thinking) ?? str(j.reasoning_content) ?? str(j.delta?.message?.reasoning_content),
     pickImages: (j) => imagesIn(j),
-    isDone: (j) => j.event === 'done' || j.is_finish === true || j.done === true,
+    isDone: (j) => j.event === 'done' || j.is_finish === true || j.done === true || j.event_type === 'done' || j.status === 'done',
   });
   const GrokDecoder = makeJsonLineDecoder({
     pickText: (j) => {
@@ -727,6 +761,43 @@
     }
   }
 
+  // ---------- Kimi Connect-RPC（2026-09-21 真机确证）----------
+  // kimi 网页已从旧 SSE（/api/chat/{id}/completion/stream）全面迁移到 Connect-RPC
+  // （POST /apiv2/kimi.gateway.chat.v1.ChatService/Chat，application/connect+json）。
+  // 响应是二进制帧流，captureInit 已按 [flags(1)][len(4BE)][json] 逐帧拆分并以
+  // 一行 JSON emit；本解码器按行喂入。逐帧语义（真机抓帧 2026-09-21 录得）：
+  //   {op:'set',  mask:'chat.lastRequest',  chat:{id, lastRequest:{options:{model:'k2d6-chat',...},tools:[...]}}}
+  //   {op:'set',  mask:'message',  message:{id, role, status, blocks:[{text:{content}}]}}
+  //   {op:'set',  mask:'block.multiStage/stage',  block:{stage:{name:'STAGE_NAME_THINKING',status}}}
+  //   {op:'set'|'append', mask:'block.think.content', block:{think:{content:'增量碎片'}}}
+  //   {op:'set',  mask:'block.text',  block:{text:{content:'正文'}}}   ← 最终正文（set 一次）
+  //   {op:'set',  mask:'message.status', message:{id, status:'MESSAGE_STATUS_COMPLETED'}}
+  //   {eventOffset,\n done:{}}                                        ← done 标志
+  //   {}                                                              ← 终结空帧
+  // 会话身份来自 chat.id；模型从 chat.lastRequest.options.model 取；工具清单在
+  // chat.lastRequest.tools（TOOL_TYPE_SEARCH / TOOL_TYPE_CRON_JOB）。
+  class KimiConnectDecoder extends JsonLinesDecoder {
+    obj(j) {
+      if (!isRecord(j)) return;
+      if (j.error) { this.failed = true; return; }
+      const cid = readId(j.chat?.id);
+      if (cid) this.conversationId = cid;
+      if (isRecord(j.done) || j.done === true) { this.done = true; return; }
+      if (isRecord(j.message) && /assistant/i.test(String(j.message.role || ''))) {
+        // 终态裁定：assistant 消息 status 变 COMPLETED/ERROR 即该轮走完（正文由
+        // block.text 独立给出，此处只做 completion 锚点）。
+        const st = String(j.message.status || '');
+        if (/COMPLETED|DONE|ERROR/.test(st) && !this.text) { /* 正文可能未及下落，不误判 */ }
+      }
+      const block = j.block;
+      const text = block?.text?.content;
+      if (typeof text === 'string' && text) { this.emitText(text); return; }
+      const think = block?.think?.content;
+      if (typeof think === 'string' && think) { this.emitThink(think); return; }
+      for (const img of imagesIn(block || j)) this.pushImage(img);
+    }
+  }
+
   // 注册表：driver 按 providers.js 里站点的 decoder 字段取用。
   // 'dom' 站点（Gemini 等）没有稳定网络流，由 driver 在页面里做终态抓取。
   globalThis.WebCodeDeepSeekStreamDecoder = DeepSeekStreamDecoder;
@@ -736,6 +807,7 @@
     chatgpt: ChatGptDecoder,
     glm: GlmDecoder,
     kimi: KimiDecoder,
+    'kimi-connect': KimiConnectDecoder,
     doubao: DoubaoDecoder,
     grok: GrokDecoder,
     claude: ClaudeSseDecoder,

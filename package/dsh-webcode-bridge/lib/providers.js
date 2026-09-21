@@ -147,7 +147,7 @@ export const DEEPSEEK = site({
   // default + ref_file_ids，由网页自行路由。因此不再拆成三个模型 id，
   // 带图能力对本模型自动生效（有图就传，无图不受限）。
   models: [
-    { id: 'deepseek', name: 'DeepSeek（深度思考）', labels: ['专家模式', 'DeepSeek'], thinking: true, context: 1_000_000, acceptsImages: true },
+    { id: 'deepseek', name: 'DeepSeek（深度思考）', labels: ['专家模式', 'DeepSeek'], thinking: true, context: 1_000_000, budget: 1_000_000, acceptsImages: true },
   ],
 });
 
@@ -169,7 +169,15 @@ export const GLM = site({
   // 限定到 p 既命中该节点，又避开「不限定的 :has-text 会命中祖先 div」的老坑；
   // 已登录页此处显示用户名，误判方向也只是「提示去检测」，不会谎报已登录。
   loginProbe: {
-    bad: 'p:has-text("登录"), button:has-text("登录"), a:has-text("登录"), button:has-text("Sign in"), a:has-text("Sign in")',
+    // bad —— 未登录特征（2026-09-13 真机）：GLM 游客页自带完整输入框，旧判定必然把
+    // 未登录记成已登录；游客页侧栏叶子节点 `<p class="sidebar-user-name">登录</p>`
+    // 是登录入口（同层 `sidebar-user-desc`「登录送积分好礼」）。
+    // ok  —— 已登录特征（2026-09-21 真机 probe-glm-ok-feature）：同一节点登录后
+    // 变为用户名文本（如 `<p class="sidebar-user-name">RSYHN</p>`），且已登录页
+    // 常驻 `.userInfoBar`（用户名 + 积分）。bad 优先命中「登录」文本，ok 命中
+    // 「已有用户名」——两向都不再依赖输入框兜底。
+    bad: 'p.sidebar-user-name:has-text("登录"), p:has-text("登录"), button:has-text("登录"), a:has-text("登录"), button:has-text("Sign in"), a:has-text("Sign in")',
+    ok: '.userInfoBar, p.sidebar-user-name',
   },
   // 模型选择契约 —— 真机 dump（2026-09-13，test-mock/out/model-dropdown-glm-*.json）：
   //   触发  <div class="think-mode-trigger mode-button …"><span class="think-label">GLM-5.3</span>极致</div>
@@ -201,9 +209,9 @@ export const GLM = site({
   models: [
     // labels 用网页逐字文本（model-picker 的精确匹配按它比对）：网页上
     // 版本条目显示 GLM-5.3，Flash 条目显示 GLM-Flash。
-    { id: 'glm-5.3', name: 'GLM-5.3', labels: ['GLM-5.3'], context: GLM_CONTEXT_WINDOW, acceptsImages: true },
-    { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', labels: ['GLM-Flash'], context: GLM_CONTEXT_WINDOW, acceptsImages: true },
-    { id: 'auto', name: '智谱清言', labels: ['GLM'], context: GLM_CONTEXT_WINDOW },
+    { id: 'glm-5.3', name: 'GLM-5.3', labels: ['GLM-5.3'], context: GLM_CONTEXT_WINDOW, budget: GLM_CONTEXT_WINDOW, acceptsImages: true },
+    { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', labels: ['GLM-Flash'], context: GLM_CONTEXT_WINDOW, budget: GLM_CONTEXT_WINDOW, acceptsImages: true },
+    { id: 'auto', name: '智谱清言', labels: ['GLM'], context: GLM_CONTEXT_WINDOW, budget: GLM_CONTEXT_WINDOW },
   ],
 });
 
@@ -228,8 +236,13 @@ export const KIMI = site({
   // 镜像按旧域名取页会拿到空跳转壳，右侧栏打不开。改用真实站点。
   id: 'kimi', name: 'Kimi (月之暗面)', origin: 'https://www.kimi.com',
   staticOrigins: ['https://statics.moonshot.cn'],
-  // 真实流端点带动态会话 id：/api/chat/{id}/completion/stream（Kimi-Free-API 同构），子串匹配
-  completionPaths: ['/api/chat/', '/completion/stream'],
+  // 真实流端点带动态会话 id：/api/chat/{id}/completion/stream（Kimi-Free-API 同构），子串匹配。
+  // 2026-09-21 真机 CDP 确证：kimi 网页已从旧 SSE **全面迁移到 Connect-RPC**——
+  // 发送/回复走 `POST /apiv2/kimi.gateway.chat.v1.ChatService/Chat`（application/connect+json），
+  // 响应为二进制帧流 [flags(1)][len(4BE)][json]。旧 /api/chat 端点不再被网页使用，
+  // 必须命中新端点并走 connect 二进制帧切分，否则捕获链零回传（页面有回复却超时）。
+  completionPaths: ['/apiv2/kimi.gateway.chat.v1.ChatService/Chat', '/api/chat/', '/completion/stream'],
+  streamTransport: 'connect',
   // 2026-09-13 真机校准：kimi 网页**没有 textarea**，输入框是 contenteditable
   // 的富文本编辑器（div.chat-input-editor）。旧选择器只有 textarea，输入框
   // 计数恒为 0 → 已登录的 profile 被判成「未登录」，设置页/右栏徽标永远显示
@@ -237,7 +250,7 @@ export const KIMI = site({
   input: 'div.chat-input-editor, div[contenteditable="true"], textarea.chat-input, textarea[placeholder], textarea',
   attachSelector: "input[type='file']",
   attachPreview: "[class*='file'], [class*='attachment'], [data-file]",
-  decoder: 'kimi', stream: true,
+  decoder: 'kimi-connect', stream: true,
   // 未登录特征：游客页有可见的「登录」入口（真机实测未登录镜像页文案为
   // 「登录以同步历史会话」+「登录」）。已登录页这两个入口都消失。
   // 注意必须限定 button/a——不限定的 :has-text 会命中包含该文案的祖先 div，
@@ -294,6 +307,7 @@ export const QWEN = site({
   // 游客页右上角有可见的「登录 / 注册」按钮，命中即判未登录。
   loginProbe: {
     bad: 'button:has-text("登录"), button:has-text("注册"), a:has-text("登录"), button:has-text("Sign in"), a:has-text("Sign in")',
+    ok: '.user-avatar, [class*="user-avatar"], [class*="userAvatar"], .header-user-avatar',
   },
   models: [
     { id: 'auto', name: 'Qwen', labels: ['Qwen'], context: 1_000_000 },
@@ -313,6 +327,7 @@ export const DOUBAO = site({
   // 未登录特征：游客页有可见的「登录」按钮；登录后该按钮消失。
   loginProbe: {
     bad: 'button:has-text("登录"), a:has-text("登录"), button:has-text("Sign in"), a:has-text("Sign in")',
+    ok: '[class*="avatar"], .user-avatar, img[class*="avatar"]',
   },
   // 模式选择契约 —— 真机 dump（2026-09-13，test-mock/out/doubao-mode-*.json）：
   //   豆包没有下拉式模型选择器；它的「模型」是**对话 / 工作**两个模式，
@@ -378,7 +393,7 @@ export const CLAUDE = site({
 // 浏览器端为 OpenAI 兼容 SSE（/api/chat/completions），故复用 'openai-sse'
 // 解码器；选择器用「特征选择器」而不是站点版本 class（改版频繁，特征更稳）。
 export const ZAI = site({
-  id: 'zai', name: 'Z.ai (GLM 海外版)', origin: 'https://chat.z.ai',
+  id: 'zai', name: 'Z.ai', origin: 'https://chat.z.ai',
   // 选择器里显示的站点键。默认等于 id，只有这里不同：站点的真实身份就是
   // 「z.ai」这个域名（用户要的正是「一眼看出是哪个网站」），而 `zai` 只是
   // 我们内部的路由 id。二者不同不影响解析——解析只认 id（见 resolveWebModel）。
@@ -403,12 +418,9 @@ export const ZAI = site({
   // 附件落到页面上的可见证据（上传确认用，见 browser-driver 的 waitForAttachment）
   attachPreview: "img[src^='blob:'], [class*='attachment'], [class*='file-card']",
   decoder: 'openai-sse', stream: true, experimental: true,
-  // 登录判定特征：z.ai 游客页自带完整输入框（真机 2026-09-12 实测：未登录
-  // 时 textarea + #send-message-button 都在，「有输入框=已登录」必然误报），
-  // 未登录特征是可见的「登录」按钮；bad 命中 → 判未登录。注意 :text-matches
-  // 对嵌套 span 按钮不命中（真机实测 count=0），has-text 才稳定。
   loginProbe: {
     bad: 'button:has-text("登录"), a:has-text("登录"), button:has-text("Sign in"), a:has-text("Sign in")',
+    ok: '.user-avatar, [class*="avatar"], button[aria-label*="User"]',
   },
   // 模型选择契约 —— 全部来自 probe-model-dropdown.mjs 的真机 dump
   //（2026-09-13，证据 test-mock/out/model-dropdown-zai-*.json）：
@@ -425,13 +437,13 @@ export const ZAI = site({
     selected: ['button.modelSelectorButton'],
   },
   models: [
-    { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', labels: ['GLM-5.3-Flash'], context: GLM_CONTEXT_WINDOW, acceptsImages: true },
-    { id: 'glm-5.3', name: 'GLM-5.3', labels: ['GLM-5.3'], context: GLM_CONTEXT_WINDOW, acceptsImages: true },
-    { id: 'glm-5.2', name: 'GLM-5.2', labels: ['GLM-5.2'], context: GLM_CONTEXT_WINDOW, acceptsImages: true },
+    { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', labels: ['GLM-5.3-Flash'], context: GLM_CONTEXT_WINDOW, budget: GLM_CONTEXT_WINDOW, acceptsImages: true },
+    { id: 'glm-5.3', name: 'GLM-5.3', labels: ['GLM-5.3'], context: GLM_CONTEXT_WINDOW, budget: GLM_CONTEXT_WINDOW, acceptsImages: true },
+    { id: 'glm-5.2', name: 'GLM-5.2', labels: ['GLM-5.2'], context: GLM_CONTEXT_WINDOW, budget: GLM_CONTEXT_WINDOW, acceptsImages: true },
     // 站点默认：不切换网页模型，按页面当前选择走。名字保持干净的站点名
     //（regression.test.mjs 有护栏：模型名不得含「网页当前模型」这类元描述，
     // 也不得用括注——选择器里应当是干净名字）。
-    { id: 'auto', name: 'Z.ai', labels: ['GLM'], context: GLM_CONTEXT_WINDOW },
+    { id: 'auto', name: 'Z.ai', labels: ['GLM'], context: GLM_CONTEXT_WINDOW, budget: GLM_CONTEXT_WINDOW },
   ],
 });
 
@@ -524,6 +536,7 @@ export function listAllModels(accounts) {
           name: modelDisplayName(st, m, slot),
           labels: m.labels,
           context: m.context || null,
+          budget: m.budget || m.context || null,
           thinking: m.thinking === true,
           vision: m.vision === true,
           // acceptsImages = 该模型的**网页端**能收下图片附件（与 vision 不同：
@@ -539,7 +552,7 @@ export function listAllModels(accounts) {
   // 兼容别名条目：它指向默认槽（历史值语义），槽信息不参与。
   // 显示名刻意写死为「无槽后缀」——它与 `deepseek:deepseek` 同名是**过滤的前提**
   // （见 MODEL_ALIAS_IDS 注释），一旦带上槽后缀这个前提就没了。
-  out.push({ id: 'deepseek-web', siteId: 'deepseek', slot: DEFAULT_SLOT, siteName: DEEPSEEK.name, name: modelDisplayName(DEEPSEEK, DEEPSEEK.models[0]), labels: [], thinking: true, vision: false, imageOut: false, experimental: false });
+  out.push({ id: 'deepseek-web', siteId: 'deepseek', slot: DEFAULT_SLOT, siteName: DEEPSEEK.name, name: modelDisplayName(DEEPSEEK, DEEPSEEK.models[0]), labels: [], thinking: true, vision: false, imageOut: false, experimental: false, context: DEEPSEEK.models[0].context || null, budget: DEEPSEEK.models[0].budget || DEEPSEEK.models[0].context || null });
   return out;
 }
 
@@ -597,6 +610,11 @@ function resolved(st, m, slot = DEFAULT_SLOT) {
     webName: m.name,
     thinking: m.thinking === true, vision: m.vision === true, imageOut: m.imageOut === true,
     acceptsImages: m.acceptsImages === true,
+    // 展示口径（声明窗口）与预算口径（发送前预算闸 B-2 比对的数）字段级分开：
+    // context = 站点声明 / 实测的窗口，展示给用户看的数；
+    // budget  = 预算闸真正对比的数，无声明时回落 context（值一致，语义可选）。
+    context: m.context ?? null,
+    budget: m.budget ?? m.context ?? null,
   });
 }
 

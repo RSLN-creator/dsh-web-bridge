@@ -64,7 +64,7 @@ test('reanchorSent：短输入安全线（<2 条锚或 <2 条消息直接 null�
   assert.equal(reanchorSent(one, undefined), null, '无锚 → null');
 });
 
-test('contractFingerprintOf：只锁契约四项，消息内容不参与', () => {
+test('contractFingerprintOf：只锁契约项（0.16.38 起含站点专属指令），消息内容不参与', () => {
   const base = { model: 'deepseek:deepseek', system: 'sys', toolNameKey: 'a,b', extraPrompt: '' };
   const f1 = contractFingerprintOf(base);
   assert.equal(f1, contractFingerprintOf({ ...base }), '同契约必须同指纹');
@@ -72,6 +72,12 @@ test('contractFingerprintOf：只锁契约四项，消息内容不参与', () =>
   assert.notEqual(f1, contractFingerprintOf({ ...base, toolNameKey: 'a,b,c' }), '工具集变化必须换指纹');
   assert.notEqual(f1, contractFingerprintOf({ ...base, extraPrompt: '新全局指令' }), '全局指令变化必须换指纹');
   assert.notEqual(f1, contractFingerprintOf({ ...base, system: '新系统提示词' }), '系统提示词变化必须换指纹');
+  // 0.16.38：站点专属指令与全局指令同一性质——它进的是网页侧的首轮正文，改了
+  // 就必须整段重建（否则旧首轮里那一句永远留着，新的永远送不进去）。
+  assert.notEqual(f1, contractFingerprintOf({ ...base, sitePrompt: '本网站指令' }), '站点专属指令变化必须换指纹');
+  // 反向：未设置站点指令（undefined）与空串必须同指纹——否则「从没配过」会被当成
+  // 「契约变了」，每轮整段重建一次。
+  assert.equal(f1, contractFingerprintOf({ ...base, sitePrompt: '' }), '未设置站点指令与空串必须等价');
   // 消息内容不参与：契约相同、消息不同 → 指纹相同（内容归内容锚管）
   assert.equal(f1, contractFingerprintOf(base), '口径必须稳定（不含 messages）');
 });

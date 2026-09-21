@@ -42,7 +42,7 @@ export function messageHash(m) {
  * 从旧整体指纹里拆出来的部分。messages **不**参与——消息内容的变化归内容锚管，
  * 契约变化（换模型、系统提示词改写、工具集增减、全局指令修改）才要求整段重建。
  *
- * @param {{model?: string, system?: unknown, toolNameKey?: string, extraPrompt?: string}} parts
+ * @param {{model?: string, system?: unknown, toolNameKey?: string, extraPrompt?: string, sitePrompt?: string}} parts
  * @returns {string} sha256 hex
  */
 export function contractFingerprintOf(parts) {
@@ -51,6 +51,9 @@ export function contractFingerprintOf(parts) {
     system: parts.system ?? null,
     tools: parts.toolNameKey ?? '',
     extraPrompt: parts.extraPrompt ?? '',
+    // 站点专属指令（0.16.38）：与全局指令同一性质——它进的是网页侧的首轮正文，
+    // 改了就必须整段重建（否则旧首轮里那一句永远留着，新的永远送不进去）。
+    sitePrompt: parts.sitePrompt ?? '',
   })).digest('hex');
 }
 

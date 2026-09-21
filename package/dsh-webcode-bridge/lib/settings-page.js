@@ -12,154 +12,381 @@ export function renderSettingsPage(models) {
 <meta charset="utf-8">
 <title>Webcode Bridge 设置</title>
 <style>
-body { font-family: system-ui, sans-serif; background: #f8fafc; padding: 20px; max-width: 600px; margin: 0 auto; }
-.card { background: #fff; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); padding: 24px; }
-h1 { font-size: 20px; margin-top: 0; }
-label { display: block; margin: 16px 0 6px; font-weight: 600; }
-textarea, select, input { width: 100%; padding: 8px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; box-sizing: border-box; }
-textarea { min-height: 80px; font-family: inherit; }
-pre.preset { max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.55; background: #f1f3f5; border-radius: 8px; padding: 10px; margin: 8px 0 0; }
-button { background: #2563eb; color: white; border: none; padding: 10px 20px; border-radius: 6px; font-size: 16px; cursor: pointer; margin-top: 16px; width: 100%; }
-button:hover { background: #1d4ed8; }
-#status { margin-top: 12px; padding: 8px; border-radius: 6px; }
-.success { background: #dcfce7; color: #166534; }
-.error { background: #fee2e2; color: #991b1b; }
-.hint { font-size: 13px; color: #6b7280; margin-top: 4px; }
-/* 0.16.25 首轮提示词：按网站逐行。每行 = 网站名 + 协议下拉 + 「实际使用」标注，
-   模板折叠在 details 里——十个站点各铺一份全文会把设置页淹掉。 */
-.site-prompt { border: 1px solid #e5e7eb; border-radius: 8px; padding: 8px 10px; margin-top: 8px; }
-.site-prompt-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.site-prompt-name { font-size: 14px; font-weight: 600; min-width: 9em; }
-.site-prompt-select { width: auto; min-width: 14em; flex: 1 1 14em; padding: 4px 6px; font-size: 13px; }
+* { box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: #f5f5f7;
+  color: #1d1d1f;
+  padding: 32px 16px 64px;
+  max-width: 640px;
+  margin: 0 auto;
+  -webkit-font-smoothing: antialiased;
+}
+.header { margin-bottom: 24px; text-align: left; }
+.header h1 { font-size: 24px; font-weight: 600; margin: 0 0 6px; letter-spacing: -0.4px; }
+.header p { font-size: 14px; color: #86868b; margin: 0; }
+
+.section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #6e6e73;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  padding: 0 12px 8px;
+  margin-top: 24px;
+}
+.section-group {
+  background: #ffffff;
+  border-radius: 14px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.03), 0 4px 12px rgba(0,0,0,0.02);
+  border: 0.5px solid rgba(0,0,0,0.08);
+  overflow: hidden;
+  margin-bottom: 20px;
+}
+.form-row {
+  padding: 14px 16px;
+  border-bottom: 0.5px solid rgba(0,0,0,0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.form-row:last-child { border-bottom: none; }
+.form-row-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+label { font-size: 14px; font-weight: 500; color: #1d1d1f; margin: 0; }
+.hint { font-size: 12px; line-height: 1.45; color: #86868b; margin-top: 2px; }
+
+textarea, select, input {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid #d2d2d7;
+  border-radius: 8px;
+  font-size: 14px;
+  color: #1d1d1f;
+  background: #fff;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+textarea:focus, select:focus, input:focus {
+  outline: none;
+  border-color: #0071e3;
+  box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.15);
+}
+textarea { min-height: 84px; font-family: inherit; line-height: 1.45; }
+
+button.primary {
+  background: #0071e3;
+  color: white;
+  border: none;
+  padding: 12px 20px;
+  border-radius: 10px;
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  margin-top: 24px;
+  width: 100%;
+  transition: background-color 0.15s;
+}
+button.primary:hover { background: #0077ed; }
+button.primary:active { background: #006edb; }
+
+button.mini {
+  width: auto;
+  margin: 0;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  background: #f5f5f7;
+  color: #1d1d1f;
+  border: 0.5px solid #d2d2d7;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+button.mini:hover { background: #e8e8ed; border-color: #c7c7cc; }
+
+pre.preset {
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.55;
+  background: #f5f5f7;
+  border-radius: 8px;
+  padding: 10px;
+  margin: 8px 0 0;
+  border: 0.5px solid rgba(0,0,0,0.06);
+}
+
+.site-prompt {
+  border: 0.5px solid rgba(0,0,0,0.08);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-top: 8px;
+  background: #fafafa;
+}
+.site-prompt-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.site-prompt-name { font-size: 13px; font-weight: 600; }
 .site-prompt details { margin-top: 6px; }
-.site-prompt summary { font-size: 13px; color: #2563eb; cursor: pointer; }
-.site-prompt pre.preset { max-height: 240px; }
-.state { display: inline-block; font-size: 12px; padding: 2px 10px; border-radius: 10px; }
-.state.ok { background: #dcfce7; color: #166534; }
-.state.bad { background: #fee2e2; color: #991b1b; }
-.state.idle { background: #e5e7eb; color: #4b5563; }
-button.mini { width: auto; margin-top: 0; padding: 6px 12px; font-size: 13px; }
+.site-prompt summary { font-size: 12px; color: #0071e3; cursor: pointer; user-select: none; }
+
+.native-spec-box {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.native-spec-card {
+  border: 0.5px solid rgba(0,0,0,0.08);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fafafa;
+}
+.native-spec-card summary {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1d1d1f;
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.native-spec-tag {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #f0f0f2;
+  color: #6e6e73;
+  margin-left: 6px;
+}
+.native-spec-desc {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #48484a;
+  margin: 6px 0 4px;
+}
+
+.state { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: 500; }
+.state.ok { background: #eafaf1; color: #2e7d32; }
+.state.bad { background: #fdf2f2; color: #d32f2f; }
+.state.idle { background: #f0f0f2; color: #6e6e73; }
+
+#status { margin-top: 14px; padding: 10px 14px; border-radius: 8px; font-size: 13px; }
+.success { background: #eafaf1; color: #2e7d32; }
+.error { background: #fdf2f2; color: #d32f2f; }
 </style>
 </head>
 <body>
-<div class="card">
-  <h1>⚙️ Webcode Bridge 设置</h1>
+  <div class="header">
+    <h1>⚙️ Webcode Bridge 设置</h1>
+    <p>管理模型、提示词、会话节奏与子代理分配策略</p>
+  </div>
+
   <form id="settingsForm">
-    <label for="extraPrompt">全局指令（首轮注入，唯一可编辑的提示词部分）</label>
-    <textarea id="extraPrompt" placeholder="例如：请始终使用中文回答..."></textarea>
-    <div class="hint">这段文本会追加到每个新网页会话的第一条用户消息之前。保存后下方模板会立刻反映它。</div>
-
-    <label>首轮提示词（只读，默认显示）</label>
-    <div class="hint">
-      发送首条消息时注入网页的完整内容，由桥按当前会话的工具清单自动生成。
-      下面**按网站逐行列出**，每行后面的选择框是该网站可用的协议——切换只预览模板，
-      不改变真实选路（每个网站实际用哪一支由桥按站点决定，写在行首）。
-    </div>
-    <div id="sitePrompts">加载中…</div>
-    <div id="variantTools" class="hint"></div>
-
-    <label for="defaultModel">默认模型</label>
-    <select id="defaultModel">
-      ${models.map((m) => `<option value="${m.id}">${m.name}${m.experimental ? '（实验）' : ''}</option>`).join('\n      ')}
-    </select>
-    <div class="hint">新建会话时默认选择的模型。已接入：DeepSeek、GLM、ChatGPT、Kimi、通义千问、豆包、Grok、Claude、Gemini。</div>
-
-    <label for="previewRefreshRate">预览刷新率 (毫秒)</label>
-    <input type="number" id="previewRefreshRate" min="1000" max="30000" step="500" value="5000">
-    <div class="hint">控制预览面板自动刷新的间隔。</div>
-
-    <label for="thinkMode">深度思考</label>
-    <select id="thinkMode">
-      <option value="auto">自动（按所选模型的默认思考行为）</option>
-      <option value="on">始终开启（强制打开网页「深度思考」开关）</option>
-      <option value="off">始终关闭（追求速度）</option>
-    </select>
-    <div class="hint">手动覆盖网页端的「深度思考」开关。自动=按模型属性（DeepSeek 默认开启深度思考）；始终开启/关闭则无视模型。</div>
-
-    <label for="subAgentMode">子代理网页会话</label>
-    <select id="subAgentMode">
-      <option value="own">独立（推荐）：每个子代理自己的新网页对话</option>
-      <option value="share">共用：所有子代理与主会话共用一个网页对话</option>
-    </select>
-    <div class="hint">同一 DSH 会话里并行 agent 的网页会话分配方式。</div>
-
-    <label for="subAgentSite">子代理站点</label>
-    <select id="subAgentSite"></select>
-    <div class="hint">
-      子代理网页会话与主线<b>相互隔离</b>：各自独立的网页对话，上下文互不可见。
-      「跟随主线」时子代理开在主线站点——同一站点两路消息频率叠加，容易触发站点限流
-      （「消息发送过于频繁」）；给子代理选另一个站点即可分流。子代理站点的登录
-      复用与主站完全相同的一套登录逻辑（登录 / 检测 / 独立窗口），登录态按站点各自
-      持久化：与主线同站点时两者天然共享登录，跨站点互不影响。
-    </div>
-    <div style="display:flex; gap:8px; align-items:center; margin-top:8px;">
-      <button type="button" id="syncMainToSub" style="width:auto; margin-top:0; padding:6px 12px; font-size:13px;">主线站点 → 子代理</button>
-      <button type="button" id="syncSubToMain" style="width:auto; margin-top:0; padding:6px 12px; font-size:13px;">子代理站点 → 主线</button>
-      <span class="hint" style="margin-top:0;">手动单向同步「站点选择」；登录态不迁移（同站点天然共享，跨站点无法迁移）。</span>
-    </div>
-
-    <div id="subAccountFollow" class="hint" style="display:none;">跟随主线站点：子代理与主线共用同一账户，登录状态随主线站点，无需单独登录。</div>
-    <div id="subAccountBlock" style="display:none; margin-top:10px; padding:10px 12px; border:1px solid #e5e7eb; border-radius:8px;">
-      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-        <b id="subSiteName" style="font-size:14px;"></b>
-        <span id="subSiteState" class="state idle">待检查</span>
-        <button type="button" id="subLogin" class="mini">登录</button>
-        <button type="button" id="subVerify" class="mini">检测</button>
-        <button type="button" id="subWindow" class="mini">独立窗口</button>
+    <!-- 分组 1: 模型与模式 -->
+    <div class="section-title">模型与模式</div>
+    <div class="section-group">
+      <div class="form-row">
+        <label for="defaultModel">默认模型</label>
+        <select id="defaultModel">
+          ${models.map((m) => `<option value="${m.id}">${m.name}${m.experimental ? '（实验）' : ''}</option>`).join('\n          ')}
+        </select>
+        <div class="hint">新建会话时默认启用的模型。支持 DeepSeek、GLM、Z.ai、豆包、Kimi、通义千问等。</div>
       </div>
-      <div id="subAccountStatus" class="hint"></div>
-      <div class="hint">子代理站点的账户与登录管理：与主线站点同一套逻辑（真实 Edge 窗口一次性登录），登录态按站点各自持久化；与主线同站点时两者天然共享登录。</div>
+      <div class="form-row">
+        <label for="thinkMode">深度思考</label>
+        <select id="thinkMode">
+          <option value="auto">自动（按所选模型的默认思考行为）</option>
+          <option value="on">始终开启（强制打开网页「深度思考」开关）</option>
+          <option value="off">始终关闭（追求快速回复）</option>
+        </select>
+        <div class="hint">控制网页端的深度思考模式；自动模式将遵循模型的原生属性（如 DeepSeek 默认开启）。</div>
+      </div>
     </div>
 
-    <label>提示词投递形态</label>
-    <div style="display:flex; gap:16px; align-items:center; flex-wrap:wrap; margin-top:6px;">
-      <label style="display:flex; gap:6px; align-items:center; font-weight:400; margin:0;">
-        <input type="radio" name="promptTransport" value="attach" style="width:auto;"> 附件投递（默认）
-      </label>
-      <label style="display:flex; gap:6px; align-items:center; font-weight:400; margin:0;">
-        <input type="radio" name="promptTransport" value="inline" style="width:auto;"> 纯文本（永远写进输入框）
-      </label>
-      <button type="button" id="attachProbeBtn" class="mini">附件探针（只上传·不发送）</button>
-    </div>
-    <div class="hint">
-      超过阈值的正文改走<b>附件上传</b>：绕开网页输入框的写入卡死与截断（真机事故：
-      一次 41.7 万字符纯文本灌进输入框，整轮 112 秒零事件）。任何一步失败都会
-      <b>自动回落纯文本</b>，消息不会发不出去。选「纯文本」= 逐字回到旧行为。
-      <br>「附件探针」会向当前网页会话上传一个 webcode-probe.md（只上传、绝不发送），
-      上传后立即尝试清理，并把证据节点与清理结果如实报回来——这是「附件到底行不行」
-      唯一不消耗真实会话的读数。
-    </div>
-    <div id="transportLine" class="hint">投递状态加载中…</div>
-    <div id="transportLastLine" class="hint"></div>
-    <div id="transportProbeLine" class="hint"></div>
+    <!-- 分组 2: 指令与提示词 -->
+    <div class="section-title">指令与提示词</div>
+    <div class="section-group">
+      <div class="form-row">
+        <label for="extraPrompt">全局指令（首轮注入）</label>
+        <textarea id="extraPrompt" placeholder="例如：请始终使用中文回答..."></textarea>
+        <div class="hint">追加一段 [全局指令] 注入每个新网页会话的首条消息。各网站专属指令请在原生面板的站点页配置。</div>
+      </div>
+      <div class="form-row">
+        <div class="form-row-header">
+          <label>各模型原生工具调用规范与教学参考</label>
+        </div>
+        <div class="hint">汇总各大模型官方训练模板、原生标签/JSON 结构与网页端调用教学规范。</div>
+        <div class="native-spec-box">
+          <details class="native-spec-card">
+            <summary>智谱清言 (GLM) & Z.ai <span class="native-spec-tag">XML 标签 / JSON 代码块</span></summary>
+            <div class="native-spec-desc">
+              <b>官方 Chat Template：</b><code>&lt;tool_call&gt;{name}&lt;arg_key&gt;{k}&lt;/arg_key&gt;&lt;arg_value&gt;{v}&lt;/arg_value&gt;&lt;/tool_call&gt;</code><br>
+              <b>网页避拦截推荐：</b>使用 <code>\`\`\`json {"mcp_action":"call","name":"...","arguments":{...}} \`\`\`</code> 代码块（避免被网页内置沙箱抢夺）。<br>
+              <b>首轮教学提示词：</b>
+              <pre class="preset">[本地工具传输协议]
+必须使用 \`\`\`json 代码块发起工具调用：
+先写一行 \`\`\`json，下一行是单个 JSON 对象 {"mcp_action":"call","name":"实际工具名","purpose":"原因","arguments":{…}}，再以一行 \`\`\` 结束。
+警告：不要使用 &lt;tool_call&gt;…&lt;/tool_call&gt; 或任何 XML 标签包裹调用——本网页会把这类标签当成它自己的内置工具抢走执行并报 unknown tool call；只有 \`\`\`json 代码块能到达本地工具网关。
+工具名和参数必须严格匹配 schema。一旦判定需要真实数据，立即发起调用并停止输出，等待真实工具结果；拿到结果后直接给出最终答复。</pre>
+              <b>增量轮再教学：</b>
+              <pre class="preset">[系统提示] 请保持工具调用格式：先写一行 \`\`\`json，其内为单个 JSON 对象 {"mcp_action":"call","name":"工具名","purpose":"原因","arguments":{…}}，再以一行 \`\`\` 结束；不要用 &lt;tool_call&gt; 等标签包裹。</pre>
+            </div>
+          </details>
 
-    <label for="sendGapPreset">发送间隔（限流防护）</label>
-    <div style="display:flex; gap:8px;">
-      <select id="sendGapPreset" style="flex:0 0 150px;">
-        <option value="0">0 秒（关闭）</option>
-        <option value="2000">2 秒</option>
-        <option value="5000">5 秒</option>
-        <option value="10000">10 秒</option>
-        <option value="30000">30 秒</option>
-        <option value="60000">60 秒</option>
-        <option value="custom">自定义…</option>
-      </select>
-      <input type="number" id="sendGapMs" min="0" max="600000" step="500" style="flex:1;" placeholder="毫秒（0–600000）">
-    </div>
-    <label for="sendGapBasis">间隔基准（从哪个时刻起算）</label>
-    <select id="sendGapBasis">
-      <option value="send-to-send">距上次发出（send-to-send，默认）</option>
-      <option value="end-to-start">距上次回复完成（end-to-start）</option>
-    </select>
-    <div class="hint">两次向同一网站<b>发送</b>之间的最小间隔。两个基准防的是两件不同的事，互不替代：<br>
-      · <b>距上次发出（send-to-send）</b>——防站点的「消息发送过于频繁」滑窗限流。它按请求到达计，与生成耗时无关，所以上一轮跑得久时本轮<b>无需再等</b>（已满足）。<br>
-      · <b>距上次回复完成（end-to-start）</b>——防对话节奏贴得太紧，即「它刚答完我立刻回」。此时上一轮跑了多久不影响本轮：<b>答完那一刻起</b>重新数满这个间隔。<br>
-      触发限流后桥会按 max(发送间隔, 10 秒) 起步自动退避重试（最多 2 次）。实际等待、目标值、基准与「距上次发送」都在右侧统计的「发送前等待」里逐项显示；该设置会落盘，<b>重启后第一轮同样生效</b>。</div>
+          <details class="native-spec-card">
+            <summary>豆包 (Doubao) <span class="native-spec-tag">Doubao-Seed 2.0 / &lt;seed:tool_call&gt;</span></summary>
+            <div class="native-spec-desc">
+              <b>官方训练规范：</b><code>&lt;seed:tool_call&gt;{"name":"...","arguments":{...}}&lt;/seed:tool_call&gt;</code> 或标准 <code>&lt;tool_call&gt;</code><br>
+              <b>首轮教学提示词：</b>
+              <pre class="preset">[本地工具传输协议]
+必须使用 &lt;seed:tool_call&gt;{"name":"实际工具名","arguments":{…}}&lt;/seed:tool_call&gt; 或 &lt;tool_call&gt;{"mcp_action":"call","name":"实际工具名","arguments":{…}}&lt;/tool_call&gt; 发起工具调用。
+工具名和参数必须严格匹配 schema。一旦判定需要真实数据，立即发起调用并停止输出，等待真实工具结果；拿到全部所需结果后，直接给出简洁答复。</pre>
+              <b>增量轮再教学：</b>
+              <pre class="preset">[系统提示] 请保持工具调用格式：以 &lt;tool_call&gt; 或 &lt;seed:tool_call&gt; 开始、闭合标签结束，其内为单个 JSON 对象。</pre>
+            </div>
+          </details>
 
-    <button type="submit">保存设置</button>
+          <details class="native-spec-card">
+            <summary>月之暗面 (Kimi) <span class="native-spec-tag">Kimi-K2 / Connect-RPC 流式</span></summary>
+            <div class="native-spec-desc">
+              <b>官方规范：</b><code>&lt;tool_call&gt;\n{"name":"...","arguments":{...}}\n&lt;/tool_call&gt;</code><br>
+              <b>网页传输特征：</b>Connect-RPC 二进制流（<code>[flags(1)][len(4BE)][json]</code>），正文与思考分流。<br>
+              <b>首轮教学提示词：</b>
+              <pre class="preset">[本地工具传输协议]
+必须使用 &lt;tool_call&gt;{"name":"实际工具名","arguments":{…}}&lt;/tool_call&gt; 发起工具调用。
+工具名和参数必须严格匹配声明的 schema。调用输出后立即停止生成，等待返回结果后继续。</pre>
+              <b>增量轮再教学：</b>
+              <pre class="preset">[系统提示] 请保持工具调用格式：以 &lt;tool_call&gt; 开始、&lt;/tool_call&gt; 结束，内含 JSON 工具调用声明。</pre>
+            </div>
+          </details>
+
+          <details class="native-spec-card">
+            <summary>通义千问 (Qwen) <span class="native-spec-tag">ChatML # Tools / &lt;tool_call&gt;</span></summary>
+            <div class="native-spec-desc">
+              <b>官方 ChatML 规范：</b><code>&lt;|im_start|&gt;assistant&lt;tool_call&gt;...&lt;/tool_call&gt;&lt;|im_end|&gt;</code><br>
+              <b>首轮教学提示词：</b>
+              <pre class="preset">[本地工具传输协议]
+# Tools
+必须使用 &lt;tool_call&gt;{"name":"实际工具名","arguments":{…}}&lt;/tool_call&gt; 格式发起工具调用。
+请严格根据提供的工具函数定义进行调用，参数名称与类型必须匹配。输出调用后立即结束当前回复，等待工具执行结果注入。</pre>
+            </div>
+          </details>
+
+          <details class="native-spec-card">
+            <summary>DeepSeek <span class="native-spec-tag">官方训练模板（唯一端到端基线）</span></summary>
+            <div class="native-spec-desc">
+              <b>官方训练格式：</b>
+              <pre class="preset">&lt;｜tool calls begin｜&gt;&lt;｜tool call begin｜&gt;function&lt;｜tool sep｜&gt;{name}
+\`\`\`json
+{arguments}
+\`\`\`&lt;｜tool call end｜&gt;&lt;｜tool calls end｜&gt;</pre>
+              <b>教学规范：</b>完全遵循 DeepSeek 官方 token 序列，保持 official 模式不变。
+            </div>
+          </details>
+        </div>
+      </div>
+      <div class="form-row">
+        <label>首轮提示词模板（只读）</label>
+        <div class="hint">各网站实际使用的传输协议与本地存储文件（可点击直接打开）。</div>
+        <div id="sitePrompts">加载中…</div>
+        <div id="variantTools" class="hint"></div>
+      </div>
+      <div class="form-row">
+        <label>提示词投递形态</label>
+        <div style="display:flex; gap:16px; align-items:center; flex-wrap:wrap; margin-top:4px;">
+          <label style="display:flex; gap:6px; align-items:center; font-weight:400; font-size:13px; cursor:pointer;">
+            <input type="radio" name="promptTransport" value="attach" style="width:auto;"> 附件投递（默认推荐）
+          </label>
+          <label style="display:flex; gap:6px; align-items:center; font-weight:400; font-size:13px; cursor:pointer;">
+            <input type="radio" name="promptTransport" value="inline" style="width:auto;"> 纯文本输入
+          </label>
+          <button type="button" id="attachProbeBtn" class="mini">附件探针</button>
+        </div>
+        <div class="hint">长文本改走附件上传，避免超大正文灌入输入框引起页面卡死或截断。探针可在不消耗会话的情况下核验上传能力。</div>
+        <div id="transportLine" class="hint">投递状态加载中…</div>
+        <div id="transportLastLine" class="hint"></div>
+        <div id="transportProbeLine" class="hint"></div>
+      </div>
+    </div>
+
+    <!-- 分组 3: 速度与排队 -->
+    <div class="section-title">速度与排队保护</div>
+    <div class="section-group">
+      <div class="form-row">
+        <label for="sendGapPreset">发送间隔（防频控限制）</label>
+        <div style="display:flex; gap:8px;">
+          <select id="sendGapPreset" style="flex:0 0 140px;">
+            <option value="0">0 秒（关闭）</option>
+            <option value="2000">2 秒</option>
+            <option value="5000">5 秒</option>
+            <option value="10000">10 秒</option>
+            <option value="30000">30 秒</option>
+            <option value="60000">60 秒</option>
+            <option value="custom">自定义…</option>
+          </select>
+          <input type="number" id="sendGapMs" min="0" max="600000" step="500" style="flex:1;" placeholder="毫秒（0–600000）">
+        </div>
+        <div class="hint">设置两次向同一站点发送消息的最小主动等待间隔，降低触发网页端风控的风险。</div>
+      </div>
+      <div class="form-row">
+        <label for="sendGapBasis">间隔基准</label>
+        <select id="sendGapBasis">
+          <option value="send-to-send">距上次发出（send-to-send，推荐）</option>
+          <option value="end-to-start">距上次回复完成（end-to-start）</option>
+        </select>
+        <div class="hint">「距上次发出」针对滑窗频控；「距上次回复完成」控制对话节奏避免过密回复。</div>
+      </div>
+      <div class="form-row">
+        <label for="previewRefreshRate">预览刷新率 (毫秒)</label>
+        <input type="number" id="previewRefreshRate" min="1000" max="30000" step="500" value="5000">
+        <div class="hint">控制右侧栏镜像页面自动刷新状态的周期（默认 5000ms）。</div>
+      </div>
+    </div>
+
+    <!-- 分组 4: 子代理与会话 -->
+    <div class="section-title">子代理与多会话</div>
+    <div class="section-group">
+      <div class="form-row">
+        <label for="subAgentMode">子代理网页会话分配</label>
+        <select id="subAgentMode">
+          <option value="own">独立（推荐）：每个子代理开启独立网页对话</option>
+          <option value="share">共用：所有子代理与主会话共用同一网页对话</option>
+        </select>
+        <div class="hint">控制 DSH 并行子代理在网页端的隔离方式。</div>
+      </div>
+      <div class="form-row">
+        <label for="subAgentSite">子代理站点分流</label>
+        <select id="subAgentSite"></select>
+        <div class="hint">为子代理指定专用站点以分流主线请求，避免单站点并发过密导致限流。</div>
+        <div style="display:flex; gap:8px; align-items:center; margin-top:8px;">
+          <button type="button" id="syncMainToSub" class="mini">主线站点 → 子代理</button>
+          <button type="button" id="syncSubToMain" class="mini">子代理站点 → 主线</button>
+        </div>
+        <div id="subAccountFollow" class="hint" style="display:none; margin-top:6px;">当前跟随主线站点，无需单独登录。</div>
+        <div id="subAccountBlock" style="display:none; margin-top:10px; padding:10px 12px; border:0.5px solid rgba(0,0,0,0.08); border-radius:10px; background:#fafafa;">
+          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+            <b id="subSiteName" style="font-size:13px;"></b>
+            <span id="subSiteState" class="state idle">待检查</span>
+            <button type="button" id="subLogin" class="mini">登录</button>
+            <button type="button" id="subVerify" class="mini">检测</button>
+            <button type="button" id="subWindow" class="mini">独立窗口</button>
+            <button type="button" id="subOpenSite" class="mini">打开网站</button>
+          </div>
+          <div id="subAccountStatus" class="hint"></div>
+        </div>
+      </div>
+    </div>
+
+    <button type="submit" class="primary">保存设置</button>
   </form>
   <div id="status"></div>
-</div>
 <script>
   const API_BASE = '/__webcode';
   // 裸模型 id（历史设置值，如 'deepseek-web'）→ 站点限定 id（'deepseek:deepseek'）
@@ -236,19 +463,21 @@ button.mini { width: auto; margin-top: 0; padding: 6px 12px; font-size: 13px; }
       stateEl.textContent = '实际使用：' + realLabel + (previewing ? '（下方为预览，未生效）' : '');
     }
   }
+  // 0.16.38：每行不再给「协议预览下拉」，改为「协议名 + 本地提示词文件 + 打开按钮」。
+  // 协议下拉只让用户**以为**能切换真实选路（它从来只能预览），而用户真正需要的是
+  // 「这个站点的提示词存在哪个文件、怎么打开它」。文件路径由服务端给（同一次
+  // /prompt-variants 的 sites[].file），本页只显示与触发打开。
   function renderSiteRows(d) {
     const byId = new Map((d.variants || []).map((v) => [v.id, v]));
     document.getElementById('sitePrompts').innerHTML = (d.sites || []).map((row) => {
-      const options = (d.variants || []).map((v) => '<option value="' + v.id + '"'
-        + (v.id === row.variantId ? ' selected' : '') + '>' + v.label
-        + (v.id === row.variantId ? ' · 该网站正在用' : '') + '</option>').join('');
       const realLabel = (byId.get(row.variantId) || {}).label || row.variantId;
       return '<div class="site-prompt">'
         + '<div class="site-prompt-head">'
         + '<span class="site-prompt-name">' + row.siteName + '</span>'
-        + '<select class="site-prompt-select" data-site="' + row.siteId + '">' + options + '</select>'
         + '<span class="hint" id="siteState-' + row.siteId + '">实际使用：' + realLabel + '</span>'
+        + '<button type="button" class="mini" data-open-site="' + row.siteId + '">用默认程序打开</button>'
         + '</div>'
+        + '<div class="hint" id="siteFile-' + row.siteId + '"></div>'
         + '<details><summary>查看该协议的完整模板</summary>'
         + '<div class="hint" id="siteNote-' + row.siteId + '"></div>'
         + '<pre id="siteText-' + row.siteId + '" class="preset"></pre>'
@@ -256,14 +485,32 @@ button.mini { width: auto; margin-top: 0; padding: 6px 12px; font-size: 13px; }
         + '</div>';
     }).join('');
     // 事件绑定放在 innerHTML 之后（重建过节点，旧引用会失效）。
-    document.querySelectorAll('.site-prompt-select').forEach((sel) => {
-      sel.addEventListener('change', (e) => {
-        const sid = e.target.getAttribute('data-site');
-        sitePick[sid] = e.target.value;
-        renderSiteText(sid);
+    document.querySelectorAll('[data-open-site]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const sid = btn.getAttribute('data-open-site');
+        btn.disabled = true;
+        try {
+          const r = await fetch(API_BASE + '/prompt-file', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ siteId: sid }),
+          });
+          const j = await r.json();
+          const el = document.getElementById('siteFile-' + sid);
+          if (el) el.textContent = j.ok ? '已用系统默认程序打开：' + j.file
+            : (j.code === 'PROMPT_FILE_MISSING' ? '提示词文件还没生成——发送第一条消息后自动落盘：' + j.file
+              : (j.code === 'PROMPT_STORE_OFF' ? '提示词落盘已被显式关闭（WEBCODE_PROMPT_STORE_DIR=off）。'
+                : '打开失败：' + (j.code || j.error || '未知') + (j.file ? ' 文件：' + j.file : '')));
+        } catch (e) {
+          const el = document.getElementById('siteFile-' + sid);
+          if (el) el.textContent = '打开失败：' + e.message;
+        } finally { btn.disabled = false; }
       });
     });
-    (d.sites || []).forEach((row) => renderSiteText(row.siteId));
+    (d.sites || []).forEach((row) => {
+      const el = document.getElementById('siteFile-' + row.siteId);
+      if (el) el.textContent = row.file || '';
+      renderSiteText(row.siteId);
+    });
   }
   async function loadVariants() {
     try {
@@ -486,9 +733,35 @@ button.mini { width: auto; margin-top: 0; padding: 6px 12px; font-size: 13px; }
     }
   }
 
+  const SITE_NAMES_MAP = {
+    deepseek: 'DeepSeek', glm: '智谱清言', chatgpt: 'ChatGPT', kimi: 'Kimi',
+    qwen: '通义千问', doubao: '豆包', grok: 'Grok', claude: 'Claude',
+    gemini: 'Gemini', zai: 'Z.ai'
+  };
+  const SITE_ORIGINS_MAP = {
+    deepseek: 'https://chat.deepseek.com',
+    glm: 'https://chatglm.cn',
+    chatgpt: 'https://chatgpt.com',
+    kimi: 'https://kimi.com',
+    qwen: 'https://chat.qwen.ai',
+    doubao: 'https://www.doubao.com',
+    grok: 'https://grok.com',
+    claude: 'https://claude.ai',
+    gemini: 'https://gemini.google.com',
+    zai: 'https://chat.z.ai'
+  };
+
   document.getElementById('subLogin').addEventListener('click', () => subAction('login'));
   document.getElementById('subVerify').addEventListener('click', () => subAction('verify'));
   document.getElementById('subWindow').addEventListener('click', () => subAction('window'));
+  document.getElementById('subOpenSite').addEventListener('click', () => {
+    const site = document.getElementById('subAgentSite').value;
+    if (!site || site === 'follow') return;
+    const url = SITE_ORIGINS_MAP[site] || ('https://' + site);
+    window.open(url, '_blank');
+    subAccountStatus.textContent = '已打开 ' + (SITE_NAMES_MAP[site] || site) + '（在 Harness 内可直接通过右侧栏 Web Bridge 或内置浏览器打开与登录）。';
+    subAccountStatus.className = 'hint';
+  });
   document.getElementById('subAgentSite').addEventListener('change', refreshSubAccount);
   setInterval(refreshSubAccount, 20000);
   // 投递读数轮询（15s）：真机出问题时用户往往就停在这一页上，读数必须自己更新，

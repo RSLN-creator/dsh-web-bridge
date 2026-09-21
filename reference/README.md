@@ -55,6 +55,7 @@ node scripts\gen-reference-index.mjs --missing  # 只列「不是 clone」的条
 | 目录 | remote | HEAD | 大小 |
 | --- | --- | --- | --- |
 | `agent-browser` | https://github.com/vercel-labs/agent-browser.git | `8c15ff9f71ae60c7e99e66afe1e2d4b9bf414fe2` | 11.9 MB |
+| `doubao2api` | https://ghfast.top/https://github.com/wangchuxiaoji-oss/doubao2api.git ⚠️镜像 | `95beb0788338ba268e13ca4c80890ceeae6ff055` | 49.8 MB |
 | `agent-team` | **不是 clone**（见 §6「约定违例」） | — | 0.4 MB |
 | `agentdock` | https://github.com/uvwt/agentdock | `84abde28b7e331fd15fce0a44421104f7fbf9dc7` | 10.3 MB |
 | `AIstudioProxyAPI` | https://github.com/CJackHwang/AIstudioProxyAPI.git | `044c3db48e956097d4c509c87ebf0ecadb4e79e2` | 7.5 MB |
@@ -72,8 +73,10 @@ node scripts\gen-reference-index.mjs --missing  # 只列「不是 clone」的条
 | `dsh-archive-manager` | **不是 clone**（见 §6「约定违例」） | — | 0.5 MB |
 | `dsh-compass` | https://github.com/Happy2Git/dsh-compass.git | `2676d15afb2b9d5a4a62715ea4c83fa7619081e0` | 2.2 MB |
 | `dsh-deepseek-chat` | https://github.com/zerorigin-studio/dsh-deepseek-chat | `5ed9d07b732ac997d0c3afbc15e7b2e46bb15bee` | 0.1 MB |
+| `dsh-drop-caret` | **不是 clone**（见 §6「约定违例」） | — | 0 MB |
 | `dsh-file-attachment` | https://ghfast.top/https://github.com/wszhoho/dsh-file-attachment.git ⚠️镜像 | `de4456a06883544fef7bc57a195c369036b02a4e` | 1.9 MB |
 | `dsh-flowglass` | https://github.com/Iwctwbh/dsh-flowglass.git | `a815bc7ee14a15008358e1c0a49aa0e6757377e4` | 3.4 MB |
+| `dsh-market` | **不是 clone**（见 §6「约定违例」） | — | 2 MB |
 | `dsh-session-graph` | https://github.com/benz-ai-x/dsh-session-graph.git | `d999061007dc3465c997fcaddbe2ab31cb8ecb2d` | 39.5 MB |
 | `dsh-task-board` | **不是 clone**（见 §6「约定违例」） | — | 1.5 MB |
 | `dsh-task-graph` | https://github.com/KevinZhangNothing/dsh-task-graph.git | `7c230e0fe0af8103cfc2d1ee6ecf74a4f0c872aa` | 14.3 MB |
@@ -87,6 +90,7 @@ node scripts\gen-reference-index.mjs --missing  # 只列「不是 clone」的条
 | `openai-stream-parser` | https://github.com/jy02140251/openai-stream-parser.git | `3f4ee58d4310de93b02182fee84e775cc2c51367` | 0 MB |
 | `opencode2dsh` | https://github.com/FishBottle7/opencode2dsh.git | `dd8d0b1f06c55723928e535c853d20a4100bd970` | 1.2 MB |
 | `Qwen-Copilot` | https://ghfast.top/https://github.com/zelosleone/Qwen-Copilot.git ⚠️镜像 | `6e33880263d5946c496d8385de7ec3451ec5687f` | 0.5 MB |
+| `qwen-code` | https://ghfast.top/https://github.com/QwenLM/qwen-code.git ⚠️镜像 | `1ac097163389b7b85b21bf74c396052fc2fcc59f` | 255.7 MB |
 | `qwen-free-api` | https://ghfast.top/https://github.com/LNpks/qwen-free-api.git ⚠️镜像 | `bf42bce60f2b1eea3801f9f6f3277ebf64226816` | 3.8 MB |
 | `steel-browser-npm` | **不是 clone**（见 §6「约定违例」） | — | 0 MB |
 | `wabac.js` | https://github.com/webrecorder/wabac.js.git | `281e9bc7affba4ce520301b10723b01f661aa7e5` | 2.8 MB |
@@ -95,6 +99,7 @@ node scripts\gen-reference-index.mjs --missing  # 只列「不是 clone」的条
 | `WebChat2Api` | https://github.com/MOSSVENC/WebChat2Api.git | `57fc2c2e6840c1f68d3e81adb8fc00250feca279` | 0.3 MB |
 | `webcode` | https://github.com/three-water666/webcode.git | `2f32151bc021204575e726578813f83a4c1e117c` | 6.5 MB |
 | `zai-copilot-chat` | https://github.com/ltmoerdani/zai-copilot-chat.git | `d56b81ef2911b864677b476e2bc5b27f041133f1` | 1.2 MB |
+| `zcode` | https://ghfast.top/https://github.com/zai-org/ZCode.git ⚠️镜像 | `872ad960de7ec172591f7e1952f7849229f94521` | 108.4 MB |
 ### 怎么把某个条目拿回来
 
 ```powershell

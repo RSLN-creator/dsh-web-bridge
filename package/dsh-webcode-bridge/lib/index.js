@@ -653,7 +653,12 @@ export function apply(ctx, config = {}) {
   // 所有既有用户的行为**——他们设 10 秒本意是防限流，不是要每轮多等 10 秒。
   // 因此这里只**新增一个可选项**，把选择权交给设置面。语义与判据见
   // metrics.computeSendGap 的注释（两个基准防的是两种不同的东西）。
-  const defaultConfig = { extraPrompt: '', defaultModel: 'deepseek', previewRefreshRate: 5000, thinkMode: 'on', subAgentMode: 'own', subAgentSite: 'follow', sendGapMs: 0, sendGapBasis: 'send-to-send', accounts: [], sendGapMsBySlot: {} };
+  // defaultModelBySite（0.16.38）：**站点内覆盖**。主线落点仍是全局 defaultModel
+  //（站点+模型），当落点站点为 S 且 defaultModelBySite[S] 存在时，用那一支而不是
+  // defaultModel 里的模型。解析点唯一，见 buildTurn 的 effectiveDefault 注释。
+  // extraPromptBySite（0.16.38）：**该站点专属的 [本网站指令]**，与全局 extraPrompt
+  // 同轮注入（全局在前）。默认空对象 = 行为与 0.16.37 逐字相同。
+  const defaultConfig = { extraPrompt: '', extraPromptBySite: {}, defaultModel: 'deepseek', defaultModelBySite: {}, previewRefreshRate: 5000, thinkMode: 'on', subAgentMode: 'own', subAgentSite: 'follow', sendGapMs: 0, sendGapBasis: 'send-to-send', accounts: [], sendGapMsBySlot: {} };
   const configManager = {
     get() {
       // settingsService 已在初始化时校验 get/set 双全；此处仍防御式包裹
@@ -719,6 +724,7 @@ export function apply(ctx, config = {}) {
    */
   function contextWindowFor(m) {
     return cfg.contextWindowBySite?.[m?.siteId]
+      ?? m?.budget
       ?? m?.context
       ?? (m?.siteId === 'deepseek' ? 1_000_000 : 64_000);
   }
@@ -2211,6 +2217,55 @@ function imageMarkdown(images) {
     return title;
   }
 
+  /**
+   * 用**系统默认程序**打开一个本机文件（0.16.38）。
+   *
+   * 只服务于「设置页里点开该站点的提示词文件」这一件事，因此调用方（web-control
+   * 的 POST prompt-file）已经把路径钉死在 prompts/ 目录下——本函数不再做路径
+   * 判据，只负责把「怎么叫起默认程序」这件平台差异收在一处。
+   *
+   * 纪律（与 dsh-host-open-in-app 同一条）：**argv 调用、绝不经 shell**。用户目录
+   * 名可能含空格或引号，走 shell 就等于把本机文件路径交给命令行解析；走 argv 时
+   * 那个字符串只是一个参数。
+   *
+   * 失败一律如实回 { ok:false, error }，调用方据此回 OPEN_FAILED——不静默、不假成功。
+   *
+   * @param {string} absPath 绝对路径
+   * @returns {Promise<{ok:boolean, error?:string}>}
+   */
+  async function openPathWithDefaultApp(absPath) {
+    const { spawn } = await import('node:child_process');
+    const file = path.resolve(String(absPath || ''));
+    if (!file) return { ok: false, error: 'empty path' };
+    // Windows：`explorer.exe <file>` 是最短路径；但 .md 未关联编辑器时 explorer 会
+    // 静默只打开所在目录（退出码仍是 0），因此失败/未关联时用 rundll32 的
+    // FileProtocolHandler 再试一次——它走的就是「用默认程序打开」这条系统路径。
+    const plan = process.platform === 'win32'
+      ? [
+        { cmd: 'explorer.exe', args: [file] },
+        { cmd: 'rundll32.exe', args: ['url.dll,FileProtocolHandler', file] },
+      ]
+      : process.platform === 'darwin'
+        ? [{ cmd: 'open', args: [file] }]
+        : [{ cmd: 'xdg-open', args: [file] }];
+    let lastErr = 'open failed';
+    for (const step of plan) {
+      const r = await new Promise((resolve) => {
+        let settled = false;
+        const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+        try {
+          const child = spawn(step.cmd, step.args, { stdio: 'ignore', windowsHide: true, detached: true });
+          child.on('error', (e) => done({ ok: false, error: String(e?.message || e) }));
+          child.on('spawn', () => { try { child.unref(); } catch { /* not fatal */ } done({ ok: true }); });
+        } catch (e) { done({ ok: false, error: String(e?.message || e) }); }
+      });
+      if (r.ok) return { ok: true };
+      lastErr = r.error || lastErr;
+      warn('openPath failed via ' + step.cmd + ':', lastErr);
+    }
+    return { ok: false, error: lastErr };
+  }
+
   // ---- web-side control plane (sessions / naming / sync / preview) -----
   // Host services are optional: without DSH session services (standalone
   // relay) listing/history/preview still work, import is simply unavailable.
@@ -2992,6 +3047,8 @@ function imageMarkdown(images) {
     // 并把原因放进 *Error（面板据此区分「确实没有」与「读不到」）。
     // sessionId 决定看**哪个会话**的子代理目录——面板轮询时会带上它。
     rosterOf: (sessionId) => projectRoster(ctx, sessionId),
+    // 「用系统默认程序打开提示词文件」（0.16.38）：平台差异收在 openPathWithDefaultApp。
+    openPath: (absPath) => openPathWithDefaultApp(absPath),
   });
   const mirror = createMirror({
     siteOrigin: new URL(cfg.site).origin,
@@ -3043,13 +3100,44 @@ function imageMarkdown(images) {
     const extraPrompt = settings.extraPrompt;
     // 用户未显式选模型时，设置页保存的「默认模型」生效（此前只有 extraPrompt
     // 被消费，defaultModel 是个只存不用的摆设）。
+    //
+    // 0.16.38：主线默认模型有了**站点内覆盖**。全局 `defaultModel` 仍是「主线落点
+    //（站点 + 模型）」；当落点站点是 S、且 `defaultModelBySite[S]` 存在时，用那一支
+    // 而不是 defaultModel 里的模型。覆盖**只在这一处**解析，别的消费点（`/status`、
+    // 设置面板的「当前主线默认」显示）都读全局那一个值，避免两套真相。
     const defaultModel = settings.defaultModel;
+    const siteDefaultModel = (siteId) => {
+      const bySite = settings.defaultModelBySite;
+      const v = bySite && typeof bySite === 'object' ? bySite[siteId] : null;
+      return typeof v === 'string' && v.trim() ? v.trim() : null;
+    };
+    // 站点专属指令（0.16.38）：与全局 extraPrompt 同轮注入，按**最终站点**取——
+    // 子代理站点分流会改 siteId，因此取值必须放在分流之后（见下）。
+    const sitePromptFor = (sid) => {
+      const bySite = settings.extraPromptBySite;
+      const v = bySite && typeof bySite === 'object' ? bySite[sid] : null;
+      return typeof v === 'string' ? v : '';
+    };
     const thinkMode = ['on', 'off', 'auto'].includes(settings.thinkMode) ? settings.thinkMode : 'auto';
     // 间隔口径（0.16.31）：与 thinkMode 同一层收一次合法性。未知值退回默认基准，
     // 于是「配置写错」只退化成 0.14.0 的既有行为，不会让等待变得无从解释。
     const sendGapBasis = settings.sendGapBasis === 'end-to-start' ? 'end-to-start' : 'send-to-send';
     const messages = Array.isArray(options.messages) ? options.messages : [];
-    const resolvedModel = resolveWebModel(options.model || defaultModel || cfg.modelId);
+    // 站点内覆盖的判据（0.16.38）：**只对未显式选模型的主线轮生效**，且覆盖值必须
+    // 落在同一个站点上——站点级默认模型的语义是「这个站点用哪一支」，它不该有能力
+    // 把落点站点也搬走（那会让子代理站点分流、账户槽、槽级间隔一起错位）。
+    const landed = resolveWebModel(options.model || defaultModel || cfg.modelId);
+    let resolvedModel = landed;
+    if (!options.model) {
+      const override = siteDefaultModel(landed.siteId);
+      if (override) {
+        try {
+          const hit = resolveWebModel(override);
+          if (hit.siteId === landed.siteId) resolvedModel = hit;
+          else warn('defaultModelBySite[' + landed.siteId + '] 指向别的站点，已忽略：' + override);
+        } catch { warn('defaultModelBySite[' + landed.siteId + '] 不是可用模型，已忽略：' + override); }
+      }
+    }
     let model = resolvedModel.id;
     let siteId = resolvedModel.siteId;
     // 账户槽（0.14.7）：随模型解析一起确定。`glm@2:glm-5.3` → slot '2'；
@@ -3075,6 +3163,9 @@ function imageMarkdown(images) {
       slot = DEFAULT_SLOT;
       accountKey = siteId;
     }
+    // 站点专属指令（0.16.38）：取值点必须在**站点最终确定之后**——子代理站点分流
+    // 刚把 siteId 换成了别的站点，在它之前取会拿到主线那一段，注入到子代理轮里。
+    const sitePrompt = sitePromptFor(siteId);
     const keyAgentId = subAgentMode === 'own' ? agentId : null;
     const keyPath = options.sessionId && cfg.contextMode === 'session' && !options.purpose
       ? [String(options.sessionId), keyAgentId ? String(keyAgentId) : ''].filter(Boolean).join('::')
@@ -3099,7 +3190,7 @@ function imageMarkdown(images) {
       };
     };
     if (!keyPath) {
-      const prompt = serializeFirstTurn({ ...options, extraPrompt, siteId });
+      const prompt = serializeFirstTurn({ ...options, extraPrompt, sitePrompt, siteId });
       recordPreset(prompt);
       return {
         prompt,
@@ -3141,8 +3232,12 @@ function imageMarkdown(images) {
     const toolNameKey = Array.isArray(options.tools)
       ? options.tools.map((t) => String(t?.name || '')).filter(Boolean).sort().join(',')
       : '';
-    const contract = contractFingerprintOf({ model, system: options.system, toolNameKey, extraPrompt });
-    const fingerprint = count => createHash('sha256').update(JSON.stringify({ model, system: options.system, tools: toolNameKey, extraPrompt, messages: messages.slice(0, count) })).digest('hex');
+    // 站点专属指令必须进**两层**指纹（0.16.38）：契约指纹决定「整段重建还是续跑」，
+    // 内容指纹决定「尾部有没有变」。站点指令改了、而它只在契约指纹里，续跑判定会
+    // 走「契约没变 + 尾部没变」→ 这一轮什么也不发；只进内容指纹则会每轮判 anchor-lost。
+    // 两处都要，且两处的键名必须逐字相同（都是 sitePrompt）。
+    const contract = contractFingerprintOf({ model, system: options.system, toolNameKey, extraPrompt, sitePrompt });
+    const fingerprint = count => createHash('sha256').update(JSON.stringify({ model, system: options.system, tools: toolNameKey, extraPrompt, sitePrompt, messages: messages.slice(0, count) })).digest('hex');
     let st = sessionState.get(keyPath);
     // 0.16.29：判 fresh 的**原因**必须可查（用户第 4 问「搞清楚为什么会新开 web 端
     // 对话！」）。此前只有 `fresh` 一个布尔量，于是「新开了对话」这句话在四个
@@ -3178,7 +3273,7 @@ function imageMarkdown(images) {
     const delta = serializeDelta(messages, st.sent, st.toolResults, undefined, trainNoteFor(siteId, '', options.tools));
     let prompt;
     if (fresh) {
-      prompt = serializeFirstTurn({ ...options, extraPrompt, siteId });
+      prompt = serializeFirstTurn({ ...options, extraPrompt, sitePrompt, siteId });
       recordPreset(prompt);
       // 提示词落盘（0.16.28）：fresh 首轮 = 站点教学全文（稳定部分）+ 会话上下文
       // 全文（完整首轮）同时落盘。增量轮不写——上下文没变，落盘只会制造 IO 噪音。
@@ -3186,7 +3281,7 @@ function imageMarkdown(images) {
       writePromptFiles({
         siteId,
         sessionKey: keyPath,
-        siteText: buildPreset({ ...options, extraPrompt }) + transportNoteFor(siteId, options.tools),
+        siteText: buildPreset({ ...options, extraPrompt, sitePrompt, siteId }) + transportNoteFor(siteId, options.tools),
         sessionText: prompt,
       });
     }
@@ -3236,7 +3331,7 @@ function imageMarkdown(images) {
         // 0.16.11：接受 { maxPromptChars } —— PROMPT_TRUNCATED 压缩重试从这条路取
         // 压缩后的首轮全文；无参调用（WEB_SESSION_LOST 重放）行为逐字不变。
         rebuild: (hint) => serializeFirstTurn({
-          ...options, extraPrompt, siteId,
+          ...options, extraPrompt, sitePrompt, siteId,
           ...(hint && Number.isFinite(hint?.maxPromptChars) ? { maxPromptChars: hint.maxPromptChars } : {}),
         }),
       },

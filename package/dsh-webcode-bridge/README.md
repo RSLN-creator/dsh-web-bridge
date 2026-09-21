@@ -1,6 +1,6 @@
 # Harness Web Bridge
 
-已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.16.31。
+已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.16.40（已打包并装入 web / headless 两个 profile；重启 DSH 后生效）。
 
 安装（本包**不发 npm registry**，只以 `.tgz` 交付）：
 
@@ -241,9 +241,20 @@ block 11 text len=200  </tool_result>\n{"mcp_action":"result","name":"write",…
 - **顶层工具条**：当前站点名 + 8px 状态点 + 右侧四颗 **28px 图标按钮**（刷新 / 独立窗口 /
   新面板 / 浮动），尺寸与官方 `ExpandButton` 实测值一致（`width/height:28px`、`border-radius:28px`、
   hover `--dsw-alias-interactive-bg-hover`）。文字全部进 `title`/`aria-label`。
-- **站点标签条**降为次级导航：紧凑胶囊（26px / 圆角 13px），登录态从「标签内文案」改为
-  **色点 + tooltip**（长文案正是把标签条挤爆的原因）；去掉了两端 mask 渐隐——官方右栏不用
-  这种表达，且渐变本身就是观感上的「遮挡」。滚轮横向滚动保留（原生非被动监听）。
+- **站点选择**（0.16.37 定稿）：右栏「Web Bridge」标签页 = **站点目录**，每行是官方「新建终端」
+  同款**胶囊**——左侧主区（图标 + 站点名，多账户时多一行「N 个账户可选」）是一颗官方
+  `Button variant:'ghost'`，右端一颗 44px 宽的 chevron `Button` 作为官方 `Menu` 的锚点；
+  点开列出该站点的各账户，选中即用那个槽开标签。尺寸**逐项**取自官方 `TerminalGuide.module.css`
+  （`border-radius:24px` / `min-height:56px` / `padding:14px 20px` / 触发器 `width:44px` /
+  标题 `15px`、说明 `13px`）。点主区 = 为该站点**新开一个独立标签**（`multiple: true`），
+  于是官方标签条上就是「Web Bridge / DeepSeek / 智谱清言 …」一行并列，点回 Web Bridge 即回目录。
+  面板内**不再**有任何自建站点导航条，工具条上的站点下拉按钮与 `SiteMenu` 组件也已删除。
+- **图标**：十个站点**全部**有真实品牌矢量。DeepSeek 用官方 primitives 的 `FISH_LOGO_PATH`；
+  八个（ChatGPT / Claude / Gemini / Grok / Qwen / Kimi / 豆包）用 simple-icons（CC0-1.0）；
+  GLM 与 Z.ai 用 `@lobehub/icons-static-svg` 取回的矢量——simple-icons 实测没有它们的条目
+  （`zhipu` / `chatglm` / `zai` / `z-ai` / `zhipuai` / `bigmodel` / `zcode` / `glm` 八个 slug 全 404）。
+  来源分档记在 `SITE_ICON_TIER`（`official` / `vector` / `missing`），逐条挂在图标 `title` 里，
+  **不把社区图集说成官方发布**。
 - 空态/错误态统一成官方 guide 卡片形态（`.5px` 边框、`bg-layer-1`、标题+说明+主按钮三层）。
 
 ### 会话日志归因工具（长期资产）

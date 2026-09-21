@@ -114,6 +114,48 @@ test('kimi：thinking 字段经 onThink 暴露且不混入正文', () => {
   assert.ok(!out.text.includes('先分析'));
 });
 
+test('kimi-connect：Connect-RPC 二进制帧 JSON 解码（2026-09-21 真机确证）', () => {
+  const deltas = [];
+  const think = [];
+  const decoder = new D['kimi-connect']({ onDelta: (t) => deltas.push(t), onThink: (t) => think.push(t) });
+  const frame = (j) => decoder.push(JSON.stringify(j) + '\n');
+  frame({ op: 'set', mask: 'chat.lastRequest', chat: { id: 'chat_x1', lastRequest: { options: { model: 'k2d6-chat' } } } });
+  // 思考链增量碎片（mask: block.think.content）
+  frame({ op: 'append', mask: 'block.think.content', block: { think: { content: '先思' } } });
+  frame({ op: 'append', mask: 'block.think.content', block: { think: { content: '考' } } });
+  // 最终正文（set 一次完整）
+  frame({ op: 'set', mask: 'block.text', block: { text: { content: '你好' } } });
+  // 完成标志
+  frame({ done: {}, eventOffset: 1 });
+  const out = decoder.finish();
+  assert.equal(out.complete, true);
+  assert.equal(out.text, '你好');
+  assert.deepEqual(deltas.join(''), '你好');
+  assert.deepEqual(think.join(''), '先思考');
+  assert.equal(out.conversationId, 'chat_x1');
+});
+
+test('kimi-connect：assistant 消息 status COMPLETED 收尾与会话 id 提取', () => {
+  const decoder = new D['kimi-connect']({ onDelta: () => {} });
+  const frame = (j) => decoder.push(JSON.stringify(j) + '\n');
+  frame({ op: 'set', mask: 'chat.lastRequest', chat: { id: 'chat_x2' } });
+  frame({ op: 'set', mask: 'message', message: { id: 'm1', role: 'assistant', status: 'MESSAGE_STATUS_COMPLETED' } });
+  frame({ op: 'set', mask: 'block.text', block: { text: { content: '正文' } } });
+  frame({ done: {} });
+  const out = decoder.finish();
+  assert.equal(out.complete, true);
+  assert.ok(out.text.includes('正文'));
+  assert.equal(out.conversationId, 'chat_x2');
+});
+
+test('kimi-connect：done 缺失判 incomplete', () => {
+  const decoder = new D['kimi-connect']({ onDelta: () => {} });
+  decoder.push(JSON.stringify({ op: 'set', mask: 'block.text', block: { text: { content: '半截' } } }) + '\n');
+  const out = decoder.finish();
+  assert.equal(out.complete, false);
+  assert.equal(out.reason, 'incomplete');
+});
+
 test('chatgpt：JSON-patch 帧 o/p/v（LLMs2API 同构）', () => {
   const deltas = [];
   const decoder = new D.chatgpt({ onDelta: (t) => deltas.push(t) });

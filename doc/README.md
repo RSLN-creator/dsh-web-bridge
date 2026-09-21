@@ -35,6 +35,9 @@
 | [tutorial-phone-access.md](tutorial-phone-access.md) | 手机连接 DSH 教程：选型对比、`dsh-local-link` 安装、配对、安全边界、**二维码位置（§3.5）** | 想从手机/平板访问 DSH 时 |
 | [bridge-failure-ledger.md](bridge-failure-ledger.md) | **桥接失败台账**：错误码 × 已做适配 × 残留风险；含 `<call>` 泄漏根因 | 排查桥接问题；决定先修哪个时 |
 | [ci-cd.md](ci-cd.md) | **CI/CD 与代码审查**：流水线分工、刻意不在 CI 里跑的东西、本地复现、发版、必需检查 | 改流水线 / 提 PR / 发版前 |
+| [settings-copy.md](settings-copy.md) | **设置界面文案总表**：每句界面提示对应的完整解释（被精简掉的部分全在这里）、以及「哪张卡属于全局页/站点页」的作用域表 | 改设置页文案或卡片归属前 |
+| [review-0.17.x.md](review-0.17.x.md) | **0.17.x 审查报告**：基线核验、0.17.0 等待占比 `100%` 真缺陷、0.17.1 台账归因不成立、交付卫生（零提交/零 tag）、三份交付物不一致、计划完成度 | 接手 0.17 之后的版本前 |
+| [official-contract-audit.md](official-contract-audit.md) | **官方契约审计**：`dsh.client` 声明、懒 CJS bundle 形状、六个插槽契约（实读结果）、主题 token、可访问性、primitives 回退、本地闸门；含「renderer-v2」这个名字在本机的查证结论 | 对齐官方写法、评审「这算不算偏离官方」时 |
 
 ## 与账户槽（0.14.7）相关的代码位置
 

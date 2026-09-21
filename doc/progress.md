@@ -20,18 +20,64 @@
 
 | 项 | 值 |
 | --- | --- |
-| 工作树版本 | **0.16.32**（已提交 `f8e5097`） |
-| 已装版本（profile） | web = **0.16.32**，headless = **0.16.32**（逐 profile 实测 `package.json`；两处 `lib/agent-preset.js` sha256 `EE9AD8B7EAC7141C…` 与工作树**逐字相同**） |
-| 运行中的进程 | 3080 实测 `build.version` = **0.16.31** ⇒ **待重启**才加载 0.16.32 |
-| 上游 | `origin/main` = `fb7cd6e`（0.16.31 文档收口）；本轮 0.16.32 待提交/待推 |
-| 单测基线 | **70/70 测试文件通过，退出码 0**（0.16.32 实跑；0.16.31 时 69/69，本轮新增 `official-truncated-close`） |
-| 注释闸门 | **PASS**（0.16.32 实跑：126 文件 error 0 / warn 0） |
-| 文件规范闸门 | **PASS**（0.16.31 改名后实跑：无 BOM + 索引无死链 + Node 版本相容） |
-| 发布闸门 | **PASS**（`verify-pack` 实跑：tarball 与工作树逐字相同 39/39 + 接线完好） |
-| 记账闸门 | **PASS**（0.16.32 实跑：version 0.16.32 / testFiles 70） |
+| 工作树版本 | **0.17.2**（待打包、待装机，见下文） |
+| 0.17.2 范围（修 0.17.0 等待占比 100% 假读数 + 更正 0.17.1 归因） | 审查 0.17.x 时在**真机**上复现的缺陷：`POST /__webcode/wait-stats` 的「平均会话等待时长占比」读出 **99–100%**，即“这台机器上的时间几乎全花在节流等待上”。根因不是公式，是**分母的覆盖范围与分子不一致**——`totalDurationMs` 是 0.17.0 才引入的字段，而账本**落盘且跨版本延续**（`webcode-wait-stats.json`），升级那一刻磁盘上 8600+ 轮的历史耗时全是 0，分母只覆盖最近几轮。修法：① 账本新增 `durationTurns`（只有 `durationMs > 0` 的轮次才 +1），作为**覆盖率判据**；② `sanitizeWaitStats` 对旧账本**不向后推断**（绝不能因 `totalDurationMs > 0` 就认定“这些轮次都有耗时”——那正是 100% 的来源）；③ 新增 `waitRatio` 作为占比的**唯一计算入口**，三种读数：全覆盖 `61%` / 零覆盖 `未记录` / 部分覆盖 `61%（覆盖 40/57 轮）`；④ 药丸是 13px 单行，只在**纯百分比**时附占比，`未记录` 与覆盖率尾巴一律交给点开的面板。同一轮内**更正 0.17.1 的台账归因**（见下行）。 |
+| 0.17.2 落地文件 | `lib/wait-stats.js`（`emptyWaitStats`/`accumulateWait`/`sanitizeWaitStats` 三处新增 `durationTurns`、新增 `waitRatio`、六个调用点改走它）、`test/wait-stats.test.mjs`（新增 5 条护栏钉住覆盖率判据）、`test/control-routes.test.mjs` 与 `test/client-render.test.mjs` 的账本夹具补 `durationTurns`、`doc/review-0.17.x.md`（审查报告）。 |
+| 0.17.2 测试与闸门（本轮实跑） | `wait-stats.test.mjs` **39/39**（原 34 + 新 5）、`control-routes.test.mjs` **12/12**、`client-render.test.mjs` **48/48**；全量 `node --test test/*.test.mjs` **866/866 通过、exit 0**。**真机验证**：拿真实落盘账本（`totalWaitMs=115033353` / `totalDurationMs=1056232` / `turns=8676`）跑修复后的 `waitRatio` → `未记录`（修复前同一份数据算出 **99%**）。 |
+| 0.17.1 归因**更正**（2026-09-22） | 原文写着「真机 session-2411bccd 实锤 `<arg_value>`」。审查时把该会话日志（`session.v3.jsonl.zstd`）解出来逐串统计：**`arg_value = 0`、`arg_key = 0`**，而 `AUTO_CONTINUED = 15`。即自动续跑确实发生了，但**那条会话里根本没有 `arg_value` 形状**，归因缺证据。修复本身是对的（GLM 开源模板确产 `<arg_key>/<arg_value>`，我独立喂四种形状全部解析正确），但性质是**预防性加固**，不是「真机缺陷修复」。历史叙述保留不改写，更正记于此。 |
+| 0.17.1 范围（GLM 原生 arg_value 解析 + read 路径纠偏 + 0.18.0 内安全发布） | 诊断 session-2411bccd 真机会话中 GLM 连出五次 `AUTO_CONTINUED` 最终丢失上下文重置为打招呼的根因并修复：① **GLM 原生 `<arg_value>` 格式解析**：GLM-4/5 在网页端原生吐出 `<tool_call>tool_name\narg1\nval1</arg_value>\narg2\nval2</arg_value></tool_call>` 语法，旧解析器只支持 JSON 体导致每轮判 UNPARSED 触发自动续跑；在 `parseAgentReply` 中新增对 `<arg_value>` 标签体的原生提取，无需续跑即可直接派发工具调用，将往返轮次减半并消除刷屏。② **read 工具参数别名纠偏**：GLM 频繁将 `file_path` 误写为 `path`，在 `coerceArguments` 中对声明了 `file_path` 的工具自动将 `path` 别名映射为 `file_path`，防止 DSH 直接拒执抛错。③ 版本号严格控制在 0.18.0 以内（定为 0.17.1）。**注：归因见上一行的更正。** |
+| 0.17.1 落地文件 | `lib/agent-preset.js`（`parseAgentReply` 增加 `<arg_value>` 提取、`coerceArguments` 增加 `path`→`file_path` 别名纠偏）、`test/glm-session-replay.test.mjs`（新增 2 条回归断言：GLM 原生 `<arg_value>` 形状解析 + read 参数别名纠偏）。 |
+| 0.17.1 测试与闸门 | `glm-session-replay.test.mjs` 22/22 PASS、`parse.test.mjs` 22/22 PASS、`check-ledger.mjs` PASS（0.17.1 / 73 个单测文件）。 |
+| 0.17.0 范围（网站选择居中 + 等待发送确认与时长占比 + 打包发布） | 用户三项要求：① **网站选择界面样式居中**：在右栏点击 Web Bridge 标签进入站点目录后，`.hwb-catalog` 样式完全参考官方 `GuideBody`（`min-height: 100%` + `justify-content: center` + `align-items: center` + `:after` 10% 弹性留白），解决之前顶部贴着的问题。② **等待发送消息口径确认**：明确记录“等待发送消息”统计的是执行工具后、发送给模型之前，由于配置的发送间隔（send gap）及限流退避（rate limit backoff）所产生的主动等待时间，纯属插件策略引入的延迟，不含模型思考、生成或本地工具执行耗时。③ **药丸与面板显示等待时长占比**：底部药丸格式改为「n秒 · 等待占比x%」（参考官方药丸中间间隔点 ` · `），占比以本次会话等待总量（含在途）除以会话总活跃耗时（等待总量 + 模型耗时 `totalDurationMs`）计算并在在途中平滑单调增长；展开面板与设置界面分别新增「本次会话占比」与「平均会话等待时长占比」展示。全量测试通过，打包发布为 0.17.0。 |
+| 0.17.0 落地文件 | `lib/wait-stats.js`（`emptyWaitStats`/`sanitizeWaitStats` 扩展 `totalDurationMs`、`waitOfTurn`/`accumulateWait` 累加 `durationMs`、新增 `formatPercent`、`composerWaitPillLabel` 改为 `n秒 · 等待占比x%`、`waitStatDetailRows`/`waitStatBlocks`/`waitStatRows` 增加「本次会话占比」与「平均会话等待时长占比」）、`lib/web-control.js`（`detailRows` 透传 `live, now` 保持与药丸同源）、`lib/client.cjs`（`.hwb-catalog` 对齐官方 `GuideBody` 垂直居中与 10% 留白）、`test/wait-stats.test.mjs`、`test/control-routes.test.mjs`、`test/client-render.test.mjs`。 |
+| 0.17.0 测试与闸门 | `wait-stats.test.mjs` 34/34 PASS、`control-routes.test.mjs` 12/12 PASS、`client-render.test.mjs` 48/48 PASS、`parse.test.mjs` 22/22 PASS、`run-m1.js` PASS（73 个单测文件基线）。 |
+| 0.16.40 范围（Kimi Connect-RPC + GLM 残留 + 切帧三缺陷） | 2026-09-21 网页会话所做、**尚未进任何 tarball** 的两项真机协议适配：① **Kimi 迁 Connect-RPC**——真机 CDP 确证 kimi 网页已从旧 SSE 全面迁到 `POST /apiv2/kimi.gateway.chat.v1.ChatService/Chat`（`application/connect+json`，响应是二进制帧 `[flags(1)][len(4BE)][json]`）。`providers.js` 的 KIMI 补新端点进 `completionPaths` + `streamTransport:'connect'`；`browser-driver.js` 的 `captureInit(paths,{transport})` 在 fetch tee 路径上加 connect 字节切帧器，逐帧 JSON 以一行 emit 给行式解码器；`decoder.js` 新增 `KimiConnectDecoder`（注册名 `kimi-connect`：会话 id 取 `chat.id`、正文取 `block.text.content`、思考取 `block.think.content`、`done` 判收尾）。② **GLM 工具轮后正文残留/加倍**——真机抓帧（`execute_sandbox_code` 工具轮）证实 GLM 的 text 帧既非纯增量也非纯累积，而是「增量碎片 → 工具轮 → 完整段落快照（连续两帧原样重发）」混合；旧 `GlmDecoder` 把两帧都判 NEW → 同一段播两遍。现在遇工具帧（`tool_calls`/`tool_result`）清零段落累积、快照等于累积则丢弃、快照以累积为前缀且更长则只补发剩余。 |
+| 0.16.40 落地文件 | `lib/providers.js`（KIMI 端点 + `streamTransport`）、`lib/browser-driver.js`（`captureInit` connect 切帧 + `judgeLoggedIn` 对声明了 bad 特征的站点做 2s 有界 SPA 水合重探）、`lib/decoder.js`（`GlmDecoder` 段累积去重 + `KimiConnectDecoder`）、新增 `lib/tool-transport.js` 与 `lib/tool-parser.js`（计划 Task 1 的「站点 → 传输形状」薄路由，**目前只被单测引用、尚未接线到调用点**）、`test/multi-site-decoder.test.mjs`（+3 条 kimi-connect）、新增 `test/glm-tool-snapshot-dedup.test.mjs`、新增 `test/tool-transport.test.mjs`（10 条）、`test-mock/` 新增 13 个真机/解析探针脚本（`login-probe` / `real-probe-26-glm-frames` / `real-probe-28,29-kimi-*` 等）。 |
+| 0.16.40 本轮新修三缺陷（`test/capture-connect.test.mjs` 的真实执行用例抓到） | 该文件当天写出、当天红，抓到的**不是**测试写法问题，是注入脚本的真缺陷：① **中文被解成 mojibake**——切帧器用逐字节 `String.fromCharCode` 拼 JSON，而 `JSON.parse` 对 mojibake 是**合法**的，于是 `你好` 一路静默变成乱码串（不抛错、不留痕）；改用 `TextDecoder('utf-8')`。② **假长度头卡死**——长度头落在合法区间（真机噪音里见过 33MB 这种值）时，只看长度会让切帧器死等一个永远凑不齐的帧，**后面所有真帧全被扣住**；补「载荷首字节必须是 `{`」做重同步。③ 顺带自查：在模板串的注释里写反引号把整个文件截断（`node --check` 抓到），已把这条教训写进那段注释。 |
+| 0.16.40 测试与闸门（本轮实跑） | 全量单测 `node --test test/*.test.mjs` **860/860 通过、exit 0**（73 个测试文件，399s）；新增 `capture-connect` 7/7、`tool-transport` 10/10；`lint-comments` 144 文件 error 0 / warn 0；`repo-hygiene` PASS；`ref-index` PASS（45 条目）；`check-ledger` PASS（0.16.40 / 73）。**未跑**：`ci-local` 整条（本机 `spawnSync` 全被挡，见 §0.16.34 五），八步均以逐条命令等价复核。 |
+| 0.16.40 发布闸门与装机（本轮实跑） | `pnpm pack` → `dsh-webcode-bridge-0.16.40.tgz`；`scripts/verify-pack.mjs` **逐字相同 41/41 + 接线完好**（比 0.16.39 多的 2 个文件即新增模块与护栏）；`install-profiles.mjs` 装入 web / headless（均 v0.16.40）；**另手工把两个 profile 的 `package.json` 与 `pnpm-lock.yaml` 声明改到 0.16.40 + 写入真实 integrity**——`install-profiles` 绕开 pnpm，不改声明的话任何一次 pnpm 通道都会静默回退（§0.16.10 七）。回读：两 profile 的 `lib/browser-driver.js` sha256 前 12 位均 **4A3066286D3C**，与工作树逐字相同。 |
+| 0.16.40 未完成项（如实记） | **需重启 DSH 才生效**——重启前 3080 上跑的仍是 0.16.39。重启后要真机验两件事：① Kimi 用新 Connect-RPC 通路能否真跑通一轮工具闭环（此前只有切帧层与解码器层的离线证据）；② GLM 工具轮之后正文不再加倍。未真机跑通不宣布这两项完成。 |
+| 0.16.39 范围 | 用户五项 UI 对齐 + 打包安装（事实基础均为本轮实测读官方产物）：① 站点选择框宽度对齐官方 `guide` 胶囊（`width:380px;max-width:100%`，首屏整块靠 `.hwb-firstrun` 居中，恒 380px、窄于 380 收缩并留左右 12–20px）；② 等待时长显示改中文单位（`wait-stats.js` 的 `formatDuration`/`formatElapsed`：`42 秒` / `3 分 05 秒` / `1 小时 02 分 09 秒`），药丸面板改**左边缘对齐 + 视口夹紧 + 随 token 字号缩放**（`useAnchoredPosition({side:'top',gap:8,margin:12})` + `createPortal(document.body)`，`position:fixed`；createPortal / hook 缺位回落内联面板，降级不崩溃）；③ 选站点**替代本标签页**（`CatalogBody` 经 `useTabInfo()` 取 `tab.actions.openTab(kind,{replaceTab:true,params})`，与官方「新建终端」同路径；取不到 hook 回落 `ctx.sidebarRight.openTab` 新开）；④ 网页标签工具条四颗动作按钮换官方 primitives 图标（IconRefreshOutline14 / IconRightUpOutline16 / IconFullscreenOutline16 / IconPanelLeftOutline16），`.hwb-act-btn` 28×28 圆角 14。工具条走官方 height 38px。hover 才上底色，`.on` 用 color + aria-pressed）；⑤ 设置页「速度与等待」加只读累计统计块（label 左 / 数值右，tabular-nums，12px 圆角 dl 网格，数据来自服务端 `statBlocks`——与药丸同一份 `waitStatBlocks` 现算，前端不再各算一套）。**未触碰**协议解析、账号底层连接、右栏镜像与窗口逻辑。 |
+| 0.16.39 落地 | `lib/client.cjs` `.hwb-picker-surface.bare` 改 `width:380px;max-width:100%;margin:0 auto`、`.hwb-catalog-list` 同步 380px 居中；`WaitLine` 接 `useAnchoredPosition` + `createPortal(document.body)` + `position:fixed` 面板（z-index 1100、border-radius 12px、padding 16px、`--dsw-specific-menu`/`--dsw-elevation-prominent`、min/max-width 视口夹紧、dt/dd 网格），字号全走 token；`openSiteTab` 走 `useTabInfo()`→`tab.actions.openTab(replaceTab:true)`；工具条四钮换官方 primitives 图标 + `.hwb-act-btn` 官方口径；`web-control.js` 输出 `statBlocks`（`waitStatBlocks({session,total,metrics})` 服务端现算）+ `client.cjs` 的设置页 `WaitTotals` 渲染（两处字段命名与口径已在客户端注释写明对应，前后端同源）；`wait-stats.js` 全中文单位、秒级不补小数、`formatElapsed` 与 `formatDuration` 合流。 |
+| 0.16.39 测试 | 全量 **836/836 通过**（`node --test test/*.test.mjs`，exit 0）；`wait-stats` 33/33；`client-render` 48/48（改写 2 条等待药丸短读数断言 `3 s`→`3 秒` / `12 s`→`12 秒`，更新 `liveWaitPayload` 缺省夹具为中文单位口径）；`control-routes` 断言同步 `15 s`→`15 秒` / `12 s`→`12 秒` / liveValue `3 s`→`3 秒`。 |
+| 0.16.39 装机 | **已完成**：`pnpm pack` → `dsh-webcode-bridge-0.16.39.tgz`；`verify-pack` **39/39 逐字相同 + 接线完好**；`install-profiles.mjs` 装入 web / headless 两 profile（均 v0.16.39）；三处 `lib/client.cjs` sha256 前 12 位 **F1DAEBA4AB3E**（286,290 字节）逐字相同。 |
+| 0.16.39 未完成项（如实记） | **需重启 DSH 才生效**（本项目反复踩过的一条：当前进程仍是旧代码）。重启后按 `doc/verify.md` 的 0.16.39 段逐条真机核对：① 目录站点行 380px 居中；② 药丸面板左对齐且不被裁、字号缩放跟随；③ 选站点后 Web Bridge 标签被替代；④ 工具条图标与官方一致；⑤ 设置页统计块数值与药丸一致。未通过不宣布完成，按 diagnose 流程定位。 |
+| 0.16.39 风险与边界 | `replaceTab` 走 `tab.actions` 依赖标签 hook；hook 缺位回落新开标签（可解释，不白屏）。portal 后测试桩若未提供 `createPortal`，按回退分支断言「内联渲染」而不是崩溃（本文件既有纪律）。面板改 `position:fixed` 后滚动/resize 由官方 hook 重算，窄面板下不再因 `right:0` 溢出。 |
+| 0.16.38 范围 | 用户七点（原话见 §0.16.38）：① 右栏站点选择框适配 tab 长短、与左右边界留间隔、居中；② 输入框底下「等待发送」药丸要在缩小后跟着适配（对齐官方）；③ 设置界面按作用域拆开——全局页删「账户与登录管理 / 首轮提示词」，站点页删「正在运行 / 模型管理 / 提示词投递 / 会话与子代理」，两者各管各的；站点页提示词改为**指向本地提示词文件并可打开**，且「每个网站只能改自己的」；tab 条改**横排单行 + 滚轮滚动 + 无滚动条**；文案学术精简（完整解释移入 `doc/settings-copy.md`）；DeepSeek 图标不再超出框；④ 全站「Z.ai (GLM 海外版)」改为「Z.ai」；⑤ 参考官方审美规范设置页 UI；⑥ 做官方契约审计并落文档（`doc/official-contract-audit.md`）；⑦ 安装并配置 modsearch。**未触碰**协议解析、账号底层连接、右栏镜像与窗口逻辑。 |
+| 0.16.38 落地 | `lib/providers.js` + `lib/client.cjs` 的 `Z.ai` 改名；`SiteGlyph` 鲸鱼分支补 `scale`（越界根因）；设置页卡片按作用域分组（`settingsTab` 判据），新增「本网站默认模型 / 本网站指令 / 提示词文件」三行；新增后端字段 `defaultModelBySite` 与 `extraPromptBySite`（归一化：未知站点丢弃、跨站点模型丢弃、空指令删键）；`POST prompt-file`（路径只由 siteId 派生，argv 打开系统默认程序）；`buildTurn` 的站点内模型覆盖 + 站点指令注入（进契约指纹与内容指纹两处）；等待药丸逐项等于官方 `StatsPills`（字号/行高挂在 wrap，pill 不再声明 height），wrap 改 `flex:0 1 auto` 可收缩；tab 条横排单行 + 非 passive 滚轮 + 隐藏滚动条；首屏网格/目录加左右内边距与居中；modsearch 全局安装并实测可用。 |
+| 0.16.38 修复的隐性缺陷 | ① `PromptSection` 与「全局指令」卡同时渲染 `GlobalPrompt` → 同一设置两个输入框（本轮自查时发现，已拆开并加护栏）；② 测试桩 `useState` 不执行函数式初值，导致 `settingsTab` 变函数对象、全局页被当站点页渲染（改用普通初值，并在注释里写明约束）；③ 站点页账户卡只列 `onlySiteId`，原先「三态头像」用例把不同站点混在一起、在作用域拆分后必然失败（夹具改为同站点三槽，更贴近真机）。 |
+| 0.16.38 测试 | 全量 **70/70 文件通过**（`ci-local` 的 `test` 步 exit 0，396s）；`client-render` 47/47（新增 1 条作用域用例）；`control-routes` 11/11（新增 3 条：站点级字典归一化 / GET 回空对象 / prompt-file 路径只由 siteId 派生）；`prompt-variants` 新增 1 条（站点指令只注入自己那一支）；`session-anchor` 扩 1 条（站点指令进契约指纹）；`regression` 新增 1 条（站点级模型覆盖 + 站点指令只进本站点首轮） |
+| 0.16.38 其他闸门 | 注释闸门 PASS；文件规范闸门 PASS；生成物卫生 PASS；基准离线回放 PASS；`check-ledger` 与 `ref-index` 的两处**既有**漂移已按闸门自身提示修正（台账版本号 0.16.37→0.16.38；`reference/README.md` 补 `dsh-drop-caret` / `dsh-market` 两行——它们入库时漏了重生成索引） |
+| 0.16.38 装机 | **已完成**：`npm pack` → 0.16.38 tarball → `install-profiles.mjs` 装入 web / headless 两 profile（均 v0.16.38）；三处 `lib/client.cjs` sha256 前 12 位 **C9BBBE8B87C1**（270,430 字节）逐字相同。 |
+| 0.16.38 闸门 | `ci-local` **8/8 PASS**：lint-comments / check-ledger（0.16.38 + 70/70）/ repo-hygiene / commit-msg / ref-index / artifacts-check / bench-offline / 全量单测（396s，exit 0）。 |
+| 0.16.38 未完成项（如实记） | **运行中的 3080 仍是 0.16.37**（实测 `build.version = 0.16.37`），需重启 DSH 才加载 0.16.38，因此「设置页新布局 / 药丸缩放 / 站点 tab 横排」等 10 项界面验收**尚未真机核对**。逐项清单见 `doc/verify.md` 的 0.16.38 段。 |
+| 0.16.38 用户原话要点 | 「设置界面……两者逻辑上单独适配全局和单独站点！你却全都有放置，请你按照我的要求删除对应 UI」「首轮提示词，每个单独模型都只能改自己的！以及请你将全部都变为指向对应网站本地提示词文本的存储文件且可以点击链接打开文件」「将这个变为横排而不是两行，然后可以通过鼠标滚轮滚动而不用显示进度条」「请你参考官方审美和借鉴苹果人类为本？理念」「做 renderer-v2 契约检查」（该名称在本机三处检索 0 命中，已按官方 client 插件契约执行，见 `doc/official-contract-audit.md` §0） |
+| 0.16.37 范围 | 用户：「① z.ai 和 glm 看搜索 zcode 看看有没有图标；② 让你**完全参考**「新建终端」做，你现在只是在半路……将 deepseek 等网站做出和他一样的**胶囊和排版**放在 web bridge 点击进去后」。落地：站点目录从「左栏 `panelRow` 数值」改成官方 **`TerminalGuide`（右栏「新建终端」）同款胶囊**——官方 `Button variant:'ghost'` 主区 + 44px 官方 `Button` 触发器 + 官方 `Menu` 账户下拉，尺寸逐项抄它的 module.css；GLM / Z.ai 拿到真实矢量（simple-icons 实测八个 slug 全 404，改取 lobehub）。 |
+| 0.16.37 测试 | `client-render` **46/46 通过**（新增 1 条：胶囊几何 + 官方原语 + 左栏旧口径不得复活；改写 2 条：SiteMenu 那条从「Menu 解构不得残留」改成「必须存在」、GLM 图标断言从「文字标记原因」改成「lobehub 来源 + 矢量真被渲染」）。**另修一处测试桩失真**（详见 §0.16.37 三） |
+| 0.16.37 已装 | 见下行「已装版本」 |
+| 0.16.36 范围（历史） | 删面板内横向站点条 + 目录改左栏 `panelRow` 排版 + 八个站点取回 simple-icons 矢量 —— **③ 的排版已被 0.16.37 推翻**（用户：「只是在半路」），① ② 保留 |
+| 0.16.36 范围（原始记录） | 用户四点（原话见 §0.16.36）：① 去掉「DeepSeek 为官方矢量；其余站点品牌方未发布…」那行脚注，把官方图**上网找来**；② 面板内**顶部那一行横向站点胶囊再删**，只留「官方多开一级 + Web Bridge 并列」那行（即 DSH 官方右侧栏自己的标签条）；③ 站点目录按**官方左栏行**排版（文件夹 / 新建终端 / 浏览器 那一套，`panelRow` 尺寸）；④ 每行**右侧**做账户展开（多账户站点）。**未触碰**任何解析 DeepSeek 协议的逻辑与账号底层连接。 |
+| 0.16.36 测试 | `client-render` **45/45 通过**（新增 1 条：面板内不得再有自建站点条；改写 1 条：目录行必须带官方 `panelRow` 尺寸口径 + 多账户站点必须有右侧展开按钮） |
+| 0.16.35 范围（历史） | 站点目录（一级）+ 每站点一个标签 + 横向站点条恢复 —— **横向条已被 0.16.36 删除**；目录与每站点标签保留 |
+| 0.16.35 范围（原始记录） | ① **恢复**横向站点标签条（0.16.34 删错了：用户要的「一行并列显示不同网址栏目」就是它），并按用户要求**去掉登录态**；② 工具条上的站点下拉按钮**删除**（「你现在的 deepseek 上面那点击排列多个网点就不要了」），`SiteMenu` 组件与 `Menu` 解构随之删干净；③ 新增**站点目录**：右栏「Web Bridge」标签页里从上往下的站点列表（图标 + 名称，多账户站点缩进列出子行，**不显示登录态**），点一行 = 为该站点**新开一个独立标签**（`multiple: true`，标题按 `navigation.params.siteId` 现算）——于是顶部标签条上就是「DeepSeek / 智谱清言 / …」一行并列，点回「Web Bridge」即回目录。**未触碰**任何解析 DeepSeek 协议的逻辑与账号底层连接。 |
+| 0.16.35 测试 | `client-render` **45/45 通过**（含 `slot` 接通后复跑）（新增 3 条：站点目录从上往下且无登录态、点一行会 `openTab` 并带 siteId、站点标签从自己的 `navigation.params` 取身份；掉头改写 1 条：横向标签条**在位**且不含状态点；删 1 条：`SiteMenu` 已删不得复活）。护栏升级：`sidebarRight.openTab` 桩改为**记录调用**（此前「点站点会发生什么」完全没有证据） |
+| 0.16.35 已装 | 见下行「已装版本」 |
+| 0.16.34 范围（历史） | 删除横向站点标签条 + 站点选择收敛为工具条竖排菜单 —— **① 已被 0.16.35 推翻**（标签条恢复），② 的菜单已被删除 |
+| 0.16.33 范围（历史） | 右栏 Web Bridge 二级站点菜单（官方 `Menu` 原语的 `submenu`）+ 账户行状态点；设置页**站点 tab 条**（形态对齐 dsh-market）+ 站点级排队间隔（`sendGapMsBySlot`，后端既有档位）；账户头像改用站点矢量标记 `SiteGlyph` |
+| 参考入库 | `reference/dsh-market/`（dshmarket 的 `src/` + `client/`，用户要求「放入插件参考文件夹」） |
+| 工作树版本（上一版） | **0.16.33**（待提交） |
+| 0.16.33 范围（历史） | 右栏 Web Bridge 二级站点菜单（官方 `Menu` 原语的 `submenu`）+ 账户行状态点；设置页**站点 tab 条**（形态对齐 dsh-market）+ 站点级排队间隔（`sendGapMsBySlot`，后端既有档位）；账户头像改用站点矢量标记 `SiteGlyph` |
+| 已装版本（profile） | web = **0.16.40**、headless = **0.16.40**（2026-09-21 实读两个 profile 的 `node_modules/dsh-webcode-bridge/package.json`；两 profile 的 `lib/browser-driver.js` sha256 前 12 位均 **4A3066286D3C**，与工作树逐字相同；`package.json` + `pnpm-lock.yaml` 的声明与 integrity 已一并改到 0.16.40，**不是**只写 `node_modules` 的易回退装法） |
+| 运行中的进程 | 3080 实测 `/__webcode/status` 的 `build` = `{hash:'f7e3cc76d4e8', version:'0.16.39'}`（2026-09-21 17:16 实读）⇒ 磁盘已是 **0.16.40**，**进程仍跑 0.16.39，待重启** |
+| 上游 | `origin/main` = `fb7cd6e`（0.16.31 文档收口）；本轮 0.16.32–0.16.40 待提交/待推（0.16.38 / 0.16.39 / 0.16.40 **均已打包装机**） |
+| 单测基线 | **73/73 测试文件（860 条断言）通过**（2026-09-21 实跑 `node --test test/*.test.mjs`，exit 0，399s）。台账曾写 70/70（0.16.38 读数）、72/72（0.16.40 初稿）——两次数值都随新护栏文件过期，`check-ledger` 两次都把它判红（这正是该闸门存在的意义）。**本机沙箱下 `pnpm test` 起子进程会 `spawn EPERM`**（见 §0.16.34 五），本机复核一律用 `node --test test/*.test.mjs` 这一条。 |
+| 注释闸门 | **PASS**（0.16.34 实跑：126 文件 error 0 / warn 0） |
+| 文件规范闸门 | **PASS**（0.16.34 实跑：无 BOM + 索引无死链 + Node 版本相容） |
+| 发布闸门 | **PASS**（2026-09-21 实跑 0.16.40：`verify-pack` 逐字相同 **41/41** + 接线完好）。**注意顺序**：README 版本行改完后**重新 pack 了一次**并重跑了 verify-pack（否则「tarball == 工作树」当场失真），两个 profile 的 lock integrity 也随新 tarball 重写。此后再改任何入库文件，都要重跑 `pnpm pack` + `verify-pack` + `install-profiles` + 声明/integrity 同步这四步 |
+| 记账闸门 | **PASS**（2026-09-21 实跑：version 0.16.40 / testFiles 73/73） |
 | 已装包核对 | 见下行「已装版本」 |
 | 真机验证（0.16.31） | 附件探针实测 `ok:true`（见 §0.16.31 一）；**「模型是否读到附件内容」尚未验证**，如实记 |
-| 下一阶段 | **重启 3080** 加载 0.16.32，然后核 §0.16.32 的真机判据（新轮 `calls` 不再归零）。遗留：`parseAgentReply().text` 的语义缺口（§0.16.32 三，已挂账不修） |
+| 下一阶段 | ① **重启 DSH** 加载 0.16.40（磁盘已就位，进程仍是 0.16.39）；② 重启后真机验两件事：Kimi 新 Connect-RPC 通路能否真跑通一轮工具闭环、GLM 工具轮后正文不再加倍；③ 0.16.39 的界面五项也可一并看（380px 居中 / 药丸面板左对齐不被裁 / 选站点替代本标签 / 工具条图标 / 设置页统计块）；④ **发布闸门与装机已完成**（`verify-pack` 41/41、两 profile v0.16.40、声明与 integrity 已同步），因此重启即可生效，不再有打包欠账；③ 真机门禁见 `doc/research/2026-09-21-login-probe-matrix.md` 末节。**2026-09-21 用户反馈后当场定性**：用户说「除 qwen 外我都登录了」；定向取证（`test-mock/doubao-login-detail.mjs`）显示**桥自己的 profile 里 doubao 就是游客页**（可见「登录」按钮、头像 0、与公开未登录页逐字同构）——探针没假阳性，用户登的是**他自己的 Edge**，而桥用独立 profile 目录，两者互不相通。要修只能走设置页该站点的「登录」按钮。qwen 经用户确认未登录，探针正确。其中**五站「已登录」态 loginProbe 已在本机真机跑完第一轮**（2026-09-21，逐站 20s 间隔）：glm 强证据 `probe-ok`；kimi / zai 是**弱结论**（`probe-fallback`，等于「有输入框」的语义歧义）；qwen / doubao 判 `probe-bad` 与「已登录」矛盾，**待人工目视定性**（真失效 or 特征假阳性）。cookie 名扫描五站零命中，如实记作「本机无法用这条通路复核」而非「未登录」。仍待办：GLM 工具轮 SSE 帧重新落盘、独立登录窗 ⇄ 右栏窗 accountKey 复核；④ 遗留：`parseAgentReply().text` 的语义缺口（§0.16.32 三，已挂账不修）、`tool-transport.js` / `tool-parser.js` **尚未接线**到任何调用点（目前只被单测引用，接线与否需你决定） |
 
 > **§0.16.10 真机判据（重启后逐条核）**：① `GET /__webcode/status` 的 `build.version` = **0.16.10**；
 > ② 让模型回复一段含 `<b>`、`<foo>`、`Array<T>` 或字面 `<tool_call>` 示例的正文，**逐字对比** harness
@@ -44,6 +90,331 @@
 > 掩盖了「web 落后两个版本」这个真因，直接导致用户按台账以为装好了、重启后仍然不变。
 > **教训记在这里而不是删掉**：凡是「已装/已重启/已验证」这类状态行，**必须逐 profile 写、并附
 > sha256 前 12 位**，否则它会把「一个 profile 装了」读成「都装了」。 |
+
+> **本轮实证（2026-09-21）**：0.16.40 那批改动**从未打包装机**，而 0.16.38 / 0.16.39 是打过包
+> 并装进两个 profile 的 —— 这两件事此前混在同一句「本轮 0.16.32–0.16.37 待提交/待推」里，
+> 读起来像是都装过。现按本表纪律拆开写：**「已打包/已装机」只认到 0.16.39，0.16.40 只有工作树**。
+> 判断依据是逐 profile 的 `package.json` 版本 + `pnpm-lock.yaml` 的 tarball 指向 +
+> `lib/client.cjs` 的 sha256 三项实读，不是按提交信息推的。 |
+
+## 0.16.37（2026-09-21，**未提交**）—— 站点目录改成官方「新建终端」同款胶囊；GLM / Z.ai 拿到真实矢量
+
+用户两点（逐字）：「1.z.ai 和 glm 看搜索 zcode 看看有没有图标，然后是让你完全参考「新建终端」做，
+你现在只是在半路，继续将 deepseek 等网站做出和他一样的胶囊和排版放在 web bridg 点击进去后，
+和 web 自身在的那里排版一样！」
+
+### 一、图标：GLM / Z.ai 也拿到了真实矢量（第 1 点）
+
+**先把结论与上一轮的关系说清楚，因为 0.16.36 的记载容易被读成「查过了，没有」：**
+
+- simple-icons 里**确实没有**。本轮逐条实测 `zhipu` / `chatglm` / `zai` / `z-ai` / `zhipuai` /
+  `bigmodel` / `zcode` / `glm` **八个 slug**，jsDelivr 与 unpkg 两个源全部 404。0.16.36 那句是**对的**。
+- 但它们并非没有矢量。`@lobehub/icons-static-svg` 同时收录两家的标记，本轮取回并**逐字**落库
+  （`zai.svg` / `chatglm.svg`，取件 2026-09-21，unpkg `@latest`）。用户提到的 **zcode** 也查了：
+  它是 z.ai 的官方 harness 产品（zcode.z.ai），**没有**独立图标条目，其品牌归属就是 Z.ai。
+
+**许可与来源必须分开说，这是本轮最容易被含糊过去的一处**：lobehub 是**社区图集**，
+不是品牌方发布的资产，与 simple-icons（CC0-1.0）也不同许可。它满足「真实矢量、透明底、随
+currentColor」，**不满足「官方发布」**。0.16.36 那份调研（`doc/brand-icons-research.md`）
+把这一点写得很死；本轮改用它，是权衡后的选择（用户明确要求这两站也要有图标，而官方渠道
+确实没有可直接引用的透明底符号），不是忽略。
+
+因此 `SITE_ICON_TIER` 从两档扩成**三档**，新增的档位专门用来装这种「真实但非官方发布」：
+
+| 档位 | 含义 | 谁在这一档 |
+| --- | --- | --- |
+| `official` | 官方发布的矢量 | DeepSeek（本机 primitives 的 `FISH_LOGO_PATH`）+ 八个 simple-icons（CC0） |
+| `vector` | **真实但非官方发布**的矢量 | GLM、Z.ai（lobehub 社区图集） |
+| `missing` | 没有矢量，退回文字标记 | **当前一个站点都不属于这档**（保留该档，供将来新增站点使用） |
+
+顺带把散在四处的 `siteTier(sid) === 'official'` 收敛成 `hasBrandVector(sid)`（`!== 'missing'`）：
+判据只有一个来源，否则新档位会被那四处漏掉，GLM / Z.ai 就会「有图标却按没有图标渲染」。
+
+### 一之二、顺手结清了 §27：九条路径已与上游**逐字符**核对
+
+0.16.36 在 [`doc/long-term-issues.md`](long-term-issues.md) §27 挂过一条未解决项：「八条
+simple-icons 路径的来源无法在本机复核」（当时外网被挡，只做了一个已被判定不可采信的
+形状审计）。**本轮外网通了，这条结清了**：改用「取回上游 SVG → 原样贴进复核脚本 →
+逐字符比对」，`.tmp/icon-source-verify.mjs` 一次跑通，**九条全部 `IDENTICAL`**
+（七条 simple-icons + 两条 lobehub）。
+
+核对过程本身查出一条**必须记下来的事实**：`openai` 在 simple-icons **latest 里已经 404**，
+只在 **14.5.0** 还能取到——该图标后来被图集移除。因此那条路径的来源必须钉版本；
+下一个人拿 `@latest` 复核会得到 404，然后**误判成「路径是编造的」**。这一条已写进
+`client.cjs` 的图标表注释与 §27 的表格里。
+
+> 边界仍然分开：脚本证明的是「**字节与上游一致**」，**不是**「它属于官方发布」。
+> zai / glm 来自 lobehub **社区图集**，这一条不因核对而改变——它由 `vector` 档承载。
+
+### 二、胶囊：从「抄 panelRow 的数值」改成「抄官方的**结构**」（第 2 点）
+
+用户说「你现在只是在半路」——**这个判断是对的**。0.16.36 我只把左栏 `.panelRow` 的行高与
+圆角抄了一半，行内是裸 `<button>`、右侧是自绘箭头 + 自管展开态。看着像，但壳子、触发器、
+键盘行为都不是官方的。而「新建终端」在官方是另一个组件：
+`@deepseek-ai/dsh-client-ui-sidebar-terminal` 的 **`TerminalGuide`**。
+
+本轮按它的结构重写（尺寸逐项取自 `TerminalGuide.module.css`）：
+
+| 部件 | 官方的做法 | 本插件的落点 |
+| --- | --- | --- |
+| 外壳 | `.entry`：`border:.5px solid border-l4` / `background:bg-layer-1` / `border-radius:24px` / `display:flex` / `overflow:hidden` | `.hwb-site-card` |
+| 主区 | `Button variant:'ghost'` + `.main`：`flex:1` / `gap:14px` / `min-height:56px` / `padding:14px 20px` / `border-radius:24px 0 0 24px` | `.hwb-site-main`（官方 `Button`） |
+| 文字 | `.title` 15px/1.4 + `.description` 13px/1.4（`label-primary` / `label-caption`） | `.hwb-site-title` / `.hwb-site-desc` |
+| 触发器 | `Button variant:'ghost'` + `.trigger`：`width:44px` / `align-self:stretch` / `border-radius:0 24px 24px 0`，内容是 `IconChevronDownOutline14` | `.hwb-site-trigger`（官方 `Button` + 官方 chevron） |
+| 下拉 | 官方 `Menu`（`portal:true` / `autoFocus` / `align:'end'`），开合由调用方的 `useState` 管 | 同款，条目 = 该站点的各账户槽 |
+
+**说明行只在多账户时出现**：官方 `TerminalGuide` 也是 `description !== undefined && …` 才画第二行，
+单账户站点给一句「1 个账户」是噪音。**单账户站点不给触发器**——给一个点了没东西的箭头是骗人的。
+
+`Button` / `Menu` / `IconChevronDownOutline14` 都按本文件既有的「降级不是崩溃」取（0.16.23 立的规矩）：
+旧版 primitives 缺位时回退成空组件，面板照常渲染。
+
+### 三、修了一处**测试桩失真**（本轮最值得记的一条）
+
+写胶囊时冒出一条看着莫名其妙的失败：目录里「找不到『智谱清言』行」，但页面渲染**没有任何错误**。
+
+真因不在产品代码，在测试桩：`client-render.test.mjs` 里的假 `React.createElement` 写的是
+
+```js
+(type, props, ...children) => ({ type, props, children })
+```
+
+——**只把 children 挂在返回节点上，没有放进 `props`**。而真 React 两者都给（单子给单值、多子给数组），
+官方 `primitives.Button` 恰恰是从 **`props.children`** 取内容的（签名 `({variant, children, ...rest})`）。
+于是「官方原语包着的图标与文字」在桩里被整块丢掉：**渲染不报错、errors 为空、断言却看不到那行字**。
+
+这与本文件上方 `primitiveOmit` 注释里记着的 0.16.21 教训同族——**桩的建模失真会把整类 bug 盖住**，
+区别只是上次是「缺导出」，这次是「导出在、但喂进去的 props 形状不对」。修法即让 `createElement`
+与真 React 同形。这条要留着：**下一批用官方原语的 UI 代码会越来越多，桩不同形就会持续假绿。**
+
+> 附带纠正一次我自己的误判：我一度以为是 harness 的 `instantiate` 吃掉了组件 children，
+> 改成「只摊平、由外层递归」——结果立刻撞 `Maximum call stack size exceeded`（外层再 instantiate
+> 一个非函数节点就会无限自套）。原来的 `map(instantiate)` 是对的，已原样恢复，并把原因写进注释，
+> 免得下一个人再走一遍。
+
+### 四、本轮实跑的读数
+
+| 项 | 读数 |
+| --- | --- |
+| `client-render.test.mjs` | **46/46 通过**（新增 1 条：胶囊几何 + 官方原语在位 + 左栏旧口径不得复活；改写 2 条） |
+| 注释闸门 | PASS（126 文件 error 0 / warn 0） |
+| 文件规范闸门 | PASS |
+| 记账闸门 | PASS（version 0.16.37 / testFiles 70/70） |
+| 发布闸门 | PASS（tarball 与工作树逐字相同 + 接线完好） |
+
+---
+
+## 0.16.36（2026-09-20，**未提交**）—— 站点目录改官方左栏行排版；面板内横向站点条再删；官方图上网取回
+
+用户四点（逐字）：「1.图标：DeepSeek 为官方矢量；其余站点品牌方未发布透明底矢量，按「官方优先」
+暂用文字标记。这行字去掉，然后把官方图上网找来 / 2.页面内顶部那一行去除，顶部一行那个去除，
+只留下官方多开一级和 web bridge 并列那行（独立标签保留就是）/ 3.上下排并列叫你参考现在官方：
+工作区文件 / 新建终端 / 浏览器 / Web Bridge 这样的排列你不懂吗？？？一样布局啊！格式！/
+4.叫你然后是每行右边能够选择登录账号（有多个账号的）做的类似“新建终端”右边点击拉取时候的
+展开你不懂吗？？参考官方布局 ui 设置代码啊！」
+
+### 一、图标：从「文字标记」改成真实品牌矢量（第 1 点）
+
+**来源是 simple-icons（CC0-1.0 公有领域）**，理由不是「随便找了个图集」，而是**跟随官方口径**：
+官方 `@deepseek-ai/dsh-client-ui-primitives` 的 `siteGlyph` 用的就是它——本机在
+`lib/index.js` 里实读到 `SITE_HOSTS`（44 条 host → 标记映射）与注释「simple-icons artwork set
+(CC0-1.0)」，逐字核对过（`grep -c 'SITE_HOSTS'` = 2 处命中）。
+
+八个站点取到真实矢量（DeepSeek 本来就有的官方鲸鱼不动，仍走 `FISH_LOGO_PATH`）：
+
+| 站点 | 图标 slug | 站点 | 图标 slug |
+| --- | --- | --- | --- |
+| ChatGPT | `openai` | 通义千问 | `qwen` |
+| Claude | `anthropic` | Kimi | `moonshotai` |
+| Gemini | `googlegemini` | 豆包 | `bytedance`（豆包属字节系，品牌方未单独发布豆包矢量） |
+| Grok | `x` | | |
+
+**GLM 与 Z.ai 确实没有**：`zhipu` / `chatglm` / `zai` 三个 slug 都取不到（404）。按本仓库
+「不造假状态」的既有纪律，这两站继续用文字标记（`GL` / `ZA` + 圆环），并在逐行 `title` 里写明
+「simple-icons 无 … 条目」。**一个站点的图标缺失是如实，不是遗漏**。
+
+顺带删掉首屏网格底部那行脚注（第 1 点明确要求「这行字去掉」）。删它不只是少一行字：
+那句话在 0.16.36 之后**已经不成立了**——八个站点现在都有真实矢量。
+
+> **取证边界（如实记）**：本轮本机沙箱下 `web_fetch` 取 simple-icons 返回
+> `TypeError: fetch failed`（外网被挡），因此**这八条路径的字节来源本轮无法在机内复核**。
+> 我写过一个形状审计脚本 `.tmp/icon-path-audit.mjs`，但它**本身不可靠、结论不可采信**：
+> 数字抽取是朴素正则，会把 `a` 命令的标志位与相对坐标混进同一串数字，报出的 `min/max`
+> 是解析产物而非几何事实（例如 `max=7948` 来自多个 token 相接，不是真实坐标）。因此它
+> **连证伪都做不到**。坐实来源的唯一办法是在能联网的环境里逐条比对 slug 文件。
+> 这一条已挂账，见 `doc/long-term-issues.md` §27。
+
+### 二、面板内横向站点条**再删**（第 2 点）
+
+0.16.34 删过 → 0.16.35 我按「一行并列显示不同网址栏目」**恢复** → 0.16.36 用户明确说
+「页面内顶部那一行去除」。**这是我上一轮把他的话读错了**：他要的「一行并列」是
+**DSH 官方右侧栏自己的标签条**（Web Bridge / DeepSeek / 智谱清言 …），不是面板内自建的一条。
+
+删除的同时清掉只为它存在的代码：`tabsRef` + 滚轮横向滚动 effect、`onTabKey`（tablist 方向键
+漫游）、`siteIds`，以及 `.hwb-sitebar*` / `.hwb-site-tab*` / `.hwb-tab-glyph` 六条样式。
+面板内站点入口因此只剩两处，且都在更合适的位置：右栏 Web Bridge 标签页里的**站点目录**
+（新建站点标签的入口），与官方标签条本身（切换）。
+
+### 三、目录改官方左栏行排版（第 3 点）
+
+尺寸**逐项**抄自官方 `@deepseek-ai/dsh-client-ui-sidebar` 的 `.panelRow`：
+`min-height:36px` / `border-radius:12px` / `padding:7px 8px` / `gap:8px` / `margin:0 2px` /
+`font-size:14px` / `line-height:22px`。于是「站点目录」与官方的「工作区文件 / 新建终端 / 浏览器」
+是同一套排版，而不是自创一套（这正是用户说的「一样布局啊！格式！」）。
+
+### 四、每行右侧账户展开（第 4 点）
+
+多账户站点在主行**右侧**给一颗展开按钮，形态照官方 `DisclosureRow` 的做法
+（`.row:hover .iconIdle{opacity:0}` / `.chevronHover{opacity:1}`）——本仓库的落点是：
+默认 `opacity:0`，行 hover / 按钮 focus / 展开态才显形；尺寸取官方图标按钮的 28px 家族。
+**单账户站点不给这颗按钮**（给一个点了没东西的箭头是骗人的）。
+展开后缩进列出各账户槽（`padding-left:36px`），点某账户 = 用那个槽开该站点的标签。
+
+### 五、本轮实跑的读数
+
+| 项 | 读数 |
+| --- | --- |
+| `client-render.test.mjs` | **45/45 通过**（新增 1 条钉子：「面板内不得再有自建站点条」，防止这条又被我恢复；改写 1 条：目录行必须带官方 `panelRow` 尺寸口径 + 多账户站点必须有右侧展开按钮） |
+| 注释闸门 | PASS |
+| 文件规范闸门 | PASS |
+| 记账闸门 | PASS（version 0.16.36 / testFiles 70/70） |
+| 发布闸门 | PASS（tarball 与工作树逐字相同） |
+
+---
+
+## 0.16.35（2026-09-20，**未提交**）—— 站点目录 + 每站点一个标签；横向站点标签条恢复
+
+用户原话：「我现在是重启了吗？你怎么完全没有改变？？？你看：文件夹，新建终端，浏览器，这几个
+是怎么排列？从上往下！我希望是点击 web bridg 后能够实现，一样的 deepseek，智谱，等这样排列！
+而不是一点进去就是 deepseek，然后你现在的 deepseek 上面那点击排列多个网点就不要了！登录态
+不要看！我只是想要能够实现然后新开 web 再次选择不一样的能够像现在一级跳转回去一样，跳回
+webbridge 一级，一行并列显示不同网址栏目！！！你这个现在还切换不了了选择后！！」
+
+先把两条事实摆清楚，因为用户的第一个问题就是它们：
+
+- **「重启了吗」**：3080 当时实测 `build.version` = **0.16.34**，即 0.16.34 已经加载了。用户
+  「完全没有改变」的观感**不是没重启**，而是 0.16.34 改的方向与他想要的相反（我删了他要的那排）。
+- **「切换不了了」**：一条**真缺陷**，且不在菜单本身（见下）。
+
+### 一、`Select` 点了没反应：`useDismissOnOutsidePointer` 的 rootRef 没挂上
+
+真因（真机行为可推、代码可读）：`SitePicker` 里 `useDismissOnOutsidePointer(rootRef, open, setOpen)`
+是**无条件调用**的（hooks 顺序纪律，`test/hooks-order.test.mjs` 钉着），而 0.16.33 写的那条
+「有 Menu 就用 SiteMenu」的分支**没有把 `rootRef` 挂到任何节点**。官方判据是：
+
+```js
+root.current?.contains(event.target) !== true   // client-ui-primitives: useDismissOnOutsidePointer
+```
+
+`root.current` 恒为 `null` → 这个表达式在**每一次** pointerdown 上都为真（**包括点在菜单行上**）。
+pointerdown 先于 click 派发，于是 `setOpen(false)` 先落地、列表先卸载，随后那一下 click 已经没有
+目标，`onSelect` **永远**不被调用——菜单能开、点不动。
+
+本轮按新方向把那条分支整个删了，缺陷随之消失；**教训写进代码注释与护栏**：将来再用
+「自绘下拉 + 官方 dismiss 钩子」，rootRef 必须挂在**同时包住触发按钮与列表**的那层元素上。
+
+### 二、删了什么、恢复什么
+
+| 动作 | 对象 | 依据 |
+| --- | --- | --- |
+| **恢复** | 横向站点标签条（`.hwb-sitebar` / `.hwb-site-tab` / 滚轮横向滚动 / `onTabKey` / `siteIds`） | 用户：「一行并列显示不同网址栏目」——0.16.34 我删错了，原样恢复 |
+| **去掉** | 站点标签里的登录态（状态点） | 用户：「登录态不要看」 |
+| **删除** | 工具条上的站点下拉按钮 | 用户：「你现在的 deepseek 上面那点击排列多个网点就不要了」 |
+| **删除** | `SiteMenu` 组件 + `Menu` 解构 + 六条菜单样式 | 失去全部调用方；死代码会让人以为还有入口 |
+
+### 三、新增：站点目录（一级）+ 每站点一个标签
+
+**站点目录**（`SiteCatalogBody`）＝右栏「Web Bridge」标签页的全部内容：从上往下的站点行
+（`SiteGlyph` 图标 + 站点名），**不显示登录态**；多账户站点把各槽作为缩进子行列在其下
+（这是「同站点多账户也能选」的落点，账号底层一行未改）。
+
+点一行 = `ctx.sidebarRight.openTab('webcode-site', { params: { siteId, slot } })`。官方契约
+（`sidebar-right/lib/client.js:5875`）在 `definition.multiple === true` 时生成
+`` `${pageAddress(kind)}/${randomUUID()}` `` 作为地址 —— **每次开都是独立标签**，`params` 随
+标签记入 `navigation`。于是顶部标签条上就是「DeepSeek / 智谱清言 / Kimi …」一行并列，点回
+「Web Bridge」标签就是回到这份目录。
+
+站点标签的正文与标题都从**自己的** `navigation.params.siteId` 读（官方 Browser 面板同款做法：
+`tab.navigation.params?.url`）。不这么做就只能靠「最后一个挂载的面板」猜站点，那正是「两个标签
+互相改对方」的根因。
+
+### 四、护栏与测试
+
+- `client-render`：**45/45 通过**。新增 3 条行为断言（目录从上往下且无登录态、点一行真的调
+  `openTab` 且带 `siteId`、站点标签从自己的 `params` 取身份），掉头改写 1 条（标签条**在位**
+  且不含状态点），删 1 条（`SiteMenu` 不得复活）。
+- 顺手修掉一条**空转的旧断言**：0.16.34 那条「站点条样式已删除」写的是 `/^\\.hwb-sitebar\\{/m`，
+  而样式表里的行是 `".hwb-sitebar{…}",`（带引号、带缩进）——它**永远为假**，所以「已删除」永远
+  成立。这是「护栏必须证明自己不是空转」的又一例，两边都改为带引号字面量。
+- `sidebarRight.openTab` 的测试桩从 `{}` 改为**记录调用**：此前「点站点会发生什么」在护栏里
+  完全没有证据，只能测出目录画得像不像。
+- 逐文件 `node test/<file>` 实跑：**69/70**（改动前基线与改动后一致），唯一红的 `reply-log.test.mjs` 是跑法产物（前提断言读
+  `NODE_TEST_CONTEXT`，补上后 4/4 绿），与本次改动无关。
+
+---
+
+## 0.16.34（2026-09-20，**未提交**）—— 右栏站点选择改竖排二级菜单（横向站点标签条删除）
+
+用户原话：「我要图一的菜单样式：tab 右侧栏目，上下排列选择，放二级菜单选择，而不是现在的
+二级菜单：一行过去，换成加个上下的选择！然后右侧参考现在官方终端右侧展开：是能切换账号
+（同站点多账户）能选择！」
+
+### 一、删了什么（这是本轮的主要动作，不是加东西）
+
+右栏面板里那条**常驻的横向站点标签条**整体删除：
+
+| 删除项 | 位置 | 为什么连它一起删 |
+| --- | --- | --- |
+| `.hwb-sitebar` / `.hwb-sitebar-tabs` / `.hwb-site-tab` / `.hwb-site-tab.active` / `.hwb-site-tab-name` / `.hwb-tab-glyph` | `client.cjs` 样式表 | 标签条没了，规则就是死规则；留着只会让下一个人以为它还在 |
+| 标签条渲染块（`role="tablist"` + 十个胶囊） | `Conversation` 渲染体 | 用户要的「上下排列」 |
+| 滚轮横向滚动 effect（`tabsRef`） | `Conversation` | 只为「标签溢出时横向滚」存在；宿主元素已不存在 |
+| `onTabKey`（tablist 左右方向键漫游）+ `siteIds` | `Conversation` | 同上，键盘走行改由官方 `Menu` 原语承包 |
+
+**随删除消失的一条能力，必须点名**：标签条上的 `Ctrl/⌘+点击` 与中键 = 在新分屏打开该站点。
+这是**只存在于标签条上**的隐形快捷键（0.16.22 的注释自己就写着「用户无从发现」），删掉它
+不丢分屏能力——工具条上的「在新面板中打开」按钮与首屏网格里的同一颗按钮都还在。
+
+### 二、留下来的形态
+
+工具条上的站点按钮弹出**竖排二级菜单**（0.16.33 已建，本轮起是唯一入口）：
+
+- 一行一个站点：`SiteGlyph` 图标 + 站点名 + 8px 状态点 + 状态词（名左、状态右，行撑满菜单宽）；
+- 该站点**有多个账户槽**时，行右侧展开子菜单列出各账户（**默认槽也在子菜单里**——单账户站点
+  不挂子菜单是官方 `Menu` 契约要求：`onSelect` 对「只展开子菜单的父行」不调用，挂上去会让
+  「切到 DeepSeek」这个最高频动作点不动）；
+- 账户行数据来自 `/status` 的 `driver.sites`（按槽一行），连接仍走既有的 `{siteId, slot}`，
+  **未新增也未改动**账号底层任何逻辑。
+
+### 三、一处信息搬家（不丢）
+
+「这个站点画的是官方矢量还是文字标记」的说明（`siteIconWhy`）原先挂在标签条每个 tab 的
+`title` 上；标签条删除后改挂在**菜单行的图标挂点**上（`.hwb-menu-glyph` 的 `title`）。
+断言也跟着从「tab 里有」改成「菜单行里有」——钉的是信息不丢，不是 DOM 位置。
+
+### 四、护栏：`Menu` 桩从「挂 props」升级为「真渲染行」
+
+`test/client-render.test.mjs` 里官方 `Menu` 的桩此前只把 `items` 原样挂成 props，于是
+「菜单打开后长什么样」在护栏里**整块是空白**——而本轮恰恰把站点选择全收进了这个菜单。
+桩现在渲染 `anchor` + （`openMenu` 时）逐行渲染 `items`（含前导图标），子菜单仍不伪造
+（真机靠 hover/focus 展开，桩拿不到这两个事件；账户行的护栏走源码静态检查）。
+
+同时新增钉子「横向站点标签条已删除，且配套代码不残留」（查带引号的活代码与 `^\\.hwb-sitebar\\{`
+这类样式规则，不查注释里解释性的提及）。
+
+### 五、本轮读数
+
+- `node test/client-render.test.mjs`：**43/43 通过**；
+- `node scripts/check-ledger.mjs`：PASS（version 0.16.34 / testFiles 70）；
+- `node scripts/lint-comments.mjs`：PASS（126 文件 error 0 / warn 0）；
+- `node scripts/check-repo-hygiene.mjs`：PASS（无 BOM / 索引无死链 / Node 版本相容）；
+- `pnpm test` 在本会话沙箱下 **`spawn EPERM`**（`node --test` 起子进程被沙箱拒绝），
+  与 0.16.9 记过的那次同因。改逐文件 `node test/<file>` 实跑：**69/70 绿**，唯一红的
+  `reply-log.test.mjs` 是**跑法的产物而不是产品缺陷**——它的第一条用例自带前提断言
+  「本用例跑在测试进程里」（读 `NODE_TEST_CONTEXT`），裸跑该文件时这个环境变量不存在，
+  于是前提断言先红；按真实跑法补上该变量再跑，该文件 **4/4 通过**。两条读数都记在这里，
+  不合并成一句「70/70 全绿」。
+
+---
 
 ## 0.16.32（2026-09-20，**未提交**）—— 官方闭 token 缺位/漂移成 DSML 时的整条调用归零
 
@@ -2944,4 +3315,3 @@ node --test test/upload-attachment-structure.test.mjs   → 4/4 pass
   **一个字符都不截**——字段名说的是「会发多少」，读数却是「假如走附件会上传多少」。
   现在 inline 一律 `truncate:false`、`payloadChars = total`、`kept:null`；「若走附件会上传
   多少」只在 `mode:'attach'` 时表达。护栏：`test/attach-callsite.test.mjs` ⑦。
-

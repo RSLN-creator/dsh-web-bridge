@@ -20,7 +20,7 @@
 | `doubao` | 豆包 | https://www.doubao.com |
 | `grok` | Grok (xAI) | https://grok.com |
 | `claude` | Claude (Anthropic) | https://claude.ai |
-| `zai` | Z.ai (GLM 海外版) | https://chat.z.ai |
+| `zai` | Z.ai | https://chat.z.ai |
 | `gemini` | Gemini (Google) | https://gemini.google.com |
 
 ---

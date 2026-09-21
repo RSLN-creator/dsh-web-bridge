@@ -406,6 +406,11 @@ export function buildPreset(options = {}) {
   if (system) parts.push('[系统指令]\n' + system);
   const extraPrompt = typeof options.extraPrompt === 'string' && options.extraPrompt.trim() ? options.extraPrompt.trim() : '';
   if (extraPrompt) parts.push('[全局指令]\n' + extraPrompt);
+  // 站点专属指令（0.16.38）：与全局指令**同轮注入、全局在前**。它由设置面按站点
+  // 单独编辑（每个网站只能改自己那一段），因此标注里写明是哪个站点——网页那一侧
+  // 多站点并行时，模型据此知道这一句只属于当前站点。
+  const sitePrompt = typeof options.sitePrompt === 'string' && options.sitePrompt.trim() ? options.sitePrompt.trim() : '';
+  if (sitePrompt) parts.push('[本网站指令]' + (options.siteId ? '（' + options.siteId + '）' : '') + '\n' + sitePrompt);
   const tools = Array.isArray(options.tools) ? options.tools : [];
   // 实验变体 slim（**默认关闭**）：首轮更短。依据 arXiv 2510.05381「长上下文
   // 本身有害，即使检索完美」。取值刻意用「显式传入」而不是全局开关——
@@ -725,6 +730,14 @@ export function coerceArguments(args, schema) {
       }
       default: break;
     }
+  }
+  // 别名纠偏：模型（尤其是 GLM）高频把 file_path 写成 path 或 filepath（真机 session-2411bccd 实锤）
+  if (props.file_path && !('file_path' in out)) {
+    if ('path' in out) { out.file_path = out.path; coerced.push('file_path'); }
+    else if ('filepath' in out) { out.file_path = out.filepath; coerced.push('file_path'); }
+  }
+  if (props.command && !('command' in out)) {
+    if ('cmd' in out) { out.command = out.cmd; coerced.push('command'); }
   }
   return { args: out, coerced };
 }
@@ -1939,8 +1952,53 @@ export function parseAgentReply(text, options = {}) {
     if (!body || !body.jsonRaw) continue;
     takeObj(body.jsonRaw);
   }
-  const tagRe = /<\s*(?:tool_call|function|stories)\s*>([\s\S]*?)<\s*\/\s*(?:tool_call|function|stories)\s*>/gi;
-  while ((m = tagRe.exec(s)) !== null) takeObj(m[1], true);
+  const tagRe = /<\s*(?:tool_call|function|stories|seed:tool_call)\s*>([\s\S]*?)<\s*\/\s*(?:tool_call|function|stories|seed:tool_call)\s*>/gi;
+  while ((m = tagRe.exec(s)) !== null) {
+    // GLM / Z.ai 原生 arg_value 形状（真机 session-2411bccd 与开源 GLM-4.5/4.6/5.1 模板）：
+    // 形式 1: <arg_key>k</arg_key>\s*<arg_value>v</arg_value>
+    // 形式 2: <tool_call>toolName\nk\nv</arg_value>\n...</tool_call>
+    if (m[1].includes('</arg_value>')) {
+      const trimmed = m[1].trim();
+      const toolNameMatch = trimmed.match(/^([a-zA-Z_][a-zA-Z0-9_.-]*)/);
+      const toolName = toolNameMatch ? toolNameMatch[1] : '';
+      if (toolName) {
+        const rest = trimmed.slice(toolName.length);
+        const args = {};
+        let count = 0;
+        // 尝试匹配 <arg_key>...</arg_key>\s*<arg_value>...</arg_value>
+        const keyValRe = /<\s*arg_key\s*>([\s\S]*?)<\s*\/\s*arg_key\s*>\s*<\s*arg_value\s*>([\s\S]*?)<\s*\/\s*arg_value\s*>/gi;
+        let kvMatch;
+        while ((kvMatch = keyValRe.exec(rest)) !== null) {
+          const k = kvMatch[1].trim();
+          let v = kvMatch[2].trim();
+          if ((v.startsWith('{') && v.endsWith('}')) || (v.startsWith('[') && v.endsWith(']')) || v === 'true' || v === 'false' || /^-?\d+(\.\d+)?$/.test(v)) {
+            try { v = JSON.parse(v); } catch {}
+          }
+          args[k] = v;
+          count++;
+        }
+        // 若无 <arg_key> 则匹配 key\nval</arg_value> 形式
+        if (count === 0) {
+          const argRe = /\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\n([\s\S]*?)<\s*\/\s*arg_value\s*>/gi;
+          let match;
+          while ((match = argRe.exec(rest)) !== null) {
+            const k = match[1];
+            let v = match[2].trim();
+            if ((v.startsWith('{') && v.endsWith('}')) || (v.startsWith('[') && v.endsWith(']')) || v === 'true' || v === 'false' || /^-?\d+(\.\d+)?$/.test(v)) {
+              try { v = JSON.parse(v); } catch {}
+            }
+            args[k] = v;
+            count++;
+          }
+        }
+        if (count > 0) {
+          takeObj(JSON.stringify({ mcp_action: 'call', name: toolName, arguments: args }), true);
+          continue;
+        }
+      }
+    }
+    takeObj(m[1], true);
+  }
   // GLM-5.3 原生形状（2026-09-13 真机）：工具名裸放在标签后、参数 JSON 直接
   // 跟随，没有 name 字段——<tool_call>pwsh{"command":"Get-ChildItem …"}</tool_call>。
   // tagRe 对它取到的 body 以工具名开头（不以 { 开头）而跳过，这里单独还原：

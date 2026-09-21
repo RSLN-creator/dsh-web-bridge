@@ -33,21 +33,66 @@ function loadDecoderRegistry(explicitPath) {
   return globalThis.WebCodeStreamDecoders;
 }
 
-/** 捕获脚本：按站点 completionPaths 拦截 SSE（XHR drain + fetch tee）。
+/** 捕获脚本：按站点 completionPaths 拦截 SSE 或 Connect-RPC（XHR drain + fetch tee）。
  *  自愈守护：站点埋点 SDK 会把 window.fetch **恢复成原生引用**（GLM 真机实锤：
  *  installed=true 而 fetch 包装出链，整条流静默丢失），单次包装挡不住。包装带
  *  __wcCap 特征标记，守护每 500ms 查一次，丢失立即重装——导航后脚本重跑，
- *  守护只存在于当前文档，不会累积。 */
-function captureInit(paths) {
+ *  守护只存在于当前文档，不会累积。
+ *
+ *  Connect-RPC（kimi 2026-09-21 真机确证）：网页已从旧 SSE 全面迁移到
+ *  `POST /apiv2/kimi.gateway.chat.v1.ChatService/Chat`（Content-Type:
+ *  application/connect+json），响应是**二进制帧流**：每帧 `[flags(1)][len(4BE)][json]`，
+ *  逐帧 JSON 自描述（{op:'set'|'append', mask:'block.text|block.think.content|...',
+ *  done:{}}）。TextDecoder 会把字节头解成乱码、无法按行切分 → 这里对 connect 站点
+ *  用原始字节累积 + 按帧头切分，把每帧 JSON 以独立一行 emit 给下游行式解码器。 */
+function captureInit(paths, opts = {}) {
+  const connect = opts.transport === 'connect';
   const list = JSON.stringify(paths.length ? paths : ['/api/v0/chat/completion']);
   return `
 (function () {
   if (window.__webcodeCaptureInstalled) { try { install(); } catch {} return; }
   window.__webcodeCaptureInstalled = true;
   const TARGETS = ${list};
+  const CONNECT = ${connect};
   const hit = (u) => TARGETS.some((t) => String(u || '').includes(t));
   const emit = (id, phase, text) => { try { window.__webcodeChunk(id, phase, text || ''); } catch {} };
   function newId() { return 'cap-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2); }
+  // Connect-RPC 二进制帧切分器：累积原始字节，按 [flags(1)][len(4BE)][json] 逐帧取 JSON。
+  function makeConnectSplitter(emitFrame) {
+    let frames = [];          // Uint8Array 累积
+    function px(arr, off, n) { let v = 0; for (let i = 0; i < n; i++) v = (v * 256) + (arr[off + i] || 0); return v; }
+    function consume(bytes) {
+      for (const b of bytes) frames.push(b);
+      let buf = Uint8Array.from(frames);
+      let off = 0;
+      for (;;) {
+        if (buf.length - off < 5) break;
+        const len = ((buf[off + 1] & 0xff) * 0x1000000) + ((buf[off + 2] & 0xff) * 0x10000)
+          + ((buf[off + 3] & 0xff) * 0x100) + (buf[off + 4] & 0xff);
+        if (len < 0 || len > 64 * 1024 * 1024) { off++; continue; }   // 防脏帧死循环
+        // 长度头之后必须紧跟 JSON 对象的首字节 {：Connect-RPC 的载荷是自描述 JSON，
+        // 而「假长度头」也能落在合法区间内（真机噪音里见过 33MB 这种值）——只看长度
+        // 会让切帧器停在那儿死等一个永远凑不齐的帧，**后面所有真帧全被扣住**。
+        // 用载荷首字节做第二判据即可重同步；正常帧的 payload 恒以 { 开头，不误伤。
+        if (buf[off + 5] !== 0x7b) { off++; continue; }
+        if (buf.length - off < 5 + len) break;
+        const chunk = buf.subarray(off + 5, off + 5 + len);
+        // Decode as UTF-8. Do NOT build the string byte-by-byte with String.fromCharCode:
+        // Connect-RPC JSON frames carry CJK text, and raw-byte decoding turns it into
+        // mojibake that JSON.parse still accepts, so the corruption travels silently all
+        // the way to the decoder and the harness (no throw, no trace, only garbled text).
+        // Caught 2026-09-21 by the real-execution cases in test/capture-connect.test.mjs.
+        // NOTE: this block lives inside a template literal; comments here must not contain
+        // backticks, or the template is cut short (hit for real on 2026-09-21).
+        let s = '';
+        try { s = new TextDecoder('utf-8').decode(chunk); } catch { continue; }
+        try { const j = JSON.parse(s); emitFrame(j); } catch { /* 跳过非 JSON 帧 */ }
+        off += 5 + len;
+      }
+      frames = Array.from(buf.subarray(off));
+    }
+    return { consume };
+  }
   function install() {
     // ---- fetch：不是我们的包装（或已是）都要保证最外层带 __wcCap 标记 ----
     if (!(window.fetch && window.fetch.__wcCap)) {
@@ -63,17 +108,34 @@ function captureInit(paths) {
               emit(id, 'start', '');
               const [forPage, forCapture] = resp.body.tee();
               const reader = forCapture.getReader();
-              const dec = new TextDecoder();
-              (async () => {
-                try {
-                  for (;;) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-                    emit(id, 'chunk', dec.decode(value, { stream: true }));
-                  }
-                } catch {}
-                emit(id, 'end', '');
-              })();
+              if (CONNECT) {
+                const splitter = makeConnectSplitter((j) => {
+                  // 每帧 JSON 一行喂给下游行式解码器（JsonLinesDecoder 按 \\n 分行）。
+                  emit(id, 'chunk', JSON.stringify(j) + '\\n');
+                });
+                (async () => {
+                  try {
+                    for (;;) {
+                      const { done, value } = await reader.read();
+                      if (done) break;
+                      splitter.consume(value);
+                    }
+                  } catch {}
+                  emit(id, 'end', '');
+                })();
+              } else {
+                const dec = new TextDecoder();
+                (async () => {
+                  try {
+                    for (;;) {
+                      const { done, value } = await reader.read();
+                      if (done) break;
+                      emit(id, 'chunk', dec.decode(value, { stream: true }));
+                    }
+                  } catch {}
+                  emit(id, 'end', '');
+                })();
+              }
               return new Response(forPage, { status: resp.status, statusText: resp.statusText, headers: resp.headers });
             }
           } catch {}
@@ -672,6 +734,17 @@ export function createBrowserDriver(options = {}) {
     if (probe?.ok) {
       try { if (await p.locator(probe.ok).first().count()) { lastLoginBasis = 'probe-ok'; return true; } } catch { /* 同上 */ }
     }
+    // SPA 水合重探（kimi 真机 2026-09-21）：domcontentloaded 一瞬，头部「登录」按钮
+    // 尚未水合，bad/ok 双缺 → 直接回退会把「没登录」记成「有输入框=已登录」。
+    // 只有「声明了特征 + 双缺 + 将回退成语义歧义（有可见 composer）」才兜这一次：
+    //   已正确命中过的站点（快速路径）零等待；deepseek 未声明特征，完全不进这里；
+    //   无 composer 时回退必为 false，再等也等不出区别，跳过。
+    if (declared && probe?.bad && await visibleComposerCount(p) > 0) {
+      try {
+        const appeared = await p.locator(probe.bad).first().waitFor({ state: 'visible', timeout: 2_000 }).then(() => true, () => false);
+        if (appeared) { lastLoginBasis = 'probe-bad'; return false; }
+      } catch { /* 重探异常不进坑 */ }
+    }
     // 声明了特征但都没命中（如站点改版、或页面根本没加载出来）：如实标成
     // probe-fallback，不要谎称「命中了登录特征」——那会让面板把一次猜测
     // 当成特征核验的结果。
@@ -939,18 +1012,48 @@ export function createBrowserDriver(options = {}) {
     try { return page && !page.isClosed?.() ? await page.evaluate(() => navigator.userAgent) : null; } catch { return null; }
   }
 
-  function defaultEdgePath() {
-    for (const c of [
-      'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-      'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+  function defaultChromiumPath() {
+    const localAppData = process.env.LOCALAPPDATA || '';
+    const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
+    const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+
+    const candidates = [
+      // 1. Edge
+      path.join(programFiles, 'Microsoft\\Edge\\Application\\msedge.exe'),
+      path.join(programFilesX86, 'Microsoft\\Edge\\Application\\msedge.exe'),
+      localAppData ? path.join(localAppData, 'Microsoft\\Edge\\Application\\msedge.exe') : '',
+      // 2. Google Chrome
+      path.join(programFiles, 'Google\\Chrome\\Application\\chrome.exe'),
+      path.join(programFilesX86, 'Google\\Chrome\\Application\\chrome.exe'),
+      localAppData ? path.join(localAppData, 'Google\\Chrome\\Application\\chrome.exe') : '',
+      // 3. Brave
+      path.join(programFiles, 'BraveSoftware\\Brave-Browser\\Application\\brave.exe'),
+      localAppData ? path.join(localAppData, 'BraveSoftware\\Brave-Browser\\Application\\brave.exe') : '',
+      // 4. Chromium / Vivaldi
+      path.join(programFiles, 'Chromium\\Application\\chrome.exe'),
+      localAppData ? path.join(localAppData, 'Vivaldi\\Application\\vivaldi.exe') : '',
+      // macOS
       '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
+      // Linux
       '/usr/bin/microsoft-edge',
       '/usr/bin/microsoft-edge-stable',
-      '/usr/bin/microsoft-edge-dev',
-    ]) {
+      '/usr/bin/google-chrome',
+      '/usr/bin/google-chrome-stable',
+      '/usr/bin/chromium',
+      '/usr/bin/chromium-browser',
+      '/usr/bin/brave-browser',
+    ].filter(Boolean);
+
+    for (const c of candidates) {
       try { if (fs.existsSync(c)) return c; } catch {}
     }
     return null;
+  }
+  function defaultEdgePath() {
+    return defaultChromiumPath();
   }
 
   function onPageCapture(m) {
@@ -1254,7 +1357,7 @@ export function createBrowserDriver(options = {}) {
   }
 
   async function launch({ headless } = {}) {
-    if (!cfg.executablePath) throw new Error('system Edge not found — install Edge or set executablePath');
+    if (!cfg.executablePath) throw new Error('Chromium-based browser not found — install Edge, Chrome, Brave or set executablePath');
     fs.mkdirSync(cfg.profileDir, { recursive: true });
     clearStaleProfileLocks();
     const launchOnce = () => chromium.launchPersistentContext(cfg.profileDir, {
@@ -1354,7 +1457,7 @@ export function createBrowserDriver(options = {}) {
     await p.exposeBinding('__webcodeChunk', (source, captureId, phase, text) => {
       onPageCapture({ captureId, phase, text });
     }).catch(() => {});
-    const init = captureInit(paths);
+    const init = captureInit(paths, { transport: site.streamTransport || null });
     await p.addInitScript(init);
     try { await p.evaluate(init); } catch { /* 页面尚未可用时忽略 */ }
     // 注入自检：binding 与捕获脚本必须在**当前文档**真实存在。exposeBinding

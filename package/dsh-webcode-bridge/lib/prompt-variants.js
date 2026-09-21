@@ -110,9 +110,13 @@ const PLACEHOLDER_TOOLS = [
  * @param {object} [options.lastPreset] 最近一次真实首轮（index.js 的 lastPresetInfo）
  * @returns {{variants: Array, toolsSource: string, active: object|null}}
  */
-export function buildPromptVariants({ tools, extraPrompt, system, lastPreset, experiments = false } = {}) {
+export function buildPromptVariants({ tools, extraPrompt, sitePromptOf, system, lastPreset, experiments = false } = {}) {
   const real = Array.isArray(tools) && tools.length > 0;
   const toolList = real ? tools : PLACEHOLDER_TOOLS;
+  // 站点专属指令（0.16.38）：按变体**实际服务的站点**取那一段，没有站点归属的
+  // （default，服务除 glm/deepseek 外的全部站点）传空——那一段属于具体站点，
+  // 不属于「除某站之外的全部站点」这一支。
+  const sitePrompt = (sid) => (typeof sitePromptOf === 'function' ? sitePromptOf(sid) : '');
   const specs = experiments ? [...VARIANT_SPECS, ...EXPERIMENT_SPECS] : VARIANT_SPECS;
   const variants = specs.map((spec) => ({
     id: spec.id,
@@ -131,6 +135,7 @@ export function buildPromptVariants({ tools, extraPrompt, system, lastPreset, ex
     // 现算：与真正发出去的那一份走同一个函数。
     text: serializeFirstTurn({
       messages: [], tools: toolList, extraPrompt, system, siteId: spec.siteId,
+      sitePrompt: sitePrompt(spec.siteId),
       ...(spec.slim ? { slim: true, toolDescLimit: SLIM_TOOL_DESC_LIMIT } : {}),
     }),
     // 再教学提示也一并露出——增量轮第 5 个工具结果会重贴它，立场必须与首轮一致。
@@ -177,15 +182,19 @@ export function variantIdForSite(siteId) {
  * @param {object} [options.lastPreset]  最近一次真实首轮
  * @returns {{sites: Array, variants: Array, toolsSource: string, active: object|null}}
  */
-export function buildSitePromptRows({ tools, extraPrompt, system, lastPreset } = {}) {
+export function buildSitePromptRows({ tools, extraPrompt, sitePromptOf, system, lastPreset } = {}) {
   const real = Array.isArray(tools) && tools.length > 0;
   const toolList = real ? tools : PLACEHOLDER_TOOLS;
+  const sitePrompt = (sid) => (typeof sitePromptOf === 'function' ? sitePromptOf(sid) : '');
   // 协议清单：id + label + 该协议在「本会话工具清单」下的完整文本。
   const variants = VARIANT_SPECS.map((spec) => ({
     id: spec.id,
     label: spec.label,
     note: spec.note,
-    text: serializeFirstTurn({ messages: [], tools: toolList, extraPrompt, system, siteId: spec.siteId }),
+    text: serializeFirstTurn({
+      messages: [], tools: toolList, extraPrompt, system, siteId: spec.siteId,
+      sitePrompt: sitePrompt(spec.siteId),
+    }),
   }));
   const byId = new Map(variants.map((v) => [v.id, v]));
   const sites = SITES.map((st) => {
@@ -199,6 +208,8 @@ export function buildSitePromptRows({ tools, extraPrompt, system, lastPreset } =
       variantLabel: chosen.label,
       // 该站点真正会发出去的模板（按它自己的 siteId 现算）。
       text: chosen.text,
+      // 该站点自己的那一段指令（0.16.38）：设置页的站点页只编辑它。
+      sitePrompt: sitePrompt(st.id),
     };
   });
   const active = lastPreset

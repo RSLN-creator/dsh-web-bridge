@@ -99,6 +99,53 @@ test('设置保存的默认模型在未显式选模型时生效', async () => {
     assert.equal(turns[0].model, 'deepseek:deepseek');
   } finally { await dispose(); }
 });
+test('0.16.38 站点级设置：defaultModelBySite 覆盖本站点模型，extraPromptBySite 只进该站点首轮', async () => {
+  // 用户要求：「模型每个网站例如『deepseek』标签页」「首轮提示词，每个单独模型都
+  // 只能改自己的」。这一条把后端语义钉住：
+  //   · defaultModelBySite[S] 只在落点站点是 S 时生效，且**不得**把站点搬走；
+  //   · extraPromptBySite[S] 只注入发给 S 的那一份首轮文本。
+  let adapter; const turns = [];
+  const driver = {
+    status: () => ({ running: true }), close: async () => {}, resetConversation: async () => {},
+    sendTurn: async (key, prompt, opts) => { turns.push({ key, prompt, ...opts }); opts.onDelta?.('答'); return { text: '答' }; },
+    sendPrompt: async (prompt, opts) => { turns.push({ prompt, ...opts }); return { text: '答' }; },
+  };
+  // 设置面：主线落点 deepseek + 它的站点级覆盖 + 两条站点指令。
+  const state = {
+    extraPrompt: '',
+    defaultModel: 'deepseek',
+    defaultModelBySite: { deepseek: 'deepseek:deepseek' },
+    extraPromptBySite: { deepseek: 'DEEPSEEK-ONLY', glm: 'GLM-ONLY' },
+  };
+  const settings = { get: () => ({ ...state }), set: (v) => { Object.assign(state, v); return { ...state }; } };
+  const ctx = { llm: { registerAdapter: (_, a) => { adapter = a; } }, get: (n) => (n === 'settings' ? settings : null), inject() {} };
+  const dispose = apply(ctx, { port: 0, requireConsent: false, driver });
+  const user = text => ({ role: 'user', content: [{ type: 'text', text }] });
+  try {
+    const first = async (options) => {
+      const chunks = [];
+      for await (const c of adapter.stream(options)) chunks.push(c);
+      return chunks;
+    };
+    // 主线（未显式选模型）→ 落点 deepseek，站点级覆盖就是它自己那一支。
+    await first({ sessionId: 'sc-1', messages: [user('问一')] });
+    assert.equal(turns[0].model, 'deepseek:deepseek', '站点级覆盖必须生效（同一支）');
+    assert.ok(turns[0].prompt.includes('DEEPSEEK-ONLY'), 'deepseek 的首轮必须带它自己的指令');
+    assert.ok(!turns[0].prompt.includes('GLM-ONLY'), 'deepseek 的首轮不得带上 glm 的指令');
+    assert.ok(turns[0].prompt.includes('[本网站指令]'), '站点指令必须有自己的标注');
+    // 跨站点的覆盖值必须被忽略（不得把落点站点搬走）。
+    // 为什么只在这一侧断言「别的站点不被污染」：换站点要**另一个站点的真实驱动**
+    //（index.js 的 driverFor），而本用例注入的桩只服务主线站点——那一段由
+    // prompt-variants.test.mjs 的纯函数护栏覆盖（glm 行只拿 glm 那一段）。
+    state.defaultModelBySite = { deepseek: 'glm:glm-5.3' };
+    await first({ sessionId: 'sc-2', messages: [user('问二')] });
+    // （sendTurn 的 opts 里能读到的站点身份就是 model 的站点前缀——驱动契约里
+    //  没有单独的 siteId 字段，所以判据写在 model 上。）
+    assert.equal(turns[1].model, 'deepseek:deepseek',
+      '跨站点的覆盖值必须被忽略：落点站点不得被搬走，模型必须回落到本站点那一支');
+  } finally { await dispose(); }
+});
+
 test('网页会话丢失时用整段首轮提示词重放，而不是把增量丢进空会话', async () => {
   let adapter; const turns = [];
   const driver = {

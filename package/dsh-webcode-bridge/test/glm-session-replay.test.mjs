@@ -8,7 +8,7 @@
 // pwsh 的 parameters 取自该会话 request/header 的真实 schema（command 的
 // description 字段省略，不影响类型/required 判定）。
 import { apply } from '../lib/index.js';
-import { parseAgentReply, buildPreset, serializeFirstTurn, serializeDelta, trainNoteFor, fillMissingRequired } from '../lib/agent-preset.js';
+import { parseAgentReply, buildPreset, serializeFirstTurn, serializeDelta, trainNoteFor, fillMissingRequired, coerceArguments } from '../lib/agent-preset.js';
 
 // 官方 tool-call 模板的词间连接符（U+2581，0.16.18 教学/断言共用；源码不出现全角字符）。
 const S = String.fromCharCode(0x2581);
@@ -69,6 +69,42 @@ async function runTurn({ reply, tools, sessionId, message = '请你审查本地�
   check('会话回放 · envelope 的 purpose 保留到调用对象',
     calls.length === 1 && calls[0].purpose === '查看当前工作目录与项目结构',
     JSON.stringify(calls));
+}
+{
+  // 0.17.1 回归：GLM 原生 <tool_call>...<arg_value> 形状（session-2411bccd 真机）
+  const glmArgValReply = '这个工作区文件很多，我先看一下顶层目录结构，找到实际的项目源码位置。<tool_call>pwsh\ncommand\nGet-ChildItem -Force | Select-Object Mode, Name | Format-Table -AutoSize</arg_value>\ndescription\nList top-level workspace directory entries</arg_value></tool_call>';
+  const { calls } = parseAgentReply(glmArgValReply, { tools: REAL_TOOLS });
+  check('会话回放 · GLM 原生 <arg_value> 形状直接解析成调用',
+    calls.length === 1 && calls[0].name === 'pwsh' && calls[0].arguments.command.includes('Get-ChildItem')
+      && calls[0].arguments.description === 'List top-level workspace directory entries',
+    JSON.stringify(calls));
+}
+{
+  // GLM 开源 <arg_key>...<arg_value> 模板形状
+  const glmKeyValReply = '<tool_call>pwsh<arg_key>command</arg_key><arg_value>Get-Process</arg_value><arg_key>description</arg_key><arg_value>List processes</arg_value></tool_call>';
+  const { calls } = parseAgentReply(glmKeyValReply, { tools: REAL_TOOLS });
+  check('会话回放 · GLM 开源 <arg_key><arg_value> 结构解析',
+    calls.length === 1 && calls[0].name === 'pwsh' && calls[0].arguments.command === 'Get-Process'
+      && calls[0].arguments.description === 'List processes',
+    JSON.stringify(calls));
+}
+{
+  // 豆包 <seed:tool_call> 形状
+  const doubaoReply = '调用工具如下：<seed:tool_call>{"name":"pwsh","arguments":{"command":"ls","description":"list files"}}</seed:tool_call>';
+  const { calls } = parseAgentReply(doubaoReply, { tools: REAL_TOOLS });
+  check('会话回放 · 豆包 <seed:tool_call> 标签解析',
+    calls.length === 1 && calls[0].name === 'pwsh' && calls[0].arguments.command === 'ls',
+    JSON.stringify(calls));
+}
+{
+  // 0.17.1 回归：read 工具把 path / filepath 纠偏为 file_path
+  const readSchema = { type: 'object', properties: { file_path: { type: 'string' } }, required: ['file_path'] };
+  const { args: a1, coerced: c1 } = coerceArguments({ path: 'package/dsh-webcode-bridge/lib/comparison-view.js' }, readSchema);
+  const { args: a2, coerced: c2 } = coerceArguments({ filepath: 'package/dsh-webcode-bridge/lib/comparison-view.js' }, readSchema);
+  check('参数纠偏 · path/filepath 自动别名补齐为 file_path',
+    a1.file_path === 'package/dsh-webcode-bridge/lib/comparison-view.js' && c1.includes('file_path')
+      && a2.file_path === 'package/dsh-webcode-bridge/lib/comparison-view.js' && c2.includes('file_path'),
+    JSON.stringify({ a1, a2 }));
 }
 
 // ---- ② 会话回放（端到端）：派发前的参数必须带上补齐的 description ----

@@ -326,3 +326,31 @@ test('slim 变体首轮文本必须严格更短（对比同输入下的 default�
   assert.ok(withLong(true).includes('X'.repeat(800)), 'slim 的工具描述上限是 800');
   assert.ok(!withLong(true).includes('X'.repeat(801)), 'slim 不得保留第 801 个字符');
 });
+
+// 0.16.38：站点专属指令。用户要求「首轮提示词，每个单独模型都只能改自己的」——
+// 后端侧的含义是：**只有该站点那一行/那一支**能拿到它的那一段，别的站点与
+// default（服务除 glm/deepseek 外全部站点）都不得被注入。
+test('站点专属指令：只注入它自己那个站点的模板，别的站点不受影响', () => {
+  const sitePromptOf = (sid) => (sid === 'glm' ? 'GLM-ONLY-DIRECTIVE' : '');
+  const { variants } = buildPromptVariants({ tools: TOOLS, sitePromptOf });
+  const glm = variants.find((v) => v.id === 'glm');
+  const dflt = variants.find((v) => v.id === 'default');
+  const official = variants.find((v) => v.id === 'official');
+  assert.ok(glm.text.includes('GLM-ONLY-DIRECTIVE'), 'glm 变体必须带上该站点的指令');
+  assert.ok(glm.text.includes('[本网站指令]'), '标注必须写明这是本网站指令');
+  assert.ok(!dflt.text.includes('GLM-ONLY-DIRECTIVE'),
+    'default 服务「除 glm/deepseek 外的全部站点」，不得把它注入（那会串到别的站点）');
+  assert.ok(!official.text.includes('GLM-ONLY-DIRECTIVE'), 'official 不得被别的站点的指令污染');
+  // 逐站点行：glm 行带自己的指令，deepseek 行不带。
+  const { sites } = buildSitePromptRows({ tools: TOOLS, sitePromptOf });
+  assert.ok(sites.find((s) => s.siteId === 'glm').text.includes('GLM-ONLY-DIRECTIVE'));
+  assert.ok(!sites.find((s) => s.siteId === 'deepseek').text.includes('GLM-ONLY-DIRECTIVE'));
+  // 行数据里要能读到该站点自己那一段（设置页的站点页只编辑它）。
+  assert.equal(sites.find((s) => s.siteId === 'glm').sitePrompt, 'GLM-ONLY-DIRECTIVE');
+  assert.equal(sites.find((s) => s.siteId === 'deepseek').sitePrompt, '');
+  // 不传 sitePromptOf 时行为必须与旧版逐字相同（默认路径零位移）。
+  const plain = buildPromptVariants({ tools: TOOLS }).variants.find((v) => v.id === 'glm');
+  assert.equal(plain.text, serializeFirstTurn({ messages: [], tools: TOOLS, siteId: 'glm' }),
+    '不传站点指令时不得改变任何文本');
+  assert.ok(!plain.text.includes('[本网站指令]'), '没配指令就不得出现空标注');
+});

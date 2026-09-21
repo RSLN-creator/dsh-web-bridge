@@ -16,10 +16,13 @@
 //     `fetch` inside the logged-in tab and only distilled JSON comes back.
 //   • Responses never echo tokens; errors are fixed-text; bodies are bounded.
 
-import { listAllModels, SITES, getSite } from './providers.js';
+import { listAllModels, resolveWebModel, SITES, getSite } from './providers.js';
 import { DEFAULT_SLOT, normalizeSlot, formatAccountKey, parseAccountKey, normalizeAccounts } from './accounts.js';
 import { buildPromptVariants, buildSitePromptRows } from './prompt-variants.js';
-import { composerWaitLine, composerWaitPillLabel, waitStatDetailRows, waitStatRows, formatDuration, formatElapsed, sanitizeWaitStats } from './wait-stats.js';
+// 站点提示词文件的**唯一路径来源**（0.16.38）：设置页要「指向本地提示词文件」，
+// 路径就必须与真正落盘/读回用的是同一个函数——前端自己拼路径，迟早与落盘分叉。
+import { sitePromptPath, DEFAULT_PROMPT_STORE_DIR } from './prompt-store.js';
+import { composerWaitLine, composerWaitPillLabel, waitStatDetailRows, waitStatRows, waitStatBlocks, formatDuration, formatElapsed, sanitizeWaitStats } from './wait-stats.js';
 import { isLoopbackHost, originMatchesHost } from './loopback.js';
 import { httpFetch } from './upstream.js';
 import fs from 'node:fs';
@@ -126,10 +129,33 @@ export function createWebControl(deps = {}) {
     // 缺省 null 时 /status 给空数组 + 'roster-not-wired'，独立启动的桥
     // （无 DSH 上下文，也就没有 agents/sessionProjections 服务）因此仍然可用。
     rosterOf = null,
+    // (absPath) → Promise<{ok:boolean, error?:string}>：用**系统默认程序**打开一个
+    // 本机文件（0.16.38）。由宿主侧注入（argv 调用，不经 shell）；缺省 null 时
+    // 「打开文件」这条路如实回 unavailable，而不是假装成功。
+    openPath = null,
   } = deps;
   const log = (...a) => logger.log?.('[webcode-web]', ...a);
   const warn = (...a) => logger.warn?.('[webcode-web]', ...a);
   const allowedOrigins = new Set((config.allowedOrigins || []).map((s) => String(s).toLowerCase()));
+
+  /**
+   * 站点提示词文件的存储根目录（0.16.38）——与 prompt-store 的写入侧同一条判据。
+   *
+   * 环境变量 `WEBCODE_PROMPT_STORE_DIR` 优先（运维/测试用），`'off'` 表示显式关闭
+   * 落盘；否则用 prompt-store 自己的默认目录（`~/.dsh/webcode`）。
+   *
+   * 为什么在本文件里也读一次环境变量：设置面要**如实显示**文件会落在哪里，而
+   * prompt-store 的 writePromptFiles 只在真正落盘时才解析目录。两处若各写一份
+   * 判据就会分叉（界面指向 A、文件落在 B），因此这里复用同一个常量与同一套语义，
+   * 只有「读环境变量」这一步是重复的，且它读的就是同一个变量名。
+   *
+   * @returns {string} 绝对目录，或字符串 'off'
+   */
+  function promptStoreDir() {
+    const requested = process.env.WEBCODE_PROMPT_STORE_DIR;
+    if (requested === 'off') return 'off';
+    return requested || DEFAULT_PROMPT_STORE_DIR;
+  }
 
   /**
    * 从请求体里取出 **accountKey**（0.14.7 账户槽）。
@@ -250,6 +276,10 @@ export function createWebControl(deps = {}) {
       // 设置页「累计」区块直接渲染这些行（0.15.10 起该区块已从设置页移除，
       // 字段保留：它是累计账本的公开只读面，curl 与旧前端仍可核对）。
       rows: total ? waitStatRows(total) : [],
+      // 0.16.39：设置页「速度与等待」卡里那块只读统计区直接渲染这两块。
+      // 与药丸同一份账本、同一个 formatDuration——两处各算一套的话，用户在设置页
+      // 与输入框底下会读到两个数（这条纪律在 wait-stats.js 开头写着）。
+      statBlocks: waitStatBlocks({ session, total, metrics }),
       // 输入框底下那一条速览（数据不足时为 null，前端据此不渲染）。
       line: composerWaitLine({ session, metrics }) || (total && total.totalWaitMs > 0
         ? '累计等待发送 ' + formatDuration(total.totalWaitMs)
@@ -264,7 +294,7 @@ export function createWebControl(deps = {}) {
       sessionValue: session ? formatDuration(sanitizeWaitStats(session).totalWaitMs) : '',
       // 面板里的「正在等待」行：与药丸同一套边界（liveElapsedMs），只在在途时有。
       liveValue: live ? formatElapsed(liveElapsedMs(live, now)) : null,
-      detailRows: waitStatDetailRows({ session, total, metrics }),
+      detailRows: waitStatDetailRows({ session, total, metrics, live, now }),
     };
   }
 
@@ -651,11 +681,22 @@ export function createWebControl(deps = {}) {
     // 保守兜底）如实列出，于是「为什么这次被 CONTEXT_WINDOW_EXCEEDED 拦了」
     // 可以在面板上直接核对。
     'GET context-windows': async () => {
-      const rows = listAllModels().map((m) => ({
-        id: m.id, siteId: m.siteId, name: m.name,
-        contextWindow: contextWindowOf ? contextWindowOf(m) : (m.context || null),
-        source: m.context ? 'declared' : (contextWindowOf ? 'fallback-or-config' : 'unknown'),
-      }));
+      // B-3 → Task 2.3：把「展示口径」与「发送预算」分开投影。二者值上当前一致
+      //（providers 各站点 budget 初值 = context），但语义不同且都可能被将来证据改写：
+      //   displayContext = 站点/模型**声明**的窗口（如实反映、展示给用户看的数）
+      //   sendBudget     = 发送前预算闸(B-2)真正比对、决定是否 CONTEXT_WINDOW_EXCEEDED 的数
+      // contextWindow 保留为 sendBudget 的别名（旧字段，跨版本兼容），站点聚合用它。
+      const rows = listAllModels().map((m) => {
+        const displayContext = m.context ?? null;
+        const sendBudget = contextWindowOf ? contextWindowOf(m) : (m.budget ?? m.context ?? null);
+        return {
+          id: m.id, siteId: m.siteId, name: m.name,
+          displayContext,
+          sendBudget,
+          contextWindow: sendBudget,
+          source: m.context ? 'declared' : (contextWindowOf ? 'fallback-or-config' : 'unknown'),
+        };
+      });
       const bySite = {};
       for (const r of rows) {
         if (!bySite[r.siteId]) bySite[r.siteId] = { siteId: r.siteId, siteName: r.name, windows: [], sources: new Set() };
@@ -714,6 +755,10 @@ export function createWebControl(deps = {}) {
         ...config,
         promptTransport: config.promptTransport === 'inline' ? 'inline' : 'attach',
         sendGapBasis: config.sendGapBasis === 'end-to-start' ? 'end-to-start' : 'send-to-send',
+        // 两个站点级字典（0.16.38）：与上面同一条纪律——从未保存过时设置文件里
+        // 没有这两个键，回 undefined 会让前端渲染成「加载失败」。回空对象。
+        defaultModelBySite: config.defaultModelBySite && typeof config.defaultModelBySite === 'object' ? config.defaultModelBySite : {},
+        extraPromptBySite: config.extraPromptBySite && typeof config.extraPromptBySite === 'object' ? config.extraPromptBySite : {},
       };
     },
     'POST settings': async (body) => {
@@ -768,6 +813,37 @@ export function createWebControl(deps = {}) {
       if ('promptTransport' in updated) {
         updated.promptTransport = updated.promptTransport === 'inline' ? 'inline' : 'attach';
       }
+      // 站点级设置（0.16.38）：`defaultModelBySite` 与 `extraPromptBySite` 都是
+      // 「站点 id → 值」的字典，设置文件可手改，因此写入前一律归一化：
+      //   · 键必须是在编站点 id（未知键丢弃，它永远不会被查表命中）；
+      //   · 模型值必须是能解析的模型 id，**且落在同一个站点上**（站点级默认模型的
+      //     语义是「这个站点用哪一支」，它不该能把落点站点搬走）；
+      //   · 指令是字符串、单站 ≤ 4000 字符（与前端 maxLength 同一条上限）；
+      //     trim 后为空的条目直接**删键**——「没配」与「配了空串」必须可区分，
+      //     后者会白白进一次契约指纹、白白整段重建一轮。
+      if ('defaultModelBySite' in updated) {
+        const src = updated.defaultModelBySite && typeof updated.defaultModelBySite === 'object' ? updated.defaultModelBySite : {};
+        const out = {};
+        for (const [sid, val] of Object.entries(src)) {
+          if (!getSite(sid)) continue;
+          const id = String(val ?? '').trim();
+          if (!id) continue;
+          // 站点归属判据只有一处：resolveWebModel（它同时负责别名与槽解析）。
+          try { if (resolveWebModel(id).siteId !== sid) continue; } catch { continue; }
+          out[sid] = id;
+        }
+        updated.defaultModelBySite = out;
+      }
+      if ('extraPromptBySite' in updated) {
+        const src = updated.extraPromptBySite && typeof updated.extraPromptBySite === 'object' ? updated.extraPromptBySite : {};
+        const out = {};
+        for (const [sid, val] of Object.entries(src)) {
+          if (!getSite(sid)) continue;
+          const text = typeof val === 'string' ? val.trim().slice(0, 4000) : '';
+          if (text) out[sid] = text;
+        }
+        updated.extraPromptBySite = out;
+      }
       const result = settingsStore.set(updated);
       return { ok: true, ...result };
     },
@@ -792,11 +868,44 @@ export function createWebControl(deps = {}) {
         ? last.tools.map((n) => ({ name: n, description: '', parameters: {} }))
         : undefined;
       const settings = settingsStore ? settingsStore.get() : {};
-      const opts = { tools, extraPrompt: settings.extraPrompt || '', system: undefined, lastPreset: last };
+      // 站点专属指令（0.16.38）：按站点取，缺省空串。取值函数**只在这里**造一份，
+      // variants 与 sites 共用——两处各取一次，迟早会在某一处漏掉站点归属。
+      const bySite = settings.extraPromptBySite && typeof settings.extraPromptBySite === 'object' ? settings.extraPromptBySite : {};
+      const sitePromptOf = (sid) => (sid && typeof bySite[sid] === 'string' ? bySite[sid] : '');
+      const opts = { tools, extraPrompt: settings.extraPrompt || '', sitePromptOf, system: undefined, lastPreset: last };
       const { variants, toolsSource, active } = buildPromptVariants(opts);
       // sites 与 variants 必须基于**同一份输入**现算，否则两处会给出不同的模板。
       const { sites } = buildSitePromptRows({ ...opts, system: undefined });
-      return { ok: true, variants, sites, toolsSource, active, extraPrompt: settings.extraPrompt || '' };
+      // 站点提示词文件路径（0.16.38）：由**服务端**用 prompt-store 的同一个函数
+      // 算好交给前端——前端只负责显示与「用默认程序打开」，绝不自己拼路径
+      //（自己拼就会与真正落盘/读回的那一份分叉）。storeDir 一并回，文件还没生成
+      // 时界面要如实把目录显示出来。
+      const storeDir = promptStoreDir();
+      const rows = sites.map((row) => ({ ...row, file: sitePromptPath(storeDir, row.siteId) }));
+      return {
+        ok: true, variants, sites: rows, toolsSource, active,
+        extraPrompt: settings.extraPrompt || '', storeDir,
+      };
+    },
+    // 用**系统默认程序**打开某站点的提示词文件（0.16.38）。
+    //
+    // 安全形状：请求体只带 siteId，路径由服务端用 sitePromptPath 现算——绝不接受
+    // 调用方传来的路径。于是这条路由的能力被钉死在「prompts/ 下的那几个 .md」，
+    // 拿不到任意文件读写的把手（与本仓库对 session-import 的纪律一致）。
+    // 文件不存在时如实回 PROMPT_FILE_MISSING（发送第一条消息后才生成），不静默。
+    'POST prompt-file': async (body) => {
+      const sid = String(body?.siteId || '').trim();
+      if (!sid || !getSite(sid)) return { ok: false, error: 'unknown siteId' };
+      const storeDir = promptStoreDir();
+      const file = sitePromptPath(storeDir, sid);
+      if (storeDir === 'off') return { ok: false, code: 'PROMPT_STORE_OFF', file, storeDir };
+      if (typeof openPath !== 'function') return { ok: false, code: 'OPEN_UNAVAILABLE', file, storeDir };
+      let exists = false;
+      try { exists = fs.existsSync(file); } catch { exists = false; }
+      if (!exists) return { ok: false, code: 'PROMPT_FILE_MISSING', file, storeDir };
+      const r = await openPath(file);
+      if (r && r.ok) return { ok: true, file, storeDir };
+      return { ok: false, code: 'OPEN_FAILED', file, storeDir, error: String(r?.error || 'open failed').slice(0, 200) };
     },
     'POST login': async (body) => {
       const accountKey = accountKeyOf(body, { fallback: '' });

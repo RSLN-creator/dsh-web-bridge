@@ -20,13 +20,14 @@
 export function waitOfTurn(metrics) {
   const m = metrics || {};
   const sendWaitMs = Math.max(0, Math.round(Number(m.sendWaitMs) || 0));
+  const durationMs = Math.max(0, Math.round(Number(m.durationMs) || 0));
   const rateLimitRetries = Math.max(0, Math.round(Number(m.rateLimitRetries) || 0));
-  return { sendWaitMs, rateLimitRetries };
+  return { sendWaitMs, durationMs, rateLimitRetries };
 }
 
 /** 空账本。键名短，因为它会落盘并被前端直接读。 */
 export function emptyWaitStats() {
-  return { totalWaitMs: 0, turns: 0, rateLimitRetries: 0, waitedTurns: 0, updatedAt: null };
+  return { totalWaitMs: 0, totalDurationMs: 0, durationTurns: 0, turns: 0, rateLimitRetries: 0, waitedTurns: 0, updatedAt: null };
 }
 
 /**
@@ -43,9 +44,14 @@ export function emptyWaitStats() {
  */
 export function accumulateWait(prev, metrics, now = Date.now()) {
   const base = prev && typeof prev === 'object' ? prev : emptyWaitStats();
-  const { sendWaitMs, rateLimitRetries } = waitOfTurn(metrics);
+  const { sendWaitMs, durationMs, rateLimitRetries } = waitOfTurn(metrics);
   return {
     totalWaitMs: Math.max(0, Math.round(Number(base.totalWaitMs) || 0)) + sendWaitMs,
+    totalDurationMs: Math.max(0, Math.round(Number(base.totalDurationMs) || 0)) + durationMs,
+    // 0.17.2：**有耗时记账的轮次**。见 waitRatio 的说明——没有这个计数，占比就会把
+    // 「0.17.0 之前那些只记了等待、没记耗时的轮次」算成「耗时≈0」，于是老账本读出 100%。
+    // 它是**覆盖率判据**，不是第二个 turns。
+    durationTurns: Math.max(0, Math.round(Number(base.durationTurns) || 0)) + (durationMs > 0 ? 1 : 0),
     turns: Math.max(0, Math.round(Number(base.turns) || 0)) + 1,
     rateLimitRetries: Math.max(0, Math.round(Number(base.rateLimitRetries) || 0)) + rateLimitRetries,
     waitedTurns: Math.max(0, Math.round(Number(base.waitedTurns) || 0)) + (sendWaitMs > 0 ? 1 : 0),
@@ -59,6 +65,11 @@ export function sanitizeWaitStats(raw) {
   const num = (v) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? Math.round(n) : 0; };
   return {
     totalWaitMs: num(raw.totalWaitMs),
+    totalDurationMs: num(raw.totalDurationMs),
+    // durationTurns **不向后推断**：旧账本里 durationMs 从未被记过（0.17.0 才引入），
+    // 缺失就是 0，即「这些轮次的耗时可核范围为零」。绝不能拿 totalDurationMs>0 反推成
+    // 「这些轮次都有耗时」——那正是 100% 假读数的来源。
+    durationTurns: num(raw.durationTurns),
     turns: num(raw.turns),
     rateLimitRetries: num(raw.rateLimitRetries),
     // waitedTurns 允许缺失（旧账本没有这个字段）——缺失时退回「有等待的轮次」
@@ -69,11 +80,22 @@ export function sanitizeWaitStats(raw) {
 }
 
 /**
- * 人类可读的时长。**与官方格式对齐**（用户要求「保持和官方格式类似」）：
+ * 人类可读的时长。**全部中文单位、秒级不补小数**（0.16.39）：
  *   < 1 秒   → `123 ms`
- *   < 1 分钟 → `4.2 s`
+ *   < 1 分钟 → `42 秒`
  *   < 1 小时 → `3 分 05 秒`
- *   其余     → `2 小时 07 分`
+ *   其余     → `1 小时 02 分 09 秒`
+ *
+ * ## 0.16.39：为什么把 `4.2 s` / `2 小时 07 分` 换掉
+ *
+ * 用户原话：「请你列出秒，当有分钟时候，然后是面板点击展开」。旧口径有两处让人
+ * 读不出来：秒级带一位小数（`4.2 s`），小时的写法**把秒吃掉了**（`2 小时 07 分`
+ * 少报最多 59 秒，而这个数在面板里是要与「本会话累计」对齐核对的）。
+ * 现在三档分别是「N 秒」「M 分 SS 秒」「H 小时 MM 分 SS 秒」——**每一档都带秒**，
+ * 因此同一个数在药丸、点击面板、设置页统计块里读出来是同一个量。
+ *
+ * 末尾单位仍然补零（`3 分 05 秒` 而不是 `3 分 5 秒`）：同一列里宽度才稳定，扫读
+ * 时不会跳动。前导单位不补零（它是可变长的读数）。
  *
  * 刻意不用 `toLocaleString`：它随宿主 locale 变（同一份 UI 在不同机器上显示不同），
  * 而面板文案必须稳定可核对。
@@ -85,8 +107,8 @@ export function formatDuration(ms) {
   const n = Number(ms);
   if (!Number.isFinite(n) || n <= 0) return '0 ms';
   if (n < 1000) return Math.round(n) + ' ms';
-  if (n < 60_000) return (n / 1000).toFixed(1) + ' s';
   const totalSec = Math.round(n / 1000);
+  if (totalSec < 60) return totalSec + ' 秒';
   if (totalSec < 3600) {
     const m = Math.floor(totalSec / 60);
     const s = totalSec % 60;
@@ -94,27 +116,96 @@ export function formatDuration(ms) {
   }
   const h = Math.floor(totalSec / 3600);
   const m = Math.floor((totalSec % 3600) / 60);
-  return h + ' 小时 ' + String(m).padStart(2, '0') + ' 分';
+  const s = totalSec % 60;
+  return h + ' 小时 ' + String(m).padStart(2, '0') + ' 分 ' + String(s).padStart(2, '0') + ' 秒';
+}
+
+/**
+ * 百分比格式化（0.17.0）。
+ *
+ * 参考 DSH 官方 token-format / StatsPills 的百分比规范：
+ *   - 非有限正数或 <= 0 → '0%'
+ *   - >= 100 → '100%'
+ *   - 0 < n < 1 → 保留一位小数（例如 '0.5%'），避免非零被抹成 '0%'
+ *   - 其余取整 → '15%'
+ *
+ * @param {number} num
+ * @returns {string}
+ */
+export function formatPercent(num) {
+  const n = Number(num);
+  if (!Number.isFinite(n) || n <= 0) return '0%';
+  if (n >= 100) return '100%';
+  if (n < 1) return (Math.round(n * 10) / 10) + '%';
+  return Math.round(n) + '%';
+}
+
+/**
+ * 等待占比的**唯一计算入口**（0.17.2）。
+ *
+ * ## 为什么不能直接 `waitMs / (waitMs + durationMs)`
+ *
+ * 0.17.0 就是这么算的，而 `totalDurationMs` 是 0.17.0 才引入的字段。账本**落盘**且
+ * 跨版本延续，于是升级那一刻磁盘上的老账本长这样（真机实测 `POST /__webcode/wait-stats`）：
+ *
+ * ```
+ * totalWaitMs: 113215468   totalDurationMs: 521868   turns: 8579
+ * ```
+ *
+ * 31 小时的等待对上 8.7 分钟的耗时——但那 8.7 分钟只是**最近几轮**的，8579 轮里绝大多数
+ * 发生在 `durationMs` 存在之前，它们的分母贡献是 0。算出来的占比是 **100%**（同一份读数
+ * 在设置页「历史累计」栏里被印成「平均会话等待时长占比 100%」）。用户看到的是一句荒谬的
+ * 结论：这台机器上的时间几乎全花在节流等待上。
+ *
+ * 占比本身没错，错的是**分母的覆盖范围与分子不一致**：分子覆盖全部 8579 轮，分母只覆盖
+ * 其中一小撮。判据因此必须是「耗时记账覆盖了几轮」，而不是「耗时 > 0」。
+ *
+ * 三种读数（都不是猜的）：
+ *   · 全覆盖  → `61%`
+ *   · 零覆盖  → `未记录`（一个百分比都不给，避免把无数据印成 0% 或 100%）
+ *   · 部分覆盖 → `61%（覆盖 40/57 轮）`——数字带上它的适用边界
+ *
+ * @param {object} o
+ * @param {number} o.waitMs 分子：等待发送
+ * @param {number} o.durationMs 分母中的模型耗时
+ * @param {number} o.durationTurns 有耗时记账的轮次
+ * @param {number} o.turns 总轮次
+ * @returns {string|null} 无可核对的分母时返回 null
+ */
+export function waitRatio({ waitMs, durationMs, durationTurns, turns } = {}) {
+  const w = Math.max(0, Number(waitMs) || 0);
+  const d = Math.max(0, Number(durationMs) || 0);
+  const covered = Math.max(0, Math.round(Number(durationTurns) || 0));
+  const total = Math.max(0, Math.round(Number(turns) || 0));
+  if (w <= 0) return null;
+  // 零覆盖：分母完全不可用。**不返回百分比**——0% 与 100% 都是错的，而任何一个数字都会
+  // 被当成结论读走。如实说「没记」是这里唯一不撒谎的答案。
+  if (covered === 0) return '未记录';
+  const pct = formatPercent((w / (w + d)) * 100);
+  if (total > 0 && covered < total) return pct + '（覆盖 ' + covered + '/' + total + ' 轮）';
+  return pct;
 }
 
 /**
  * 「正在等待」那一段的时长（0.16.24）。
  *
- * 与 {@link formatDuration} 只差一处，但那一处正是需求本身：秒级**取整**
- * （`3 s`）而不是留一位小数（`3.0 s`）。理由是这串数字会**逐秒跳动**——
- * 官方在输入框底下那枚统计药丸就是「开始就涨」，不是等结束了再一次性显示；
+ * 与 {@link formatDuration} 只差一处，但那一处正是需求本身：秒级**向下取整**
+ * 且**不带任何小数位**（`3 秒` 而不是 `3.9 秒`）。理由是这串数字会**逐秒跳动**
+ *——官方在输入框底下那枚统计药丸就是「开始就涨」，不是等结束了再一次性显示；
  * 跳动时小数位只是噪声。
  *
- * 到分钟以上与 formatDuration 合流（`3 分 05 秒`）：那时没人盯着末位看，
- * 两套写法必须给出同一个数，否则药丸与面板又会互相打架。
+ * 0.16.39：单位改成中文「秒」，与 formatDuration 的秒档**逐字相同**；此前这里是
+ * `3 s` 而对方是 `3.9 s`，同一枚药丸在等待中与结算后读出来像是两个单位。
+ * 分钟以上继续与 formatDuration 合流（`3 分 05 秒`）：两套写法必须给出同一个数，
+ * 否则药丸与面板又会互相打架。
  *
  * @param {number} ms
  * @returns {string}
  */
 export function formatElapsed(ms) {
   const n = Number(ms);
-  if (!Number.isFinite(n) || n <= 0) return '0 s';
-  if (n < 60_000) return Math.floor(n / 1000) + ' s';
+  if (!Number.isFinite(n) || n <= 0) return '0 秒';
+  if (n < 60_000) return Math.floor(n / 1000) + ' 秒';
   return formatDuration(n);
 }
 
@@ -180,21 +271,79 @@ export function composerWaitLine({ session, metrics } = {}) {
  * 设置页那条累计统计的展示行（多段，交给 UI 排版）。
  *
  * @param {object} stats 累计账本
+ * @param {'total'|'session'} [scope] 标签前缀（0.16.39）。设置页现在**两本账并排
+ *   展示**（本会话 + 历史累计），两套行必须能一眼分清是哪一个，因此标签按 scope
+ *   生成，而不是调用方各自拼字符串——拼字符串迟早会有一处写成「累计」而值是本会话。
  * @returns {{label:string,value:string}[]}
  */
-export function waitStatRows(stats) {
+export function waitStatRows(stats, scope = 'total') {
   const s = sanitizeWaitStats(stats);
-  const rows = [
-    { label: '累计等待发送', value: formatDuration(s.totalWaitMs) },
-    { label: '已统计轮次', value: s.turns + ' 轮' },
-    { label: '其中等待过', value: s.waitedTurns + ' 轮' },
-  ];
+  const isSession = scope === 'session';
+  const rows = [];
+  if (isSession) {
+    rows.push({ label: '本会话等待发送', value: formatDuration(s.totalWaitMs) });
+    const sessionRatio = waitRatio({ waitMs: s.totalWaitMs, durationMs: s.totalDurationMs, durationTurns: s.durationTurns, turns: s.turns });
+    if (sessionRatio) rows.push({ label: '本次会话占比', value: sessionRatio });
+    rows.push({ label: '本会话轮次', value: s.turns + ' 轮' });
+    rows.push({ label: '其中等待过', value: s.waitedTurns + ' 轮' });
+  } else {
+    rows.push({ label: '累计等待发送', value: formatDuration(s.totalWaitMs) });
+    const totalRatio = waitRatio({ waitMs: s.totalWaitMs, durationMs: s.totalDurationMs, durationTurns: s.durationTurns, turns: s.turns });
+    if (totalRatio) rows.push({ label: '平均会话等待时长占比', value: totalRatio });
+    rows.push({ label: '已统计轮次', value: s.turns + ' 轮' });
+    rows.push({ label: '其中等待过', value: s.waitedTurns + ' 轮' });
+  }
   if (s.waitedTurns > 0) {
     rows.push({ label: '平均每次等待', value: formatDuration(Math.round(s.totalWaitMs / s.waitedTurns)) });
   }
   if (s.rateLimitRetries > 0) rows.push({ label: '限流重试', value: s.rateLimitRetries + ' 次' });
   if (s.updatedAt) rows.push({ label: '最近更新', value: new Date(s.updatedAt).toLocaleString() });
   return rows;
+}
+
+/**
+ * 设置页「速度与等待」里那块统计区的**数据形状**（0.16.39）。
+ *
+ * 返回 `[{title, rows:[{label,value}]}]`：两栏并排（本会话 / 历史累计），每栏的行
+ * 由本模块现算——**客户端不拼标签、不算时长**（client.cjs 是单文件 bundle，
+ * import 不到这里；让它自己拼，两处口径迟早分叉，这正是本文件开头那条纪律）。
+ *
+ * 行序是**从「此刻最想知道」到「历史」**：本会话累计 → 轮次 → 本轮读数
+ *（发送间隔目标 / 距上次发送）→ 限流重试；累计栏同理。空账本时那栏 rows 为空，
+ * 客户端会画「暂无记录」，而不是显示一排 0。
+ *
+ * @param {object} o
+ * @param {object} [o.session] 本会话账本
+ * @param {object} [o.total] 累计账本
+ * @param {object} [o.metrics] 本轮 relay.metrics（提供间隔目标与距上次发送）
+ * @returns {{title:string, rows:{label:string,value:string}[]}[]}
+ */
+export function waitStatBlocks({ session, total, metrics } = {}) {
+  const s = sanitizeWaitStats(session);
+  const t = total ? sanitizeWaitStats(total) : null;
+  const m = metrics || {};
+  const sessionRows = [];
+  if (s.totalWaitMs > 0 || s.turns > 0) {
+    sessionRows.push({ label: '本会话等待发送', value: formatDuration(s.totalWaitMs) });
+    const sessionRatio = waitRatio({ waitMs: s.totalWaitMs, durationMs: s.totalDurationMs, durationTurns: s.durationTurns, turns: s.turns });
+    if (sessionRatio) sessionRows.push({ label: '本次会话占比', value: sessionRatio });
+    sessionRows.push({ label: '本会话轮次', value: s.turns + ' 轮' });
+    if (s.waitedTurns > 0) sessionRows.push({ label: '其中等待过', value: s.waitedTurns + ' 轮' });
+    if (s.rateLimitRetries > 0) sessionRows.push({ label: '限流重试', value: s.rateLimitRetries + ' 次' });
+  }
+  // 本轮读数与账本无关（可能还没结算），因此只要 metrics 有就显示。
+  if (m.gapTargetMs > 0) sessionRows.push({ label: '发送间隔目标', value: formatDuration(m.gapTargetMs) });
+  if (m.sincePrevSendMs != null) {
+    sessionRows.push({
+      label: m.gapBasis === 'end-to-start' ? '距上次回复完成' : '距上次发送',
+      value: formatDuration(m.sincePrevSendMs),
+    });
+  }
+  const totalRows = t && t.totalWaitMs > 0 ? waitStatRows(t, 'total') : [];
+  return [
+    { title: '本会话', rows: sessionRows },
+    { title: '历史累计', rows: totalRows },
+  ];
 }
 
 /**
@@ -219,33 +368,20 @@ export function liveWaitMs(live, now = Date.now()) {
 }
 
 /**
- * 输入框底下那枚药丸的**短文案**（0.15.10）。
+ * 输入框底下那枚药丸的**短文案**（0.15.10，0.17.0 对齐「n秒 · 等待占比x%」）。
  *
  * 与 `composerWaitLine` 的区别是长度预算：官方在同一个槽位放的是 13px 单行
- * 药丸（ui-chat 的 StatsPills），一行只容得下「一个数 + 一个后缀」。旧实现把
- * 本会话、距上次发送、限流三件事全塞进一行，于是它只能另起一行、和官方那排
- * 药丸分成两栏——用户报的「两栏」正是这么来的。
+ * 药丸（ui-chat 的 StatsPills），一行只容得下「一个数 + 一个后缀」。
  *
- * 这里只留最要紧的那个数：本会话累计等待（等过才有）。限流重试作为后缀附上；
- * 完全没数据时返回 null，调用方整枚药丸不渲染。其余细节全部进点击面板
- * （见 {@link waitStatDetailRows}）。
+ * 0.17.0：文案格式调整为「n秒 · 等待占比x%」，中间以官方药丸的间隔点（` · `）分隔。
+ * 占比以「本会话等待总量（含在途） / 本会话总活跃耗时（等待总量 + 模型耗时）」现算；
+ * 限流重试作为后缀附上；完全没数据时返回 null，调用方整枚药丸不渲染。
+ * 其余细节全部进点击面板（见 {@link waitStatDetailRows}）。
  *
  * 0.16.24：**在途等待优先**。还在等的时候，药丸显示的是「正在等的这一段」
- * （`live` 现算），而不是上一轮结算完的旧数——否则用户看到的是一个不动的
- * 数字，等结束才跳一下，正是他要修掉的那个观感。
+ * （`live` 现算），而不是上一轮结算完的旧数。
  *
  * 0.16.26：**读数改成「会话累计 + 在途增量」的连续投影**（用户报的跳变）。
- *
- * 0.16.24 把 live 与账本当成两个可互换的显示源，于是同一枚药丸在两种语义之间
- * 来回切：等的时候显示「这一轮等了多久」，等一结束 live 被清、回落到
- * `s.totalWaitMs`「本会话一共等了多久」。用户看到的就是——数字从 1 s 缓慢涨到
- * 8 s（这一轮把发送间隔补满），然后**一跳**到「2 分多」（会话历史累计）。
- * 两次读数都「对」，但它们不是同一个量，拼在一枚药丸里就是假跳变。
- *
- * 正确的量只有一个：**本会话到目前为止的等待发送总量，把正在等的这一段也算进去**。
- * 它在等待期间逐秒增长（`s.totalWaitMs + liveWaitMs`），等待结束、账本结算后
- * 收敛到同一个数（`s.totalWaitMs` 已经含了刚刚那一段）——**连续、单调、不跳**。
- * 这也正是用户最初要的「和官方一样开始就计时增长」。
  *
  * @param {object} o
  * @param {object} [o.session] 本会话账本
@@ -262,7 +398,15 @@ export function composerWaitPillLabel({ session, metrics, live, now } = {}) {
   // 增量，两者相加才是「本会话等待发送」的当前真值。live 消失后账本已被本轮
   // 结算补上，相加项自然归零，读数不变——这正是它不再跳变的原因。
   const projectedMs = s.totalWaitMs + liveWaitMs(live, now);
-  if (projectedMs > 0) parts.push('等待发送 ' + formatElapsed(projectedMs));
+  if (projectedMs > 0) {
+    // 药丸是 13px 单行，容不下「（覆盖 40/57 轮）」这种尾巴——因此这里只在**全覆盖**
+    // 时给出百分比；未覆盖就只报时长，让点开的面板去说明边界（waitStatDetailRows）。
+    const ratio = waitRatio({ waitMs: projectedMs, durationMs: s.totalDurationMs, durationTurns: s.durationTurns, turns: s.turns });
+    // 只接受**纯百分比**：`未记录` 与 `61%（覆盖 40/57 轮）` 都带不了——药丸是 13px 单行，
+    // 容不下覆盖率尾巴；而「未记录」写上去比不写更长且更费解。边界一律交给点开的面板。
+    const suffix = ratio && /^\d+(\.\d+)?%$/.test(ratio) ? ' · 等待占比 ' + ratio : '';
+    parts.push(formatElapsed(projectedMs) + suffix);
+  }
   if (s.rateLimitRetries > 0) parts.push('限流重试 ' + s.rateLimitRetries + ' 次');
   // 还没等待过、但已知距上次发送：至少给一个可核对的数，而不是空药丸。
   if (!parts.length && m.sincePrevSendMs != null) parts.push('距上次发送 ' + formatDuration(m.sincePrevSendMs));
@@ -277,40 +421,40 @@ export function composerWaitPillLabel({ session, metrics, live, now } = {}) {
  * TimePill/UsagePill 各带一个 stat-dialog）。这里照同一套来：本会话在前、
  * 累计在后，每行一个可核对的标签值对。空账本不出行——面板不留 `0 ms` 噪音。
  *
+ * 0.17.0：详细展开面板中新增显示「本次会话占比」与「平均会话等待时长占比」。
+ *
  * @param {object} o
  * @param {object} [o.session] 本会话账本
  * @param {object} [o.total] 累计账本
  * @param {object} [o.metrics] 本轮 relay.metrics
+ * @param {object} [o.live] 在途等待
+ * @param {number} [o.now] 现算时刻
  * @returns {{label:string,value:string}[]}
  */
-export function waitStatDetailRows({ session, total, metrics } = {}) {
+export function waitStatDetailRows({ session, total, metrics, live, now } = {}) {
   const s = sanitizeWaitStats(session);
   const t = total ? sanitizeWaitStats(total) : null;
   const m = metrics || {};
   const rows = [];
-  if (s.totalWaitMs > 0 || s.turns > 0) {
-    // 0.16.24：本会话这一行用 formatElapsed，与药丸同写法——它是「还在变的那个
-    // 数」（药丸在途时显示它、结算后回落到它）。累计/平均是历史账，继续用
-    // formatDuration 的 `20.0 s`：两者不该混成一个。
-    rows.push({ label: '本次会话等待发送', value: formatElapsed(s.totalWaitMs) });
+  const projectedMs = s.totalWaitMs + liveWaitMs(live, now);
+  if (projectedMs > 0 || s.turns > 0) {
+    rows.push({ label: '本次会话等待发送', value: formatElapsed(projectedMs) });
+    const sessionRatio = waitRatio({ waitMs: projectedMs, durationMs: s.totalDurationMs, durationTurns: s.durationTurns, turns: s.turns });
+    if (sessionRatio) rows.push({ label: '本次会话占比', value: sessionRatio });
     rows.push({ label: '本次会话轮次', value: s.turns + ' 轮' });
     if (s.rateLimitRetries > 0) rows.push({ label: '本次会话限流重试', value: s.rateLimitRetries + ' 次' });
   }
   if (m.gapTargetMs > 0) rows.push({ label: '发送间隔目标', value: formatDuration(m.gapTargetMs) });
-  // 0.16.31：口径必须与目标值并列出现。同一条读数下两个口径给出不同结论，
-  // 只写「目标 10 s」而不管它是从「上次发出」还是「上次回复完成」起算，
-  // 用户看到的仍是「等待不像我设的」——而这次连该改哪儿都指不出来。
   if (m.gapBasis === 'end-to-start') rows.push({ label: '间隔基准', value: '距上次回复完成' });
   else if (m.gapBasis === 'send-to-send') rows.push({ label: '间隔基准', value: '距上次发出' });
   if (m.sincePrevSendMs != null) {
-    // 标签只在**口径明确**时才切换。`gapBasis` 缺失（旧 metrics / 注入桩）时保持
-    // 「距上次发送」这个历史文案——缺字段不等于口径变了，悄悄换词会让读者以为
-    // 基准换了（旧读数配新词，比不显示更误导）。
     const sinceLabel = m.gapBasis === 'end-to-start' ? '距上次回复完成' : '距上次发送';
     rows.push({ label: sinceLabel, value: formatDuration(m.sincePrevSendMs) });
   }
   if (t && t.totalWaitMs > 0) {
     rows.push({ label: '累计等待发送', value: formatDuration(t.totalWaitMs) });
+    const totalRatio = waitRatio({ waitMs: t.totalWaitMs, durationMs: t.totalDurationMs, durationTurns: t.durationTurns, turns: t.turns });
+    if (totalRatio) rows.push({ label: '平均会话等待时长占比', value: totalRatio });
     rows.push({ label: '累计已统计', value: t.turns + ' 轮' });
     if (t.waitedTurns > 0) rows.push({ label: '平均每次等待', value: formatDuration(Math.round(t.totalWaitMs / t.waitedTurns)) });
   }

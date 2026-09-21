@@ -1515,3 +1515,62 @@ turn/end reason = {"kind":"error","error":{"message":"empty response from web AI
 判空，报错带收束原因与流首段；思考-only 轮交回适配器走 `thinkingOnlyNotice`。
 护栏 `test/empty-response.test.mjs`（5 条）。**披露**：驱动接线 2 行无自动化红线
 （既有测试桩全部绕过真驱动），靠代码评审与真机 run-5/7 连续零 empty-response 佐证。
+
+---
+
+## 27. **站点品牌图标的来源无法在本机复核**（0.16.36 新登记，**0.16.37 已解决**）
+
+### 现象（取证）
+
+`lib/client.cjs` 的 `SITE_ICON_PATHS` 里八条品牌矢量（`openai` / `anthropic` /
+`googlegemini` / `x` / `qwen` / `moonshotai` / `bytedance`）声明取自 simple-icons
+（CC0-1.0），取件日期 2026-09-20。**当时本机沙箱下 `web_fetch` 对这些 URL 一律返回
+`TypeError: fetch failed`**（外网被挡），因此这八条路径**无法在机内与上游文件逐字比对**。
+
+当时做的形状审计（`.tmp/icon-path-audit.mjs`）**已被判定不可采信并作废**：它的数字抽取是
+朴素正则，会把 SVG 路径的**标志位**（`a` 命令的 `large-arc-flag` / `sweep-flag`）与
+**相对坐标**混进同一串数字里，于是报出的 `min/max` 是解析产物而不是几何事实
+（例如 `max=7948` 来自多个 token 首尾相接，不是任何真实坐标）。它**连证伪都做不到**。
+
+### 为什么不能靠「官方也用 simple-icons」绕过
+
+官方 `dsh-client-ui-primitives` 的 `siteGlyph` 确实用同一图集（本机在 `lib/index.js` 实读到
+`SITE_HOSTS` 与注释「simple-icons artwork set (CC0-1.0)」）——这解释了**为什么选它**，
+但不证明**我们抄的那几条字节**与上游一致。两件事不能混。
+
+### 解决（2026-09-21，0.16.37）
+
+外网恢复后，改用「**取回上游 SVG → 原样贴进复核脚本 → 逐字符比对**」的做法，
+脚本 `.tmp/icon-source-verify.mjs` 一次跑通，**九条全部 `IDENTICAL`**：
+
+| 站点 | 上游 | 路径长度 |
+| --- | --- | --- |
+| chatgpt | `simple-icons@14.5.0/icons/openai.svg` | 1460 |
+| claude | `simple-icons@16.32.0/icons/anthropic.svg` | 168 |
+| gemini | `simple-icons@16.32.0/icons/googlegemini.svg` | 284 |
+| grok | `simple-icons@16.32.0/icons/x.svg` | 194 |
+| qwen | `simple-icons@16.32.0/icons/qwen.svg` | 697 |
+| kimi | `simple-icons@16.32.0/icons/moonshotai.svg` | 537 |
+| doubao | `simple-icons@16.32.0/icons/bytedance.svg` | 218 |
+| zai | `@lobehub/icons-static-svg@1.95.0/icons/zai.svg` | 119 |
+| glm | `@lobehub/icons-static-svg@1.95.0/icons/chatglm.svg` | 2040 |
+
+**复核过程本身查出一条事实，必须记下来**：`openai` 在 simple-icons **latest 里已经是 404**，
+只在 14.5.0 还能取到——即该图标后来被图集移除（simple-icons 的商标移除流程）。因此
+「我们的 openai 路径来自哪个版本」必须写在复核脚本里；下一个人若拿 `@latest` 去核，
+会得到 404 并误判成「路径是编造的」。
+
+### 仍然要分开的一件事（本条目解除的是「来源」，不是「官方性」）
+
+zai / glm 两条来自 **lobehub 社区图集**，**不是品牌方发布的资产**，与 simple-icons（CC0）
+也不同许可。脚本证明的是「字节与上游一致」，**不是「它属于官方发布」**。这一点由
+`SITE_ICON_TIER` 的 `vector` 档承载（见 `doc/progress.md` §0.16.37 一），两侧不要互相冒充。
+
+### 若要重跑
+
+```
+node .tmp/icon-source-verify.mjs    # 退出码 0 = 九条逐字相同
+```
+
+该脚本是**一次性取证留痕**（`.tmp/` 不入库）。若要长期保留，应移进 `scripts/` 并接进 CI——
+那样图集升级导致的静默漂移才会变成红灯。当前未做，如实记。

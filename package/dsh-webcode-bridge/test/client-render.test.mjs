@@ -34,7 +34,12 @@ const bridgeSrcFrom = (rel) => readFileSync(path.resolve(here, '../lib/', rel), 
 const SESSION_PROPS = { sessionId: 'session-render-test' };
 
 /** 在当前进程里加载 client.cjs 并跑若干渲染周期，返回每次渲染捕获的异常。 */
-async function renderPane({ payloads, which = 'pane', sites = [], roster = null, primitiveOmit = [], waitStats = null } = {}) {
+async function renderPane({ payloads, which = 'pane', sites = [], roster = null, primitiveOmit = [], waitStats = null, openMenu = false, tabParams = undefined, noTabActions = false, settingsTab = '', sessionProps = SESSION_PROPS } = {}) {
+  // 0.16.38：设置页按作用域切成「全局页 / 站点页」。站点的账户、模型、提示词三张卡
+  // 只在站点页渲染，护栏必须能直接渲染站点页才谈得上验证它们——否则只能断言
+  // 「全局页看不见」，那证明不了站点页是对的。`initialSettingsTab` 是给这个用的
+  // 初值入口，真机缺省仍是全局页（''）。
+  const scopedProps = settingsTab ? { ...sessionProps, initialSettingsTab: settingsTab } : sessionProps;
   const saved = { window: global.window, document: global.document, fetch: global.fetch, setInterval: global.setInterval, clearInterval: global.clearInterval };
   const realSetTimeout = global.setTimeout;
   let captured = null;
@@ -60,6 +65,14 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
   let DockComponent = null;
   const MenuItems = [];
   const effectDisposers = [];
+  // 0.16.35：站点目录点一行会调 `ctx.sidebarRight.openTab(kind, { params })`，
+  // 这是「一个站点一个标签」的**唯一**动作。必须收下每一次调用，否则「点站点到底
+  // 开了什么」在护栏里完全没有证据（只能测出目录渲染得像不像）。
+  const openTabCalls = [];
+  // 0.16.39：目录页改用本标签自己的 `tab.actions.openTab(…, { replaceTab: true })`
+  //（官方 guide 的同一条路径）。这是「选站点**替代**本标签页」的唯一动作，
+  // 与上一条分开收集——两条路径的断言不同，混在一起会看不出走的是哪条。
+  const inPlaceOpenCalls = [];
   let windowHits = 0;
   // 每次 setInterval 的周期（ms）。药丸的轮询节奏由它在途与否决定，见 0.16.24 用例。
   const intervalDelays = [];
@@ -90,7 +103,20 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
     try { return fn(); } finally { ownerStack.pop(); }
   };
   const React = {
-    createElement: (type, props, ...children) => ({ type, props, children }),
+    // createElement 必须与真 React 同形：真 React 会把**可变子节点**也放进
+    // `props.children`（单子给单值、多子给数组），而不仅是挂在返回节点的 children 上。
+    //
+    // 0.16.37 修的一处假绿：此前只写 `(type, props, ...children) => ({type, props, children})`，
+    // 于是 `props.children` 永远是 undefined。真机上 `primitives.Button` 是从
+    // **props.children** 取内容的（组件签名 `({variant, children, ...rest})`），
+    // 于是官方原语包着的图标与文字在桩里被整块丢掉——页面照常渲染、errors 为空，
+    // 断言却报「找不到那一行文字」。这是「桩的建模失真会把整类 bug 盖住」的又一例
+    //（本文件上方 primitiveOmit 注释里记着同一教训的 0.16.21 版本）。
+    createElement: (type, props, ...children) => {
+      const merged = children.length === 0 ? props
+        : { ...(props || {}), children: children.length === 1 ? children[0] : children };
+      return { type, props: merged, children };
+    },
     useState: (init) => {
       const frame = ownerStack[ownerStack.length - 1];
       // `i` 是**该组件内**的序号；无 owner 帧时回落到旧的全局 cursor（顶层调用）。
@@ -112,11 +138,14 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
   const mockRequire = (id) => {
     if (id === 'react') return React;
     if (id === 'react-dom/client') return { createRoot: () => ({ render() {} }) };
-    // 0.16.18：等待药丸不再 require react-dom——官方 `[data-composer-stats]`
-    // 标记在新版里已不存在，portal 已删除（见 client.cjs 的长注释与源码护栏）。
-    // 这里仍留一条 react-dom 桩，但要求它**不得**被用到：真被 require 到说明
-    // portal 路线又被加回来了。
-    if (id === 'react-dom') return { createPortal: () => { throw new Error('不得再用 createPortal：官方统计行标记已不存在'); } };
+    // 0.16.39：createPortal **重新被使用**——但用途与 0.16.18 删掉的那次不同。
+    //
+    // 那次是拿 portal 去塞官方统计行（标记已消失，那条路是 bug 源）；这次是给
+    // 我们自己的等待统计弹层用：官方 stat-dialog 同样 portal 到 body，弹层必须
+    // 逃出右栏面板的 `transform` + `overflow:hidden` 才能「左边缘对齐药丸 + 视口
+    // 夹紧」。桩把它**内联返回**（而不是真挂到 document.body），于是展开态的
+    // 内容仍然能在渲染树里被断言到。
+    if (id === 'react-dom') return { createPortal: (node) => node };
     // 官方 primitives 桩（0.16.23 起按真实契约补齐）：client.cjs 还解构了
     // IconChevronDownOutline14 / FishLogo / FISH_LOGO_PATH / FISH_LOGO_VIEWBOX /
     // useDismissOnOutsidePointer（站点图标与选择框，0.16.23 接手网页会话半成品时
@@ -129,10 +158,59 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
         IconCodeOutline16: () => null,
         IconQueueOutline14: () => null,
         IconChevronDownOutline14: () => null,
+        // 0.16.37：官方 `Button` 原语。站点目录的胶囊两半（主区 + 右侧触发器）都用它，
+        // 与官方「新建终端」同源。桩必须把它渲染成**可点的 button 节点**并透传
+        // className / onClick —— 否则「点目录一行会开标签」那条行为断言会静默失效
+        //（找不到节点 → buttons 为空 → 断言在别处炸，或者更糟：静默通过）。
+        Button: ({ variant, size, icon, className, children, ...rest }) =>
+          ({ type: 'ButtonStub', props: { variant, className, ...rest }, children: children === undefined ? [] : [children] }),
         FishLogo: () => null,
+        // 0.16.33：官方 Menu 原语。桩按**真实契约**给（Menu.d.ts）：
+        //   · 首参是 props 对象（含 open/anchor/items/onSelect/onClose）；
+        //   · 返回一个可渲染元素，把 anchor 原样放在里面——触发按钮必须能被找到；
+        //   · open 时把 items 逐行画出来，`submenu` 作为嵌套节点保留下来。
+        // 桩必须照契约给形状而不是「能过就行」：旧桩只给两个图标时，新解构的
+        // 五个导出全是 undefined，渲染期抛错变白屏——那次 0.16.21 事故的教训是
+        // **桩的建模失真会把整类 bug 盖住**（见本文件上方 primitiveOmit 注释）。
+        // 这里把 items 的 id/submenu 结构暴露出来，菜单的层级才能被断言。
+        // 0.16.34：桩必须**真渲染**菜单行。此前它只把 items 原样挂成 props，于是
+        // 「菜单打开后长什么样」在护栏里是空白的——而 0.16.34 恰恰把站点选择整个
+        // 收进了这个菜单（横向标签条已删）。渲染不到行，这一整块就等于没有护栏：
+        // 站点名丢失、状态点丢失、行宽塌掉，一条都测不出来。
+        //
+        // 渲染范围**只到 menu row**，与真机的可见层级一致：
+        //   · anchor（触发按钮）永远渲染——它是锚点，不在 items 里；
+        //   · items 仅在 open 时渲染，真机同理（关着的时候列表不画）；
+        //   · 子菜单**不在这里渲染**：真机靠 hover/focus 展开，桩拿不到这两个事件，
+        //     假装展开只会让断言依赖桩的想象。账户行的护栏走源码静态检查
+        //     （见 ★ 二级站点菜单 用例），不在渲染树里伪造。
+        Menu: ({ open, anchor, items, onSelect, onClose }) => ({
+          type: 'MenuStub', props: { open, items, onSelect, onClose },
+          children: [
+            anchor,
+            ...((open || openMenu) ? (items || []).map(it => ({
+              type: 'MenuStubRow', props: { id: it.id, submenu: it.submenu },
+              // 前导图标必须一起渲染：菜单行的图标挂点带着「官方矢量 / 文字标记」
+              // 的档位说明（title），丢掉 icon 等于把那段说明从树里抹掉。
+              // 标题行（type:'label'）的文字在 text 上，普通行在 label 上。
+              children: [it.icon, it.label !== undefined ? it.label : it.text],
+            })) : []),
+          ],
+        }),
         FISH_LOGO_PATH: '<path d="M11.58 17.04C6.5 16.6 1 12.6 1 8.5 1 3.8 5.6 0 11.6 0c5.4 0 10 3 11.2 7.2L14 6l-2.4 11z" fill="currentColor"/>',
         FISH_LOGO_VIEWBOX: { width: 23.16, height: 17.04 },
         useDismissOnOutsidePointer: () => {},
+        // 0.16.39：官方弹层定位钩子。桩返回一个固定坐标（而不是 null）：
+        //   · 返回 null → client.cjs 走内联回落分支，**左对齐那条路根本没被测到**；
+        //   · 返回坐标 → 面板带上 left/top 样式，护栏才能断言「坐标来自官方钩子」。
+        // 坐标值本身由官方实现决定（这里不重复它的算法），只钉「有没有用它」。
+        useAnchoredPosition: () => ({ left: 100, top: 200 }),
+        // 0.16.39：工具条图标（官方线框图标族）。桩统一给一个可渲染的空组件——
+        // 断言看的是「用的是官方图标组件」而不是字形字符，只要它们可渲染即可。
+        IconRefreshOutline14: () => null,
+        IconRightUpOutline16: () => null,
+        IconFullscreenOutline16: () => null,
+        IconPanelLeftOutline16: () => null,
       };
       for (const k of primitiveOmit) delete stub[k];
       return stub;
@@ -200,19 +278,21 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
       // 0.15.11：等待药丸的数据面。服务端已把文案与明细算好（label / detailRows），
       // 客户端只负责渲染——夹具照真实载荷形状给，含本会话与累计两类行。
       // 0.16.24：`waitStats` 可整体替换该载荷（在途等待用例要带 live/now/liveValue），
-      // 缺省仍给 0.15.11 那份「已结算」夹具。文案里的 `3 s` 与 wait-stats.js 的
-      // formatElapsed（秒级取整）一致——夹具必须照真实服务端输出给，否则护栏是假绿。
+      // 缺省仍给 0.15.11 那份「已结算」夹具。文案与 wait-stats.js 的单位口径一致
+      //（0.16.39 起秒级用中文「秒」）——夹具必须照真实服务端输出给，否则护栏是假绿。
       else if (u.includes('/__webcode/wait-stats')) body = waitStats || {
         ok: true,
-        total: { totalWaitMs: 20000, turns: 9, waitedTurns: 4, rateLimitRetries: 1, updatedAt: 1789000000000 },
-        session: { totalWaitMs: 3000, turns: 2, waitedTurns: 1, rateLimitRetries: 0, updatedAt: 1789000000000 },
-        rows: [{ label: '累计等待发送', value: '20.0 s' }],
-        line: '本次会话等待发送 3 s',
-        label: '等待发送 3 s',
-        sessionValue: '3 s',
+        total: { totalWaitMs: 20000, totalDurationMs: 60000, turns: 9, waitedTurns: 4, rateLimitRetries: 1, updatedAt: 1789000000000 },
+        session: { totalWaitMs: 3000, totalDurationMs: 7000, turns: 2, waitedTurns: 1, rateLimitRetries: 0, updatedAt: 1789000000000 },
+        rows: [{ label: '累计等待发送', value: '20 秒' }],
+        line: '本次会话等待发送 3 秒',
+        label: '3 秒 · 等待占比 30%',
+        sessionValue: '3 秒',
         detailRows: [
-          { label: '本次会话等待发送', value: '3 s' },
-          { label: '累计等待发送', value: '20.0 s' },
+          { label: '本次会话等待发送', value: '3 秒' },
+          { label: '本次会话占比', value: '30%' },
+          { label: '累计等待发送', value: '20 秒' },
+          { label: '平均会话等待时长占比', value: '25%' },
         ],
       };
       // 必须是**忠实**的 Response：真实 client.cjs 走 response.text() +
@@ -258,9 +338,14 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
           return () => {};
         },
       },
-      // 标签页类型注册：收下定义，便于断言「三个 kind 都存在且都是 page type」。
+      // 标签页类型注册：收下定义，便于断言「各 kind 都存在且都是 page type」。
       sidebarRightTabs: { register: (def) => { if (def?.kind) TabDefinitions.set(def.kind, def); return () => {}; } },
-      sidebarRight: { toggleExpanded() {} },
+      // 0.16.35：站点目录用 `openTab` 为选中站点开一个独立标签。桩必须真的记下
+      //（kind + params），否则「点站点会发生什么」在护栏里没有任何证据。
+      sidebarRight: {
+        toggleExpanded() {},
+        openTab(kind, options) { openTabCalls.push({ kind, params: (options && options.params) || null }); },
+      },
       get: () => null,
     });
     assert.ok(PaneComponents.size > 0, 'sidebar.right.pane.tab 正文从未注册');
@@ -289,12 +374,23 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
       // PromptPanel）的 useState/useEffect 从未注册，它们的请求也就从未发出。
       // 表现是护栏「跑得过」却什么都没验证（0.14.0 修首轮提示词默认显示时暴露：
       // 数据路径全通、只有嵌套面板停在「加载中」）。
+      //
+      // 这里**必须** `map(instantiate)` 而不是「只摊平、留待外层递归」：那样写会
+      // 让本节点被外层再 instantiate 一次，而它仍不是函数组件 → 无限自套。
       return { ...el, children: (el.children || []).map(instantiate) };
     };
     const errors = [];
     /** which → 座位 key。标签页正文、中央列 main 面板、设置页、等待药丸各一条路径。 */
+    // 0.16.35：右栏现在有**两个** kind——目录页（`dsh-webcode-bridge`）与站点网页
+    //（`dsh-webcode-bridge/site`，一个站点一个标签）。
+    //
+    // 默认 `pane` 仍然指向**站点网页**：本文件绝大多数用例断言的是网页面板（工具条、
+    // iframe、窗口状态、站点标签条），把默认值改成目录页会让它们集体变成「在测目录」
+    // 而自己不知道。目录页用显式的 `which: 'catalog'`。
     const PANE_KEYS = {
-      pane: 'dsh-webcode-bridge',
+      pane: 'dsh-webcode-bridge/site',
+      site: 'dsh-webcode-bridge/site',
+      catalog: 'dsh-webcode-bridge',
       team: 'dsh-webcode-bridge/team',
     };
     // 0.16.18：任务板正文不再挂在 `sidebar.right.pane.tab` 上（右栏那份注册已按
@@ -318,6 +414,10 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
     // 这里改成把真实的 props 形状传进去，并把「拿不到会话身份」单独做成一个
     // 用例（见「花名册：读不到」那条），两种宿主行为都被覆盖。
     let tree = null;
+    // 组件每次渲染都会调 useState(false) 重建菜单的开合状态，因此「打开菜单」必须
+    // 是**渲染前**的常量条件，不能在渲染后翻转：桩是同步无状态的，翻转不会带来
+    // 第二次渲染。openMenu 因此是 renderPane 的入参（mockRequire 直接闭包捕获它），
+    // 与真机里的「用户先点了站点按钮」等价——差别只是这个点击发生在渲染之前。
     for (const p of payloads) {
       current = p;
       // 保留组件状态跨 pass 演进（异步 setState 需要在下一 pass 被读到），
@@ -325,13 +425,36 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
       states = {}; effectSlots = {};
       for (let pass = 0; pass < 8; pass++) {
         cursor = 0; effectSlotCursor = 0; pendingEffects = [];
-        try { tree = instantiate(Target(SESSION_PROPS)); } catch (e) { errors.push(e); break; }
+        // tabParams（0.16.35）：站点标签的正文从**自己的** navigation.params 读 siteId。
+        // 桩按官方 TabHookContext 的契约把 `useTabInfo` 作为框架注入交给组件，
+        // 与真机同形（官方 Browser 面板就是这么读 `tab.navigation.params?.url`）。
+        // 0.16.39：目录页改用**本标签自己的**动作做「替代本标签页」（官方 guide 的
+        // `replaceTab: true`）。桩把它记下来，否则这条官方语义在护栏里没有任何证据。
+        // `noTabActions` 用来构造「宿主没给 actions」的旧环境，专测降级分支。
+        const tabInfoStub = () => ({
+          tab: {
+            navigation: { params: tabParams, address: '', revision: 1 },
+            ...(noTabActions ? {} : {
+              actions: {
+                openTab: (kind, options) => inPlaceOpenCalls.push({
+                  kind,
+                  replaceTab: Boolean(options && options.replaceTab),
+                  params: (options && options.params) || null,
+                }),
+              },
+            }),
+          },
+        });
+        const paneProps = (tabParams === undefined && which !== 'catalog' && !noTabActions)
+          ? scopedProps
+          : { ...scopedProps, useTabInfo: tabInfoStub };
+        try { tree = instantiate(Target(paneProps)); } catch (e) { errors.push(e); break; }
         for (const fn of pendingEffects) { try { fn(); } catch (e) { errors.push(e); } }
         await flush(); await flush(); await flush(); await flush();   // ← 异步 setState 必须在这里落地
       }
     }
     return {
-      errors, windowHits, tree, menuItems: MenuItems, effectDisposers,
+      errors, windowHits, tree, menuItems: MenuItems, effectDisposers, openTabCalls, inPlaceOpenCalls,
       tabDefinitions: TabDefinitions, paneKeys: [...PaneComponents.keys()],
       // 0.16.0：左栏入口与中央列 main 座位的登记结果。两个都返回，用例才能断言
       // 「成对且同名」——只看一半会放过「侧栏行存在但点了报未注册」那类缺陷。
@@ -418,15 +541,67 @@ test('设置面板：首轮提示词默认就显示，且**按网站逐行**列�
   assert.ok(text.includes('GLM-PROMPT-TEXT'), 'glm 行未渲染它自己的模板');
   // 「实际使用」标注必须在（用户要能分辨「预览」与「生效」）。
   assert.ok(/实际使用：/.test(text), '每行必须标出该网站实际在用的协议');
-  // 协议仍要能选（每行一个下拉），选项文案用新标签。
-  assert.ok(text.includes('标签形状（<tool_call> 标签）'), '协议下拉未列出标签形状');
-  assert.ok(text.includes('GLM 代码块'), '协议下拉未列出 GLM 代码块');
-  assert.ok(text.includes('DeepSeek 官方模板'), '协议下拉未列出官方模板');
-  // 全局指令仍是可编辑的（唯一可编辑项）
+  // 协议名要能在行内读到（0.16.38 去掉了「预览下拉」——它从来只能预览，用户
+  // 真正要的是「这个站点用哪一支 + 它的提示词文件在哪」）。
+  assert.ok(text.includes('DeepSeek 官方模板'), '未标出 deepseek 实际使用的协议');
+  assert.ok(text.includes('GLM 代码块'), '未标出 glm 实际使用的协议');
+  // 全局指令仍是可编辑的
   assert.ok(text.includes('保存全局指令'), '全局指令编辑区未默认渲染');
 });
 
-test('右栏：站点栏在空站点表与十站点表下都渲染不抛错（tablist 规范）', async () => {
+test('★ 0.16.38 设置页作用域：全局页与站点页各只有自己那一半卡片', async () => {
+  // 用户原话：「将全局界面设置『账户与登录管理』『首轮提示词』入口删除……然后模型
+  // 每个网站例如『deepseek』标签页 —— 请你将『正在运行（子代理 / Team）』『模型管理』
+  // 『提示词投递』『会话与子代理』一样界面表面删除 —— 两者逻辑上单独适配全局和单独
+  // 站点！你却全都有放置，请你按照我的要求删除对应 UI」。
+  //
+  // 这条钉子把「哪张卡属于哪一页」变成可执行的：全局页不得出现账户/站点提示词，
+  // 站点页不得出现那五张全局卡。
+  const global = await renderPane({ payloads: [emptyWindows], which: 'settings' });
+  assert.deepEqual(global.errors, [], '全局页渲染抛错：' + global.errors.map(e => e.message).join('; '));
+  const gt = treeText(global.tree);
+  assert.ok(!gt.includes('的账户与登录'), '全局页不该有站点账户卡');
+  assert.ok(!gt.includes('的首轮提示词'), '全局页不该有站点提示词卡');
+  assert.ok(!gt.includes('的模型'), '全局页不该有站点模型卡');
+  for (const keep of ['正在运行（子代理 / Team）', '提示词投递', '连接', '速度与等待', '会话与子代理', '全局指令', '发送间隔（全局）']) {
+    assert.ok(gt.includes(keep), '全局页缺少卡片：' + keep);
+  }
+  const site = await renderPane({ payloads: [emptyWindows], which: 'settings', settingsTab: 'deepseek', sites: [
+    { siteId: 'deepseek', siteName: 'DeepSeek 网页版', accountKey: 'deepseek', displayName: 'DeepSeek 网页版', initialized: true, loggedIn: true },
+  ] });
+  assert.deepEqual(site.errors, [], '站点页渲染抛错：' + site.errors.map(e => e.message).join('; '));
+  const st = treeText(site.tree);
+  assert.ok(st.includes('DeepSeek 的账户与登录'), '站点页缺少该站点的账户卡');
+  assert.ok(st.includes('DeepSeek 的首轮提示词'), '站点页缺少该站点的提示词卡');
+  assert.ok(st.includes('DeepSeek 的模型'), '站点页缺少该站点的模型卡');
+  for (const gone of ['正在运行（子代理 / Team）', '提示词投递', '会话与子代理', '全局指令', '发送间隔（全局）']) {
+    assert.ok(!st.includes(gone), '站点页不该出现全局卡片：' + gone);
+  }
+
+  // 全局指令编辑区**只能有一个**（0.16.38 自查发现并修掉的缺陷）：拆分卡片时
+  // 「全局指令」卡与 PromptSection 同时渲染了 GlobalPrompt，同一设置在界面上出现
+  // 两个输入框——改一个另一个不知道，保存后互相覆盖。数量断言才是这条的判据：
+  // 「存在」在有两个的时候同样为真。
+  const count = (s, sub) => s.split(sub).length - 1;
+  assert.equal(count(gt, '保存全局指令'), 1, '全局页的全局指令编辑区必须**恰好一个**');
+  assert.equal(count(st, '保存全局指令'), 0, '站点页不得出现全局指令编辑区');
+  // 站点提示词卡（文件 + 本网站指令）只属于站点页。
+  assert.equal(count(st, '提示词文件'), 1, '站点页必须恰好有一个提示词文件行');
+  assert.equal(count(gt, '提示词文件'), 0, '全局页不得出现站点提示词文件行');
+  // 站点页的模型下拉在目录**未加载**时必须是「加载中」，不得是空下拉
+  //（空数组是真值，ModelSelect 的 `if (!models)` 兜不住它——那会看起来像
+  // 「这个站点没有模型」，而真相是「还没读到」）。此处目录已加载，故只钉
+  //「该站点那一支必须在」这一半。
+  assert.ok(st.includes('本网站默认模型'), '站点页缺少本网站默认模型行');
+});
+
+test('★ 0.16.35 站点目录：从上往下列出全部站点，且不显示登录态', async () => {
+  // 用户原话：「文件夹，新建终端，浏览器，这几个是怎么排列？从上往下！我希望是点击
+  // web bridg 后能够实现，一样的 deepseek，智谱，等这样排列」「登录态不要看」。
+  //
+  // 两条都钉在这里：① 十个站点**全部**按 SITE_NAMES 的顺序从上往下出现；
+  // ② 登录态词（已登录/未登录/待检查）**不得**出现在目录的可见文本里——这是本轮
+  // 的明确要求，不是遗漏。它仍存在于设置页「账户与登录管理」与右栏工具条状态点。
   const ten = [
     { siteId: 'deepseek', siteName: 'DeepSeek 网页版', initialized: true, loggedIn: true },
     { siteId: 'glm', siteName: '智谱清言 (GLM)', initialized: false, loggedIn: true, loggedInCached: true, loginBasis: 'probe-fallback' },
@@ -439,27 +614,134 @@ test('右栏：站点栏在空站点表与十站点表下都渲染不抛错（ta
     { siteId: 'gemini', siteName: 'Gemini', initialized: false, loggedIn: null },
     { siteId: 'zai', siteName: 'Z.ai', initialized: false, loggedIn: true, loggedInCached: true },
   ];
-  const empty = await renderPane({ payloads: [emptyWindows] });
+  const empty = await renderPane({ payloads: [emptyWindows], which: 'catalog' });
   assert.deepEqual(empty.errors, [], '空站点表渲染抛错：' + empty.errors.map(e => e.message).join('; '));
-  const full = await renderPane({ payloads: [emptyWindows], sites: ten });
+  const full = await renderPane({ payloads: [emptyWindows], sites: ten, which: 'catalog' });
   assert.deepEqual(full.errors, [], '十站点表渲染抛错：' + full.errors.map(e => e.message).join('; '));
-  // 站点名与登录徽标都要真的渲染出来（不是空 tablist）
   const text = treeText(full.tree);
   for (const n of ['DeepSeek', '智谱清言', 'Kimi', '豆包', 'Z.ai']) {
-    assert.ok(text.includes(n), '站点栏缺少 ' + n);
+    assert.ok(text.includes(n), '站点目录缺少 ' + n);
   }
-  // 0.14.5：登录态从「标签内文案」改为「8px 色点 + tooltip」。四态仍必须都
-  // 能表达出来，但表达的位置变了——断言跟着契约走，而不是跟着实现细节走。
+  // 登录态不显示（用户明确要求）。
+  for (const s of ['已登录', '未登录', '待检查']) {
+    assert.ok(!text.includes(s), '站点目录里不该出现登录态「' + s + '」——用户要求「登录态不要看」');
+  }
+  // 但图标挂点必须在，而且档位说明不能丢（「官方矢量 / 文字标记」是如实标注）。
+  const html = JSON.stringify(full.tree);
+  assert.ok(html.includes('hwb-catalog-ico'), '站点目录行缺少图标挂点');
+  const titles = treeAttrs(full.tree, ['title']).join(' | ');
+  assert.ok(titles.includes('官方鲸鱼矢量'), 'DeepSeek 的档位说明未出现在目录 title 中');
+});
+
+/**
+ * 0.16.35：点目录里的一行 = 为该站点**新开一个独立标签**。
+ *
+ * 这是「一行并列显示不同网址栏目」的实现路径：`kind` 必须声明 `multiple: true`
+ *（否则同名标签会被去重成同一个），并且开标签时要把 `siteId` 放进 params——
+ * 站点标签的正文正是从自己的 params 读身份（见下一条用例）。
+ *
+ * 用桩收下的 `openTab` 调用做**行为**断言，而不是查源码里有没有那行字符串：
+ * 前者能证明「点了真的会开标签、开的是哪个站点」，后者只能证明有人写过这句话。
+ */
+test('★ 0.16.35 站点目录：点一行会为该站点开标签，并带上 siteId', async () => {
+  // 0.16.39 收尾：解构必须带上 inPlaceOpenCalls——下方断言从 openTabCalls 改到它，
+  // 少了这一列会 ReferenceError（gate 只在夹具里收下 inPlaceOpenCalls 却没在断言侧解构）。
+  const { errors, tree, openTabCalls, inPlaceOpenCalls, tabDefinitions } = await renderPane({ payloads: [emptyWindows], which: 'catalog' });
+  assert.deepEqual(errors, [], '站点目录渲染抛错：' + errors.map(e => e.message).join('; '));
+  const def = tabDefinitions.get('webcode-site');
+  assert.ok(def, '未注册站点网页标签类型 webcode-site');
+  assert.equal(def.multiple, true, '站点标签类型必须 multiple:true —— 否则多个站点会挤成一个标签');
+  // 找到目录里「智谱清言」那一行的按钮并点它（真实调用链，不是直接调函数）。
+  const buttons = [];
+  const collect = (el) => {
+    if (!el || typeof el !== 'object') return;
+    if (Array.isArray(el)) { el.forEach(collect); return; }
+    if (el.props && el.props.className && /hwb-site-main/.test(String(el.props.className)) && typeof el.props.onClick === 'function') {
+      buttons.push(el);
+    }
+    (el.children || []).forEach(collect);
+  };
+  collect(tree);
+  assert.ok(buttons.length >= 10, '站点目录行不足（实际 ' + buttons.length + '）');
+  const glmRow = buttons.find(b => treeText(b).includes('智谱清言'));
+  assert.ok(glmRow, '目录里找不到「智谱清言」行');
+  glmRow.props.onClick();
+  // 0.16.39：目录页改走**本标签自己的**动作（官方 guide 的做法），因此这条断言
+  // 从「ctx.sidebarRight.openTab 被调用」改成「tab.actions.openTab 被调用，且带
+  // replaceTab:true」——后者才是「选站点**替代**本标签页」的可执行证据。
+  assert.equal(inPlaceOpenCalls.length, 1, '点站点行没有走本标签的 openTab');
+  assert.equal(inPlaceOpenCalls[0].kind, 'webcode-site', '开标签用错了 kind：' + inPlaceOpenCalls[0].kind);
+  assert.equal(inPlaceOpenCalls[0].params && inPlaceOpenCalls[0].params.siteId, 'glm',
+    'openTab 没有带上 siteId —— 新标签不知道自己是哪个站点');
+  assert.equal(inPlaceOpenCalls[0].replaceTab, true,
+    '必须带 replaceTab:true —— 否则目录标签会被保留（用户报的「新开/保留 web」）');
+  // 旧路径**不得**同时被调用：两条路一起走会开出两条标签。
+  assert.equal(openTabCalls.length, 0, '走了本标签动作时不得再调 ctx.sidebarRight.openTab');
+});
+
+/**
+ * 0.16.39：拿不到本标签动作时必须**降级**成旧行为，而不是什么都不做。
+ *
+ * 官方 `tab.actions` 只在标签被宿主正式挂载时才存在（旧版右栏 / 精简桩没有）。
+ * 这一条钉住「降级不是崩溃」：那种环境下点站点仍然会开标签，只是目录不会被顶掉。
+ */
+test('★ 0.16.39 站点目录：拿不到本标签动作时降级为 ctx.sidebarRight.openTab', async () => {
+  // 这里刻意**不**走 catalog 的默认桩（which:'catalog' 会给 actions），改从 pane
+  // 座位取目录组件——pane 座位的 useTabInfo 桩没有 actions 字段。
+  const { errors, tree, openTabCalls, inPlaceOpenCalls } = await renderPane({
+    payloads: [emptyWindows], which: 'catalog', noTabActions: true,
+  });
+  assert.deepEqual(errors, [], '降级路径渲染抛错：' + errors.map(e => e.message).join('; '));
+  const buttons = [];
+  const collect = (el) => {
+    if (!el || typeof el !== 'object') return;
+    if (Array.isArray(el)) { el.forEach(collect); return; }
+    if (el.props && el.props.className && /hwb-site-main/.test(String(el.props.className)) && typeof el.props.onClick === 'function') buttons.push(el);
+    (el.children || []).forEach(collect);
+  };
+  collect(tree);
+  const glmRow = buttons.find(b => treeText(b).includes('智谱清言'));
+  assert.ok(glmRow, '降级路径下目录里找不到「智谱清言」行');
+  glmRow.props.onClick();
+  assert.equal(inPlaceOpenCalls.length, 0, '没有 actions 时不该调 tab.actions.openTab');
+  assert.equal(openTabCalls.length, 1, '降级路径必须仍然开标签（否则点了没反应）');
+  assert.equal(openTabCalls[0].params && openTabCalls[0].params.siteId, 'glm');
+});
+
+/**
+ * 0.16.35：站点标签的正文从**自己的** navigation.params 读站点。
+ *
+ * 官方 Browser 面板就是这么读 `tab.navigation.params?.url` 的
+ *（dsh-client-ui-sidebar-browser/lib/client.js:251）。不这么做就只能靠「最后一个
+ * 挂载的面板」猜站点——那正是「两个标签互相改对方」的根因。
+ */
+test('★ 0.16.35 站点标签：正文与标题都从本标签的 navigation.params 取 siteId', async () => {
+  const { errors, tree } = await renderPane({
+    payloads: [emptyWindows], which: 'site', tabParams: { siteId: 'kimi', slot: '' },
+  });
+  assert.deepEqual(errors, [], '站点标签正文渲染抛错：' + errors.map(e => e.message).join('; '));
+  const text = treeText(tree);
+  assert.ok(text.includes('Kimi'), '站点标签正文没有切到 params 指定的站点');
+  assert.ok(!text.includes('DeepSeek 网页版'), '站点标签仍停在默认站点 —— params 没被用起来');
+  // 标题（标签芯片上的字）走**同一个**来源函数。
   //
-  // 这一条同时钉住「美化不得把信息弄丢」：点本身没有文字，状态词必须在
-  // title/aria-label 里可读到，否则屏幕阅读器与悬停提示都拿不到状态。
-  const titles = treeAttrs(full.tree, ['title', 'aria-label']).join(' | ');
-  for (const s of ['已登录(缓存)', '未登录', '待检查']) {
-    assert.ok(titles.includes(s), '登录态「' + s + '」未出现在任何 title/aria-label 中：' + titles.slice(0, 300));
-  }
-  // 反过来锁住这次改动的意图：长状态文案不得再出现在**可见文本**里
-  //（它正是把标签条挤爆、被用户报「状态有点简略」的那段文字）。
-  assert.ok(!text.includes('已登录(缓存)'), '长状态文案仍渲染在可见文本中，标签条会被撑爆');
+  // 断言方式是「两处共用 siteTabParams」，而不是分别检查各写一遍 navigation/siteId：
+  // 后者在源码里写两遍也会通过，而那正是「标题写着 Kimi、正文却是 DeepSeek」的成因。
+  const src = bridgeSrcFrom('client.cjs');
+  assert.ok(/sidebar\.right\.pane\.tab\.title/.test(src), '未注册站点标签标题座位');
+  assert.ok(/const siteTabParams = \(props\) =>/.test(src), 'siteTabParams 读取函数不存在');
+  const reader = src.indexOf('const siteTabParams');
+  const readerBody = src.slice(reader, reader + 700);
+  assert.ok(/navigation/.test(readerBody) && /siteId/.test(readerBody),
+    'siteTabParams 没有从 navigation.params 取 siteId');
+  const titleBody = src.slice(src.indexOf('const SiteTabTitle'), src.indexOf('const SiteTabTitle') + 400);
+  assert.ok(/siteTabParams\(props\)/.test(titleBody),
+    'SiteTabTitle 没有复用 siteTabParams —— 标题与正文会各读一份、迟早漂移');
+  const convBody = src.slice(src.indexOf('const SiteTabBody'), src.indexOf('const SiteTabBody') + 500);
+  assert.ok(/siteTabParams\(props\)/.test(convBody),
+    'SiteTabBody 没有复用 siteTabParams');
+  // 槽也必须传下去（否则「选账户2」等于没选）。
+  assert.ok(/slot/.test(convBody), 'SiteTabBody 没有把 slot 传给面板');
 });
 
 test('右栏：注册全部走 ctx.effect，并把「刷新 / 独立窗口」挂进标签动作菜单', async () => {
@@ -501,12 +783,30 @@ test('★ 站点图标与一级选择框（0.16.23 接手网页会话半成品�
   assert.deepEqual(full.errors, [], '站点图标渲染抛错：' + full.errors.map(e => e.message).join('; '));
   // 档位表语义：DeepSeek 是官方鲸鱼矢量（official 档），GLM 如实标注「未找到」——
   // 不许把第三方图集冒充官方（doc/brand-icons-research.md 的结论）。
-  const titles = treeAttrs(full.tree, ['title']).join(' | ');
+  //
+  // 0.16.36：档位说明（「官方矢量 / 文字标记」）现在挂在**站点目录行**与**首屏网格**
+  // 的图标挂点上。站点网页标签的正文只显示当前这一个站点，没有目录可解释，
+  // 因此这条断言改在目录页上跑——钉的是**信息不能丢**（用户要能分辨真实品牌矢量
+  // 与占位文字标记），不是某一个 DOM 位置。
+  const catalog = await renderPane({ payloads: [emptyWindows], sites: ten, which: 'catalog' });
+  assert.deepEqual(catalog.errors, [], '站点目录渲染抛错：' + catalog.errors.map(e => e.message).join('; '));
+  const titles = treeAttrs(catalog.tree, ['title']).join(' | ');
   assert.ok(titles.includes('官方鲸鱼矢量'), 'DeepSeek 的 official 档位说明未出现在 title 中');
-  assert.ok(titles.includes('未找到品牌方发布的透明底矢量'), 'GLM 的 missing 档位说明未出现在 title 中');
-  // 站点栏每个 tab 内都有 glyph 挂点（图标或文字标记的容器）。
-  const html = JSON.stringify(full.tree);
-  assert.ok(html.includes('hwb-tab-glyph'), '站点栏 tab 缺少图标挂点');
+  // 0.16.37：GLM / Z.ai 也有真实矢量了（来源 lobehub），因此 title 里的说明从
+  // 「simple-icons 无此条目，暂用文字标记」改成**来源声明**。钉的仍然是「如实说明
+  // 图标从哪来」，而不是某一句固定文案。
+  assert.ok(titles.includes('lobehub'), 'GLM/Z.ai 的图标来源说明未出现在 title 中');
+  // 图标挂点：工具条站点图标（.hwb-glyph）与目录行图标（.hwb-catalog-ico）各一处。
+  const html = JSON.stringify(catalog.tree);
+  // 0.16.37：GLM 的矢量必须真的画出来（这是「z.ai 和 glm 也要有图标」的验收点）。
+  assert.ok(/M9\.917 2c4\.906/.test(html), 'GLM 的品牌矢量没被渲染（仍是文字标记？）');
+  assert.ok(/M12\.105 2L9\.927/.test(html), 'Z.ai 的品牌矢量没被渲染（仍是文字标记？）');
+  assert.ok(html.includes('hwb-catalog-ico'), '站点目录行缺少图标挂点');
+  assert.ok(!html.includes('hwb-menu-glyph'), '已删除的站点菜单挂点又出现了');
+  assert.ok(!html.includes('hwb-tab-glyph'), '已删除的横向站点标签挂点又出现了');
+  // 0.16.36：取回的**真实品牌矢量**必须真的画出来——断言 svg path 的 d 属性用了
+  // simple-icons 的那一条，而不是仍走文字标记（这是「把官方图上网找来」的验收点）。
+  assert.ok(/M22\.2819 9\.8211/.test(html), 'ChatGPT 的 simple-icons 路径没被渲染（仍在用文字标记？）');
 });
 
 test('★ 站点图标：旧版 primitives 缺导出时必须降级而不是白屏（0.16.21 事故回归钉子）', async () => {
@@ -530,15 +830,18 @@ test('右栏账户头像：圆框按真实读数分三态，且颜色不是唯�
   // 这一条同时钉住调研里点名「最容易犯的错」的那条约束
   //（doc/research/agent-ui-design-references.md:180）：**不用颜色作为唯一状态载体**。
   // 所以断言分两半：类名（视觉）与 title/aria-label（可读文本）都要到位。
+  // 0.16.38：账户卡只在**站点页**渲染，且只列**该站点**的账户行（`onlySiteId`）。
+  // 因此三个状态必须落在同一个站点的三个槽上——这恰好也是真机形态：同一站点
+  // 多账户时，每个槽各有自己的登录态与会话失效读数。
   const sites = [
     // 正常：已登录且从未丢过网页会话
     { siteId: 'deepseek', siteName: 'DeepSeek 网页版', accountKey: 'deepseek', displayName: 'DeepSeek 网页版', initialized: true, loggedIn: true, sessionLostCount: 0 },
     // 会话没了：登录态还在，但网页会话丢过 —— 这是「浅红」的**唯一**合法依据
-    { siteId: 'glm', siteName: '智谱清言 (GLM)', accountKey: 'glm#2', slot: '2', displayName: '智谱清言 (GLM) (账户2)', initialized: true, loggedIn: true, sessionLostCount: 3, lastSessionLost: { reason: 'no-stored-session', siteId: 'glm' } },
+    { siteId: 'deepseek', siteName: 'DeepSeek 网页版', accountKey: 'deepseek#2', slot: '2', displayName: 'DeepSeek 网页版 (账户2)', initialized: true, loggedIn: true, sessionLostCount: 3, lastSessionLost: { reason: 'no-stored-session', siteId: 'deepseek' } },
     // 待检查：没有可信读数
-    { siteId: 'kimi', siteName: 'Kimi', accountKey: 'kimi', displayName: 'Kimi', initialized: false, loggedIn: null },
+    { siteId: 'deepseek', siteName: 'DeepSeek 网页版', accountKey: 'deepseek#3', slot: '3', displayName: 'DeepSeek 网页版 (账户3)', initialized: false, loggedIn: null },
   ];
-  const { errors, tree } = await renderPane({ payloads: [emptyWindows], sites, which: 'settings' });
+  const { errors, tree } = await renderPane({ payloads: [emptyWindows], sites, which: 'settings', settingsTab: 'deepseek' });
   assert.deepEqual(errors, [], '账户头像渲染抛错：' + errors.map(e => e.message).join('; '));
 
   // 头像存在且是圆框：断言类名（视觉契约）
@@ -564,7 +867,7 @@ test('右栏账户头像：per-slot 会话丢失读数缺失时退化为 idle，
   // 缺字段时必须退化成 idle（待检查），而不是把 undefined > 0 当 false 升绿，
   // 也不是编一个「会话失效」的红色——两者都是造假状态。
   const old = [{ siteId: 'deepseek', siteName: 'DeepSeek 网页版', accountKey: 'deepseek', displayName: 'DeepSeek 网页版', initialized: true, loggedIn: true }];
-  const { errors, tree } = await renderPane({ payloads: [emptyWindows], sites: old, which: 'settings' });
+  const { errors, tree } = await renderPane({ payloads: [emptyWindows], sites: old, which: 'settings', settingsTab: 'deepseek' });
   assert.deepEqual(errors, [], '旧后端行渲染抛错：' + errors.map(e => e.message).join('; '));
   const classes = treeAttrs(tree, ['className']).join(' ');
   assert.match(classes, /hwb-avatar ok/, '缺 sessionLostCount 时已登录账户应仍是 ok（正常）');
@@ -719,7 +1022,7 @@ test('★ 等待药丸：真的渲染出短读数，且默认不展开明细', a
   const { errors, tree } = await renderPane({ which: 'dock', payloads: [{}] });
   assert.deepEqual(errors, [], '药丸渲染抛错');
   const text = treeText(tree);
-  assert.match(text, /等待发送 3 s/, '药丸必须显示服务端算好的短读数');
+  assert.match(text, /3 秒 · 等待占比 30%/, '药丸必须显示服务端算好的短读数');
   // 默认收起：明细只在点击后才出现——「默认没有，点击能出现」是用户的要求。
   assert.ok(!/累计等待发送/.test(text), '明细默认不应展开');
   assert.ok(!/本会话尚无等待记录/.test(text), '不该显示空态文案');
@@ -737,19 +1040,21 @@ test('★ 等待药丸：真的渲染出短读数，且默认不展开明细', a
 /** 在途等待的服务端载荷（字段照 /__webcode/wait-stats 真实输出给）。 */
 const liveWaitPayload = {
   ok: true,
-  total: { totalWaitMs: 20000, turns: 9, waitedTurns: 4, rateLimitRetries: 1, updatedAt: 1789000000000 },
+  total: { totalWaitMs: 20000, totalDurationMs: 60000, turns: 9, waitedTurns: 4, rateLimitRetries: 1, updatedAt: 1789000000000 },
   // 本会话账本里已有 12 秒历史等待：在途读数必须**盖过**它，否则用户看到的
   // 仍是一个不动的数（这正是旧观感）。
-  session: { totalWaitMs: 12000, turns: 2, waitedTurns: 1, rateLimitRetries: 0, updatedAt: 1789000000000 },
+  session: { totalWaitMs: 12000, totalDurationMs: 48000, turns: 2, waitedTurns: 1, rateLimitRetries: 0, updatedAt: 1789000000000 },
   live: { startedAt: 1789000000000, endsAt: 1789000010000, baseMs: 0, kind: 'gap' },
   now: 1789000003000,
-  rows: [{ label: '累计等待发送', value: '20.0 s' }],
-  label: '等待发送 3 s',
-  sessionValue: '12 s',
-  liveValue: '3 s',
+  rows: [{ label: '累计等待发送', value: '20 秒' }],
+  label: '3 秒 · 等待占比 6%',
+  sessionValue: '12 秒',
+  liveValue: '3 秒',
   detailRows: [
-    { label: '本次会话等待发送', value: '12 s' },
-    { label: '累计等待发送', value: '20.0 s' },
+    { label: '本次会话等待发送', value: '12 秒' },
+    { label: '本次会话占比', value: '20%' },
+    { label: '累计等待发送', value: '20 秒' },
+    { label: '平均会话等待时长占比', value: '25%' },
   ],
 };
 
@@ -757,9 +1062,9 @@ test('★ 等待药丸：在途读数盖过账本累计（显示正在涨的那�
   const { errors, tree } = await renderPane({ which: 'dock', payloads: [{}], waitStats: liveWaitPayload });
   assert.deepEqual(errors, [], '在途药丸渲染抛错');
   const text = treeText(tree);
-  assert.match(text, /等待发送 3 s/, '在途时必须显示现算的短读数');
-  // 账本里的 12 s 不得到药丸上——两个数同时出现等于没修。
-  assert.ok(!/等待发送 12 s/.test(text), '在途时药丸不得回落到账本累计值');
+  assert.match(text, /3 秒 · 等待占比 6%/, '在途时必须显示现算的短读数');
+  // 账本里的 12 秒不得到药丸上——两个数同时出现等于没修。
+  assert.ok(!/12 秒 · 等待占比/.test(text), '在途时药丸不得回落到账本累计值');
 });
 
 test('★ 等待药丸：在途时轮询提到 1 秒（10 秒一问等于没在动）', async () => {
@@ -812,7 +1117,7 @@ test('★ 等待药丸：可点（onClick 存在），且 aria 契约完整', as
   assert.match(String(pill.props['aria-label']), /等待发送/);
 });
 
-test('★ 等待药丸：靠官方 dock 行自身的 flex 同栏，不得 portal、不得几何偏移', () => {
+test('★ 等待药丸：靠官方 dock 行自身的 flex 同栏，且不得有几何 hack', () => {
   // 用户原话：「写死的会被侧面面板挤到重叠的」。0.15.10 用负上边距把本行拽进
   // 官方那一行，官方行一旦换行（右栏把输入区挤窄）两块内容就叠在一起。
   //
@@ -825,12 +1130,14 @@ test('★ 等待药丸：靠官方 dock 行自身的 flex 同栏，不得 portal
   // 直接子项（ui-conversation 的 InputBar 直接 renderSlot 再渲染 ContextMeter），
   // 所以只要自己是 inline-flex，同栏就自动成立。
   //
-  // 这条同时钉住三件事：不许再 portal（依赖已消失的标记）、不许有几何偏移、
-  // 必须是 inline-flex 而不是整行。
+  // 这条钉住的是**药丸自己在哪**：必须是官方 dock 行的直接子项、inline-flex、
+  // 不写整行宽度、不给负边距。
+  //
+  // 0.16.39 改动：`createPortal` 不再被这条禁掉。它现在的用途是**弹层**（官方
+  // stat-dialog 同样 portal 到 body，为了逃出右栏面板的 transform 包含块），
+  // 与 0.16.18 删掉的那条「塞进官方统计行」完全无关；药丸本身仍在本行里，
+  // 由下面的规则逐条钉住。
   const src = bridgeSrcFrom('client.cjs');
-  // 断言的是**调用形态**而不是这个词：0.16.18 的注释里正当地解释了「为什么不再用
-  // portal」，把注释一起禁掉会逼着后续维护者删掉那段解释——那是本末倒置。
-  assert.ok(!/\bcreatePortal\s*\(/.test(src), 'client.cjs 不得再调用 createPortal：官方 [data-composer-stats] 标记已不存在');
   assert.ok(!src.includes('useOfficialStatsHost'), '不得保留找官方统计行的旧钩子');
   assert.ok(!/data-composer-stats'\]/.test(src), '不得再按已消失的官方标记去 querySelector');
   assert.ok(!/joinOffset/.test(src), '不得再保留负边距的几何补偿量 joinOffset');
@@ -839,7 +1146,13 @@ test('★ 等待药丸：靠官方 dock 行自身的 flex 同栏，不得 portal
   // 必须是内联行内盒：整行 width:100% 正是「药丸独占一行」的成因。
   const wrap = src.slice(src.indexOf('".hwb-waitwrap{'), src.indexOf('".hwb-waitpill{'));
   assert.match(wrap, /display:inline-flex/, '等待 wrap 必须是 inline-flex（官方 dock 行已提供 justify-content:center）');
-  assert.ok(!/width:100%/.test(wrap), '不得给等待 wrap 写 width:100%——那会独占官方 dock 行');
+  // 判据必须写成「独立的 width:100%」：`max-width:100%` 是官方 root 就有的约束，
+  // 用 /width:100%/ 去查会把它一起禁掉（0.16.38 需要 max-width 才能被父行约束）。
+  assert.ok(!/(?:^|[;{])width:100%/.test(wrap), '不得给等待 wrap 写 width:100%——那会独占官方 dock 行');
+  // 0.16.38：wrap 必须**可收缩**。旧值 `flex:none` 明确禁止收缩，于是窄 pane 下
+  // 官方药丸在缩、这一枚不动——用户报的「缩小后没适配」在数值层面就是它。
+  assert.match(wrap, /flex:0 1 auto/, '等待 wrap 必须可收缩（flex:0 1 auto），否则窄栏下不与官方药丸同步');
+  assert.match(wrap, /max-width:100%/, '等待 wrap 需要 max-width:100% 才能被父行约束');
 });
 
 test('★ 等待药丸：关闭语义必须与官方一致（Esc + 点外部）', () => {
@@ -849,14 +1162,23 @@ test('★ 等待药丸：关闭语义必须与官方一致（Esc + 点外部）'
   const src = bridgeSrcFrom('client.cjs');
   assert.ok(/key === 'Escape'/.test(src), '必须支持 Esc 收起');
   assert.ok(src.includes("'pointerdown'"), '必须监听 pointerdown 以复刻官方的点外部关闭');
-  assert.ok(/!root\.contains\(event\.target\)/.test(src), '关闭边界必须是本组件自身，而不是整行');
+  // 0.16.39：判据从「必须写 !root.contains(...)」放宽成「必须同时认 root 与 panel」——
+  // 面板 portal 到 body 之后，只用 root 做边界会让点面板内部把它自己关掉；
+  // 官方 useDismissOnOutsidePointer 的第四个参数（portal）正是为这件事存在的。
+  assert.ok(/root\.contains\(target\)/.test(src), '关闭边界必须包含本组件自身（而不是整行）');
+  assert.ok(/panel\.contains\(target\)/.test(src), '面板已 portal 到 body，关闭边界必须把面板自身也算作「内部」');
 });
 
-test('★ 等待药丸：字号/行高/高度必须走官方 content-font token，不得写死像素', () => {
-  // 官方药丸（ui-chat 的 StatsPills 与 TurnUsagePanel）三个值都走 token：字号取
-  // `--dsh-content-font-size-secondary`（缺省 13px），行高取
-  // `--dsh-content-font-delta-secondary` 以 24px 为基，高度取
-  // `--dsh-content-font-delta` 以 28px 为基。
+test('★ 等待药丸：字号/行高必须走官方 content-font token，不得写死像素', () => {
+  // 官方药丸（ui-chat 的 StatsPills）走 token：root 给字号
+  // `--dsh-content-font-size-secondary`（缺省 13px）与行高
+  // `--dsh-content-font-delta-secondary` 以 20px 为基，pill 自己只
+  // `line-height:inherit` + `padding:1px 8px`。
+  //
+  // 0.16.38 修正：本仓库此前把行高基写成 24px、并额外给 pill 一条
+  // `height:calc(28px + delta)`。两者都不是官方值——同一行里那两枚药丸因此
+  // **不等高**，正是用户说的「没适配」。现在逐项等于官方：字号与行高在 wrap 上，
+  // pill 不再自己声明高度。
   // 用户在设置里改「内容字号」时，这两个 delta 会让官方所有药丸一起缩放；
   // 写死 13px/24px/28px 的那一枚**不跟着变**——同一行里出现一大一小两枚药丸，
   // 就是「没适配」在数值层面的形态。
@@ -875,11 +1197,15 @@ test('★ 等待药丸：字号/行高/高度必须走官方 content-font token�
     assert.ok(end > i, '样式规则 ' + sel + ' 没有终止符' );
     return src.slice(i, end + 2);
   };
+  // 字号与行高挂在 wrap 上（与官方 StatsPills 的 root 同形），pill 继承——两处都查。
+  const wrap = ruleAt('".hwb-waitwrap{');
   const pill = ruleAt('".hwb-waitpill{');
-  assert.match(pill, /font-size:var\(--dsh-content-font-size-secondary,13px\)/, '药丸字号必须走官方 content-font token');
-  assert.match(pill, /line-height:calc\(24px \+ var\(--dsh-content-font-delta-secondary,0px\)\)/, '药丸行高必须跟随官方 content-font delta');
-  assert.match(pill, /height:calc\(28px \+ var\(--dsh-content-font-delta,0px\)\)/, '药丸高度必须跟随官方 content-font delta');
-  assert.ok(!/font-size:13px/.test(pill), '药丸字号不得写死 13px：用户改内容字号时它不会跟着缩放');
+  assert.match(wrap, /font-size:var\(--dsh-content-font-size-secondary,13px\)/, '药丸字号必须走官方 content-font token');
+  assert.match(wrap, /line-height:calc\(20px \+ var\(--dsh-content-font-delta-secondary,0px\)\)/, '药丸行高必须跟随官方 content-font delta（官方以 20px 为基）');
+  assert.ok(!/font-size:13px/.test(wrap) && !/font-size:13px/.test(pill), '药丸字号不得写死 13px：用户改内容字号时它不会跟着缩放');
+  // 官方 pill **不声明 height**（高度由行高与 padding 决定）。钉住「不得再加回
+  // 那条 28px 的 height」——它正是两枚药丸不等高的直接原因。
+  assert.ok(!/height:calc\(/.test(pill), 'pill 不得自己声明 height：官方靠 line-height + padding 定高，多一条就会与官方药丸不等高');
 });
 
 test('★ 左栏任务板：整列页面排版必须对齐官方 page 契约', () => {
@@ -1281,4 +1607,150 @@ test('设置页：useSessions 缺席时优雅降级为 null，不得整块崩掉
   // 无条件调用 hook（条件调用会复现 SiteAccounts 那类 hooks 顺序违规）。
   assert.ok(/const useSessions = typeof props\?\.useSessions === 'function' \? props\.useSessions : noSessions;/.test(src),
     'useSessions 的取值被写成条件分支外的形式之外了；必须常量选择后再无条件调用');
+});
+
+// ------------------------------------------------- 0.16.33 二级站点菜单 + 站点设置 tab
+
+/**
+ * 0.16.35：站点下拉菜单（`SiteMenu`）已删除，且**不得复活**。
+ *
+ * 它曾用官方 `Menu` 原语画「站点 → 同站点多账户向右展开」，作为工具条那颗站点按钮的
+ * 下拉。用户 0.16.35 明确否掉了那颗按钮（「你现在的 deepseek 上面那点击排列多个网点
+ * 就不要了」），于是它失去全部调用方。
+ *
+ * 这条钉子钉两件事：
+ *   ① 组件与其 `Menu` 解构都不得残留（死代码会让人以为还有入口）；
+ *   ② 它承担过的能力必须在**新**位置仍在：多账户可选 → 站点目录的子行（已由
+ *      「站点目录：点一行会为该站点开标签」那条用例行为验证）。
+ *
+ * 保留下 0.16.33–0.16.34 那个真缺陷的记录（用户报「切换不了了」）：官方
+ * `useDismissOnOutsidePointer` 的 rootRef 若不挂在「同时包住触发按钮与列表」的那层，
+ * 每次 pointerdown 都会被判成「外面」，列表在 click 前卸载 → onSelect 永不触发。
+ */
+test('★ 0.16.35：站点下拉菜单 SiteMenu 已删除且不得复活', async () => {
+  const src = bridgeSrcFrom('client.cjs');
+  assert.ok(!/function SiteMenu\(/.test(src), 'SiteMenu 被复活了 —— 那个工具条下拉已按用户要求删除');
+  // 0.16.37：`Menu` **又有了正当使用方**——站点目录胶囊右端的账户展开（官方
+  // 「新建终端」同款结构）。因此这条断言从「解构不得残留」改成「解构必须存在」，
+  // 把「工具条那颗下拉」（禁止）与「胶囊右端的账户菜单」（要求）分开。
+  // 这正是 0.16.37 用户说「每行右边能选账户」的落点。
+  assert.ok(/const Menu = primitives\.Menu/.test(src), '官方 Menu 原语未接入 —— 账户展开没有承载');
+  assert.ok(/function SiteCatalogBody\(/.test(src), '站点目录组件不存在 —— 站点列表没有落点');
+  assert.ok(/\.hwb-site-card\{/.test(src), '站点目录胶囊外壳样式缺失');
+});
+
+/**
+ * 0.16.35：**横向站点标签条必须在位**（它被删过一次又恢复了，这条钉子两向都钉）。
+ *
+ * ## 这段历史必须留下，否则第三个人还会再删一次
+ *
+ * 0.16.34 我按「低频动作不该常驻占版面」删掉了这一行，并写了当时那条反向钉子
+ *（「横向站点标签条已删除」）。那是**误判**：用户 0.16.35 要的就是「一行并列显示
+ * 不同网址栏目」，指的就是这条。钉子于是掉头——现在它防的是「又被删掉」。
+ *
+ * 断言分两组：
+ *   · 渲染点与三处配套代码**存在**（滚轮横向滚动 effect / onTabKey / siteIds）；
+ *   · 标签里**不得**出现登录态（用户：「登录态不要看」）——恢复时唯一的有意改动。
+ */
+/**
+ * 0.16.36：**面板内的横向站点条已删除**（第三次也是最后一次掉头）。
+ *
+ * ## 这段历史必须完整留下
+ *
+ * 0.16.34 删（我按「低频动作不该常驻」判断）→ 0.16.35 恢复（我把它读成了「一行并列
+ * 显示不同网址栏目」）→ 0.16.36 再删（用户明说「页面内顶部那一行去除……只留下官方
+ * 多开一级和 web bridge 并列那行」）。
+ *
+ * 读对的地方是：**「一行并列」由 DSH 官方右侧栏自己的标签条承担**（Web Bridge /
+ * DeepSeek / 智谱清言… 那一行），面板里不该再有一条自己的站点导航。
+ *
+ * 这条钉子防两件事：
+ *   ① 面板内那条渲染点与配套代码（滚轮 effect / onTabKey / siteIds）**不得复活**；
+ *   ② 「一行并列」的能力必须仍在——它由 `multiple: true` 的站点标签提供，
+ *      已由「站点目录：点一行会为该站点开标签」那条用例行为验证。
+ */
+test('★ 0.16.36：面板内横向站点条已删除，配套代码不残留', async () => {
+  const src = bridgeSrcFrom('client.cjs');
+  // 只查**活代码**（带引号的渲染点与样式规则）；注释里会提到这些名字解释为什么删。
+  assert.ok(!/'hwb-sitebar'/.test(src), '面板内横向站点条被复活了');
+  assert.ok(!/'hwb-site-tab/.test(src), '站点 tab 胶囊被复活了');
+  assert.ok(!/"\.hwb-sitebar\{/.test(src), '站点条样式残留（无宿主的死规则）');
+  assert.ok(!/"\.hwb-site-tab\{/.test(src), '站点 tab 样式残留');
+  assert.ok(!/const onTabKey = \(e\) =>/.test(src), 'onTabKey 残留 —— 它只服务于已删除的标签条');
+  // 0.16.38：`tabsRef` 这个名字本身**允许**再出现——设置页的站点 tab 条用它做
+  // 滚轮横向滚动。这里钉的是**那个组件**不复活（上面的 class 名与 onTabKey 已覆盖），
+  // 而不是钉一个现在有正当用途的标识符。
+  // 站点目录在（那是「从上往下」的落点）。
+  assert.ok(/function SiteCatalogBody\(/.test(src), '站点目录组件不存在');
+  assert.ok(/\.hwb-site-card\{/.test(src), '站点目录胶囊外壳样式缺失');
+});
+
+/**
+ * 0.16.37：站点目录必须是官方「新建终端」那张**胶囊**，不是左栏的列表行。
+ *
+ * 用户原话：「让你完全参考『新建终端』做，你现在只是在半路」「将 deepseek 等网站做出
+ * 和他一样的胶囊和排版」「每行右边能够选择登录账号（有多个账号的）做的类似『新建终端』
+ * 右边点击拉取时候的展开」。
+ *
+ * 结构对着官方 `TerminalGuide`（右栏「新建终端」就是它）：一张胶囊卡片，左端主区是
+ * 一颗 `Button variant:'ghost'`，右端一颗 44px 宽的 chevron `Button` 作为官方 `Menu`
+ * 的 anchor。尺寸逐项来自它的 `TerminalGuide.module.css`。
+ *
+ * 这条钉子钉四件事：
+ *  ① 胶囊外壳的几何（24px 圆角 / 半像素描边 / bg-layer-1 底色）；
+ *  ② 主区与右端触发器是**两颗独立的**官方 `Button`，各自的几何按官方给；
+ *  ③ 账户展开走官方 `Menu` 原语，不是自绘箭头 + 自管展开态；
+ *  ④ 上一轮那套左栏 `panelRow` 口径（`.hwb-catalog-row`）**不得复活**——
+ *     「只是在半路」指的就是它。
+ */
+test('★ 0.16.37 站点目录：官方「新建终端」同款胶囊 + 右侧官方 Menu 账户展开', async () => {
+  const src = bridgeSrcFrom('client.cjs');
+  // ① 胶囊外壳：逐项对齐官方 TerminalGuide.module.css 的 .entry
+  assert.ok(/\.hwb-site-card\{[^}]*border-radius:24px/.test(src), '胶囊外壳不是官方 24px 圆角');
+  assert.ok(/\.hwb-site-card\{[^}]*border:\.5px solid/.test(src), '胶囊外壳缺官方那圈半像素描边');
+  assert.ok(/\.hwb-site-card\{[^}]*background:var\(--dsw-alias-bg-layer-1/.test(src), '胶囊外壳底色不是官方 bg-layer-1');
+  // ② 主区 .main 与触发器 .trigger 是两颗官方 Button
+  assert.ok(/\.hwb-site-main\{[^}]*min-height:56px/.test(src), '主区高度不是官方的 56px');
+  assert.ok(/\.hwb-site-main\{[^}]*padding:14px 20px/.test(src), '主区内边距不是官方的 14px 20px');
+  assert.ok(/\.hwb-site-main\{[^}]*border-radius:24px 0 0 24px/.test(src), '主区圆角不是官方的左侧半胶囊');
+  assert.ok(/\.hwb-site-trigger\{[^}]*width:44px/.test(src), '右侧触发器不是官方的 44px 宽');
+  assert.ok(/\.hwb-site-trigger\{[^}]*align-self:stretch/.test(src), '右侧触发器没有撑满胶囊高度');
+  assert.ok(/\.hwb-site-trigger\{[^}]*border-radius:0 24px 24px 0/.test(src), '右侧触发器圆角不是官方的右侧半胶囊');
+  // 标题 / 说明两行的字号（官方 15px / 13px）
+  assert.ok(/\.hwb-site-title\{[^}]*font-size:15px/.test(src), '标题字号不是官方的 15px');
+  assert.ok(/\.hwb-site-desc\{[^}]*font-size:13px/.test(src), '说明行字号不是官方的 13px');
+  // ③ 官方原语在位，自绘那套不在
+  assert.ok(/const Button = primitives\.Button/.test(src), '没有取官方 Button 原语 —— 胶囊的两半都得是它');
+  assert.ok(/const Menu = primitives\.Menu/.test(src), '没有取官方 Menu 原语');
+  assert.ok(!/hwb-catalog-expand/.test(src), '自绘展开箭头残留 —— 已由官方 Menu 取代');
+  // ④ 旧的左栏行口径不得复活
+  assert.ok(!/\.hwb-catalog-row\{/.test(src), '左栏 panelRow 那套行样式残留（「只是在半路」的就是它）');
+});
+/**
+ * 站点 tab 条：形态必须对齐 dsh-market，且**切 tab 只切视图**。
+ *
+ * 用户要求「点击后能切换设置界面内的 tab 页面，参考 dsh-market 的」。
+ * 这里钉住三件事：
+ *   ① tab 条与选中态类名存在（下边框高亮那套）；
+ *   ② 站点级排队间隔写的是 `sendGapMsBySlot`（后端**既有**的那一档），
+ *      不是新造一个设置键；
+ *   ③ 有「跟随全局」= 删除该键的路径——「没配」与「配了 0」必须可区分。
+ */
+test('★ 设置页站点 tab：形态对齐 dsh-market，且排队间隔走后端既有档位', async () => {
+  const src = bridgeSrcFrom('client.cjs');
+  assert.ok(/\.hwb-settings-tabs\{/.test(src), 'tab 条样式缺失');
+  assert.ok(/\.hwb-settings-tab\.on\{/.test(src), 'tab 选中态样式缺失（下边框高亮）');
+  assert.ok(/border-bottom:2px solid transparent/.test(src),
+    'tab 缺少透明下边框 —— 选中时整排会跳一下（边框参与布局）');
+  // 站点级间隔必须写 sendGapMsBySlot：这一档 0.14.7 起就在 lib/accounts.js 的
+  // 回落链里（槽显式值 → 站点级键 → 全局值），界面只是把它接出来。
+  assert.ok(/sendGapMsBySlot: next/.test(src),
+    '站点级间隔没有写到 sendGapMsBySlot —— 不要新造设置键');
+  assert.ok(/delete next\[siteId\]/.test(src),
+    '「跟随全局」必须**删除**该键，而不是写 0（两者语义不同）');
+  const at = src.indexOf('async function saveSlotGap(');
+  assert.ok(at > 0, 'saveSlotGap 不存在');
+  const body = src.slice(at, src.indexOf('async function saveSetting(', at));
+  assert.ok(/\{ \.\.\.slotGaps, \[siteId\]:/.test(body),
+    'saveSlotGap 没有整对象读改写 —— 只 POST 单个键会让其它站点的覆盖丢失');
 });

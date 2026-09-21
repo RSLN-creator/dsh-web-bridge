@@ -135,7 +135,13 @@
 
 > 备注：`reference/webcode` 的目录名与本插件的命名（`webcode-bridge`、`/__webcode/*`、`window.__webcodeCaptureInstalled`）**同名不同物**。全仓库 grep `webcode` 有数百处命中，其中绝大多数是插件自身命名，**只有上面这一处**是对该参考项目的引用。本文件不把同名命中当作采用证据。
 
-### 背景素材（未直接采用，但有间接影响）
+### `zcode` / `qwen-code` / `doubao2api` → 国内五站协议转换的官方/逆向对照（2026-09-21 补录）
+
+> 这三个是**本轮为 `doc/plans/2026-09-21-domestic-sites-protocol.md` 新拉的参考**，是后续国内站适配（GLM 打样）的对照基准，**尚未写入任何代码**。按本文件「不伪造采用痕迹」的立场，这里登记它们的既定用途与理由，具体采用点等实现任务落地后回填。
+
+- `reference/zcode`（`zai-org/ZCode`，智谱官方 ADE，总部 HEAD `872ad96`）：GLM 的第一方 Agent 运行时 + 工具调用协议。已确认 `apps/zcode-cli/packages/adapters/src/model/` 下存在对本项目最相关的实现：`streaming-tool-call-assembler.ts`、`tool-call-validation.ts`、`tool-input-normalization.ts`、`reasoning-history-normalization.ts`、`tool-result-media-projection.ts`——这正是「带状态机的工具调用解析」「推理/思考归一」「工具结果回注」三个设计要点的官方参照。计划用来对齐 Task 1 的 `lib/tool-transport.js`/`lib/tool-parser.js` 与 GLM 打样（Task 2）。
+- `reference/qwen-code`（`QwenLM/qwen-code`，千问官方 ADE，总部 HEAD `1ac0971`）：千问官方 agent，`packages/core` 有 provider 接入（OpenAI/Anthropic/Gemini 多协议）、`packages/cli` 有 `qwen serve` HTTP/SSE daemon 协议、`packages/acp-bridge` 有 ACP 通道。用于对齐千问站的模型切换、流协议与上下文投影。**值得注意的是：它不暴露 Qwen 网页端私有协议本身**，价值在 Agent 语义层。
+- `reference/doubao2api`（`wangchuxiaoji-oss/doubao2api`，豆包网页端第三方逆向，总部 HEAD `95beb07`）：Playwright 驱动 doubao.com、自动注入 `a_bogus`+`msToken` 签名、兼容 OpenAI Chat Completions、支持多轮/深度思考/联网/文生图。用于对齐豆包站（`decoder:doubao`）的请求体签名与会话形状——是豆包站当前唯一可参照的网页逆向实现。
 
 - `AIstudioProxyAPI`、`browser-ai-bridge`、`WebBridge`、`chatgpt-gateway`：都走「Playwright/Camoufox 驱动真实浏览器 + 持久登录 profile」这条路。它们佐证了**这条路可行**，但没有代码或协议被采用。当时被否掉的是**浏览器扩展**路线（见下节），而这些项目多是独立进程/扩展两种形态混杂。
 - `deepseek-web-api`、`deepseek-reverse-api`、`WebChat2Api`、`chatgpt2api-NoReverse`、`cursor-2api`：DeepSeek 及其他站点「网页转 API」的同题项目。协议事实以 `reference/local-refs/` 的交叉验证笔记为准（见下节），未从这些代码取用。
@@ -147,11 +153,12 @@
 
 ## `reference/local-refs/` —— 真正的事实来源
 
-这个目录是**本项目自己的调研笔记**（不是第三方项目）：**根级 6 份 `.md` + 一个 `2026-09-12-review-sources/` 子目录（11 个文件）**。计数口径可直接核对：
+这个目录是**本项目自己的调研笔记**（不是第三方项目）：**根级 6 份 `.md` + 两个归档子目录（`2026-09-12-review-sources/` 11 个文件、`2026-09-21-zcode-docs/` 4 个 HTML 快照）**。计数口径可直接核对：
 
 ```powershell
-Get-ChildItem reference\local-refs                    # 6 份 md
+Get-ChildItem reference\local-refs                    # 6 份 md + 2 个归档目录
 Get-ChildItem reference\local-refs\2026-09-12-review-sources   # 11 个文件
+Get-ChildItem reference\local-refs\2026-09-21-zcode-docs       # 4 个 HTML（ZCode 官方文档快照）
 ```
 
 `reference/*/` 被 `.gitignore` 排除，只有本目录（与 `reference/README.md`）入库——**换机器后活下来的参考材料只有这些**，所以这里的记录比 `reference/` 下的代码树更重要。
@@ -165,6 +172,7 @@ Get-ChildItem reference\local-refs\2026-09-12-review-sources   # 11 个文件
 | `agentdock-reference-notes.md` | AgentDock 三个同名项目的关联度整理与落点 |
 | `agent-teams-reference-notes.md` | DSH 官方实验包 `agent-team` 的取证笔记（发布 tarball 的 SHA1 逐字核对、rc.1 与 rc.2 的兼容结论）。**承重文档**：`lib/accounts.js` 的注释直接引用它（复核行号 18） |
 | `2026-09-12-review-sources/`（11 个文件） | 右栏一致性评审的原始快照：9 份 HTML（Playwright Screencast、CDP Page domain、ReplayWeb 嵌入、MCP-UI 与 MCP Apps、Cloudflare / Browserbase Live View、ChatGPT 双 iframe 沙箱、SO 低 FPS 问答）+ 评审结论 `external-review-2026-09-12.md` + 来源清单 `README.md` |
+| `2026-09-21-zcode-docs/`（4 个 HTML） | 智谱官方 ZCode 文档快照（2026-09-21 拉取），用于 GLM 站适配的官方口径：`welcome.html` / `agents.html` / `configuration.html` / `skill.html`。`thought-level.html` 404 未取到 |
 
 > 2026-09-16 复核：`agent-teams-reference-notes.md`（2026-09-14 新增）与 `2026-09-12-review-sources/` 此前都漏登记，本表已补齐。
 
