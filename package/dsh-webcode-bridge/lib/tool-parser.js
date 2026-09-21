@@ -1,5 +1,10 @@
 // tool-parser.js — 工具调用解析的**记录态薄壳**（带状态机，2026-09-21）。
 //
+// ⚠ 本模块当前只被单测引用，**未接线到任何调用点**（2026-09-22 审查核实）。
+//   真正在用的解析入口是 lib/agent-preset.js 的 parseAgentReply（index.js 直调）。
+//   去留由计划 2026-09-21-domestic-sites-protocol.md 的 Task 1.4 决定：
+//   要么接线，要么删掉。审查结论见 doc/review-0.17.x.md 第 6、8 节。
+//
 // ## 与 plan Task 1.2 的收口关系
 //
 // 计划想在这里「新建独立解析器，吸收 browser-driver 散落的标签/正则」。真机勘察
