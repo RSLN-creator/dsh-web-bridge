@@ -1,5 +1,25 @@
 # 国内五站协议转换（GLM/千问/豆包/Kimi/Z.ai）实现计划
 
+> **完成度回填（2026-09-22 审查）**：本文件 33 条 `- [ ]` **一条都没勾**，但对照代码
+> 实际已完成多条。为避免下一个会话被「全空」误导，逐条核实如下（依据见
+> `doc/review-0.17.x.md` 第 6 节）：
+>
+> | 任务 | 实况 |
+> | --- | --- |
+> | Task 0.1 登录探针矩阵 | **已完成**（`doc/research/2026-09-21-login-probe-matrix.md`，15.7 KB） |
+> | Task 0.2 GLM 正文残留复现 | **部分**：根因已定并修（见 Task 2.1），但要求的 `.tmp/glm-replay/raw-frames.jsonl` 原始帧不在仓库（`.tmp/` 被忽略） |
+> | Task 0.3 上下文口径核对 | 未见独立留痕 |
+> | Task 0.4 profile 账户关联复现 | 未见独立留痕 |
+> | Task 1.1–1.3 统一转换层 | **已完成**，且**有意改变收口**：`lib/tool-transport.js` / `lib/tool-parser.js` 只做「形状路由」，不重写协议（头注写明：解析已在 agent-preset 成熟，重写必然漂移）。这比原计划更正确 |
+> | Task 1.4 接线 | **未完成**——两个新模块目前**只被单测引用**，未接任何调用点（已加头注警告） |
+> | Task 2.1 GLM 正文残留修复 | **已完成**（`decoder.js` 的 `glmSegBuf` 段累积去重 + `test/glm-tool-snapshot-dedup.test.mjs` 3 条护栏） |
+> | Task 2.2–2.4 | 未见留痕（2.4 真机验收未做） |
+> | Task 3 其余四站铺开 | **未完成**，无验收记录 |
+> | Task 4 全量回归 + 打包 + 留痕 | **部分**：全量回归与打包已在 0.17.2 做（866/866、41/41）；五站真机矩阵 `10/10` 未见本轮留痕 |
+>
+> **判据**：勾 = 有真机或护栏证据；「未见留痕」不等于「没做」，而是**无法核实**，
+> 按本项目纪律如实标成未核实，不替它宣布完成。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development 或 superpowers:executing-plans 逐任务实施。步骤用 `- [ ]` 追踪。
 >
 > **本文档对应设计**：`doc/research/2026-09-21-domestic-sites-protocol-design.md`（已获用户批准）。
