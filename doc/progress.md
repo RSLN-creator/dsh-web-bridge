@@ -33,6 +33,19 @@
 
 ---
 
+## 0.19.0 对账 262 原始诉求（2026-09-23 晚）
+
+| 项 | 内容 |
+| --- | --- |
+| **对账前全量基线（T0 取真读数）** | 改动落地后串行跑 `node --test test/*.test.mjs`：**898 项、897 通过、1 失败**。失败为 `control-routes.test.mjs:216`（真实 HTTP 端点 `fetch failed`），**单独重跑 14/14 全绿** —— 并发下真实 HTTP/计时用例争用误报，非代码缺陷（本文件已记同型判据：全量须串行独占，并发红不算）。改动相关测试（client-render 81 + control-routes 14）**95 项全绿**。 |
+| **T1 对账 262 点 3：任务展开面板「按评论派发」完整闭环** | 逐链核对 `client.cjs` `onImplement`（L1252）→ `POST task-implement` 组装 prompt（web-control.js:1245）→ `POST chat` 投递（带 `task.sessionKey` 落到该任务自己的会话）→ `verdictOf` 如实分派。`pendingRef`（L2385 组件体顶层声明、L2480/2515-2517 计数）与详情页 `boardNotice`（L1082/1190/1364）两处出口均在。**结论：闭环完整，只记读数不改**（plan 要求）。 |
+| **T2 对账 262 点 2：风控纪律穷尽性** | 风控纪律「探针间隔 ≥20s、单站 ≤3 次、命中风控页立即停」**权威出处是 `doc/bridge-failure-ledger.md §3`**（0.14.3 事故实证），`PROJECT-INTENT.md` / `UNDERSTANDING.md:258` / `ROADMAP.md:63` 均有记录；README 讲的是「风控页单独成一态」（识别逻辑）。**更正本 plan 一处笔误**：plan 写「README 已写死」，实际纪律在 doc 层。多站点真机矩阵 3/5 已登录、逐站 20s 间隔已跑。**跨站优先级队列=独立功能，按 plan 明确不做**。 |
+| **T3 落地两处小改（对账列出的历史缺口）** | ① `client.cjs sourceText()` 补 `src==='ledger'` 映射（roster.js `projectTasks` L352 落库回落发 `source:'ledger'`，此前无映射 → 路基任务板**最常见来源反而无出处标注**）；② `index.js` 第 25 行删死导入 `transportNoteFor`（已被 `tool-transport.js teachFor` 纯委托取代）。**护栏**：client-render.test.mjs 补「ledger 映射 + 服务端 source 键」双断言（含反向验证；三刀提交前子 agent 独立审查确认两处改与护栏均正确、无误匹配）。 |
+| **T4 分刀入库 0.19.0（git status 清零）** | 刀1 `feat(bridge)`（b4c7ec3，lib 12 文件 +2548/-378）；刀2 `test(bridge)`（cad8d2a，6 文件 +1426）；刀3 `docs(bridge)`（71ad794，doc/reference 6 文件 +644）。每刀独立可 `git revert` 单刀回滚；提交前过 `lint-comments`（0 error/0 warn）。`.trae/` 为 gitignore 私有留痕，不入库。 |
+| **对账声明的本轮不做项** | ① 跨站优先级队列（独立功能扩展，需单独一轮）；② 控制面 task 请求带 sessionId 上传（遗留收口项）；③ 官方 agentTeams「有权限但空任务」被旧台账盖住的权威语义修正（产品决定）。均已记录不越界。 |
+
+---
+
 ## 当前状态
 
 | 项 | 值 |
