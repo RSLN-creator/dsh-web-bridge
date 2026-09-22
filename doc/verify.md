@@ -4,6 +4,222 @@
 
 ---
 
+# 0.19.0 补记 —— 第三轮对抗审查抓到的 2 条真缺陷（887 条单测当时全绿也看不见）
+
+日期：2026-09-22（同日追加）。工作树仍为 **0.19.0**。
+
+## 为什么要单开一段
+
+前三轮的读数是「887/887 全绿」，而这一段记的两条缺陷**全部逃过了那 887 条**。
+它们不是靠读代码发现的，是靠**动态驱动真实组件** + **变异测试**发现的。
+记在这里的理由是：**「测试全绿」不等于「功能可用」**，而这两条正好各自打破了
+用户三条要求里的一条（③ 的 Team 用不了、② 的反馈看不到）。
+
+## 一、阻断级：`MultiModelCompareView` 一次挂载只能发一句话
+
+**症状（动态复现，非推断）**：从已注册的 `conversation.view` 槽取出真实组件 → 驱动表单
+提交 → 解析 chat 请求并让其返回。读数：提交后按钮 `发送中… disabled:true`；**三列回复全部
+到达后，按钮仍是 `disabled:true`**；三列状态均为「已完成」。
+即：**列全绿、按钮永久锁死**，`conversation.view` 是中央常驻视图不随交互卸载，**不自愈**。
+
+**根因**：`setSending(false)` 是全文件**唯一**的解锁点，而它被写在**微任务**里的一个
+`setCols` updater 内，判据是「没有列处于 streaming」。那段微任务排进队列时，上面刚把每列
+设成 `streaming`，而 POST chat 的往返还没回来 ⇒ 判为「仍有 streaming」⇒ 提前返回，
+**解锁行永不执行**。
+
+**修法**：① 用 `pendingRef` **计数**在途列数（发出 `+= jobs.length`、`finally` 里 `-= 1`、
+归零才解锁）——`finally` 保证**失败也减**，不存在「一列异常永久锁死」；
+② 把 `setSending` **移出** updater（在 updater 里调另一个 setState 是不纯 reducer，
+StrictMode 双调用下行为未定义）。
+
+**护栏**：`team-compare.test.mjs` 新增「发送锁必须必然解开」——禁 `Promise.resolve().then(`
+式延时猜测、禁 updater 内调 `setSending`、要求计数 + `finally` + 归零判据、且
+`setSending(false)` **全文件只能出现一次**。**反向验证**：退回旧写法 → `FAIL(1)`；还原 → PASS。
+
+## 二、严重级：详情页的写操作反馈**一条都渲染不出来**（本轮自己引入的回归）
+
+**症状（动态复现）**：渲染看板 → 点卡片进详情页 → 点「保存修改」：
+`POST task-update` **真的发出**，而「已保存。」在**任何**渲染树里都不存在。
+⚡ 派发路径同：`task-implement` → `chat` 都带正确的 `{siteId, prompt, sessionKey}` 发出，
+而「已按批注派发」/「派发失败」/模型回复**都不出现**。
+
+**根因**：`notify()` 的**全部** 16 个调用点都在 `TaskDetailNotionView` 的写回调里，
+而 `boardNotice` 横幅只在**看板/列表分支**渲染 —— `TaskBoardPanel` 在
+`if (selectedTaskId)` 处就 `return h(TaskDetailNotionView, …)` 了，**永远走不到**渲染点。
+
+**性质**：这是**本轮把 `alert()` 换成内联横幅时丢掉的那一半**（`alert` 是阻塞弹窗，
+与挂载分支无关，所以旧实现不会有这个问题）。属于本项目反复记过的「说做了、其实没做」——
+写入确实到了服务端，但用户看不到任何结果，**包括被 CAS 拒绝与被派发失败的结果**。
+
+**修法**：把 `notice` / `onDismissNotice` 传进详情页并在其体内渲染（两处渲染点：看板 + 详情页）。
+**护栏**：`client-render.test.mjs` 新增「详情页写操作反馈必须有渲染出口」——要求组件**接收**
+该状态、**体内真的渲染**它、关闭回调**真的被调用**、且两处渲染点都在。
+**反向验证**：把详情页那一句渲染改成恒假 → `FAIL(1)`；还原 → PASS。
+
+## 三、三条护栏逃逸（子代理在沙箱副本里变异验证，均已修并各自补判据）
+
+| # | 逃逸形态 | 后果 | 为何漏网 | 修法 |
+| --- | --- | --- | --- | --- |
+| 1 | `onImplement` 忽略 chat 结果，换一句无条件成功 | **派发失败被报成成功** | 没有任何断言覆盖 chat 结果的消费 | 补判据覆盖「chat 失败必须标失败」 |
+| 2 | `verdictOf` 的 `ok === false` 分支反转成返回成功 | **服务端明确拒绝被报成成功**（正是该判据要防的假成功） | 上一版**只钉了白名单那一支**（`ok === true`），黑名单分支从未被钉 | 两支都钉，且钉**返回语义**而非字面量存在 |
+| 3 | 按站点忙碌锁退回全局锁（`isBusy(sid)` → `busySids.length`） | 重新引入「其它站点点击被静默吞掉」 | 判据只禁**单数**字面量 `if (busySid) return;`，只断言 `isBusy` **被定义**、从未断言它**被用作守卫** | 断言守卫**确实调用** `isBusy(sid)` |
+
+**对照实验**：子代理另做了一条无害变异（插入 `const __unused = null;`）——**照样存活**，
+说明其方法能区分「真缺陷」与「噪音」，不是见变异就红。
+
+## 四、Lead 复跑的反向验证（每条都先断言「变异确实生效」）
+
+| 判据 | 变异 | 读数 |
+| --- | --- | --- |
+| 发送锁必然解开 | 退回「微任务扫 streaming」 | **FAIL(1)** ✔ |
+| `verdictOf` 两支都钉 | 黑名单分支反转成成功 | **FAIL(1)** ✔ |
+| 详情页反馈有出口 | 详情页渲染点改为恒假 | **FAIL(1)** ✔ |
+| 忙碌锁按站点 | 退回全局锁 | **FAIL(1)** ✔ |
+
+四条全部还原后**逐字一致**、复跑 PASS。**方法论**：脚本每次都先断言「替换确实生效」再判定
+（前两轮各栽过一次「替换静默失效 → 把有效护栏误判成装饰品」），因此本轮没有假阴性。
+
+## 五、第三轮明确「无发现」的类别（逐项核实，不是略过）
+
+- **跨作用域/未定义标识符 —— 干净**：用大括号配对的作用域走查解析了五个组件里每个被调用的
+  标识符；此前那条 `siteSlot` 跨组件引用**确已修好**（`slotOf` 现为本地定义）。
+  仅有的「未解析」命中都只出现在**注释里**（如 `openTab`）或关键字/内建。
+- **hooks 规则 —— 干净**：逐组件枚举每个 hook 调用与非表达式 `return`，五个组件里
+  **每个 hook 都在每个提前 `return` 之前**。
+- **`busySids` 并发逻辑 —— 干净**：解锁按发起站点 `filter`，`apiSoft` 不抛异常，
+  不存在「永久忙碌」或「永久空闲」的交错；单值版本那个 `点A→点B→B先返回清空A` 的交错**已消失**。
+
+## 六、顺带抓到并修掉的一处：注释被当成代码调用
+
+修完上面两条后，`client-server-contract.test.mjs` 报 **`GET chat` 未在服务端注册**
+（真机会是 HTTP 405）。核查：`chat` 在服务端**只有 POST**；出问题的是我写的**注释**——
+它在解释旧缺陷时逐字引用了 `api('chat')`（**不带第二个参数**），而契约测试按**源码文本**
+解析调用（不剥注释），于是把「说明」读成了「GET 调用」。
+这与本仓库记过多次的坑同源（护栏/契约测试匹配到注释）。修法：注释改写成散文措辞
+（`下面那句 POST chat`），不再出现可被解析为调用的字面量。
+
+> **可复用的教训**：本仓库有三处判据直接**按源码文本**解析（契约测试、护栏、变异脚本），
+> 它们**都不剥注释**。因此**注释里不要写出可被解析成真实调用的代码字面量**——
+> 尤其不要写「没有第二个参数的 `api('x')`」这种形态（会被读成 GET）。
+> 需要引用旧写法时，要么改写成散文，要么确保字面量不会被误解析。
+
+---
+
+# 0.19.0 —— 三项用户要求（③ 删 Team / ② 任务板与 Word 审批 / ① 登录收敛）＋ 两轮独立审查
+
+日期：2026-09-22。环境：Windows、Node v24.18.0。工作树版本 **0.19.0**。
+
+## 零、一句话结论与「尚未真机生效」的如实声明
+
+**已做成的**：三项要求的代码与护栏全部落地，全量 **887/887 通过 exit 0**，四个离线闸门全 PASS，
+tarball `verify-pack` **42/42 逐字相同 + 接线完好**，两个 profile 均已装入 **v0.19.0** 且**声明与
+lock integrity 已同步**。
+
+**尚未做成的**：**线上 3080 进程跑的仍是 0.18.0**——0.19.0 的客户端改动要**重启 DSH** 才生效。
+因此本文件中一切「界面项」的真机目视核对（任务板观感、Word 双栏、登录按钮、并列多会话视图）
+**都还没有做**，如实记为待办而不是已完成。
+
+## 一、本轮真机验证（teammate `verify-live`，线上 3080，脚本与读数见 `.tmp/verify-live-report.md`）
+
+**验证版本证据**：`GET /__webcode/status` 起止各读一次，均为 `build.version=0.18.0` /
+`hash a86bce573e0b`（读数不变，说明验证期间进程未被换掉）。**注意它验的是 0.18.0，不含本轮
+0.19.0 的 `client.cjs` 改动**——所以下面这些是「0.19.0 所继承的基线事实」，不是 0.19.0 的验收。
+
+| # | 项 | 读数 | 判定 |
+| --- | --- | --- | --- |
+| ① | `glm` 一轮真实请求 | `{"ok":true,"reply":"9","fresh":true}`，5.2s | **通过** |
+| ① | `kimi` 一轮真实请求 | `{"ok":true,"reply":"9","fresh":true}`，5.9s | **通过**（`probe-fallback` 弱判据此次为真阳性） |
+| ① | `doubao` | 502 `NEED_LOGIN: 豆包 会话缺失` | **失败，但理由真实**。发送前缓存 `loggedIn=true/probe-fallback` 是弱判据**假阳性**；失败后 `/status` 自我更正为 `probe-bad/needLogin=true`，per-site store 为 `{}` 互证。**桥没有谎报成功** |
+| ① | `qwen` | 502 `NEED_LOGIN` | **失败，与已知 `loggedIn=false` 一致** |
+| ① | `zai` | 502，耗时 241.1s | **失败，根因未定位**。旁证：网络可达（probe 200）、页面已开新会话（消息确实送达）、`loggedIn=true/probe-ok`，但 per-site store 仍 `{}`（会话未落地）。**未取得 502 正文、未观察到 captcha 证据，故不归因验证码**——按纪律记「读不到」 |
+| ② | 并列多会话语义 | 轮 1「只回一个数字：7」→ `reply:"7", fresh:true, resumed:false`；轮 2「上一个数字加 1」→ `reply:"8", fresh:false, resumed:true` | **通过（强证据）**。答对「上一个数字 +1」**只有真续上同一对话才可能**；`webSessionId` 前后均为 `6ab24430f04b04ef5e183534`，且与 glm 页面 `cid` 互证 |
+| ③ | 任务板 6 端点全链路 | create(rev0) → update(pending→in_progress, attempts 0→1, rev1) → comment(rev2) → comment-resolve(resolved false→true, rev3) → implement → delete(软删, rev4) | **全部 `ok`** |
+| ③ | **诚实性核对 1：CAS 是否真被消费** | `POST task-comment` 带过期 `expectedRevision=0` → `{"ok":false,"error":"revision-mismatch: expected 0, actual 1"}` | **通过**（过期写入被真实拒绝，不是假成功） |
+| ③ | **诚实性核对 2：`task-implement` 是否谎报派发** | 返回 `{"dispatched":false,"dispatchBy":"client"}` | **通过**（如实标注「客户端负责派发」） |
+| ③ | 反向：伪造 `taskId` / 空 prompt | `{"ok":false,"error":"task-not-found"}` / `empty-prompt` | **通过** |
+| ④ | 探针清理 | 默认台账可见行 2 → 1（余 `t4` 非本次探针，未动）；bridge 作用域那份可见 0 | **通过** |
+
+**风控合规**（硬约束，逐条可核）：单站 1 次、**零重试**、站间实测最小 **32s**、prompt 极短。
+真实发送合计：glm 3（② 两轮 + ① 一轮）、zai/doubao/kimi/qwen 各 1。
+
+## 二、真机暴露的两条**口径**问题（已验证，存档以免下次踩坑）
+
+这两条**不是**缺陷，是「按直觉用会得到错误结论」的机制，必须写下来：
+
+1. **`/status` 的 `conversations` 是「默认 deepseek 站点」的映射**（128 键已满额裁剪），
+   **不含**发往其它站点的 key；`GET session-slot?siteId=zai` 也**不按传入 siteId 路由**
+   （实测回 `siteId:"deepseek"`）。
+   ⇒ **跨站核对必须读该站 `profileDir` 下的 `webcode-sessions-<siteId>.json`**，
+   用 `/status.conversations` 做跨站验证会得到错误结论。
+2. **任务台账的存储根**取 `body.workspaceRoot || config.workspaceRoot || process.cwd()`。
+   不传 `workspaceRoot` 时，线上落到**宿主 cwd 工作区**（实测 `…\A0-Robocup\.webcode-tasks\ledger.json`），
+   **不是本仓库**；且与传 `workspaceRoot` 的那份**互不可见**。那才是任务看板 UI 读的那一份。
+   （据此已在 `.gitignore` 补 `.webcode-tasks/` 规则，理由见该文件注释。）
+
+## 三、测试与闸门读数（全部本机实跑）
+
+| 闸门 | 命令 | 读数 |
+| --- | --- | --- |
+| 全量单测 | `node --test test/*.test.mjs` | **887/887 通过、exit 0**（75 文件） |
+| 注释闸门 | `node scripts/lint-comments.mjs` | **PASS**（149 文件 error 0 / warn 0） |
+| 台账闸门 | `node scripts/check-ledger.mjs` | **PASS**（version 0.19.0、testFiles 75/75） |
+| 文件规范 | `node scripts/check-repo-hygiene.mjs` | **PASS**（BOM / 索引死链 / Node 版本） |
+| 参考索引 | `node scripts/gen-reference-index.mjs --check` | **PASS**（45 条目，0 个不在本机） |
+| 客户端-服务端契约 | `node --test test/client-server-contract.test.mjs` | **2/2**（新路由未破坏契约） |
+
+> **一条必须记住的判据**：全量测试**必须串行、独占**跑。本轮一次全量跑出现
+> `regression.test.mjs` 超时（400,668ms）+ 1 fail，而**单独跑该文件 54/54 通过**——
+> 根因是当时机器上并发跑着多个 `node --test` 进程（我的后台全量 + teammate 的复跑），
+> 该文件含多条**真实驱动计时**用例（单条 20s/40s/60s），争用把某条推过了文件级超时。
+> **并发跑出的红不是代码缺陷**；判据一律以独占复跑为准。
+
+## 四、发布闸门与装机（实读）
+
+| 项 | 怎么读的 | 读数 |
+| --- | --- | --- |
+| tarball | `pnpm pack` | `dsh-webcode-bridge-0.19.0.tgz`，**565,140 字节** |
+| 打包一致性 | `node scripts/verify-pack.mjs` | **逐字相同 42/42** + 接线完好 + tarball 与工作树一致 |
+| 装机 | `node scripts/install-profiles.mjs` | web = **v0.19.0**、headless = **v0.19.0** |
+| 装机内容与工作树同源 | 五文件 × 两 profile 的 sha256 前 12 位 | `client.cjs` **79D29ABC1C93**、`browser-runtime.js` **DCEFFBE2BDCB**、`web-control.js` **0D2F3F8B1367**、`settings-page.js` **FD4439BBEC2E**、`roster.js` **8F33D53C9BDC** —— **10/10 全部相同** |
+| profile 声明 | 两 profile 的 `package.json` | 均 **0.19.0** |
+| **lock 声明与 integrity** | 两 profile 的 `pnpm-lock.yaml` | 均指向 `dsh-webcode-bridge-0.19.0.tgz`、`version: 0.19.0`、integrity `sha512-rVBztarjGVVz9WHXbtswr7YMzSf279a64b/rLSa6AQHpc41AEAAW2wPX8LOl59dXefBy0ZqdMl1sdb+QAheCsg==`（**由 tarball 原始字节独立重算核对一致**）；逐行 diff 比对备份证明**只有 bridge 条目变动**，`modsearch` / `dsh-drop-caret` / `dshmarket` / `playwright-core` 的 integrity **未被误伤** |
+
+> **本轮实测读数会随修复推进而更新**（本文件按「最新在最前」追加，但同一版内我选择**直接更新为最终值**而不是留一串中间值）：tarball 因第三轮修复经历过 563,279 → 563,545 → **565,140** 三次打包，`client.cjs` 的 sha256 相应由 `9BCAF917B600` 变为 **`79D29ABC1C93`**。**每一次重打包都重新同步了路径 + integrity + version 三项并独立复算核对**——只改路径不改 integrity，pnpm 通道会校验失败或按旧值回退。
+
+> **与 lock 同步有关的纪律**（本项目 §0.16.10 七记过）：`install-profiles.mjs` **绕开 pnpm**
+> 直接写 `node_modules`，**不改**声明与 lock。不同步的话，任何一次走 pnpm 的操作都会按 lock 里的
+> 旧 tarball 把 `node_modules` **静默回退**到上一版。本轮已同步，且用**逐行 diff 比对备份**证明
+> 只动了该动的条目。
+
+## 五、两轮独立审查（含反向验证）
+
+| 轮次 | 执行者 | 结果 |
+| --- | --- | --- |
+| 第一轮 | teammate `reviewer-1` | 报告 `.tmp/review-round1.md`：**4 条发现**，3 条真并已修（含 1 条阻断级：跨组件作用域 `ReferenceError`），1 条护栏逃逸已修；另跑 **8 条反向验证**（原本 6 有效 / 2 逃逸） |
+| 第二轮 | teammate `reviewer-2` | **中途失败退出、未产出报告**（如实记）。其退出前给出的唯一结论「`teamSource` 失去唯一消费者」经核实**为真并已修**；其余角度由 Lead 自行复核并留痕（见 `doc/progress.md` 对应行） |
+
+**第一轮修完后的反向验证（Lead 复跑，证明护栏不是装饰品）**：三条此前「不变红」的逃逸形态
+**现已全部变红**——I（保留定义、调用改回 `siteSlot(`）→ fail 1；F（删掉菜单项 `disabled`）→ fail 1；
+G2（改回全局锁）→ fail 1；还原后 **7/7 pass**。
+
+**本轮新增护栏一览**（每条都做过反向验证，删判据即变红）：
+官方花名册 Team 面板不得复活 / `conversation.view` 必须注册并列多会话 / label 不得自称「三列」/
+CSS 只许用官方已有的 dsw token / 按钮走官方 button-info 语义 token 且禁 `alert` / 看板列数不得写死 /
+Word 范式三件套（含锚点原始下标）/ 写路径必须吃 CAS 且成功判据白名单式 / 登录入口不得指向桥以外的
+浏览器（按组件体）/ 目录不得跨组件引用 `siteSlot` / 忙碌态按站点判定且两个入口都有 `disabled` /
+`teamSource` 三段链路齐全 / 右栏座位集合与标签页类型集合实测值。
+
+## 六、待办（未做，如实记）
+
+1. **重启 DSH** 使 0.19.0 生效（当前 3080 仍是 0.18.0）。
+2. 重启后逐项目视核对：任务板观感与官方审美、人工新建/编辑/删除任务、Word 式左正文右批注栏
+   （含正文侧锚点留痕）、站点目录的单账户「登录」按钮与多账户菜单项、中央对话区并列多会话视图。
+3. `zai` 一轮超时的根因（本轮仍未定位；**不采信**「阿里云验证码」这一未经证实的归因）。
+4. `doubao` / `qwen` 在桥窗口内登录后是否可用（本轮读到的是「未登录」这一真实状态）。
+5. 多账户站点（`glm#2`）的真机登录窗口实测。
+
+---
+
 # 0.16.40 已装机（实读）＋ 0.16.39 装机核对（历史）
 
 日期：2026-09-21 17:16（读数取自运行中的 3080）。环境：Windows、Node v24.18.0、DSH 0.1.6-alpha.2。
@@ -1137,3 +1353,207 @@ POST http://127.0.0.1:3080/__webcode/status   {"sessionId":"session-0f644e25-…
 反向用例是在**真实的 `doc/progress.md`** 上做的，不是造一份假文件——这样验的才是
 「这条规则在真文件上抓不抓得住」。还原后的正向读数记在上面。
 
+
+---
+
+## 0.17.3 验证记录（2026-09-22，三轮交付）
+
+### 一、本轮验证了什么（全部为本机实跑读数，不是推断）
+
+| 项 | 命令 | 读数 |
+| --- | --- | --- |
+| 全量单测 | `node --test test/*.test.mjs` | **869 tests / 869 pass / 0 fail / exit 0**（379s） |
+| 台账闸门 | `node scripts/check-ledger.mjs` | **PASS**：事实=0.17.3 台账=0.17.3；testFiles 73/73 |
+| 打包 | `pnpm pack`（`package/dsh-webcode-bridge`） | `dsh-webcode-bridge-0.17.3.tgz`（542,624 字节） |
+| 包一致性 | `node scripts/verify-pack.mjs <tgz>` | **逐字相同 41/41 + 接线完好 + tarball 与工作树一致** |
+| 装机 | `node scripts/install-profiles.mjs <tgz>` | web / headless 均 **v0.17.3** |
+| 装机字节核对 | `Get-FileHash -Algorithm SHA256`（三个关键文件 × 两个 profile） | `client.cjs` **4B7C6A17B471**、`web-control.js` **76884BB6F525**、`task-ledger.js` **EBBFE3578831** —— 与工作树**逐字相同** |
+| 声明同步 | profile 的 `package.json` + `pnpm-lock.yaml` | 均指向 0.17.3 tgz，integrity `sha512-6h6GJ/i0…` 与工作树 tarball 一致 |
+
+### 二、第三轮自审抓到并修掉的两处真缺陷（都有护栏）
+
+**A. 批注写路径的 CAS 被静默吞掉。**
+`web-control.js:1106` 的 `POST task-comment` 与 `:1117` 的 `POST task-comment-resolve`
+**一直在传**第五个参数 `expectedRevision`，而 `applyAddComment` / `applyResolveComment`
+的签名**没有这个形参** —— 传进去的值被静默丢弃。
+
+修前实测：同一份台账连调两次、第二次带过期 `expectedRevision=999`，**两次都回 `error = null`**。
+这是**假成功**：两人同时批注同一条任务，后到的覆盖前者、双方都收到 ok。
+它还与 `task-ledger.js` 头注第 28 行「CAS 是三道防线之一」的声明直接矛盾。
+修后实测：过期 → `revision-mismatch: expected 999, actual 0`；正确 revision → 写入并把 revision 推到 1。
+护栏：`test/task-ledger.test.mjs`「★ 批注写路径必须吃 CAS」（删掉判定即变红）。
+
+**B. `task-implement` 谎报已派发，而客户端根本不发。**
+服务端只**组装** prompt 就返回 `{dispatched: true}`；客户端 `onImplement`（`client.cjs`）
+拿到后**只弹一句「已向 AI 发起实施指令！」**，从不把 prompt 投出去 —— 按钮是死的，
+用户却被告知已发送。修法：服务端如实标 `dispatched: false` + `dispatchBy: 'client'`；
+客户端拿 `res.prompt` 真调 `POST chat` 并带 `res.sessionKey`；`POST chat` 新增 `sessionKey`
+支持且**指定会话时不 fresh**（fresh 会把任务上下文每轮清掉，「以任务为核心实现会话」就断了）。
+
+**C. `tool-parser.js` 是死导入，而它的头注谎称「已正式接线」。**
+`index.js` 原先那行 import **全文件零调用**；真正接线的是 `teachFor`（`:1146` 续跑重申、
+`:3290` 首轮落盘）。已删死导入（连同同样零调用的 `transportShapeForSite`）并把头注改回
+「未接线、只被单测引用」——与 `doc/review-0.17.x.md` §6 的判定一致。
+
+### 三、第三轮补的路由级护栏（此前零覆盖）
+
+全量 869 条里**原先没有任何一条**真的 POST 到 `/__webcode/task-*`。
+已补 `test/control-routes.test.mjs` 的一条端到端用例（真实 HTTP），断言：
+建任务**真写盘**（`.webcode-tasks/ledger.json` 存在）→ 空评论拒 → 过期 revision 拒 →
+`task-implement` 标 `dispatched:false` 且**组装阶段不得替用户发消息** →
+`chat` 真投递到 driver 且 `sessionKey`/`fresh` 语义正确 → 软删后不进面板行 →
+`task-ledger` 只许注册 GET（多注册 POST 会被 `client-server-contract` 判死路由）。
+读数：`control-routes.test.mjs` **13/13 通过**。
+
+### 四、未完成项（如实记，不宣布完成）
+
+1. **需重启 DSH 才生效。** 本轮真机探针实测线上 3080 仍是 **0.17.2**
+   （`GET /__webcode/status` → `build.version 0.17.2`、`build.hash dd9a81a82725`），
+   且 `POST /__webcode/task-*` 全部 **405**（路由不存在）⇒ 0.17.3 尚未加载。
+   重启后要复验：任务看板五个新端点可达、Notion 展开页与三列对比视图渲染正常。
+2. **五站真机矩阵 `10/10` 仍未见本轮留痕**（计划 Task 4）。本轮未做，不计入完成。
+3. `tool-parser.js` 的去留（删或真接）是计划 Task 1.4 的产品决定，本轮只更正事实、未处置。
+
+---
+
+## 0.17.3 真机复验（2026-09-22，用户重启 DSH 之后）
+
+### 一、重启已生效（与重启前读数对照）
+
+| 探针 | 重启前 | 重启后 |
+| --- | --- | --- |
+| `GET /__webcode/status` → `build.version` | 0.17.2 | **0.17.3** |
+| `build.hash` | dd9a81a82725 | **ed0d0bae4777** |
+| `POST /__webcode/task-*` | 全部 **405**（路由不存在） | **200**（全部可达） |
+
+`driver = deepseek / loggedIn=true`、`relay running=true consent=true`。
+
+### 二、任务看板五端点真机全链路（线上 3080，真实 HTTP）
+
+| 动作 | 读数 |
+| --- | --- |
+| `GET task-ledger` | 200，`{ok:true, ledger:{version:1,...}, tasks:[]}` |
+| `POST task-create` | 200，返回 `assignedModel.siteId=glm`、`projectId=r3`、`sessionKey` 完整的任务 |
+| `POST task-comment` | 200，`resolved=false`，`quote` 保留 |
+| `POST task-comment`（`expectedRevision=999`） | **`{ok:false, error:"revision-mismatch: expected 999, actual 1"}`** ← 缺陷 A 的修复在真机确认生效 |
+| `POST task-comment-resolve` | 200，`resolved=true` |
+| `POST task-update`（→in_progress） | 200，`rev=3` |
+| `POST task-implement` | 200，`{dispatched:false, dispatchBy:"client", prompt:"【任务执行指令】…"}` ← 如实标注，不再谎报 |
+| `POST task-delete` | 200，`status=deleted`，面板行归零 |
+
+探针任务已全部清理：`before: tasks=2` → `after: tasks=0`。
+
+### 三、★ 真机抓到的最严重缺陷（D）：全新任务会话被 url-heal 采纳成「用户当前正开着的对话」
+
+**现象**：`POST chat` 带一个**全新**的 `sessionKey`（`task-session-t3-muc2xo2n`）后，
+`/status` 的 `navTrace` 显示它被判成 **resume**，且 `landedId` 与**本 DSH 会话**
+（`session-0f9fe6cf-…`）**同为 `37820be9-1286-4934-9b37-92001068d2ec`**。
+`chat` 返回的「回复」因此不是模型回答，而是**用户上一条消息的原文**。
+
+**后果（为什么这条最严重）**：任务指令被发进**用户当前正在看的那个对话**里。
+这不是「功能没生效」，是**把内容投到了错误的会话**。
+
+**根因链**：
+1. 我在缺陷 B 的修复里写了 `fresh = !body?.sessionKey` —— 「传了会话键就不 fresh」；
+2. 而 `browser-driver.js:2624` 的 url-heal 分支条件是「**槽为空 且 fresh=false**」，
+   命中时执行 `rememberConversation(key, fromUrl, 'url-heal')` —— 把**页面此刻所在的会话**
+   采纳为本轮会话；
+3. url-heal 本身是对的（它救的是「失败轮次没落盘」的历史槽，见该处长注释），
+   **错的是调用方把一个从未建立过的会话键当成可续会话递给了它**。
+
+**修法**：`fresh` 的判据改为「驱动槽里**确实存着** `webSessionId`」：
+
+```js
+const stored = typeof target?.conversationFor === 'function' ? target.conversationFor(sessionKey) : null;
+const fresh = !stored?.webSessionId;
+```
+
+并新增 `resumed` 字段供调用方核对；同时删掉末尾那句编出来的「成功」——
+原先无驱动时回 `{ok:true, reply:'[已向 X 投递: …]'}`，改为
+`{ok:false, error:'no-driver-for-site: …（消息未发出）'}`。
+
+**反向验证（护栏不是装饰）**：把判据改回旧写法 → `control-routes.test.mjs` **fail 1**；
+还原 → **13/13 pass**。护栏现分两路断言：槽里有 → `resumed:true`/`fresh:false`；
+全新键 → `resumed:false`/**`fresh:true`**（并注明「否则 url-heal 会采纳当前页」）。
+
+### 四、修复后的交付读数（全部实跑）
+
+| 项 | 读数 |
+| --- | --- |
+| 全量单测 | **869 tests / 869 pass / 0 fail / exit 0**（399s） |
+| 台账闸门 | **PASS**（0.17.3 / 73 个测试文件） |
+| 打包 | `dsh-webcode-bridge-0.17.3.tgz`（543,276 字节，含 D 的修复） |
+| `verify-pack` | **逐字相同 41/41 + 接线完好 + tarball 与工作树一致** |
+| 装机 | web / headless 均 **v0.17.3**；`web-control.js`/`client.cjs`/`task-ledger.js`/`index.js` 四个文件 × 两 profile **全部 SAME** |
+| integrity 同步 | 两 profile 的 `package.json` 与 `pnpm-lock.yaml` 均指向 0.17.3 tgz，integrity `sha512-Yl2Ux7/c…` 与工作树 tarball 一致 |
+
+### 五、残余（如实记）
+
+1. **D 的修复需再次重启才生效**：当前 3080 进程加载的是本轮第一份 0.17.3 tarball
+   （`hash ed0d0bae4777`），D 的修复在**第二份** tarball 里。重启后应复验：
+   带全新 `sessionKey` 调 `POST chat` 时 `navTrace` 必须出现 `requestedFresh=true`，
+   且 `landedId` **不得**等于任何其它会话的 id。
+2. **五站真机矩阵 `10/10` 仍未见本轮留痕**（计划 Task 4）。未做，不计入完成。
+3. `tool-parser.js` 的去留是计划 Task 1.4 的产品决定，本轮只更正事实。
+
+---
+
+## 0.18.0 浏览器与登录验证（2026-09-22）
+
+### 一、目标 ① 的承诺：登录态跨重启完整保留（真机实测）
+
+探针两段法（只读、不发消息）：
+
+| 段 | 动作 | loggedIn | loginBasis |
+| --- | --- | --- | --- |
+| 第 1 段 | 用自带 Chromium 打开 GLM，读登录态 | **true** | probe-ok |
+| 第 2 段 | **关闭驱动**（浏览器退出）后重新创建，再读 | **true** | probe-ok |
+
+`RESULT: LOGIN-PERSISTS-ACROSS-RESTART`（exit 0）。
+「登录一次、之后跨重启一直有效」是实测事实，不是承诺。
+
+### 二、五站登录态矩阵（守风控：≥22s 间隔、单站 1 次、只读）
+
+| 站点 | loggedIn | loginBasis | 强度 |
+| --- | --- | --- | --- |
+| glm | **true** | probe-ok | 强证据 |
+| kimi | **true** | probe-fallback | 弱结论（特征未命中，回退输入框判定） |
+| qwen | false | probe-bad | 未登录 |
+| doubao | false | probe-bad | 未登录 |
+| zai | **true** | probe-ok | 强证据 |
+
+五站 `browserSource` **全部为 `bundled`** —— 自带 Chromium 真的在驱动全部站点。
+
+**结论**：GLM / Z.ai 可直接进入「五站真机可用」验证；Kimi 需先定性弱结论；
+**qwen / doubao 需在桥的窗口内登录一次**（设置页或站点工具条的「登录窗口」）。
+
+### 三、修掉「登了不算数」的两处误导入口
+
+桥跑在**自己独占的 Chromium profile** 里，而界面上有两个入口把人带到别处登录：
+
+| 入口 | 原先行为 | 后果 |
+| --- | --- | --- |
+| 设置页「打开网站」 | `window.open(url)` → 用户日常浏览器（如 Firefox） | 登录不进桥 |
+| 站点工具条 🌐 | `sidebarRight.openTab(browser)` → 官方 iframe 浏览器 | 登录不进桥（另一个进程、另一份 cookie 罐） |
+
+这正是长期「探针说未登录、用户说我登了」而**两边都是真的**的根因。
+修法：「打开网站」按钮删除（连同其死代码 `SITE_NAMES_MAP` / `SITE_ORIGINS_MAP`）；
+🌐 改为打开桥自己的登录窗口；文案里的「Edge 窗口」改为准确措辞。
+
+护栏：`settings-transport.test.mjs` ⑦「登录入口不得指向桥以外的浏览器」。
+**反向验证**：把按钮加回去 → **fail 2**；还原 → **7/7 pass**。
+
+### 四、读数汇总
+
+| 项 | 结果 |
+| --- | --- |
+| 全量单测 | **873/873 通过、exit 0**（399s） |
+| 台账闸门 | **PASS**（0.18.0 / 74 文件） |
+| 装机 | web / headless 均 **v0.18.0**，关键文件 × 两 profile 全 SAME |
+| 打包 | `verify-pack` **42/42 逐字相同** |
+
+### 五、残余（如实记）
+
+1. **需重启 DSH 才生效**（当前 3080 进程仍为 0.17.3）。
+2. qwen / doubao 未登录 —— 需人工在桥窗口内登录一次，之后 ② 才能对这两站验证。
+3. Kimi 的 `probe-fallback` 是弱结论，需真机发一轮才能定性。

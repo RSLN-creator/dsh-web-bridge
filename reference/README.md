@@ -148,8 +148,18 @@ git -C reference/glm-free-api checkout 3237198289d8c672cbac065bec4d6dceca62deae
 
   `dsh-file-attachment` 属于第三类：它有上游 git 仓库，因此**照常登记在 §4**
   （`https://ghfast.top/https://github.com/wszhoho/dsh-file-attachment.git`）。
-  也就是说 §6 的违例清单只有 `agent-team`、`dsh-archive-manager`、`dsh-task-board`、
-  `steel-browser-npm` 四个（`local-refs` 是故意的，不算），§4 的表 39 行里 34 个是可复现的 clone。
+
+  `dsh-official-plugins`（2026-09-23 新增）属于第二类：**官方独立包 ⚠️ 解包原样留档**
+  —— 12 个 `@deepseek-ai/*` npm 包的原样 `.tgz`（**未解包展开**，便于与官方发布物逐字节对照）。
+  它是本项目的 **0.19.0 能力边界参考基线**（Chromium 持久登录 / 任务板·并行界面 UI 对齐 harness），
+  所以不在 `local-refs/`（那里只存本项目笔记），而独立成目录。来源与版本见
+  `reference/local-refs/2026-09-23-dsh-official-plugins-and-boundaries.md`；
+  monorepo 源码形态（更权威，已 `git pull` 到 master 最新 0.1.7-alpha.2）在
+  `reference/deepseek-harness/packages/**`。
+
+  也就是说 §6 的违例清单新增 `dsh-official-plugins`，连同 `agent-team`、`dsh-archive-manager`、
+  `dsh-task-board`、`steel-browser-npm` 共五个（`local-refs` 是故意的，不算）；
+  §4 的表 39 行里 34 个是可复现的 clone。
 
 ## 7. 权威清单在哪
 
