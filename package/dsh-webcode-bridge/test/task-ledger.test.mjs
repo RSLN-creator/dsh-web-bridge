@@ -22,7 +22,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  applyCreate, applyDelete, applyPlan, applyUpdate, emptyLedger, ledgerPath, readLedger,
+  applyCreate, applyDelete, applyPlan, applyUpdate, applyAddComment, applyResolveComment, emptyLedger, ledgerPath, readLedger,
   rowsOf, writeLedger, LEDGER_VERSION, MAX_TASKS,
 } from '../lib/task-ledger.js';
 
@@ -283,9 +283,148 @@ test('★ rowsOf：软删除行不出现，且**不带 ready**（判据只有一
   assert.equal(rows[0].maxAttempts, 1);
 });
 
+test('★ Notion 式正文批注：添加评论、切换 resolved 状态与字段保留', () => {
+  const l0 = emptyLedger();
+  const { ledger: l1, task: t1 } = applyCreate(l0, {
+    subject: '实现登录表单',
+    description: '请在前端添加用户名和密码输入框',
+    assignedModel: { siteId: 'glm', accountSlot: 1, modelId: 'glm-4' },
+    projectId: 'proj-auth',
+  }, NOW);
+  assert.equal(t1.assignedModel?.siteId, 'glm');
+  assert.equal(t1.projectId, 'proj-auth');
+  assert.equal(t1.comments.length, 0);
+
+  // 添加评论
+  const { ledger: l2, comment: c1, error: err1 } = applyAddComment(l1, t1.id, {
+    quote: '用户名和密码输入框',
+    text: '请同时支持记住密码和验证码登录',
+    author: 'user',
+  }, NOW + 1);
+  assert.equal(err1, null);
+  assert.equal(c1.quote, '用户名和密码输入框');
+  assert.equal(c1.text, '请同时支持记住密码和验证码登录');
+  assert.equal(c1.resolved, false);
+
+  const rows = rowsOf(l2);
+  assert.equal(rows[0].comments.length, 1);
+  assert.equal(rows[0].comments[0].id, c1.id);
+  assert.equal(rows[0].assignedModel?.siteId, 'glm');
+  assert.equal(rows[0].projectId, 'proj-auth');
+
+  // 切换 resolved 状态
+  const { ledger: l3, comment: c1Resolved, error: err2 } = applyResolveComment(l2, t1.id, c1.id, NOW + 2);
+  assert.equal(err2, null);
+  assert.equal(c1Resolved.resolved, true);
+
+  const rowsResolved = rowsOf(l3);
+  assert.equal(rowsResolved[0].comments[0].resolved, true);
+});
+
+// 0.17.3（第三轮真机自审抓到）：`web-control.js` 的 `POST task-comment` /
+// `POST task-comment-resolve` **一直在传**第五个参数 `expectedRevision`，而这两个
+// 函数原先的签名**没有**这个形参 —— 传进来的值被静默丢弃。
+//
+// 这不是「少了个校验」：它是**假成功**。两个成员同时批注同一条任务时，后到的那个
+// 会覆盖前者，而双方都收到 `ok: true`。本文件第 11 行把头注里的 CAS 列为「静默丢
+// 数据」的那一类，那么它就必须在这里被钉住 —— 删掉 `applyAddComment` /
+// `applyResolveComment` 里的 `revision-mismatch` 判定，本条立刻变红。
+test('★ 批注写路径必须吃 CAS：过期 revision 不许静默覆盖（0.17.3 自审缺陷）', () => {
+  const l0 = emptyLedger();
+  const { ledger: l1, task: t1 } = applyCreate(l0, { subject: '并发批注' }, NOW);
+  assert.equal(t1.revision, 0, '新任务 revision 从 0 起，夹具依赖这个起点');
+
+  // ① 过期 revision 必须拒，且**不能**把评论写进去。
+  const stale = applyAddComment(l1, t1.id, { text: '甲先写' }, NOW + 1, t1.revision + 7);
+  assert.equal(stale.error, 'revision-mismatch: expected 7, actual 0');
+  assert.equal(stale.comment, null);
+  assert.equal(stale.ledger.tasks[0].comments.length, 0, '被拒的写不得留下半截评论');
+
+  // ② 正确 revision 通过，并把任务 revision 推到 1。
+  const ok = applyAddComment(l1, t1.id, { text: '甲先写' }, NOW + 1, t1.revision);
+  assert.equal(ok.error, null);
+  assert.equal(ok.ledger.tasks[0].revision, 1);
+
+  // ③ 乙拿着**旧** revision(=0) 再来一条：必须拒，甲的评论原样保留。
+  const second = applyAddComment(ok.ledger, t1.id, { text: '乙后写' }, NOW + 2, t1.revision);
+  assert.equal(second.error, 'revision-mismatch: expected 0, actual 1');
+  assert.equal(second.ledger.tasks[0].comments.length, 1);
+  assert.equal(second.ledger.tasks[0].comments[0].text, '甲先写');
+
+  // ④ 不传 expectedRevision（旧调用点/内部调用）仍走「不做 CAS」的旧行为 ——
+  //    这条是**兼容性**约束，不是安全约束，因此必须与 ① 分开断言。
+  const noCas = applyAddComment(ok.ledger, t1.id, { text: '无 CAS' }, NOW + 3);
+  assert.equal(noCas.error, null);
+
+  // ⑤ resolve 同一条缺陷、同一个判据。
+  const cid = ok.comment.id;
+  const badResolve = applyResolveComment(ok.ledger, t1.id, cid, NOW + 4, t1.revision);
+  assert.equal(badResolve.error, 'revision-mismatch: expected 0, actual 1');
+  assert.equal(badResolve.comment, null);
+
+  const goodResolve = applyResolveComment(ok.ledger, t1.id, cid, NOW + 4, 1);
+  assert.equal(goodResolve.error, null);
+  assert.equal(goodResolve.comment.resolved, true);
+});
+
 test('rowsOf：畸形台账给空数组，不抛', () => {
   for (const bad of [null, undefined, {}, { tasks: null }, { tasks: [null, 42, { id: 'x' }] }]) {
     assert.doesNotThrow(() => rowsOf(bad));
     assert.ok(Array.isArray(rowsOf(bad)));
   }
+});
+
+// ── 排期 / 开始时间（0.19.0）────────────────────────────────────────────
+//
+// 用户 2026-09-22 原话：「设置接任务智能体和**时间**，以及模式，权限等等等详细的」。
+// 移植任务板时这一整块被漏掉了。下面每条都对着一个**会静默丢数据**的位置：
+// 建的时候存不住、改的时候存不住、行不带出去（存住了但界面读不到）各一条。
+
+test('★ 0.19.0 排期：开始时间必须真的落盘，且缺省时不得伪装成 1970', () => {
+  const startAt = NOW + 3_600_000;
+  const r = applyCreate(emptyLedger(), { subject: 'A', schedule: { startAt } }, NOW);
+  assert.equal(r.error, null);
+  assert.equal(r.task.schedule.startAt, startAt, '开始时间必须原样存住');
+  assert.equal(r.task.schedule.enabled, true, '设了开始时间就是「有排期」');
+  // 没设时必须是 **null**，不能是 0。`Number(null)` 是 0 且 `Number.isFinite(0)` 为真，
+  // 只判 isFinite 会把「没排期」读成 1970-01-01 —— 本项目在 stall-settle 上记过同一个坑。
+  const bare = applyCreate(emptyLedger(), { subject: 'B' }, NOW);
+  assert.equal(bare.task.schedule.startAt, null);
+  assert.equal(bare.task.schedule.enabled, false);
+  assert.equal(rowsOf({ tasks: [bare.task] })[0].schedule.startAt, null, '缺省经 rowsOf 仍必须是 null 而不是 0');
+});
+
+test('★ 0.19.0 排期：改的时候也必须存得住（只建时能存 = 半个功能）', () => {
+  const created = applyCreate(emptyLedger(), { subject: 'A', schedule: { startAt: NOW + 1000, cron: '0 9 * * *' } }, NOW);
+  const moved = applyUpdate(created.ledger, 't1', { schedule: { startAt: NOW + 9999 } }, NOW, 0);
+  assert.equal(moved.error, null);
+  assert.equal(moved.task.schedule.startAt, NOW + 9999, '改过的开始时间必须赢');
+  assert.equal(moved.task.schedule.cron, '0 9 * * *', '没提交的 cron 不得被顺手抹掉');
+  // 清空开始时间：必须真的变回「没排期」，而不是被旧值粘住。
+  const cleared = applyUpdate(moved.ledger, 't1', { schedule: { startAt: null, cron: '' } }, NOW, 1);
+  assert.equal(cleared.task.schedule.startAt, null, '清空必须生效');
+  assert.equal(cleared.task.schedule.enabled, false);
+});
+
+test('★ 0.19.0 排期：行必须把排期/模式/权限带出去（存住了但读不到 = 没做）', () => {
+  const r = applyCreate(emptyLedger(), {
+    subject: 'A', mode: 'preset-x', permission: 'auto', reuseSession: true,
+    schedule: { startAt: NOW + 5, cron: '*/10 * * * *' },
+  }, NOW);
+  const row = rowsOf({ tasks: [r.task] })[0];
+  assert.equal(row.schedule.startAt, NOW + 5);
+  assert.equal(row.schedule.cron, '*/10 * * * *');
+  assert.equal(row.mode, 'preset-x');
+  assert.equal(row.permission, 'auto');
+  assert.equal(row.reuseSession, true);
+  // 时间戳也要透出：用户问的「开始时间」有一半指的是「什么时候建的」。
+  assert.equal(row.createdAt, NOW);
+  assert.equal(row.updatedAt, NOW);
+});
+
+test('★ 0.19.0 排期：非法时间回落成「没排期」，不得抛错也不得写坏值', () => {
+  const r = applyCreate(emptyLedger(), { subject: 'A', schedule: { startAt: 'not-a-number' } }, NOW);
+  assert.equal(r.error, null, '人手填的表单，一个填错的时间不该让整条任务写不进去');
+  assert.equal(r.task.schedule.startAt, null);
+  assert.equal(r.task.schedule.enabled, false);
 });

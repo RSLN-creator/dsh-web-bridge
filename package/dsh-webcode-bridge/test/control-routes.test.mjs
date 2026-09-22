@@ -24,6 +24,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createWebControl, routeIndex, controlRoutes } from '../lib/web-control.js';
@@ -397,5 +398,201 @@ test('未知方法回 405 JSON（带 Allow），未知路径回 false 由调用�
     assert.notEqual((await r.text()).length, 0);
   } finally {
     await new Promise((r) => server.close(r));
+  }
+});
+
+// ── 0.17.3：任务看板控制面（第三轮补的路由级护栏）──────────────────────────────
+//
+// 为什么必须在这一层测：`client-server-contract.test.mjs` 只查「动作名对不对得上」，
+// 查不出「路由存在但行为错」。0.17.3 的这批端点此前**一条路由级断言都没有**
+// ——全量 867 条里没有任何一条真的 POST 到 `/__webcode/task-*`。
+//
+// 这一条同时钉住第三轮自审抓到的两个真实缺陷：
+//   · 批注写路径的 CAS 必须真的生效（此前 `expectedRevision` 传进函数后被静默吞掉）；
+//   · `task-implement` 只组装指令，必须如实标 `dispatched: false`，不许假装已派发。
+test('★ 0.17.3 任务看板端点：真实 HTTP 走通 建→批注→解决→改(CAS)→实施→删除，并如实报错', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hwb-task-'));
+  const sent = [];
+  // 会话槽夹具：只有 `task-session-t1` 是**已存在**的可续会话，其余键在槽里没有。
+  // 这张表正是「fresh 该取什么」的判据所在（见下面 ⑥ 的三条断言）。
+  const store = new Map([['task-session-t1', { webSessionId: 'web-existing-1' }]]);
+  const control = createWebControl({
+    driver: {
+      sendTurn: async (key, message, opts) => { sent.push({ key, message, opts }); return { text: 'stub-reply' }; },
+      conversationFor: (key) => store.get(String(key || 'main')) || null,
+      status: () => ({ running: true, busy: false, loggedIn: true, conversations: {} }),
+    },
+    relay: {
+      status: () => ({ running: true, consent: true, busy: false, queueLength: 0, activeRequests: 0, lastError: '', metrics: null }),
+      setConsent() {},
+      config: {},
+    },
+    config: {}, host: {}, logger,
+    presetInfo: () => null,
+    settingsStore: { get: () => ({}), set: (v) => v },
+  });
+  const post = async (p, b) => JSON.parse((await call(control, 'POST', '/__webcode/' + p, b)).text);
+  try {
+    // ① 建 —— 必须真写盘，不是只回一个包
+    const created = await post('task-create', {
+      workspaceRoot: root,
+      subject: '第三轮端到端任务',
+      description: '证明写路径真的落盘',
+      assignedModel: { siteId: 'glm', accountSlot: 1, modelId: 'glm-5.3' },
+      projectId: 'r3',
+    });
+    assert.equal(created.ok, true, '创建必须成功：' + JSON.stringify(created));
+    const id = created.task.id;
+    assert.equal(created.task.assignedModel.siteId, 'glm');
+    assert.equal(created.task.projectId, 'r3');
+    assert.equal(fs.existsSync(path.join(root, '.webcode-tasks', 'ledger.json')), true,
+      '创建必须真写盘：文件不在就说明只改了内存副本，重启即丢');
+
+    // ② 批注
+    const c1 = await post('task-comment', { workspaceRoot: root, taskId: id, text: '请加验证码', quote: '登录表单' });
+    assert.equal(c1.ok, true, JSON.stringify(c1));
+    const cid = c1.comment.id;
+    assert.equal(c1.comment.resolved, false);
+    assert.equal(c1.comment.quote, '登录表单');
+
+    // ②b 空文本必须如实拒，不许静默成功
+    const empty = await post('task-comment', { workspaceRoot: root, taskId: id, text: '   ' });
+    assert.equal(empty.ok, false);
+    assert.equal(empty.error, 'empty-comment-text');
+
+    // ②c CAS：过期 revision 批注必须拒（第三轮抓到的真缺陷）
+    const stale = await post('task-comment', { workspaceRoot: root, taskId: id, text: '并发写入', expectedRevision: 999 });
+    assert.equal(stale.ok, false, '过期 revision 必须拒 —— 静默覆盖会让前一个人的批注无声消失');
+    assert.match(String(stale.error), /revision-mismatch/);
+
+    // ③ 解决批注
+    const rs = await post('task-comment-resolve', { workspaceRoot: root, taskId: id, commentId: cid });
+    assert.equal(rs.ok, true, JSON.stringify(rs));
+    assert.equal(rs.comment.resolved, true);
+
+    // ④ 改状态 + CAS
+    const up = await post('task-update', { workspaceRoot: root, taskId: id, patch: { status: 'in_progress' } });
+    assert.equal(up.ok, true, JSON.stringify(up));
+    const upStale = await post('task-update', {
+      workspaceRoot: root, taskId: id, patch: { status: 'completed' }, expectedRevision: 0,
+    });
+    assert.equal(upStale.ok, false);
+    assert.match(String(upStale.error), /revision-mismatch/);
+
+    // ⑤ 实施：只组装、不派发，且必须如实说（此前谎报 dispatched:true 而客户端不发）
+    const impl = await post('task-implement', {
+      workspaceRoot: root, taskId: id, commentText: '按批注改', quote: '登录表单',
+    });
+    assert.equal(impl.ok, true, JSON.stringify(impl));
+    assert.equal(impl.dispatched, false, 'task-implement 只组装指令：不得谎报已派发');
+    assert.equal(impl.dispatchBy, 'client', '派发方必须是可核对的字段，不是注释里的一句话');
+    assert.match(impl.prompt, /第三轮端到端任务/);
+    assert.match(impl.prompt, /按批注改/);
+    assert.match(impl.prompt, /登录表单/);
+    assert.equal(sent.length, 0, '组装阶段不得替用户发消息');
+
+    // ⑤b 未知任务必须如实拒
+    const implBad = await post('task-implement', { workspaceRoot: root, taskId: 't999' });
+    assert.equal(implBad.ok, false);
+    assert.equal(implBad.error, 'task-not-found');
+
+    // ⑥ chat：真的投递到 driver，且会话键语义正确
+    //
+    // 两条路径必须**分开**验 —— 0.17.3 第三轮真机缺陷正是把二者混为一谈：
+    //   • 槽里**有**这个会话 → resume（fresh=false），保住任务上下文；
+    //   • 槽里**没有**（全新 sessionKey）→ 必须 fresh=true 开新会话。
+    //     若错判成 resume，驱动的 url-heal（browser-driver.js:2624）会把这个新键
+    //     采纳成「页面当前正开着的那个会话」，任务指令就被发进用户自己的对话里。
+    //     真机现场（2026-09-22 实测）：`task-session-t3-…` 与 `session-0f9fe6cf-…`
+    //     的 `landedId` 同为 `37820be9-…`，`chat` 读回的「回复」是用户上一条
+    //     消息的原文。
+    const chat1 = await post('chat', { siteId: 'deepseek', prompt: '你好', sessionKey: 'task-session-t1' });
+    assert.equal(chat1.ok, true, JSON.stringify(chat1));
+    assert.equal(chat1.reply, 'stub-reply');
+    assert.equal(chat1.sessionKey, 'task-session-t1');
+    assert.equal(chat1.resumed, true, '槽里有该会话：必须如实报告为续接');
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].key, 'task-session-t1');
+    assert.equal(sent[0].opts.fresh, false,
+      '槽里有会话才 resume；fresh 会把任务上下文每轮清掉，「以任务为核心」就断了');
+
+    // ★ 本条就是真机缺陷的护栏：全新键必须 fresh=true，不得续到别人的页面上。
+    const chatNew = await post('chat', { siteId: 'deepseek', prompt: '新会话', sessionKey: 'task-session-never-used' });
+    assert.equal(chatNew.ok, true, JSON.stringify(chatNew));
+    assert.equal(chatNew.resumed, false);
+    assert.equal(sent[1].key, 'task-session-never-used');
+    assert.equal(sent[1].opts.fresh, true,
+      '槽里没有的会话键必须 fresh=true —— 否则驱动 url-heal 会把它采纳成当前页面所在的会话，'
+      + '把任务指令发进用户自己的对话（真机 2026-09-22 实测）');
+
+    const chat2 = await post('chat', { siteId: 'deepseek', prompt: '匿名会话' });
+    assert.equal(sent[2].opts.fresh, true, '没有指定会话时才 fresh');
+    assert.match(String(sent[2].key), /^chat-deepseek-/);
+
+    // ⑦ 空 prompt 必须拒
+    const chatEmpty = await post('chat', { siteId: 'deepseek', prompt: '   ' });
+    assert.equal(chatEmpty.ok, false);
+    assert.equal(chatEmpty.error, 'empty-prompt');
+
+    // ⑧ 软删 + 摘边
+    const del = await post('task-delete', { workspaceRoot: root, taskId: id });
+    assert.equal(del.ok, true, JSON.stringify(del));
+    assert.equal(del.task.status, 'deleted');
+    assert.equal(del.tasks.length, 0, '软删除行不得出现在面板行里');
+
+    // ⑨ 方法契约：client 只 GET task-ledger，因此只许注册 GET
+    const idx = routeIndex(control.actions);
+    assert.equal(idx.has('task-ledger'), true);
+    assert.deepEqual([...idx.get('task-ledger')], ['GET'],
+      'client 只 GET task-ledger；多注册 POST 会被 client-server-contract 判成死路由');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+// ── 任务台账存储根：必须**单一取法**（0.19.0）──────────────────────────────
+//
+// 0.19.0 独立审查发现的 HIGH：`task-*` 路由各自内联
+// `body?.workspaceRoot || config.workspaceRoot || process.cwd()`（7 处），而任务投影
+// 那一侧（`roster.js projectTasks`）用的是**会话的工作目录**。两者可以指向两个不同的
+// `.webcode-tasks/ledger.json` —— 同一块界面上任务板与花名册各拿一份，互不可见。
+//
+// 判据两条：
+//   ① 源码里**不得**再出现内联的那条表达式（收敛成 `taskRootOf` 一处）；
+//   ② 根解析必须真的可注入，且 `GET task-ledger` 把实际用的根**如实透出**
+//      （否则「面板读的到底是哪一份台账」只能靠猜）。
+test('★ 0.19.0：任务台账的存储根必须是单一取法，且如实透出实际路径', async () => {
+  const wcSrc = fs
+    .readFileSync(path.join(here, '..', 'lib', 'web-control.js'), 'utf8')
+    // **先去注释再断言**：本项目反复踩过「护栏匹配到注释」的坑——上面那段说明
+    // 逐字引用了旧的表达式形态，不剥注释就会把「解释」读成「缺陷仍在」。
+    // 文件是 CRLF：按 `\r?\n` 切分，否则行尾 `\r` 会让 `$` 对不上、注释根本剥不掉。
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s*\/\/.*$/, ''))
+    .join('\n')
+    .replace(/\/\*[\s\S]*?\*\//g, '');
+  assert.ok(!/body\?\.workspaceRoot \|\| config\.workspaceRoot \|\| process\.cwd\(\)/.test(wcSrc),
+    '不得再内联存储根表达式 —— 7 处各写一份正是「两份真相」的来源，必须走 taskRootOf');
+  assert.match(wcSrc, /function taskRootOf\(body\)/, '必须有唯一解析器 taskRootOf');
+  assert.match(wcSrc, /resolveWorkspaceRoot/, '必须支持宿主注入根解析器（与会话工作目录同源）');
+
+  // 行为：显式 workspaceRoot 优先；GET 回显实际用的根。
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wc-taskroot-'));
+  try {
+    const webControl = stubControl();   // 与本文件其它用例同一个夹具
+    const created = await call(webControl, 'POST', '/__webcode/task-create', { subject: 'x', workspaceRoot: root });
+    assert.equal(created.status, 200);
+    assert.ok(fs.existsSync(path.join(root, '.webcode-tasks', 'ledger.json')),
+      '写必须真的落到那个根下的 ledger.json');
+    // GET 那一跳**直接调动作表**：本文件的 `call()` 夹具把带 query 的 pathname
+    // 原样传给 `handle()`，而 `handle()` 的 suffix 是按 `pathname` 整串切的——
+    // query 会让它变成 `task-ledger?...` 从而 404（这是夹具的限制，不是产品缺陷：
+    // 真实服务端传进来的 pathname 不含 query，实测 200 且回显正确）。
+    // 因此这里走 `actions['GET task-ledger']` 的真实实现，验的是**同一段代码**。
+    const gotBody = await webControl.actions['GET task-ledger']({ workspaceRoot: root });
+    assert.equal(gotBody.workspaceRoot, root, 'GET 必须如实回显它读的根（可当场核对读的是哪一份）');
+    assert.equal(gotBody.ok, true);
+    assert.equal(gotBody.tasks.length, 1, '写的和读的必须是**同一份**台账');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });

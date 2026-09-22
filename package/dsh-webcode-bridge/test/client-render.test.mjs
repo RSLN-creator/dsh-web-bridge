@@ -58,6 +58,9 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
   // 现在只从这里取（右栏那份 `sidebar.right.pane.tab` 注册已按用户要求删除），
   // 因此组件本身也要留一份，否则 which:'tasks' 无座位可渲染。
   const MainComponents = new Map();
+  // 0.19.0：`conversation.view` 槽位注册的视图定义（按 id）。用于断言「并列多会话
+  // 真的挂在中央对话区」，而不是只断言源码里存在这个组件。
+  const ViewComponents = new Map();
   let SettingsComponent = null;
   // 0.15.11：输入框底下的等待药丸也必须被真的渲染到。此前没有任何用例捕获
   // `conversation.composer.dock` 的组件，于是「药丸长什么样、点了会怎样」
@@ -335,6 +338,10 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
           // main 是 keyed 座位，按 key 派发。两者分别收下，用于断言成对且同名。
           if (def?.name === 'sidebar.panellist') PanelEntries.push({ id: def.id, order: def.order, label: def.label, Comp });
           if (def?.name === 'main') { MainKeys.push(def.key); MainComponents.set(def.key, Comp); }
+          // 0.19.0：中央对话区的并列多会话视图。槽位注册的是**带 id 的视图定义**
+          // （`conversation.view`），必须按 id 收下——「组件写对了但没注册到槽」
+          // 在本插件里等于「用户点不到」，那正是这条要防的形态。
+          if (def?.name === 'conversation.view' && def.id) ViewComponents.set(def.id, def);
           return () => {};
         },
       },
@@ -391,7 +398,7 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
       pane: 'dsh-webcode-bridge/site',
       site: 'dsh-webcode-bridge/site',
       catalog: 'dsh-webcode-bridge',
-      team: 'dsh-webcode-bridge/team',
+      // 0.19.0：`team: 'dsh-webcode-bridge/team'` 已随官方花名册 Team 面板一并删除。
     };
     // 0.16.18：任务板正文不再挂在 `sidebar.right.pane.tab` 上（右栏那份注册已按
     // 用户要求删除），它现在只由左栏 `sidebar.panellist` 行 + 同名 `main` 座位提供。
@@ -459,6 +466,9 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
       // 0.16.0：左栏入口与中央列 main 座位的登记结果。两个都返回，用例才能断言
       // 「成对且同名」——只看一半会放过「侧栏行存在但点了报未注册」那类缺陷。
       panelEntries: PanelEntries, mainKeys: MainKeys,
+      // 0.19.0：conversation.view 槽位注册的视图定义（按 id）。用例据此断言
+      // 「并列多会话真的挂在中央对话区」，而不是只断言源码里存在这个组件。
+      viewDefinitions: ViewComponents,
       // 0.16.24：药丸 setInterval 的周期序列（静止 10000 / 在途 1000）。
       intervalDelays,
     };
@@ -760,9 +770,11 @@ test('右栏：注册全部走 ctx.effect，并把「刷新 / 独立窗口」挂
   // 旧用例只给 dismiss，等于模拟了一个「没有 tab 的菜单」，那在新契约下应当
   // 返回 null（隐藏），因此这里按真实 owner 形状喂进去。
   for (const Item of menuItems) {
-    // 非网页标签页：必须隐藏（返回 null），否则会在 Team/任务板菜单里出现
-    // 一个「刷新网页」——而它作用于**另一个**面板的站点，用户完全看不出来。
-    assert.equal(Item({ dismiss: () => {}, tab: { kind: 'webcode-team' } }), null,
+    // 非网页标签页：必须隐藏（返回 null）。夹具用 `webcode-tasks`（0.16.18 起
+    // 已不存在的任务板 kind）——它代表的正是「本插件自己注册的**非网页**面板」；
+    // 0.19.0 起右栏还有 `webcode-team` 也属于这一类，但那个 kind 已随官方花名册
+    // 面板删除，用已删的 kind 做夹具等于在测一个不存在的场景。
+    assert.equal(Item({ dismiss: () => {}, tab: { kind: 'webcode-tasks' } }), null,
       '菜单项在非网页标签页上也渲染了——点下去会作用到别的面板');
     let el;
     assert.doesNotThrow(() => { el = Item({ dismiss: () => {}, tab: { kind: 'webcode-bridge' } }); });
@@ -1330,10 +1342,10 @@ test('设置页：会话身份必须经 useSessions 取，不得用 root 槽的 
  * 指向同一份数据、同一个组件，两个入口只会让用户不知道该看哪个；而右栏是窄条
  * 常驻视图，放不下依赖图。任务板现在只由左栏 `sidebar.panellist` + `main` 提供。
  */
-test('★ 标签页：只注册 webcode-bridge 与 webcode-team，任务是左栏面板而非右栏标签', async () => {
+test('★ 标签页：只注册 webcode-bridge（官方花名册 Team 标签页 0.19.0 已删除）', async () => {
   const { errors, paneKeys, tabDefinitions } = await renderPane({ payloads: [emptyWindows] });
   assert.deepEqual(errors, [], '注册阶段抛错：' + errors.map(e => e.message).join('; '));
-  for (const kind of ['webcode-bridge', 'webcode-team']) {
+  for (const kind of ['webcode-bridge']) {
     assert.ok(tabDefinitions.has(kind), '标签页类型未注册：' + kind + '（已注册：' + [...tabDefinitions.keys()].join(', ') + '）');
     const def = tabDefinitions.get(kind);
     assert.equal(typeof def.title, 'function', kind + ' 的 title 必须是 thunk（语言切换要能重读）');
@@ -1344,80 +1356,63 @@ test('★ 标签页：只注册 webcode-bridge 与 webcode-team，任务是左�
   // 加回来，从而把用户明确要求删掉的双入口重新引入。
   assert.ok(!tabDefinitions.has('webcode-tasks'),
     '右栏不得再注册任务板标签页（0.16.18 起任务板只走左栏 sidebar.panellist）');
-  // team 是 page type：不得声明 patterns。
-  assert.equal(tabDefinitions.get('webcode-team').patterns, undefined,
-    'webcode-team 声明了 patterns —— 它是 page type，不该参与地址识别');
+  // 0.19.0：右栏不得再有 `webcode-team` 标签页。用户 2026-09-22 明确指出那份
+  // 「官方 agentTeams 花名册」参考错了——本插件的 Team 是中央区的**并列多会话**
+  // （`MultiModelCompareView`，注册在 `conversation.view`），不是右栏的花名册。
+  // 这条是反向断言：把它加回来即变红。
+  assert.ok(!tabDefinitions.has('webcode-team'),
+    '右栏不得再注册 webcode-team 标签页（0.19.0：Team = 中央区并列多会话，不是官方花名册）');
+  assert.ok(!paneKeys.includes('dsh-webcode-bridge/team'),
+    '官方花名册 Team 面板的正文座位仍挂在 sidebar.right.pane.tab 上——没删干净');
   // 正文各自占一个 keyed 座位，且 key 互不相同（合成一个会让标签条出现同名项）。
   assert.equal(new Set(paneKeys).size, paneKeys.length, 'pane.tab 座位 key 有重复：' + paneKeys.join(', '));
-  assert.ok(paneKeys.length >= 2, '面板正文未注册（座位：' + paneKeys.join(', ') + '）');
+  assert.ok(paneKeys.length >= 1, '面板正文未注册（座位：' + paneKeys.join(', ') + '）');
   assert.ok(!paneKeys.includes('dsh-webcode-bridge/tasks'),
     '任务板正文仍挂在 sidebar.right.pane.tab 上——右栏那份注册没删干净');
+  // 0.19.0：删掉 Team 面板**之后**，右栏正文座位应当**恰好剩两个**——站点目录
+  // （`dsh-webcode-bridge`）与网页镜像（`dsh-webcode-bridge/site`）。
+  //
+  // 这条比「不含某个 key」更强：它同时挡住「删过头」（座位少了 → 面板废了）与
+  // 「删不干净」（还剩 team/tasks 座位）两种失败。值按**实测**写死，将来的改动者
+  // 必须显式面对这条判据并同步更新它，而不是顺手让集合漂移。
+  assert.deepEqual([...paneKeys].sort(),
+    ['dsh-webcode-bridge', 'dsh-webcode-bridge/site'],
+    '右栏正文座位集合变了（实测应为目录 + 网页镜像）：' + paneKeys.join(', '));
+  assert.deepEqual([...tabDefinitions.keys()].sort(),
+    ['webcode-bridge', 'webcode-site'],
+    '右栏标签页类型集合变了（实测应为目录 webcode-bridge + 网页镜像 webcode-site）：'
+    + [...tabDefinitions.keys()].join(', '));
 });
 
 /**
- * Team 面板：成员行必须带可读的角色/状态/归属，且读不到时说「读不到」。
+ * 0.19.0：Team 必须落在**中央对话区**的并列多会话视图上，而不是右栏满名册。
  *
- * 为什么不能只断言「不抛错」：那正是本项目已经踩过三次的坑（mock 失真 → 全绿
- * 但什么也没证明）。这里逐项要求**信息真的到达界面**：状态词、角色、模型、任务数。
+ * 这条与 `test/team-compare.test.mjs` 分工：那边查 `MultiModelCompareView` 的
+ * 内部实现（列数组、按 id 回填、稳定 sessionKey），这边查**注册位置**——
+ * 一个做对了但没注册到 `conversation.view` 的组件，用户点不到，等于没做。
  */
-test('★ Team 面板：成员的角色/状态/模型/任务数都必须渲染成可读文本', async () => {
-  const { errors, tree } = await renderPane({
-    payloads: [emptyWindows], which: 'team',
-    roster: {
-      team: [
-        { id: 's1', name: 'lead', role: 'lead', status: 'running', model: 'deepseek:deepseek' },
-        { id: 's2', name: 'reviewer', role: 'teammate', status: 'idle', context: 'fresh', taskCount: 2 },
-      ],
-      tasks: [],
-    },
-  });
-  assert.deepEqual(errors, [], 'Team 面板渲染抛错：' + errors.map(e => e.message).join('; '));
-  const text = treeText(tree);
-  assert.ok(text.includes('reviewer'), '成员名必须渲染：' + text.slice(0, 400));
-  assert.ok(text.includes('teammate'), '角色必须渲染（官方给的就是这个词，原样透出）：' + text.slice(0, 400));
-  assert.ok(text.includes('空闲'), '成员状态必须是可读词而不是只有色点：' + text.slice(0, 400));
-  assert.ok(text.includes('deepseek:deepseek'), '成员模型必须显示：' + text.slice(0, 400));
-  assert.ok(/任务 2/.test(text), '任务归属数必须显示：' + text.slice(0, 400));
-  assert.ok(text.includes('fresh'), '上下文模式必须透出：' + text.slice(0, 400));
-  // 共享 checkout 的事实不能省：否则「并行面板」看起来像隔离环境。
-  assert.ok(/共享同一个 checkout/.test(text), '未说明 Team 共享 checkout');
+test('★ 0.19.0 Team：并列多会话必须注册在 conversation.view（用户点得到才算做成）', async () => {
+  const { errors, viewDefinitions } = await renderPane({ payloads: [emptyWindows] });
+  assert.deepEqual(errors, [], '注册阶段抛错：' + errors.map(e => e.message).join('; '));
+  const entry = viewDefinitions.get('webcode-compare-view');
+  assert.ok(entry, 'conversation.view 未注册并列多会话视图（已注册：' + [...viewDefinitions.keys()].join(', ') + '）');
+  // label 必须与真实能力一致：列数由数组驱动、支持 2~4 列，
+  // 所以不得再叫「三列…」（用户加到第四列时那句话就是假的）。
+  assert.ok(typeof entry.label === 'function', 'label 必须是 thunk（语言切换要能重读）');
+  const labelText = String(entry.label());
+  assert.ok(!/三列/.test(labelText),
+    'label 仍写着「三列」而实际支持 2~4 列——名称与能力不符即假陈述：' + labelText);
+  assert.match(labelText, /并列多会话/, 'label 必须表达「并列多会话」这一真实语义');
 });
 
-/**
- * Team 面板：`inactive` 必须显示成「未加载（可唤醒）」，不是「已停止」。
- *
- * 官方 README（agent-team）明说这种成员仍会收到排队消息。显示成「已停止」会让
- * 用户去重建一个本来还活着的成员——动作完全错，而界面上看不出错。
- */
-test('★ Team 面板：inactive 成员必须说「可唤醒」，不得显示成已停止', async () => {
-  const { errors, tree } = await renderPane({
-    payloads: [emptyWindows], which: 'team',
-    roster: { team: [{ id: 's2', name: 'reviewer', role: 'teammate', status: 'inactive' }], tasks: [] },
-  });
-  assert.deepEqual(errors, [], '渲染抛错：' + errors.map(e => e.message).join('; '));
-  const text = treeText(tree);
-  assert.ok(/未加载（可唤醒）/.test(text), 'inactive 未按官方语义显示：' + text.slice(0, 400));
-  assert.ok(!/已停止/.test(text), 'inactive 被显示成「已停止」——用户会去重建一个还活着的成员');
-  assert.ok(/发一条消息就会唤醒/.test(text), '未给出可执行的下一步（怎么唤醒它）');
-});
-
-/**
- * Team 面板：只有 lead 一行时必须说明「没有派生 teammate」。
- *
- * 官方语义：**每个普通顶层会话都是隐式 Team 的 Lead**（agent-team README）。
- * 因此 `listMembers` 在没有团队时也会返回一行 lead——照单渲染会让用户以为
- * 有一个团队在协作，而实际上 `spawn_teammate` 根本没挂载。
- */
-test('★ Team 面板：只有 lead 一行时必须说明「没有派生 teammate」', async () => {
-  const { errors, tree } = await renderPane({
-    payloads: [emptyWindows], which: 'team',
-    roster: { team: [{ id: 's1', name: 'lead', role: 'lead', status: 'running' }], tasks: [] },
-  });
-  assert.deepEqual(errors, [], '渲染抛错：' + errors.map(e => e.message).join('; '));
-  const text = treeText(tree);
-  assert.ok(/没有派生出的 teammate/.test(text),
-    '只有 lead 时未说明「没有派生 teammate」，会被读成「有一个团队」：' + text.slice(0, 400));
-});
+// 0.19.0 删除：三条「官方花名册 Team 面板」用例（成员角色/状态/模型渲染、inactive
+// 显示「可唤醒」、只有 lead 时说明没有派生 teammate）。
+//
+// 删除理由：它们验证的那个面板**本身已被用户否定**——用户 2026-09-22 明确说
+// 「删除参考官方用的team面板，和我设想的team不同，参考错误了」（原话见
+// `doc/user-voice-log.md:3670`）。本插件的 Team 是中央区的并列多会话，不是右栏
+// 的官方 `agentTeams` 花名册。用例随被验证对象一并删除；「不得复活」由上面两条
+// 反向断言（`webcode-team` 标签页 / `dsh-webcode-bridge/team` 座位）钉住。
 
 /**
  * 任务板：四组分区必须都在，且「可开工 / 被阻塞」按**官方 ready** 分流。
@@ -1518,15 +1513,14 @@ test('★ 任务板：环 / 自环 / 悬空边必须报出，并说明「永远�
 });
 
 /**
- * 两个新面板的读不到路径：必须说「读不到」+ 原因，不得画成空列表。
+ * 任务板面板的读不到路径：必须说「读不到」+ 原因，不得画成空列表。
+ *
+ * 0.19.0：本用例原先同时覆盖「Team 面板」，那个面板已删除（见上方删除说明），
+ * 故只剩任务板这一半。任务板这半照旧有效且必须保留——「读不到 ≠ 确实没有」
+ * 是本项目反复踩过的那类缺陷。
  */
-test('★ 新面板：读不到时必须给原因，不得画成「确实没有」', async () => {
+test('★ 任务板：读不到时必须给原因，不得画成「确实没有」', async () => {
   const roster = { team: [], tasks: [], teamError: 'caller-not-live', tasksError: 'caller-not-live' };
-  const team = await renderPane({ payloads: [emptyWindows], which: 'team', roster });
-  assert.deepEqual(team.errors, [], 'Team 面板读不到时抛错：' + team.errors.map(e => e.message).join('; '));
-  const teamText = treeText(team.tree);
-  assert.ok(teamText.includes('caller-not-live'), 'Team 面板未给出原因：' + teamText.slice(0, 400));
-  assert.ok(/不代表没有成员/.test(teamText), 'Team 面板未澄清「读不到 ≠ 没有成员」');
 
   const tasks = await renderPane({ payloads: [emptyWindows], which: 'tasks', roster });
   assert.deepEqual(tasks.errors, [], '任务板读不到时抛错：' + tasks.errors.map(e => e.message).join('; '));
@@ -1753,4 +1747,418 @@ test('★ 设置页站点 tab：形态对齐 dsh-market，且排队间隔走后�
   const body = src.slice(at, src.indexOf('async function saveSetting(', at));
   assert.ok(/\{ \.\.\.slotGaps, \[siteId\]:/.test(body),
     'saveSlotGap 没有整对象读改写 —— 只 POST 单个键会让其它站点的覆盖丢失');
+});
+
+/**
+ * ★ 0.18.0 任务详情页：后台轮询**不得**清掉用户正在编辑的内容。
+ *
+ * 用户原话（2026-09-22）：「我想要的任务版是人能够手动添加任务的！」
+ * 「我用的 gemini 做到 0.17.0 之后的任务，都严重掺水/未实现理想要求」。
+ *
+ * 这条钉住的正是那次「掺水」的确切形态：
+ *
+ *   `TaskDetailNotionView` 的同步 effect 原先是 `}, [task]);`，而 `task` 来自
+ *   `TaskBoardPanel` 的 `byId` —— 那是**每 5 秒**轮询 `task-ledger` 之后重建的对象，
+ *   引用每次都变。于是 effect 每 5 秒跑一次，把用户刚敲进标题/正文/状态/模型的值
+ *   静默重置回台账里的旧值。界面看起来一切正常，实际「打字会自己消失」。
+ *
+ * 判据因此必须落在**稳定标识**上（任务 id / revision），并且用户一旦编辑过，
+ * 外部同步就必须让路（dirty 门）。
+ */
+test('★ 0.18.0 任务详情页：轮询不得覆盖用户正在编辑的字段', () => {
+  // 只在**去掉注释的代码**上断言。
+  //
+  // 为什么必须这么做（本次实测教训）：第一版护栏直接搜 `}, [task]);`，结果被
+  // client.cjs 里那段「解释这个缺陷」的注释误触发 —— 注释里引用了旧代码，护栏把
+  // 「说明」当成了「缺陷仍在」，报出的失败信息还指向代码，排查方向被完全带偏。
+  // 判据要落在代码上；注释讲的是历史。
+  //
+  // 0.19.0 修的**真缺陷**：原先这里是 `split('\n')`，而本仓库的文件是 CRLF
+  //（`\r\n`）。按 `\n` 切分后每行尾部残留 `\r`，`^\s*\/\/.*$` 匹配到 `\r` 时
+  // `.*` 退回空串、`$` 对不上行尾，于是**整行注释根本没被去掉**——也就是说这段
+  // 「去掉注释」的代码一直在空转，只是恰好因为本条的目标串没出现在注释里而没暴露。
+  // 现在按 `\r?\n` 切分，去注释才真的生效（用 `openTab('browser')` 这类确实出现在
+  // 注释里的串可以验证）。
+  const src = bridgeSrcFrom('client.cjs')
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s*\/\/.*$/, ''))   // 整行注释
+    .join('\n')
+    .replace(/\/\*[\s\S]*?\*\//g, '');                // 块注释
+
+  // ① 同步 effect 不得以整个 task 对象为依赖（那正是每 5 秒重置的成因）。
+  assert.ok(!/\}, \[task\]\);/.test(src),
+    '任务详情页的同步 effect 不能依赖整个 task 对象 —— 轮询每 5 秒换引用，会把用户输入冲掉');
+
+  // ② 必须用稳定标识（taskId）换任务，用 revision 判外部改动。
+  assert.ok(/const taskId = String\(task\?\.id \|\| ''\);/.test(src),
+    '必须从 task.id 取稳定标识');
+  assert.ok(/\}, \[taskId\]\);/.test(src),
+    '换任务必须由 taskId 触发');
+  assert.ok(/const taskRevision = Number\(task\?\.revision\) \|\| 0;/.test(src),
+    '外部改动必须由 revision 判定');
+
+  // ③ dirty 门必须真的存在且被输入框接上（只声明不接线 = 又一次掺水）。
+  assert.ok(/const dirtyRef = React\.useRef\(false\);/.test(src), '缺少 dirty 门');
+  assert.ok(/if \(dirtyRef\.current\) return;/.test(src),
+    '外部同步没有让路判据 —— 用户正在打字时仍会被覆盖');
+  const marks = (src.match(/markDirty\(\);/g) || []).length;
+  assert.ok(marks >= 4,
+    '标题/状态/模型/正文四个受控输入都必须置 dirty，实际接线点=' + marks);
+
+  // ④ 保存成功后必须解除 dirty，否则之后永远同步不到外部改动。
+  const saveAt = src.indexOf('const handleSaveMeta = () => {');
+  assert.ok(saveAt > 0, 'handleSaveMeta 不存在');
+  const saveBody = src.slice(saveAt, saveAt + 500);
+  assert.ok(/dirtyRef\.current = false;/.test(saveBody),
+    '保存后必须解除 dirty，否则该任务此后再也同步不到外部改动');
+});
+
+// ── 0.19.0 ③：删除 Team 面板后的**全局一致性**（第二轮审查视角）──────────────
+
+/**
+ * 删除右栏 Team 面板后，`teamSource` 一度**失去唯一消费者**（第二轮独立审查抓到）。
+ *
+ * `roster.js:571` 一直在算它、`web-control.js:550` 一直在透出它，而此前只有
+ * `TeamPanel` 渲染过它。面板删掉后这条链路就断了——服务端算、前端不读，属于
+ * 本项目记过的「只声明不接线」形态（数据层还在产出，用户永远看不到）。
+ *
+ * 判据要求**三点同时成立**，缺一即变红：① `useRoster` 把它取进来；② 存活的花名册
+ * 渲染它；③ 服务端仍在透出它（不能靠删字段来「消除」这条判据）。
+ *
+ * 为什么不干脆删掉服务端那两个字段：`roster.test.mjs:391/400` 把 `teamSource` /
+ * `tasksSource` 钉为 `projectRoster` 的公开契约（并以「两个来源都没读到时不得谎报
+ * 来源」为断言），删字段会破坏那份契约、也会让「读不到 ≠ 没有」这条说明失去依据。
+ * 正确的处置是把断掉的消费端接回来。
+ */
+test('★ 0.19.0 一致性：teamSource/tasksSource 必须「服务端透出 → 客户端取 → 界面渲染」三段齐全', () => {
+  const client = bridgeSrcFrom('client.cjs');
+
+  // ① 客户端必须把它取进 rows。
+  assert.match(client, /teamSource:\s*r\?\.teamSource\s*\?\?\s*null/,
+    'useRoster 未取回 teamSource —— 服务端算它、前端不读，链路是断的');
+  assert.match(client, /tasksSource:\s*r\?\.tasksSource\s*\?\?\s*null/,
+    'useRoster 未取回 tasksSource');
+  // 兜底分支也必须给这两个键，否则读不到时渲染成 undefined 而不是「无来源」。
+  assert.match(client, /teamSource:\s*null,\s*tasksSource:\s*null/,
+    'useRoster 的异常兜底分支缺少 teamSource/tasksSource —— 读不到时状态会漂');
+  // ② 存活的花名册必须真的渲染它（不是取进来放着）。
+  assert.match(client, /sourceText\(rows\.teamSource\)/,
+    '花名册没有渲染 teamSource —— 取进来却不显示，等于没接');
+  assert.match(client, /sourceText\(rows\.tasksSource\)/,
+    '花名册没有渲染 tasksSource');
+  // ③ 服务端两侧都必须在（防止有人用「删字段」来让本条变绿）。
+  const roster = bridgeSrcFrom('roster.js');
+  const wc = bridgeSrcFrom('web-control.js');
+  assert.match(roster, /teamSource:\s*team\.source/, 'roster.js 必须仍在算 teamSource');
+  assert.match(wc, /teamSource:\s*r\.teamSource/, 'web-control.js 必须仍在透出 teamSource');
+  assert.match(wc, /tasksSource:\s*r\.tasksSource/, 'web-control.js 必须仍在透出 tasksSource');
+  // ④ 对账 262 护栏：roster.js 的落库回落分支会发 `source:'ledger'`（桥自有任务台账），
+  // 客户端 sourceText 必须为它映射文案——否则路基任务板最常见的来源反而不标出处。
+  assert.match(client, /if \(src === 'ledger'\)/,
+    'sourceText 未映射 ledger 来源 —— 桥自有任务台账的来源标注缺失（对账 262 ③ 未落地）');
+  assert.match(roster, /source: 'ledger'/, 'roster.js 必须仍在算 ledger 来源（若改键需同步客户端）');
+});
+
+// ── 0.19.0 ②：任务板 UI 必须统一官方 harness 审美 ───────────────────────────
+
+/**
+ * 官方 token 白名单：逐条来自参考实现
+ * `reference/dsh-task-board/src/client/board.module.css`（用户指定以它为基准）。
+ *
+ * 为什么要有**白名单**而不是「不许写十六进制」：只禁十六进制会放过
+ * `var(--dsw-alias-label-inverse)` 这种**看起来像官方 token、实际不存在**的写法
+ * ——它会静默落到 CSS 回落值，在浅色主题下看不出任何异常，只有换主题才暴露。
+ * 这正是本轮 Lead 自己写错过一次的那个坑，因此判据必须能抓住它。
+ */
+const OFFICIAL_DSW_TOKENS = new Set([
+  'dsw-alias-bg-base', 'dsw-alias-bg-layer-1', 'dsw-alias-bg-layer-2', 'dsw-alias-bg-mask-1',
+  'dsw-alias-border-l1', 'dsw-alias-border-l2', 'dsw-alias-border-l3', 'dsw-alias-border-l4',
+  'dsw-alias-separator-primary',
+  'dsw-alias-label-primary', 'dsw-alias-label-primary-foreground', 'dsw-alias-label-secondary',
+  'dsw-alias-label-tertiary', 'dsw-alias-label-caption', 'dsw-alias-label-dimmed',
+  'dsw-alias-label-quaternary',
+  'dsw-alias-button-info-fill', 'dsw-alias-button-info-hover',
+  'dsw-alias-brand-primary', 'dsw-alias-brand-subtle',
+  'dsw-alias-interactive-bg-hover', 'dsw-alias-interactive-bg-active',
+  'dsw-alias-state-success-primary', 'dsw-alias-state-error-primary',
+  'dsw-alias-state-warn-primary', 'dsw-alias-state-warn-secondary',
+  'dsw-alias-state-business-primary',
+  'dsw-alias-markdown-code-block',
+  'dsw-font-family',
+  'dsw-elevation-prominent', 'dsw-specific-menu',
+  // 输入底与聚焦色：来自参考实现 `.input` / `.input:focus`。
+  'dsw-specific-input-major',
+]);
+
+test('★ 0.19.0 任务板审美：CSS 只许用官方已有的 dsw token（不得凭直觉编 token 名）', () => {
+  const src = bridgeSrcFrom('client.cjs');
+  const used = [...src.matchAll(/var\((--dsw-[a-z0-9-]+)/g)].map((m) => m[1].slice(2));
+  const unknown = [...new Set(used)].filter((t) => !OFFICIAL_DSW_TOKENS.has(t));
+  assert.deepEqual(unknown, [],
+    '这些 token 不在官方 token 家族里，写出来会静默回落（换主题时暴露）：' + unknown.join(', '));
+});
+
+test('★ 0.19.0 任务板审美：按钮走官方 button-info 语义 token，不得写死颜色或整块 opacity', () => {
+  const src = bridgeSrcFrom('client.cjs');
+
+  // 主按钮必须用官方**按钮语义** token（有配套 hover 档），而不是 brand-primary。
+  assert.match(src, /\.hwb-btn\.primary\{background:var\(--dsw-alias-button-info-fill/,
+    '主按钮底色必须走 --dsw-alias-button-info-fill（官方按钮语义 token）');
+  assert.match(src, /\.hwb-btn\.primary:hover:not\(:disabled\)\{background:var\(--dsw-alias-button-info-hover/,
+    '主按钮 hover 必须换到官方 button-info-hover，而不是整块调透明度');
+  // 字色必须是官方前景 token，不得写死 #fff。
+  assert.match(src, /\.hwb-btn\.primary\{[^}]*color:var\(--dsw-alias-label-primary-foreground/,
+    '主按钮字色必须走 --dsw-alias-label-primary-foreground，不得写死 #fff');
+  assert.match(src, /\.hwb-btn\.danger\{background:var\(--dsw-alias-state-error-primary/,
+    '危险按钮必须走 --dsw-alias-state-error-primary，不得写死 #dc2626');
+  // 不得再用整块 opacity 做 hover 反馈（会把文字一起调淡）。
+  assert.ok(!/\.hwb-btn:hover\{opacity:\.9\}/.test(src),
+    '按钮 hover 不得用 opacity:.9 —— 官方只换底色，文字保持全对比');
+});
+
+test('★ 0.19.0 任务板审美：看板列数不得写死（窄面板下必须能收缩）', () => {
+  const src = bridgeSrcFrom('client.cjs');
+  assert.ok(!/\.hwb-kanban-board\{[^}]*repeat\(5,1fr\)/.test(src),
+    '看板写死 repeat(5,1fr)：窄面板下五列一起被压到读不出字，应改为按 minmax 自适应');
+  assert.match(src, /\.hwb-kanban-board\{display:grid;grid-template-columns:repeat\(auto-fit,minmax\(180px,1fr\)\)/,
+    '看板必须按 auto-fit + minmax(180px,1fr) 自适应');
+});
+
+/**
+ * 0.19.0：任务板不得用 `alert()` 做反馈。
+ *
+ * 为什么这是一条真判据而不是洁癖：`alert` 是**阻塞式**浏览器模态，弹出期间
+ * JS 主线程停住——5 秒轮询的下一拍与所有在途 fetch 回调都被卡住，用户看到的是
+ * 「点一下，整个面板僵住」。它也不属于官方 harness 的任何一种反馈形态：
+ * 参考实现（`reference/dsh-task-board`）一律用内联 `.formError` 文案。
+ */
+test('★ 0.19.0 任务板审美：不得用 alert 做反馈（阻塞主线程，非官方形态）', () => {
+  // 只在**去掉注释的代码**上断言 —— 与上面「轮询不得覆盖用户输入」同一条纪律：
+  // 本文件已经吃过一次亏（护栏被解释缺陷的注释误触发，报出的失败信息指向代码，
+  // 排查方向被完全带偏）。这里 `alert` 恰好也只出现在注释里，若不去注释就会
+  // 把「解释」当成「仍在用」。注释讲的是历史，判据必须落在代码上。
+  const src = bridgeSrcFrom('client.cjs')
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s*\/\/.*$/, ''))   // 整行注释
+    .join('\n')
+    .replace(/\/\*[\s\S]*?\*\//g, '');                // 块注释
+
+  // 只查任务板两个组件体：设置页等其它历史代码不在本次范围内，
+  // 把它们一并断言会让这条护栏变成「全文件洁癖」，从而在无关改动上误报。
+  for (const fn of ['function TaskBoardPanel', 'function NewTaskModalDialog', 'function TaskDetailNotionView']) {
+    const at = src.indexOf(fn);
+    assert.ok(at > 0, '找不到 ' + fn);
+    const end = src.indexOf('\n    function ', at + 10);
+    const body = src.slice(at, end === -1 ? src.length : end);
+    assert.ok(!/\balert\(/.test(body),
+      fn + ' 里仍有 alert() —— 阻塞主线程且非官方反馈形态，应改用 hwb-notice / hwb-form-error');
+  }
+  // 正判据：内联反馈必须真的存在且被渲染出来（删掉横幅即变红）。
+  assert.match(src, /const \[boardNotice, setBoardNotice\] = React\.useState\(null\)/,
+    '缺少任务板级反馈状态 boardNotice');
+  assert.match(src, /hwb-notice-text/, 'boardNotice 必须有渲染出口，否则用户看不到任何回执');
+  assert.match(src, /hwb-form-error/, '新建弹窗缺少内联校验文案出口');
+});
+
+/**
+ * 0.19.0：任务详情页的**所有写路径**都必须吃 CAS，且成功判据不得含糊。
+ *
+ * 两条真缺陷都出在这里，故逐条钉住：
+ *
+ *   ① `onAddComment` / `onResolveComment` **没传 `expectedRevision`**。服务端
+ *      `POST task-comment` / `task-comment-resolve` 的第五个参数就是 CAS
+ *      （0.17.3 修「批注 CAS 被静默吞掉」修的正是这条链路），不传等于放弃并发保护：
+ *      两人同时对同一条任务批注，后到的覆盖先到的，而**双方都收到成功**。
+ *   ② 成功判据原先写成 `if (res && res.ok === false)` —— 它把 `ok` 缺失、`res`
+ *      为 `null`、字段名拼错等情形**全部当成成功**，界面报「已保存」而磁盘没动。
+ *      现在必须走 `verdictOf`（只有显式 `ok === true` 才算成功）。
+ */
+test('★ 0.19.0 任务详情页：所有写路径必须吃 CAS，成功判据不得含糊', () => {
+  const src = bridgeSrcFrom('client.cjs');
+
+  // ① 四条写路径都必须带 expectedRevision。
+  for (const action of ['task-update', 'task-comment', 'task-comment-resolve']) {
+    const at = src.indexOf("api('" + action + "'");
+    assert.ok(at > 0, '找不到 ' + action + ' 调用');
+    // 取该调用到下一个 `)` 收尾的一段（够覆盖对象字面量）。
+    const call = src.slice(at, at + 420);
+    assert.match(call, /expectedRevision:\s*currentTask\.revision/,
+      action + ' 未带 expectedRevision —— 放弃 CAS = 并发写入静默互相覆盖，而双方都收到成功');
+  }
+  const upd = src.indexOf("api('task-update'");
+  assert.match(src.slice(upd, upd + 260), /expectedRevision:\s*currentTask\.revision/,
+    'task-update 未带 expectedRevision');
+
+  // ② 不得再有 `res && res.ok === false` 这种「缺 ok 就当成功」的**分散**判据。
+  //
+  //    两点必须处理对，否则这条护栏是装饰品：
+  //      · 先去注释 —— 解释这个缺陷的注释里正好引用了旧写法（本文件的老坑）；
+  //      · 豁免 `verdictOf` 自身 —— 它里面**就该**出现 `res.ok === false`，
+  //        那是白名单判定的第二支，不是「分散判据」。
+  const code = src
+    .split(/\r?\n/)
+    .map(line => line.replace(/^\s*\/\/.*$/, ''))
+    .join('\n')
+    .replace(/\/\*[\s\S]*?\*\//g, '');
+  const vAt = code.indexOf('const verdictOf = (res, what) => {');
+  assert.ok(vAt > 0, '找不到 verdictOf 定义');
+  // 取到该定义之后的下一个顶层 `const ` 为止（把 verdictOf 的函数体整段排除）。
+  const afterV = code.indexOf('\n      const ', vAt + 10);
+  const outside = code.slice(0, vAt) + (afterV === -1 ? '' : code.slice(afterV));
+  assert.ok(!/res\s*&&\s*res\.ok\s*===\s*false/.test(outside),
+    '成功判据不得写成 `res && res.ok === false` —— ok 缺失时会被当成成功（假成功）；'
+    + '应统一走 verdictOf');
+
+  // ③ 正判据：必须存在一个「只有显式 ok===true 才算成功」的收口函数并被使用。
+  assert.match(src, /const verdictOf = \(res, what\) => \{/,
+    '缺少 verdictOf 收口 —— 每条写链路各自判 ok 必然漂移');
+  assert.match(src, /if \(res && res\.ok === true\) return \{ ok: true, error: '' \};/,
+    'verdictOf 必须白名单式判定（只有 ok===true 算成功）');
+  // ★ 第三轮对抗审查抓到的**护栏逃逸**：上一版只钉了白名单那一支，于是把
+  //   `ok === false` 那一支改成「返回 ok:true」时，**服务端明确拒绝被报成成功**
+  //   （正是本条要防的假成功），而护栏全绿。两支都必须钉住，且要钉**返回语义**，
+  //   不是只钉字面量存在。
+  assert.match(src, /if \(res && res\.ok === false\) return \{ ok: false, error: String\(res\.error \|\| '[^']*'\) \};/,
+    'verdictOf 的 ok===false 分支必须如实返回 ok:false 并带出服务端原因 —— '
+    + '只钉白名单分支会让「服务端拒绝被报成成功」这条假成功逃过护栏');
+  // 缺 ok 字段的响应必须按**未成功**处理（默认拒绝），不得当成成功。
+  assert.match(src, /return \{ ok: false, error: what \+ '[^']*' \};/,
+    'verdictOf 的兜底分支必须返回 ok:false（响应形状不认识 ⇒ 按未成功处理）');
+  const uses = (src.match(/verdictOf\(/g) || []).length;
+  assert.ok(uses >= 6,
+    'verdictOf 必须被各条写链路真的用上（定义处 + 至少 6 处调用），实际=' + uses);
+});
+
+/**
+ * ★ 0.19.0：详情页的写操作反馈必须有渲染出口（第三轮对抗审查抓到的真回归）。
+ *
+ * 把 `alert()` 换成内联横幅时漏了一半：`notify()` 的**全部**调用点都在
+ * `TaskDetailNotionView` 的写回调里（保存/删除/批注/解决/按批注派发），而横幅原先
+ * 只在看板/列表那一支渲染 —— `TaskBoardPanel` 在 `if (selectedTaskId)` 处就
+ * `return h(TaskDetailNotionView, …)` 了，**永远走不到**那个渲染点。
+ * 于是用户在详情页做的每一次写（含**被 CAS 拒绝**、**派发失败**）都看不到任何结果。
+ * 旧实现用 `alert()` 时不会有这个问题（阻塞弹窗与挂载分支无关），所以这是换成
+ * 内联反馈时丢掉的另一半 —— 属于本项目反复记过的「说做了、其实没做」。
+ */
+test('★ 0.19.0 任务详情页：写操作反馈必须有渲染出口（不得只在看板分支渲染）', () => {
+  const src = bridgeSrcFrom('client.cjs');
+
+  // ① 详情页必须**接到**这个状态。
+  assert.match(src, /function TaskDetailNotionView\(\{ task, allTasks, notice, onDismissNotice,/,
+    'TaskDetailNotionView 必须接收 notice/onDismissNotice —— 否则它的写操作反馈无处可去');
+  assert.match(src, /notice: boardNotice,/, 'TaskBoardPanel 必须把 boardNotice 传进详情页');
+  assert.match(src, /onDismissNotice: \(\) => setBoardNotice\(null\),/,
+    '必须传关闭回调（横幅可关，否则会一直占着版面）');
+
+  // ② 详情页体内必须真的渲染它（不是只接不用）。
+  const at = src.indexOf('function TaskDetailNotionView(');
+  assert.ok(at > 0, '找不到 TaskDetailNotionView');
+  const end = src.indexOf('\n    function ', at + 10);
+  const body = src.slice(at, end === -1 ? src.length : end);
+  assert.match(body, /notice && h\('div', \{/,
+    'TaskDetailNotionView 体内必须渲染 notice 横幅 —— 只接不渲染等于没接');
+  assert.match(body, /notice\.kind === 'bad' \? 'bad' : 'ok'/,
+    '横幅必须区分成败色档');
+  assert.match(body, /onDismissNotice\(\)/,
+    '关闭按钮必须真的调用 onDismissNotice');
+
+  // ③ 两处渲染点都要在：看板一处 + 详情页一处（少任何一处就有一半操作看不到反馈）。
+  const renders = (src.match(/notice && h\('div', \{/g) || []).length
+    + (src.match(/boardNotice && h\('div', \{/g) || []).length;
+  assert.ok(renders >= 2,
+    '反馈横幅至少要有两个渲染出口（看板 + 详情页），实际=' + renders);
+});
+
+/**
+ * ★ 0.19.0：按批注派发的**第二步**（`chat` 的真实结果）必须有断言覆盖。
+ *
+ * 第三轮对抗审查指出这条是**零覆盖**：把「成功/失败分支」整段换成一句无条件的
+ * 成功提示，测试仍全绿 —— 而「派发失败被报成成功」正是本项目反复记过的假成功。
+ * 派发是**两次**串行调用（`task-implement` 组装 → `chat` 真正投出），两步都要如实报。
+ */
+test('★ 0.19.0 按批注派发：chat 的真实结果必须决定成败（不得无条件报成功）', () => {
+  const src = bridgeSrcFrom('client.cjs');
+
+  // 第一步：组装失败/形状不认识 ⇒ 必须报失败且**不得**继续投递。
+  assert.match(src, /const v = verdictOf\(res, '组装实施指令'\);/,
+    'task-implement 的结果必须经 verdictOf 判定');
+  assert.match(src, /if \(!v\.ok\) \{ notify\('bad', '发起实施失败: ' \+ v\.error\); return null; \}/,
+    '组装失败必须报失败并中止（不得继续投递）');
+
+  // 第二步：chat 结果必须经判定后**分派到两个分支**。
+  const at = src.indexOf("verdictOf(r2, '派发')");
+  assert.ok(at > 0, 'chat 的结果必须经 verdictOf 判定 —— 否则可被换成无条件成功');
+  const around = src.slice(at, at + 420);
+  assert.match(around, /if \(v2\.ok\) notify\('ok'/,
+    'chat 成功才报「已按批注派发」');
+  assert.match(around, /else notify\('bad', '派发失败: ' \+ v2\.error\)/,
+    'chat 失败必须报「派发失败」并带出真实原因 —— 无条件成功就是假成功');
+
+  // 反向：不得出现「不看结果就报成功」的形态。
+  assert.ok(!/api\('chat'[\s\S]{0,200}?\.then\(\(\) => notify\('ok'/ .test(src),
+    'api(chat) 之后不得无条件 notify 成功（丢弃结果）');
+});
+
+/**
+ * Word 范式审批界面的**可核对**判据（用户：参考 office 左正文、右划线编辑评论）。
+ *
+ * 只断言「有左右两栏」不够——那是最容易被做成的样子货。这里要求三条本质都在：
+ * 正文可划词、右侧是独立滚动的页边栏、**已被批注的片段在正文侧留痕**。
+ */
+test('★ 0.19.0 审批界面：Word 范式三件套（划词 / 页边独立滚动 / 正文侧留痕）', () => {
+  const src = bridgeSrcFrom('client.cjs');
+
+  // ① 左正文可划词：textarea 的 onMouseUp 取选区。
+  assert.match(src, /const handleDescSelect = \(e\) => \{[\s\S]{0,200}?getSelection\(\)/,
+    '正文必须能划词取选区（Word 审阅的前提）');
+  assert.match(src, /hwb-review-split/, '缺少左右分栏容器');
+  assert.match(src, /hwb-review-margin/, '右侧批注栏（Word 页边）缺失');
+  // ② 页边栏独立滚动：CSS 必须给批注列表自己的滚动容器。
+  assert.match(src, /\.hwb-review-comments\{[^}]*overflow-y:auto/,
+    '右侧批注栏必须独立滚动 —— 否则长批注会把正文一起顶走');
+  // 窄屏回落：硬撑两栏会让两栏都窄到不能用。
+  assert.match(src, /@media \(max-width:720px\)\{\.hwb-review-split\{grid-template-columns:1fr\}\}/,
+    '窄屏必须回落为上下布局');
+  // ③ 正文侧留痕：已被批注的引用片段必须列出来（Word 的「已评论文字」标记）。
+  assert.match(src, /hwb-review-anchors/, '正文侧缺少「已批注片段」留痕');
+  assert.match(src, /const anchorQuotes = comments/, 'anchorQuotes 未定义');
+  // 锚点跳转必须用**原始下标**：只要有一条无引用的批注夹在中间，
+  // 用过滤后的下标就会点到别的批注上，而界面上完全看不出来。
+  assert.match(src, /\.filter\(a => a\.quote\)/,
+    '锚点必须自带原始下标后再过滤，否则跳转会错位一格');
+  assert.match(src, /anchorQuotes\.map\(\(a\) => h\('button'/,
+    '锚点必须按带入下标的对象渲染');
+});
+
+/**
+ * ★ 0.19.0：站点标签的站点**不得**被「有独立窗口就切过去」改写。
+ *
+ * 用户原话（2026-09-22）：「质谱清言等网站的登录没问题，但是回点击直接打开
+ * deepseek?」
+ *
+ * 现场：`Conversation` 挂载时无条件执行「把当前站点换成第一个开着独立窗口的站点」。
+ * DeepSeek 的窗口是常驻的（`GET window` 实测 `windows.deepseek.open=true`），
+ * 于是挂载一个「智谱清言」标签会被 `setSiteId('deepseek')` 顶掉——标签标题写着
+ * 智谱清言，正文区却是 DeepSeek。**登录本身一直是好的**（走的是另一个控制面动作）。
+ *
+ * 这段代码是 0.11.0 单站点时代的遗留；0.16.35 起站点由标签的 `navigation.params`
+ * 决定，它就从「合理」变成了「推翻用户明确的选择」。
+ *
+ * 判据：受控标签（`controlledSite` 非空）**不得**走自动采纳分支；且那个分支整体
+ * 必须在 `if (!controlledSite)` 之内——只断言「有这行代码」是不行的，那正是它活到
+ * 今天的原因（原护栏只钉了 `GET window` 的形状，没钉它**被用作站点改写**）。
+ */
+test('★ 0.19.0 站点标签：站点不得被「有独立窗口就切过去」改写（用户报的「点开就变 DeepSeek」）', () => {
+  const src = bridgeSrcFrom('client.cjs');
+  // ① 自动采纳必须被 `!controlledSite` 守住。
+  assert.match(src, /const adoptWindowSite = !controlledSite;/,
+    '自动采纳必须由「本标签没有明确站点」决定');
+  assert.match(src, /if \(adoptWindowSite\) \{/,
+    '必须在分支内才执行采纳——无条件执行就会顶掉用户点开的站点');
+  // ② 反向：不得再出现「无条件的 winState().then(... setSiteId(open[0]))」。
+  assert.ok(!/winState\(\)\.then\(w => \{ const open = Object\.keys/.test(src),
+    '不得恢复无条件的「切到第一个开窗站点」——那正是「点开智谱清言却出了 DeepSeek」的成因');
+  // ③ 受控同步仍然要在（站点标签必须跟着自己的 params 走，修 A 不能把 B 拆掉）。
+  assert.match(src, /if \(controlledSite && SITE_NAMES\[controlledSite\]\) setSiteId\(controlledSite\);/,
+    '受控站点同步必须保留——修掉自动采纳 ≠ 不再认标签自己的站点');
 });
