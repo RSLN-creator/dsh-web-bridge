@@ -71,6 +71,7 @@
 import { analyzeTaskGraph } from './task-graph.js';
 import { analyzePlan, validatePlan, writeScopeConflicts } from './task-plan.js';
 import { projectTeamFromDisk, projectTasksFromDisk } from './team-state.js';
+import { readLedger, rowsOf } from './task-ledger.js';
 
 /**
  * 从 cordis 上下文里取一个服务，容忍两种取法。
@@ -335,15 +336,53 @@ function tasksFromService(ctx, sessionId) {
  *   serviceError?: string|null, diskError?: string|null}}
  */
 export function projectTasks(ctx, sessionId) {
+  const cwd = cwdOf(ctx, sessionId);
   const svc = tasksFromService(ctx, sessionId);
-  if (svc.tasksError === null) return { ...svc, source: 'service' };
-  const disk = projectTasksFromDisk(cwdOf(ctx, sessionId), sessionId);
+  if (svc.tasksError === null && svc.tasks.length > 0) return { ...svc, source: 'service' };
+
+  // 检查桥自有任务台账（.webcode-tasks/ledger.json）
+  if (cwd) {
+    try {
+      const { ledger, error } = readLedger(cwd);
+      if (!error && ledger && Array.isArray(ledger.tasks)) {
+        const rows = rowsOf(ledger);
+        if (rows.length > 0) {
+          let graph = null;
+          try { graph = analyzeTaskGraph(rows); } catch { /* graph 缺了不连坐 */ }
+          return { tasks: rows, graph, tasksError: null, source: 'ledger' };
+        }
+      }
+    } catch { /* 容错 */ }
+  }
+
+  const disk = projectTasksFromDisk(cwd, sessionId);
   if (disk.tasks.length > 0) {
     let graph = null;
     try { graph = analyzeTaskGraph(disk.tasks); } catch { /* 图是补充信息，缺了不该连坐 tasks */ }
     return { tasks: disk.tasks, graph, tasksError: null, source: 'disk', serviceError: svc.tasksError };
   }
   return { tasks: [], graph: null, tasksError: svc.tasksError, source: null, diskError: disk.tasksError };
+}
+
+/**
+ * 取某个会话的工作目录（**公开**，0.19.0）。
+ *
+ * 为什么把它导出：`web-control.js` 的任务台账路由需要一个与任务投影**同源**的
+ * 存储根解析器，否则同一块界面上「任务板」与「花名册」会读到两份互不可见的
+ * `.webcode-tasks/ledger.json`（0.19.0 独立审查发现的 HIGH）。
+ *
+ * 注意：控制面路由此刻**拿不到 sessionId**（随包客户端调 `api('task-ledger')`
+ * 时不带任何 body）。因此 index.js 只能在没有会话身份时让路由回落 `process.cwd()`；
+ * 「让客户端把 sessionId 传上来」是遗留的收口项，已记入 `doc/progress.md`。
+ * 在它落地之前，这里导出的函数仍让两侧共用**同一套判据**（而不是各写一份），
+ * 且 `GET task-ledger` 会把实际用的根如实透出，可当场核对。
+ *
+ * @param {object} ctx cordis 上下文
+ * @param {string|null} sessionId 会话 id
+ * @returns {string|null} 绝对路径，或 null（拿不到就不猜）
+ */
+export function workspaceRootOf(ctx, sessionId) {
+  return cwdOf(ctx, sessionId);
 }
 
 /**

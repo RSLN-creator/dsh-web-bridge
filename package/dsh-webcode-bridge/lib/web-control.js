@@ -24,12 +24,27 @@ import { buildPromptVariants, buildSitePromptRows } from './prompt-variants.js';
 import { sitePromptPath, DEFAULT_PROMPT_STORE_DIR } from './prompt-store.js';
 import { composerWaitLine, composerWaitPillLabel, waitStatDetailRows, waitStatRows, waitStatBlocks, formatDuration, formatElapsed, sanitizeWaitStats } from './wait-stats.js';
 import { isLoopbackHost, originMatchesHost } from './loopback.js';
+// 浏览器来源与安装（0.18.0）。与 browser-driver 读**同一份**解析逻辑，
+// 避免「驱动用一个、面板报另一个」。
+import { resolveBrowserExecutable, installBundledChromium } from './browser-runtime.js';
 import { httpFetch } from './upstream.js';
+import {
+  readLedger, writeLedger, applyCreate, applyUpdate, applyDelete,
+  applyAddComment, applyResolveComment, rowsOf,
+} from './task-ledger.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 const MAX_BODY_BYTES = 256 * 1024;
+
+/**
+ * 进行中的浏览器安装（0.18.0）。
+ *
+ * 模块级而非每次请求新建：下载是重 IO 动作，用户连点两次按钮不该拉两份；
+ * 并发的第二次调用复用同一次进行中的安装，装完自动清空。
+ */
+let browserInstallPromise = null;
 
 /**
  * 「导入登录态」允许的源 profile 根目录（0.14.4）。
@@ -133,6 +148,10 @@ export function createWebControl(deps = {}) {
     // 本机文件（0.16.38）。由宿主侧注入（argv 调用，不经 shell）；缺省 null 时
     // 「打开文件」这条路如实回 unavailable，而不是假装成功。
     openPath = null,
+    // () → string|null：当前会话的工作目录（0.19.0）。由宿主注入，使任务台账的
+    // 读写根与 `roster.js` 的任务投影**同源**（两侧各取各的根会让同一块界面拿到
+    // 两份互不可见的台账）。缺省 null 时回落 config / process.cwd()，见 `taskRootOf`。
+    resolveWorkspaceRoot = null,
   } = deps;
   const log = (...a) => logger.log?.('[webcode-web]', ...a);
   const warn = (...a) => logger.warn?.('[webcode-web]', ...a);
@@ -246,6 +265,51 @@ export function createWebControl(deps = {}) {
       });
       req.on('error', () => resolve({}));
     });
+  }
+
+  /**
+   * 任务台账的存储根 —— **全族路由的唯一取法**（0.19.0 收口）。
+   *
+   * ## 为什么必须收敛成一处
+   *
+   * 这条表达式原先在 7 条 `task-*` 路由里各内联了一份
+   * （`body?.workspaceRoot || config.workspaceRoot || process.cwd()`），而**读**任务板
+   * 的另一侧（`roster.js` 的 `projectTasks`）用的是 `cwdOf(ctx, sessionId)` ——
+   * **会话的工作目录**。两边因此可以指向两个不同的 `.webcode-tasks/ledger.json`：
+   * 同一块界面上，任务板与花名册会拿两份互不可见的数据（0.19.0 独立审查发现）。
+   * 这正是本项目记过的「同一件事两份真相」。
+   *
+   * 而 `config.workspaceRoot` 在本仓库里**从未被赋值**、`workspaceRoot` 也**从未被
+   * 任何随包客户端发送**（客户端调 `api('task-ledger')` 时不带 body），所以那两段
+   * 其实从不生效，路由侧恒定落到 `process.cwd()` —— 那是**宿主进程**的目录，
+   * 不是用户打开的那个项目。
+   *
+   * ## 取法（按「具体到笼统」）
+   *
+   *   ① 调用方显式给的 `workspaceRoot`（脚本 / 测试 / 将来的多工作区前端）；
+   *   ② `config.workspaceRoot`（宿主注入）；
+   *   ③ 注入的 `resolveWorkspaceRoot()`（宿主在这里给出**当前会话的工作目录**，
+   *      与 roster 侧同源——index.js 接上之后两侧就永远看同一份台账）；
+   *   ④ `process.cwd()`。
+   *
+   * 末端仍回落 `process.cwd()`（不抛错）：拿不到根时「能读能写」比「整块面板报错」
+   * 更有用，且 `readLedger` 对不存在的文件返回的是**真实的「没有任务」**。
+   * 返回值经 `GET task-ledger` 的 `workspaceRoot` 字段如实透出，让「面板读的到底是
+   * 哪一份台账」成为可核对的读数，而不是要人去猜。
+   *
+   * @param {object|null} body 请求体 / query
+   * @returns {string} 绝对目录（不做存在性检查）
+   */
+  function taskRootOf(body) {
+    const given = String(body?.workspaceRoot || '').trim();
+    if (given) return given;
+    const fromConfig = String(config.workspaceRoot || '').trim();
+    if (fromConfig) return fromConfig;
+    try {
+      const resolved = resolveWorkspaceRoot?.();
+      if (typeof resolved === 'string' && resolved.trim()) return resolved.trim();
+    } catch { /* 宿主给的解析器抛错不该让写路径失败，落到 cwd */ }
+    return process.cwd();
   }
 
   /**
@@ -655,6 +719,58 @@ export function createWebControl(deps = {}) {
           + '；清理 ' + (probe.cleaned ? '成功（' + probe.cleanedBy + '）' : '未完成（' + (probe.cleanupNote || probe.cleanedBy) + '）'));
       return { ok: true, effective: chosen, limit, last, probe, transportLine, lastLine, probeLine };
     },
+    // ── 浏览器来源与安装（0.18.0）────────────────────────────────────────────
+    //
+    // 兑现用户要求「尽量对应本插件外的少干扰少依赖，确保人人下载安装可用本插件
+    // 所有功能」。把 426.7 MB 的 Chromium 打进 npm 包不现实（tarball 会从 543 KB
+    // 涨到 400 MB+），因此走「优先用 playwright 自带的那份，缺了再下」。
+    //
+    // 为什么必须能**查询**（GET）：用户要能核对「现在到底用哪个浏览器、从哪来」。
+    // 这是可以用一次请求验证的性质，不该只活在代码里。
+    'GET browser-runtime': async () => {
+      const r = resolveBrowserExecutable();
+      return {
+        ok: true,
+        ready: r.path !== null,
+        source: r.source,
+        executablePath: r.path,
+        revision: r.revision,
+        // 给面板一句可直接显示的话，避免前端再拼一遍（两处措辞迟早漂移）。
+        line: r.source === 'bundled' ? '使用插件自带 Chromium（推荐，与日常浏览器零交叉）'
+          : r.source === 'system' ? '使用本机已安装的浏览器（兜底）'
+            : '未找到可用的浏览器 —— 需要下载',
+        hint: r.path === null
+          ? '点击「下载浏览器」会拉取 playwright 自带的 Chromium（约 150 MB，仅一次）'
+          : null,
+      };
+    },
+    // 下载自带 Chromium。**只在真的缺浏览器时才该被调用**（有系统浏览器时
+    // 也能用，没必要强制下载）。
+    //
+    // 串行化：下载是重 IO 动作，并发的第二次调用只会浪费带宽并可能写坏同一个
+    // 下载目录，因此用模块级 promise 复用同一次进行中的安装。
+    'POST browser-install': async () => {
+      const existing = resolveBrowserExecutable();
+      if (existing.path) {
+        return { ok: true, already: true, source: existing.source, executablePath: existing.path };
+      }
+      if (!browserInstallPromise) {
+        browserInstallPromise = installBundledChromium({ timeoutMs: 10 * 60_000 })
+          .finally(() => { browserInstallPromise = null; });
+      }
+      const res = await browserInstallPromise;
+      const after = resolveBrowserExecutable();
+      return {
+        ok: res.ok === true && after.path !== null,
+        source: after.source,
+        executablePath: after.path,
+        revision: after.revision,
+        code: res.code,
+        // 命令输出尾部透出：失败时用户/我们能直接看到真实原因，
+        // 而不是只收到一个「安装失败」。
+        output: res.output ? String(res.output).slice(-1200) : null,
+      };
+    },
     'POST consent': async (body) => {
       if (!relay) return { ok: false, error: 'no relay' };
       relay.setConsent(body?.accepted === true);
@@ -1042,6 +1158,162 @@ export function createWebControl(deps = {}) {
         workspaceId: String(body?.workspaceId || ''),
       });
     },
+    // ── 任务看板独立数据层与控制面动作（0.17.3，对齐 dsh-task-board 与 Notion 式批注）──
+    //
+    // 台账存储根走**同一个**解析器 `taskRootOf`（0.19.0 收口），理由见它自己的注释。
+    'GET task-ledger': async (body) => {
+      const root = taskRootOf(body);
+      const { ledger, error } = readLedger(root);
+      return { ok: error === null, ledger, tasks: rowsOf(ledger), error, workspaceRoot: root };
+    },
+    'POST task-create': async (body) => {
+      const root = taskRootOf(body);
+      const { ledger: cur, error: rErr } = readLedger(root);
+      if (rErr) return { ok: false, error: rErr };
+      const now = Date.now();
+      const res = applyCreate(cur, {
+        subject: body?.subject,
+        description: body?.description,
+        ownerName: body?.ownerName,
+        assignedModel: body?.assignedModel,
+        sessionKey: body?.sessionKey,
+        projectId: body?.projectId,
+        writeScopes: body?.writeScopes,
+        maxAttempts: body?.maxAttempts,
+        // 排期与执行面（0.19.0）：用户要求「设置接任务智能体和时间，以及模式，权限」。
+        // 不在这里透传的话，界面填了、客户端发了，服务端**丢掉**——那是静默失败。
+        schedule: body?.schedule,
+        startAt: body?.startAt,
+        cron: body?.cron,
+        mode: body?.mode,
+        permission: body?.permission,
+        reuseSession: body?.reuseSession,
+      }, now);
+      if (res.error) return { ok: false, error: res.error };
+      const wRes = writeLedger(root, res.ledger);
+      if (wRes.error) return { ok: false, error: wRes.error };
+      return { ok: true, task: res.task, tasks: rowsOf(res.ledger) };
+    },
+    'POST task-update': async (body) => {
+      const root = taskRootOf(body);
+      const { ledger: cur, error: rErr } = readLedger(root);
+      if (rErr) return { ok: false, error: rErr };
+      const now = Date.now();
+      const res = applyUpdate(cur, body?.taskId, body?.patch || {}, now, body?.expectedRevision ?? null);
+      if (res.error) return { ok: false, error: res.error };
+      const wRes = writeLedger(root, res.ledger);
+      if (wRes.error) return { ok: false, error: wRes.error };
+      return { ok: true, task: res.task, tasks: rowsOf(res.ledger) };
+    },
+    'POST task-delete': async (body) => {
+      const root = taskRootOf(body);
+      const { ledger: cur, error: rErr } = readLedger(root);
+      if (rErr) return { ok: false, error: rErr };
+      const now = Date.now();
+      const res = applyDelete(cur, body?.taskId, now);
+      if (res.error) return { ok: false, error: res.error };
+      const wRes = writeLedger(root, res.ledger);
+      if (wRes.error) return { ok: false, error: wRes.error };
+      return { ok: true, task: res.task, prunedFrom: res.prunedFrom, tasks: rowsOf(res.ledger) };
+    },
+    'POST task-comment': async (body) => {
+      const root = taskRootOf(body);
+      const { ledger: cur, error: rErr } = readLedger(root);
+      if (rErr) return { ok: false, error: rErr };
+      const now = Date.now();
+      const res = applyAddComment(cur, body?.taskId, {
+        quote: body?.quote,
+        text: body?.text,
+        author: body?.author || 'user',
+      }, now, body?.expectedRevision ?? null);
+      if (res.error) return { ok: false, error: res.error };
+      const wRes = writeLedger(root, res.ledger);
+      if (wRes.error) return { ok: false, error: wRes.error };
+      return { ok: true, comment: res.comment, tasks: rowsOf(res.ledger) };
+    },
+    'POST task-comment-resolve': async (body) => {
+      const root = taskRootOf(body);
+      const { ledger: cur, error: rErr } = readLedger(root);
+      if (rErr) return { ok: false, error: rErr };
+      const now = Date.now();
+      const res = applyResolveComment(cur, body?.taskId, body?.commentId, now, body?.expectedRevision ?? null);
+      if (res.error) return { ok: false, error: res.error };
+      const wRes = writeLedger(root, res.ledger);
+      if (wRes.error) return { ok: false, error: wRes.error };
+      return { ok: true, comment: res.comment, tasks: rowsOf(res.ledger) };
+    },
+    'POST task-implement': async (body) => {
+      const root = taskRootOf(body);
+      const { ledger: cur, error: rErr } = readLedger(root);
+      if (rErr) return { ok: false, error: rErr };
+      const taskId = String(body?.taskId || '');
+      const task = (Array.isArray(cur?.tasks) ? cur.tasks : []).find((t) => String(t.id) === taskId);
+      if (!task) return { ok: false, error: 'task-not-found' };
+
+      const instructions = String(body?.instructions || body?.commentText || '').trim();
+      const quote = String(body?.quote || '');
+      const assignedModel = task.assignedModel || null;
+
+      // 组装派发指令
+      const prompt = [
+        `【任务执行指令】针对任务 [${task.id}] ${task.subject}:`,
+        task.description ? `任务说明:\n${task.description}` : '',
+        quote ? `针对正文片段的批注引用:\n> ${quote}` : '',
+        instructions ? `用户反馈与实施要求:\n${instructions}` : '',
+        '请根据以上批注和要求，真实执行并实现代码修改或分析。',
+      ].filter(Boolean).join('\n\n');
+
+      // 诚实字段：本动作**只组装指令**，真正的派发由客户端拿着 `prompt` 调
+      // `POST chat`（见 lib/client.cjs 的 onImplement）。0.17.3 之前这里写的是
+      // `dispatched: true`，而当时客户端根本不派发 —— 那个字段是假的。
+      return {
+        ok: true,
+        dispatched: false,
+        dispatchBy: 'client',
+        taskId: task.id,
+        sessionKey: task.sessionKey,
+        assignedModel,
+        prompt,
+      };
+    },
+    'POST chat': async (body) => {
+      const siteId = String(body?.siteId || 'deepseek');
+      const prompt = String(body?.prompt || '').trim();
+      if (!prompt) return { ok: false, error: 'empty-prompt' };
+      if (!relay?.status().consent) return { ok: false, error: '请在设置中启用网页自动化' };
+
+      // 任务侧派发要能落到**该任务自己的会话**上（`task.sessionKey`），否则「以任务
+      // 为核心实现会话」就断了：同一任务的多轮实施会各自开一个新会话。
+      //
+      // ⚠️ `fresh` 的判据必须是「**槽里确实存着**一个可续的会话」，而不是「调用方
+      // 传了 sessionKey」。0.17.3 第三轮真机抓到的严重缺陷就出在这里：
+      //
+      //   我一度写成 `fresh = !body?.sessionKey`，于是**全新**的 `task-session-t3-…`
+      //   带着 fresh=false 进入 `driver.sendTurn`；而驱动的 url-heal 分支
+      //   （`browser-driver.js:2624`）在「槽为空且 fresh=false」时会把**页面当前所在
+      //   的会话**采纳为本轮会话 —— 当时浏览器正开着我自己的 DSH 会话，于是任务指令
+      //   被发进了**用户当前正在看的那个对话**，`chat` 读回来的「回复」是我上一条消息
+      //   的原文。真机证据：`navTrace` 里 `task-session-t3-muc2xo2n` 与
+      //   `session-0f9fe6cf-…` 的 `landedId` 同为 `37820be9-…`。
+      //
+      // url-heal 本身是对的（它救的是「失败轮次没落盘」的历史槽，见那里的长注释），
+      // 不该动它；错的是调用方把一个**从未建立过**的会话键当成可续会话递给它。
+      // 判据：先问驱动有没有这个槽，有才 resume。
+      const sessionKey = String(body?.sessionKey || `chat-${siteId}-${Date.now().toString(36)}`);
+      const target = relay?.config?.siteConnect?.(accountKeyOf(body)) || driver;
+      const stored = typeof target?.conversationFor === 'function'
+        ? target.conversationFor(sessionKey)
+        : null;
+      const fresh = !stored?.webSessionId;
+      if (typeof target?.sendTurn === 'function') {
+        const res = await target.sendTurn(sessionKey, prompt, { fresh, model: body?.model });
+        return { ok: true, reply: res?.text || res || '', sessionKey, fresh, resumed: !fresh };
+      }
+      // 没有可用的驱动时**如实报错**。原先这里回 `{ok:true, reply:'[已向 X 投递: …]'}`
+      // —— 那是一条编出来的「成功」，用户会以为消息真的发出去了。
+      // 本项目对「说做了、其实没做」有明确纪律，故改为 `ok:false`。
+      return { ok: false, error: `no-driver-for-site: ${siteId}（网页驱动不可用，消息未发出）` };
+    },
   };
 
   // ── `status` 必须同时接受 GET 与 POST（0.15.3，真机缺陷修复）────────────────
@@ -1071,10 +1343,6 @@ export function createWebControl(deps = {}) {
   // `api(action, body)` 推导出的方法与服务端动作表直接对齐，于是这一族
   // 「调用点存在、另一端没有」的缺陷从此在离线就能红。
   actions['POST status'] = actions['GET status'];
-
-  // `session-slot` 同样两头都收（与 status 同一理由：客户端统一走「有 body 就
-  // POST」，而排障形态天然是 `curl .../__webcode/session-slot` 这种 GET）。
-  // 别名而不是复制实现——两个方法必须返回逐字相同的形状。
   actions['POST session-slot'] = actions['GET session-slot'];
 
   /**

@@ -22,7 +22,17 @@ import { createBrowserDriver } from './browser-driver.js';
 import { zeroProgressDecision } from './zero-progress.js';
 import { idleWindowDecision } from './idle-window.js';
 import { createWebControl, buildSessionEvents, mainLineOf } from './web-control.js';
-import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, stripProtocolRegions, proseSafeEnd, readCallAt, partialProtocolAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeOfficialToolCalls, normCallArgs, inferToolNameFromArgs, recoverUnparsedCalls, officialToolCallSpecimen, officialCallExampleFor, transportNoteFor, buildPreset } from './agent-preset.js';
+import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, stripProtocolRegions, proseSafeEnd, readCallAt, partialProtocolAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeOfficialToolCalls, normCallArgs, inferToolNameFromArgs, recoverUnparsedCalls, officialToolCallSpecimen, officialCallExampleFor, buildPreset } from './agent-preset.js';
+// 只用 `teachFor`（1146 的续跑重申、3290 的首轮落盘）——那两处是**真调用**，
+// 即计划 Task 1.4 所说的「教学提示按 teachShape 选支」。
+// `transportShapeForSite` 曾一并 import 但全文件零调用（第三轮自审发现），已移除；
+// 它仍是 tool-transport.js 的公开导出，被 tool-parser.js 与 tool-transport.test.mjs 用。
+import { teachFor } from './tool-transport.js';
+// 注意（0.17.3）：这里**不再** import `tool-parser.js`。它是一层对 `parseAgentReply`
+// 的纯委托薄壳，本文件已经直接用 agent-preset 的解析器 + 自己的流式状态机，接上它
+// 只会多一跳而行为逐字不变。原先那行 import 是**死的**（全文件零调用），而
+// tool-parser.js 的头注却写着「已正式接线」——两者都是假话，第三轮自审发现后按本项目
+// 纪律改回事实。该模块仍被单测引用，去留见计划 Task 1.4。
 import { appendReplyLog } from './reply-log.js';
 import { contractFingerprintOf, reanchorSent, messageHash, ANCHOR_LEN } from './session-anchor.js';
 import { writePromptFiles, readPromptFile, sitePromptPath, sessionPromptPath, DEFAULT_PROMPT_STORE_DIR } from './prompt-store.js';
@@ -60,7 +70,9 @@ import { textOfBlocks } from './flatten.js';
 // 被 web-control 的 try/catch 降级成 `subAgentsError: "roster-threw: projectRoster is not defined"`，
 // 面板永久空白（与 0.14.9「写死空数组」的可见后果一致）。
 // 护栏：test/wiring-roster.test.mjs 走真实 apply() → HTTP → /status 钉住整条路径。
-import { projectRoster } from './roster.js';
+// workspaceRootOf 供控制面解析任务台账的存储根：与 projectTasks 内部的 cwdOf
+// 是**同一个函数**，两侧因此不可能对「工作目录是什么」有第二种判据。
+import { projectRoster, workspaceRootOf } from './roster.js';
 import { estimateTokens, computeSendGap, checkContextBudget } from './metrics.js';
 import { accumulateWait, sanitizeWaitStats, emptyWaitStats, composerWaitLine, waitStatRows, formatDuration } from './wait-stats.js';
 import { renderSettingsPage } from './settings-page.js';
@@ -599,6 +611,9 @@ function frontClaims(pathname) {
  * @returns {void}
  */
 export function apply(ctx, config = {}) {
+  // 最近一次被 `/status` 投影过的会话 id（0.19.0）。任务台账的**写**路径不带会话身份，
+  // 用它与 roster 的任务投影共用同一个工作目录根，避免「任务板与花名册各读一份台账」。
+  let lastProjectedSessionId = null;
   const cfg = { ...DEFAULTS, ...(config || {}) };
   // Stable fingerprint surfaced in /__webcode/status so a packed installation
   // can be compared with the workspace build without restarting the GUI here.
@@ -1137,7 +1152,7 @@ export function apply(ctx, config = {}) {
         // （noticeText 本身已由 unparsedCallNotice 按官方骨架给出重发示例，这里
         // 补的是**完整协议段**：它带着该站点的格式立场与行为约束。）
         const siteId = turn.meta?.siteId || null;
-        const transport = transportNoteFor(siteId, tools);
+        const transport = teachFor(siteId, tools);
         // 0.16.28：框架前置。真机（session-4f236a51）里模型读到再教学提示会停下来
         // 「回应提醒」而不是「按提醒行动」——续跑轮的开头必须先声明这条消息的身份
         // （系统提示、勿回应），把模型的注意力钉回任务。协议段（transport）保留：
@@ -3046,7 +3061,22 @@ function imageMarkdown(images) {
     // Team 成员来自官方 agentTeams 服务。两者各自独立降级，读不到时给空数组
     // 并把原因放进 *Error（面板据此区分「确实没有」与「读不到」）。
     // sessionId 决定看**哪个会话**的子代理目录——面板轮询时会带上它。
-    rosterOf: (sessionId) => projectRoster(ctx, sessionId),
+    rosterOf: (sessionId) => {
+      // 记下最近一次被投影的会话：任务台账的写路径（下面 `resolveWorkspaceRoot`）
+      // 没有会话身份可拿，用「面板此刻正在看的那个会话」作为同源依据。
+      if (sessionId) lastProjectedSessionId = String(sessionId);
+      return projectRoster(ctx, sessionId);
+    },
+    // 任务台账的存储根（0.19.0）：与上面的任务投影**共用同一套判据**
+    //（`roster.workspaceRootOf` 就是 `projectTasks` 用的那个 `cwdOf`）。
+    //
+    // 为什么现在只取「最近一次投影过的会话」而不是从请求里拿 sessionId：
+    // 控制面请求里**没有**会话身份（随包客户端调 task 族端点时不带 body），
+    // 而现编一个会话 id 去猜工作目录正是本项目禁止的那类猜测。因此这里用任务
+    // 投影最近一次用过的会话做根（与「面板正在看的那个人」同源），拿不到就返回
+    // null 让路由回落 `process.cwd()`——`GET task-ledger` 会把实际用的根透出。
+    // 「客户端带上 sessionId」是遗留收口项，见 doc/progress.md 对应行。
+    resolveWorkspaceRoot: () => workspaceRootOf(ctx, lastProjectedSessionId),
     // 「用系统默认程序打开提示词文件」（0.16.38）：平台差异收在 openPathWithDefaultApp。
     openPath: (absPath) => openPathWithDefaultApp(absPath),
   });
@@ -3281,7 +3311,7 @@ function imageMarkdown(images) {
       writePromptFiles({
         siteId,
         sessionKey: keyPath,
-        siteText: buildPreset({ ...options, extraPrompt, sitePrompt, siteId }) + transportNoteFor(siteId, options.tools),
+        siteText: buildPreset({ ...options, extraPrompt, sitePrompt, siteId }) + teachFor(siteId, options.tools),
         sessionText: prompt,
       });
     }

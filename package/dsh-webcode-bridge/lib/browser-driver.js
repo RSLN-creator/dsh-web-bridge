@@ -1,8 +1,13 @@
 // browser-driver.js — 内置浏览器自动化（无需扩展）。
 //
-// 用系统 Edge（playwright-core + executablePath）以独立持久 profile 驱动内容
-// 服务网页：首次 headed 登录一次，之后 headless——填输入框、自动发送、通过
-// init 脚本捕获站点自身的 SSE 流并吐出增量。
+// 用 **playwright 自带 Chromium 优先、系统浏览器兜底**（playwright-core +
+// executablePath）以独立持久 profile 驱动内容服务网页：首次 headed 登录一次，
+// 之后 headless——填输入框、自动发送、通过 init 脚本捕获站点自身的 SSE 流并吐出增量。
+//
+// 「自带优先」是 0.18.0 的改动：在此之前只认系统 Edge/Chrome/Brave，于是
+// ① 没装浏览器的机器直接不可用，而 playwright-core 自带的 Chromium 本来就在；
+// ② 登录态长期与用户日常浏览器混淆（两套 profile 互不相通）。自带 Chromium 让
+// 桥的 profile 完全自持，兑现「下载本插件即可用全部功能」。选路逻辑见 bundledChromiumPath。
 //
 // 多站点：站点契约（输入框/按钮/捕获路径/解码器）来自 lib/contract.js；
 // 解码器实例从 globalThis.WebCodeStreamDecoders 按站点 decoder 字段选用；
@@ -12,6 +17,7 @@
 // {text, thinking, images}——修复“没有思考链条”“有图说没图”。
 
 import { chromium } from 'playwright-core';
+import { findSystemChromium, resolveBrowserExecutable, isBundledChromiumPath, installBundledChromium } from './browser-runtime.js';
 import { toPlaywrightCookie } from './cookies.js';
 import { getSite, getContract, resolveWebModel, conversationNav, conversationIdFromUrl } from './contract.js';
 import { DEFAULT_SLOT, normalizeSlot } from './accounts.js';
@@ -671,10 +677,13 @@ export function createBrowserDriver(options = {}) {
       return await p.evaluate(() => {
         const t = String(document.title || '');
         const body = String(document.body?.innerText || '');
-        // 三种指纹任一命中即算：title、可见文案、WAF 脚本标识
-        if (/滑动验证|访问验证|安全验证|验证页面/.test(t)) return 'waf-title';
-        if (/访问验证|请按住滑块|拖动到最右边/.test(body)) return 'waf-body';
-        if (/CF_APP_WAF|aliyun_waf|_waf_[0-9a-f]+/.test(document.documentElement?.innerHTML || '')) return 'waf-script';
+        const html = String(document.documentElement?.innerHTML || '');
+        // 1. 标题命中滑块/验证/风控
+        if (/滑动验证|访问验证|安全验证|验证页面|人机验证|人机身份验证|系统安全验证/.test(t)) return 'waf-title';
+        // 2. 可见文案命中滑块、手势、点击、高频限制
+        if (/访问验证|请按住滑块|拖动到最右边|向右拖动滑块|拖动滑块完成验证|请完成下方验证|请点击下方图形|请依次点击|操作过于频繁|系统繁忙，请稍后再试|访问受限|请求过于频繁|验证码错误/.test(body)) return 'waf-body';
+        // 3. WAF、极验、腾讯防水墙、阿里滑块脚本/容器指纹
+        if (/CF_APP_WAF|aliyun_waf|_waf_[0-9a-f]+|baxia-punish|baxia-dialog|geetest|TencentCaptcha|sec_def_pc|sec_def_h5|cf-turnstile/.test(html)) return 'waf-script';
         return null;
       });
     } catch { return null; }
@@ -910,6 +919,15 @@ export function createBrowserDriver(options = {}) {
       slot,
       accountKey: slot === DEFAULT_SLOT ? siteId : siteId + '#' + slot,
       profileDir: cfg.profileDir,
+      // 0.18.0：**用的哪个浏览器**必须可核对。用户要的「零外部依赖、下载插件即可用」
+      // 是可以用一次 GET 验证的性质，不该只活在代码里。
+      //   · browserSource='bundled' —— playwright 自带的 Chromium（插件自持，推荐）
+      //   · browserSource='system'  —— 本机 Edge/Chrome/Brave（兜底）
+      //   · browserSource=null      —— 一个都没找到，`ensure()` 会抛可读安装指引
+      executablePath: cfg.executablePath || null,
+      browserSource: cfg.executablePath
+        ? (isBundledChromiumPath(cfg.executablePath) ? 'bundled' : 'system')
+        : null,
       loginState,
       lastLogin,
       recoveredTurns,
@@ -1013,48 +1031,24 @@ export function createBrowserDriver(options = {}) {
   }
 
   function defaultChromiumPath() {
-    const localAppData = process.env.LOCALAPPDATA || '';
-    const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
-    const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
-
-    const candidates = [
-      // 1. Edge
-      path.join(programFiles, 'Microsoft\\Edge\\Application\\msedge.exe'),
-      path.join(programFilesX86, 'Microsoft\\Edge\\Application\\msedge.exe'),
-      localAppData ? path.join(localAppData, 'Microsoft\\Edge\\Application\\msedge.exe') : '',
-      // 2. Google Chrome
-      path.join(programFiles, 'Google\\Chrome\\Application\\chrome.exe'),
-      path.join(programFilesX86, 'Google\\Chrome\\Application\\chrome.exe'),
-      localAppData ? path.join(localAppData, 'Google\\Chrome\\Application\\chrome.exe') : '',
-      // 3. Brave
-      path.join(programFiles, 'BraveSoftware\\Brave-Browser\\Application\\brave.exe'),
-      localAppData ? path.join(localAppData, 'BraveSoftware\\Brave-Browser\\Application\\brave.exe') : '',
-      // 4. Chromium / Vivaldi
-      path.join(programFiles, 'Chromium\\Application\\chrome.exe'),
-      localAppData ? path.join(localAppData, 'Vivaldi\\Application\\vivaldi.exe') : '',
-      // macOS
-      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
-      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-      '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
-      '/Applications/Chromium.app/Contents/MacOS/Chromium',
-      // Linux
-      '/usr/bin/microsoft-edge',
-      '/usr/bin/microsoft-edge-stable',
-      '/usr/bin/google-chrome',
-      '/usr/bin/google-chrome-stable',
-      '/usr/bin/chromium',
-      '/usr/bin/chromium-browser',
-      '/usr/bin/brave-browser',
-    ].filter(Boolean);
-
-    for (const c of candidates) {
-      try { if (fs.existsSync(c)) return c; } catch {}
-    }
-    return null;
+    return findSystemChromium();
   }
+
+  /**
+   * 默认浏览器：**自带 Chromium 优先，系统浏览器兜底**。
+   *
+   * 顺序的理由：自带的那份是插件能保证存在与版本可控的一份；系统浏览器是
+   * 「用户碰巧装了」的运气。让可控的来源优先，才能兑现「下载插件即可用」。
+   * 两者都没有时返回 null，由 `launch()` 抛出可读的安装指引（那时确实无解）。
+   *
+   * @returns {string|null}
+   */
   function defaultEdgePath() {
-    return defaultChromiumPath();
+    // 浏览器来源的唯一真相在 browser-runtime.js（面板报状态、缺时安装也读那一份）。
+    // 这里只取路径：把「自带优先、系统兜底」的顺序与扫描逻辑留在那边，避免两份实现漂移。
+    return resolveBrowserExecutable().path;
   }
+
 
   function onPageCapture(m) {
     if (!active) return;
@@ -1327,15 +1321,22 @@ export function createBrowserDriver(options = {}) {
       // 统一成全反斜杠再匹配：调用方传混合分隔符（C:\Users\x/.dsh/…）时
       // -like 永远匹配不上（真机踩过）。
       const dir = String(cfg.profileDir).replace(/\//g, '\\').replace(/'/g, "''");
+      // 0.18.0：进程名**不能写死 `msedge.exe`**。浏览器来源改成「自带 Chromium 优先」
+      // 之后，实际跑的是 `chrome.exe`（playwright 的 Chromium）；只按 msedge 过滤会
+      // 一个都匹配不到，孤儿进程留在那里持有 profile 单实例锁 —— 表现为下一次
+      // launch 报 ProcessSingleton/SingletonLock，而自愈路径恰好也依赖这个函数。
+      // 这里按**可执行文件名**取，同时覆盖 Edge / Chrome / Brave / Vivaldi / Chromium。
+      const exeName = path.basename(String(cfg.executablePath || 'msedge.exe'));
+      const safeName = exeName.replace(/'/g, "''");
       const script =
-        `$procs = Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" | ` +
+        `$procs = Get-CimInstance Win32_Process -Filter "Name='${safeName}'" | ` +
         `Where-Object { $_.CommandLine -like '*${dir}*' }; ` +
         `foreach ($p in $procs) { Invoke-CimMethod -InputObject $p -MethodName Terminate | Out-Null; Write-Output $p.ProcessId }`;
       const out = child_process.execFileSync('powershell.exe', ['-NoProfile', '-Command', script], { timeout: 30_000, encoding: 'utf8' });
       const pids = out.split(/\s+/).filter(Boolean);
-      if (pids.length) warn(`killed orphan Edge for profile via WMI (pids: ${pids.join(', ')})`);
+      if (pids.length) warn(`killed orphan browser (${exeName}) for profile via WMI (pids: ${pids.join(', ')})`);
       setTimeout(() => clearStaleProfileLocks(), 500);
-    } catch (err) { warn('orphan edge kill failed:', err?.message); }
+    } catch (err) { warn('orphan browser kill failed:', err?.message); }
   }
 
   /** 经 CDP 优雅回收孤儿 Edge：launch 时带 --remote-debugging-port=0，profile 里的
@@ -1356,8 +1357,52 @@ export function createBrowserDriver(options = {}) {
     } catch (err) { warn('cdp orphan release failed:', err?.message); return false; }
   }
 
+  // ── 「下载插件即可用」的最后一块（0.18.0）─────────────────────────────────
+  //
+  // 用户要求（2026-09-22，逐字）：「直接复制过来 chrom 核做到只用下载本插件就能实现」
+  // 「尽量对应本插件外的少干扰少依赖，确保人人下载安装可用本插件所有功能」。
+  //
+  // 426 MB 的 Chromium 打不进 npm 包（当前 tarball 543 KB），因此兑现方式是
+  // **缺的时候自己下**。设置页的「下载浏览器」按钮是**可选加速入口**，不是唯一入口：
+  // 新用户第一次点「连接 / 登录」走的正是 launch —— 那一刻若只抛一句「请手动执行
+  // CLI 命令」，他看到的仍然是「插件不能用」。所以补齐动作必须在 launch 里。
+  //
+  // 并发保护：同一次下载在进程内复用（与 web-control 的 browserInstallPromise 同族）。
+  // 两个面板同时触发时不该下两份、更不该写坏同一个下载目录。
+  let autoInstallPromise = null;
+
+  /**
+   * 确保有一个可用的浏览器可执行文件；没有就自己下。
+   *
+   * @returns {Promise<string>} 可执行文件绝对路径
+   * @throws {Error} 下载也失败时抛出，错误里带**真实原因**（code + 输出尾部）
+   */
+  async function ensureExecutable() {
+    if (cfg.executablePath) return cfg.executablePath;
+    // 再解析一次：用户可能刚在设置页点过「下载浏览器」，或本机新装了浏览器。
+    // 构造时算的那一次不该成为永久判决。
+    const again = resolveBrowserExecutable();
+    if (again.path) { cfg.executablePath = again.path; return cfg.executablePath; }
+    if (!autoInstallPromise) {
+      warn('未找到任何浏览器 —— 正在下载插件自带 Chromium（仅一次，约 150 MB）…');
+      autoInstallPromise = installBundledChromium({ timeoutMs: 10 * 60_000 })
+        .finally(() => { autoInstallPromise = null; });
+    }
+    const res = await autoInstallPromise;
+    const after = resolveBrowserExecutable();
+    if (after.path) {
+      cfg.executablePath = after.path;
+      log('自带 Chromium 就绪：' + after.path + '（revision ' + after.revision + '）');
+      return cfg.executablePath;
+    }
+    // 下载失败：报真实原因，不报「安装失败」这种没法排查的话。
+    throw new Error('未找到可用的浏览器，自动下载也失败了（' + (res?.code || 'unknown') + '）：'
+      + String(res?.output || '').slice(-400)
+      + ' —— 可在设置页点「下载浏览器」重试，或在设置里指定 executablePath');
+  }
+
   async function launch({ headless } = {}) {
-    if (!cfg.executablePath) throw new Error('Chromium-based browser not found — install Edge, Chrome, Brave or set executablePath');
+    await ensureExecutable();
     fs.mkdirSync(cfg.profileDir, { recursive: true });
     clearStaleProfileLocks();
     const launchOnce = () => chromium.launchPersistentContext(cfg.profileDir, {

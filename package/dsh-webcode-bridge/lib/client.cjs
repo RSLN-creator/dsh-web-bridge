@@ -201,6 +201,10 @@ window.__ModuleLoader__.load({
      */
     function sourceText(src) {
       if (src === 'service') return '来源：AgentTeams 服务';
+      // 0.19.0 对账 262（roster.js `projectTasks` 落库回落分支把 `source` 置成
+      // `'ledger'`，此前这里没有该键的映射 → 路基任务板最常见的来源反而**不显示**
+      // 出处标注，看起来像「数据来源不明」。补上：`ledger` = 桥自有任务台账。
+      if (src === 'ledger') return '来源：桥自有任务台账（.webcode-tasks/ledger.json）';
       if (src === 'disk') return '来源：磁盘状态（AgentTeams 未提供实时数据）';
       return null;
     }
@@ -216,8 +220,9 @@ window.__ModuleLoader__.load({
      * 没了、要去重新创建——而正确动作只是发消息唤醒它。真正终态（done/completed）
      * 与停用（stopped）另算，不与该词混用。
      *
-     * 提到模块作用域是因为 Team 面板与设置页花名册读**同一份**状态语义：
-     * 两处各写一份迟早会出现「设置页说空闲、面板说工作中」。
+     * 提到模块作用域是因为设置页花名册与任务板读**同一份**状态语义：
+     * 两处各写一份迟早会出现「花名册说空闲、任务板说工作中」。
+     *（0.19.0：原先这里还并列了「Team 面板」，那份右栏花名册面板已删除。）
      */
     function rosterStateOf(x) {
       const s = String(x?.status || x?.state || '').toLowerCase();
@@ -234,6 +239,39 @@ window.__ModuleLoader__.load({
     // 站点显示名 + 多站点模型目录（打开时从 /__webcode/models 拉取）
     const SITE_NAMES = { deepseek: 'DeepSeek', glm: '智谱清言', chatgpt: 'ChatGPT', kimi: 'Kimi', qwen: '通义千问', doubao: '豆包', grok: 'Grok', claude: 'Claude', gemini: 'Gemini', zai: 'Z.ai' };
     const siteName = sid => SITE_NAMES[sid] || sid;
+    /**
+     * 毫秒时间戳 → `<input type="datetime-local">` 要的**本地时间**字符串。
+     *
+     * 为什么不能用 `toISOString().slice(0,16)`：那是 **UTC**。用户在东八区会看到
+     * 差 8 小时的时间；更要命的是「读出来 → 原样存回去」会把时间**每次打开漂一次**，
+     * 而界面上完全看不出来（数字看着都合理）。因此按本地时区手工拼这个字符串。
+     *
+     * 空/非法值一律回 `''`（不是 `undefined`）：受控 input 的 value 为 undefined
+     * 会让 React 把它变成非受控组件并打警告。
+     *
+     * @param {number|null|undefined} ms 毫秒时间戳
+     * @returns {string} `YYYY-MM-DDTHH:mm`，或空串
+     */
+    function toLocalInputValue(ms) {
+      const n = Number(ms);
+      if (!Number.isFinite(n) || n <= 0) return '';
+      const d = new Date(n);
+      const p = (x) => String(x).padStart(2, '0');
+      return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+        + 'T' + p(d.getHours()) + ':' + p(d.getMinutes());
+    }
+    /**
+     * 毫秒时间戳 → 可读的本地时间文本（面板上显示创建/更新时间用）。
+     * 读不到就给一个**明确说读不到**的占位，而不是 `Invalid Date` 这种假值。
+     *
+     * @param {number|undefined} ms 毫秒时间戳
+     * @returns {string}
+     */
+    function formatStamp(ms) {
+      const n = Number(ms);
+      if (!Number.isFinite(n) || n <= 0) return '读不到';
+      return new Date(n).toLocaleString();
+    }
     const SITE_ORIGINS = {
       deepseek: 'https://chat.deepseek.com',
       glm: 'https://chatglm.cn',
@@ -785,7 +823,10 @@ window.__ModuleLoader__.load({
     /**
      * 网页与模型管理的「账户」卡片：每个内容服务一行——登录状态 + 登录/换账户
      * + 独立窗口。登录等待真实结果（最长 5 分钟），成功/失败/超时都回显在本行，
-     * 不再 fire-and-forget；登录窗口是真实有头 Edge，与自动化共用同一 profile。
+     * 不再 fire-and-forget；登录窗口开的是**桥自己的浏览器**（`browser-runtime.js`
+     * 解析出的自带 Chromium 优先、系统浏览器兜底），与自动化共用同一 profile ——
+     * 所以在这里登录**就是**给桥登录。0.18.0 之前这里写的是「有头 Edge」，那是
+     * 驱动改造前的措辞，会让用户以为要装 Edge。
      * onlySiteId：只渲染该站点一行（子代理卡内联所选子代理站点的账户管理，
      * 与「账户与登录管理」卡片同一套状态与端点，不另起第二套真相）。
      */
@@ -836,16 +877,29 @@ window.__ModuleLoader__.load({
               // 同源失败时会把同一句话重复两遍，读起来像两个问题）。
               err: uniqReasons([r?.teamError || r?.membersError, r?.subAgentsError]),
               taskErr: uniqReasons([r?.tasksError]),
+              // 来源标注（0.19.0）：服务端一直在透出这两个字段，但此前**只有已删的
+              // 右栏 Team 面板**读它。花名册是存活的那个消费者，必须一并取进来，
+              // 否则下面的 `sourceText(rows.teamSource)` 恒为 undefined —— 看着像
+              // 「接上了」，实际什么都没显示（本项目记过的「只声明不接线」形态）。
+              teamSource: r?.teamSource ?? null,
+              tasksSource: r?.tasksSource ?? null,
             });
           })
-          .catch(e => { if (alive) setRows({ sub: [], team: [], tasks: [], err: String(e?.message || e), taskErr: null }); });
+          .catch(e => {
+            if (alive) {
+              setRows({
+                sub: [], team: [], tasks: [], err: String(e?.message || e), taskErr: null,
+                teamSource: null, tasksSource: null,
+              });
+            }
+          });
         pull();
         const t = setInterval(pull, 5000);
         return () => { alive = false; clearInterval(t); };
       }, [sessionId]);
       if (rows === null) return h('p', { className: 'hwb-hint' }, '花名册加载中…');
       // 状态词必须与颜色**同时**出现（调研 §5 点名：颜色不得是唯一载体）。
-      // 语义本体在模块作用域的 rosterStateOf——Team 面板与这里读同一份。
+      // 语义本体在模块作用域的 rosterStateOf——任务板与这里读同一份。
       const stateOf = rosterStateOf;
       const row = (x, key, nested) => {
         const st = stateOf(x);
@@ -911,8 +965,7 @@ window.__ModuleLoader__.load({
       }
       return h('div', { className: 'hwb-roster' },
         // 部分可用时同样要说清楚：有 Team 行但子代理读不到，不能装作子代理为空。
-        rows.err && h('p', { className: 'hwb-hint' }, '部分分区读不到（' + rows.err + '）。'),
-        // 子代理区：缩进——它们是**本会话**派生出来的，不是平级的同事。
+        rows.err && h('p', { className: 'hwb-hint' }, '部分分区读不到（' + rows.err + '）。'),        // 子代理区：缩进——它们是**本会话**派生出来的，不是平级的同事。
         sub.length > 0 && h('div', { className: 'hwb-roster-group' },
           h('p', { className: 'hwb-roster-head' }, '子代理（属于本会话）'),
           sub.map((x, i) => row(x, 's' + i, true))),
@@ -922,13 +975,23 @@ window.__ModuleLoader__.load({
           h('p', { className: 'hwb-roster-head' }, 'Team 成员（平级）'),
           team.map((x, i) => row(x, 't' + i, false)),
           h('p', { className: 'hwb-hint' }, 'Team 成员共享同一个 checkout：并行的是会话与呈现，不是文件系统。')),
-        tasks.length > 0 && taskBoard(tasks));
+        tasks.length > 0 && taskBoard(tasks),
+        // 来源标注（0.19.0 补）：`roster.js` 一直在算 `teamSource` / `tasksSource`，
+        // 但此前**只有右栏那份 Team 面板**渲染过它。那份面板已按用户要求删除，
+        // 于是 `teamSource` 失去了唯一消费者（第二轮独立审查抓到这一点）。
+        // 这里把它接到**存活的花名册**上：磁盘回落时成员/任务没有实时 activity，
+        // 用户必须知道，否则「空闲」会被读成「真的空闲」而不是「这里没有实时数据」。
+        sourceText(rows.teamSource) && h('p', { className: 'hwb-hint' }, sourceText(rows.teamSource)),
+        sourceText(rows.tasksSource) && h('p', { className: 'hwb-hint' }, sourceText(rows.tasksSource)));
     }
 
     /**
      * 花名册数据的**唯一**拉取点（0.15.12）。
      *
-     * Team 面板、任务板面板与设置页花名册读的是同一份 `/__webcode/status`。
+     * 任务板面板与设置页花名册读的是同一份 `/__webcode/status`。
+     * （0.19.0：原先这里还写着「Team 面板」——那份右栏花名册面板已按用户要求删除，
+     * 理由见下方「Team 面板标签页：已删除」处；本函数剩下的两个消费者是任务板与
+     * 设置页花名册，两者仍在用，故本函数与 `roster.js` 的官方读取都保留。）
      * 三处各写一遍 fetch 会有两个立刻可见的代价：轮询相位不同（同屏出现
      * 「3 个成员」与「2 个成员」），以及错误处理各不相同（一处说「读不到」、
      * 另一处静默空列表）。所以只留一个 hook，三处都从这里取。
@@ -962,7 +1025,7 @@ window.__ModuleLoader__.load({
       return state;
     }
 
-    /** 官方任务状态 → 中文标签与色档。任务板与 Team 面板共用，避免两处措辞漂移。 */
+    /** 官方任务状态 → 中文标签与色档。任务板与设置页花名册共用，避免两处措辞漂移。 */
     function taskStatusOf(s) {
       const v = String(s || '');
       if (v === 'in_progress') return { k: 'ok', t: '进行中' };
@@ -970,83 +1033,6 @@ window.__ModuleLoader__.load({
       if (v === 'pending') return { k: 'idle', t: '待办' };
       if (v === 'deleted') return { k: '', t: '已删除' };
       return { k: '', t: v || '未知' };
-    }
-
-    /**
-     * **Team 面板**（0.15.12）：一张「谁在这个团队里、各自在忙什么」的只读视图。
-     *
-     * ## 与设置页花名册的分工（不是重复）
-     *
-     * 设置页那栏回答的是**配置期**的问题（有哪些账户、模型怎么选、提示词是什么），
-     * 花名册只是顺带一行。而右栏是**运行期**的常驻视图：用户在做任务时想知道
-     * 「谁在跑、谁空闲、能不能再派活」。因此这里的呈现比设置页更细：
-     * 角色、模型、上下文模式、名下任务数各自成列，并给出可执行的下一步提示。
-     *
-     * ## 数据来源与纪律
-     *
-     * 全部来自 `/__webcode/status`（服务端 lib/roster.js 从官方 `agentTeams`
-     * 的 `listMembers` 真实读出）。**只读、不造假**：读不到时把原因摊开，
-     * 而不是画一行看起来正常的空列表。
-     *
-     * `inactive` 必须显示成「未加载（可唤醒）」——官方 README 明说这种成员仍会
-     * 收到排队消息，显示成「已停止」会让人以为要重新创建（见 rosterStateOf）。
-     *
-     * @param {{sessionId?: string, useSessions?: Function}} props 槽注入的会话身份
-     */
-    function TeamPanel(props) {
-      const sessionId = useCurrentSessionId(props);
-      const { data, err } = useRoster(sessionId, 5000);
-      if (data === null) {
-        return h('div', { className: 'hwb-panel' },
-          h('p', { className: 'hwb-hint' }, err ? '读不到 Team：' + err : 'Team 加载中…'));
-      }
-      const team = Array.isArray(data.team) ? data.team : (Array.isArray(data.members) ? data.members : []);
-      const teamErr = uniqReasons([data.teamError, data.membersError]);
-      const tasks = Array.isArray(data.tasks) ? data.tasks : [];
-      // 只在「有非 lead 成员」时才算作一个真实的团队。官方对任何顶层会话都返回
-      // 一行 lead（agent-team README.md:128），只画那一行会让用户以为有团队在跑。
-      const teammates = team.filter(m => String(m?.role || '') !== 'lead');
-      const counts = team.reduce((acc, m) => {
-        const k = rosterStateOf(m).k;
-        acc[k === 'ok' ? 'working' : k === 'bad' ? 'failed' : 'idle'] += 1;
-        return acc;
-      }, { working: 0, idle: 0, failed: 0 });
-      const memberRow = (m, i) => {
-        const st = rosterStateOf(m);
-        const name = String(m?.name || m?.id || '（未命名）');
-        return h('div', { key: 'm' + i, className: 'hwb-panel-row' },
-          h('span', { className: 'hwb-dot ' + st.k, 'aria-hidden': 'true' }),
-          h('span', { className: 'hwb-panel-title' }, name),
-          m?.role && h('span', { className: 'hwb-chip' }, String(m.role)),
-          m?.model && h('span', { className: 'hwb-panel-meta' }, String(m.model)),
-          // 上下文模式（fresh/fork）是 Team 成员的既有字段，官方给了就透出。
-          m?.context && h('span', { className: 'hwb-panel-meta' }, String(m.context)),
-          h('span', { className: 'hwb-panel-state' }, st.t),
-          m?.taskCount != null && h('span', { className: 'hwb-chip' }, '任务 ' + m.taskCount));
-      };
-      return h('div', { className: 'hwb-panel' },
-        h('div', { className: 'hwb-panel-summary' },
-          h('span', { className: 'hwb-panel-stat' }, '成员 ' + team.length),
-          counts.working > 0 && h('span', { className: 'hwb-panel-stat ok' }, '工作中 ' + counts.working),
-          counts.idle > 0 && h('span', { className: 'hwb-panel-stat' }, '空闲/未加载 ' + counts.idle),
-          counts.failed > 0 && h('span', { className: 'hwb-panel-stat bad' }, '失败 ' + counts.failed),
-          h('span', { className: 'hwb-panel-stat' }, '任务 ' + tasks.length)),
-        teamErr && h('p', { className: 'hwb-hint bad' }, 'Team 分区读不到（' + teamErr + '）——这不代表没有成员，而是数据源不可用。'),
-        team.length === 0 && !teamErr
-          ? h('p', { className: 'hwb-hint' }, '本会话没有任何 Team 成员。官方语义：每个普通顶层会话都是隐式 Team 的 Lead，但只有真正 spawn 过 teammate 才存在一个团队。')
-          : null,
-        // 只有 lead 一行时如实说明——否则用户会以为「团队就我一个人在跑」。
-        team.length > 0 && teammates.length === 0
-          ? h('p', { className: 'hwb-hint' }, '当前只有本会话自己（lead），没有派生出的 teammate。')
-          : null,
-        team.length > 0 && h('div', { className: 'hwb-panel-group' }, team.map(memberRow)),
-        // 来源标注：磁盘回落时成员**没有实时 activity**，用户必须知道
-        //（否则「空闲」会被读成「真的空闲」，而不是「这里没有实时数据」）。
-        sourceText(data.teamSource) && h('p', { className: 'hwb-hint' }, sourceText(data.teamSource)),
-        teammates.length > 0 && h('p', { className: 'hwb-hint' },
-          '成员状态为「未加载（可唤醒）」时不必重建：给它发一条消息就会唤醒并继续原来的上下文。'),
-        h('p', { className: 'hwb-hint' },
-          'Team 成员共享同一个 checkout：并行的是会话与呈现，不是文件系统。任务归属与依赖关系见「任务板」标签页。'));
     }
 
     /**
@@ -1076,61 +1062,371 @@ window.__ModuleLoader__.load({
     function TaskBoardPanel(props) {
       const sessionId = useCurrentSessionId(props);
       const { data, err } = useRoster(sessionId, 5000);
-      if (data === null) {
+      const [viewMode, setViewMode] = React.useState('kanban'); // 'kanban' | 'list'
+      const [selectedTaskId, setSelectedTaskId] = React.useState(null);
+      const [showNewModal, setShowNewModal] = React.useState(false);
+      const [searchFilter, setSearchFilter] = React.useState('');
+      const [projectFilter, setProjectFilter] = React.useState('');
+      const [localTasks, setLocalTasks] = React.useState([]);
+      const [ledgerErr, setLedgerErr] = React.useState('');
+      /**
+       * 任务板级操作反馈（0.19.0）。
+       *
+       * 为什么把 `alert()` 全部换掉：`alert`/`confirm` 是**阻塞式**浏览器模态——
+       * 弹出期间 JS 主线程停住，5 秒轮询的下一拍、以及所有在途 fetch 的回调都被
+       * 卡在队列里；用户看到的是「点一下保存，整个面板僵住」。而且它不属于官方
+       * harness 的任何一种反馈形态：参考实现
+       * （`reference/dsh-task-board/src/client/board/TaskForm.tsx` + `board.module.css`
+       * 的 `.formError`）一律用**页面内联文案**报错。
+       *
+       * 因此这里收拢成一个横幅：`{ kind: 'ok' | 'bad', text }`。它同时承担
+       * 「报错」与「回执」两种语义——用户点完「保存修改」需要看到「已保存」，
+       * 否则分不清是没生效还是没反应。
+       */
+      const [boardNotice, setBoardNotice] = React.useState(null);
+      const notify = React.useCallback((kind, text) => {
+        setBoardNotice(text ? { kind, text: String(text) } : null);
+      }, []);
+
+      /**
+       * 把一次台账写操作的返回值化成「说人话的结论」，**拒绝一切模棱两可的形态**。
+       *
+       * 为什么要单独抽出来：写路径的唯一正确判据是服务端**显式**回的 `ok === true`。
+       * 此前各处写的是 `if (res && res.ok === false)` —— 它把 `ok` 缺失、`res` 为
+       * `null`、字段名拼错等情形**全部当成成功**，于是界面报「已保存」而磁盘没动。
+       * 这正是本项目反复记过的那一类缺陷（「说做了、其实没做」）。判据改成
+       * **白名单式**：只有明确的 `ok === true` 才算成功，其余一律按失败报出，
+       * 且把服务端给的真实原因带出来。
+       *
+       * @param {*} res 服务端返回值
+       * @param {string} what 失败时显示的动作名（如「保存」）
+       * @returns {{ok: boolean, error: string}} 结论
+       */
+      const verdictOf = (res, what) => {
+        if (res && res.ok === true) return { ok: true, error: '' };
+        if (res && res.ok === false) return { ok: false, error: String(res.error || '服务端未给原因') };
+        return { ok: false, error: what + '的响应形状不认识（没有 ok 字段）——按未成功处理' };
+      };
+
+      // 从后端读取桥任务台账。
+      //
+      // 0.17.3（第三轮 GLM 子代理审查抓到）：这里原先只有 `clearInterval`，**没有**
+      // 在卸载时取消在途请求的写回 —— 组件卸载瞬间发出的那次 `task-ledger` 回来时
+      // 仍会 `setLocalTasks` / `setLedgerErr`。React 18 不再对此告警，于是它是一条
+      // **静默**的泄漏路径（在这个每次切标签都会卸载面板的容器里必然发生）。
+      // 判据用「本组件是否还挂着」的 ref，而不是 AbortController：请求本身没有副作用，
+      // 要拦的是**写回**，不是请求。
+      const aliveRef = React.useRef(true);
+      const refreshLedger = React.useCallback(() => {
+        api('task-ledger').then(res => {
+          if (!aliveRef.current) return;
+          if (res?.ok && Array.isArray(res.tasks)) {
+            setLocalTasks(res.tasks);
+            setLedgerErr('');
+          }
+        }).catch(e => { if (aliveRef.current) setLedgerErr(e?.message || '读取台账失败'); });
+      }, []);
+
+      React.useEffect(() => {
+        aliveRef.current = true;
+        refreshLedger();
+        const timer = setInterval(refreshLedger, 5000);
+        return () => { aliveRef.current = false; clearInterval(timer); };
+      }, [refreshLedger]);
+
+      if (data === null && localTasks.length === 0) {
         return h('div', { className: 'hwb-panel' },
           h('p', { className: 'hwb-hint' }, err ? '读不到任务板：' + err : '任务板加载中…'));
       }
-      const tasks = Array.isArray(data.tasks) ? data.tasks : [];
-      const taskErr = uniqReasons([data.tasksError]);
-      const g = data.graph && typeof data.graph === 'object' ? data.graph : null;
-      // 执行语义（0.16.2）：与 graph 同一性质——是 tasks 的**补充视角**，
-      // 算不出来时为 null 并带 planError，不连坐 tasks 与 graph。
-      const plan = data.plan && typeof data.plan === 'object' ? data.plan : null;
-      const planErr = data.planError || null;
-      const byId = new Map(tasks.map(t => [String(t.id), t]));
-      // 判定表：id → admission。面板按它分组，而不是自己重算 ready——
-      // 「能不能开工」的两个轴（依赖 / 资源）判据只在服务端一份。
-      const admissionById = new Map(
-        (Array.isArray(plan?.admissions) ? plan.admissions : []).map(a => [String(a.id), a]));
-      /** 一条任务行：状态点 + 标题 + 归属 + 状态 + 阻塞明细。 */
+
+      // 合并任务来源：自有台账优先（带完整评论与模型信息），辅以 roster 任务
+      const rosterTasks = Array.isArray(data?.tasks) ? data.tasks : [];
+      const taskMap = new Map();
+      for (const t of rosterTasks) if (t?.id) taskMap.set(String(t.id), t);
+      for (const t of localTasks) if (t?.id) taskMap.set(String(t.id), { ...taskMap.get(String(t.id)), ...t });
+      const allTasks = Array.from(taskMap.values());
+
+      const taskErr = uniqReasons([data?.tasksError, ledgerErr].filter(Boolean));
+      const g = data?.graph && typeof data.graph === 'object' ? data.graph : null;
+      const plan = data?.plan && typeof data.plan === 'object' ? data.plan : null;
+      const planErr = data?.planError || null;
+      const byId = taskMap;
+
+      // 过滤任务
+      const filteredTasks = allTasks.filter(t => {
+        if (projectFilter && String(t.projectId || 'default') !== projectFilter) return false;
+        if (searchFilter.trim()) {
+          const q = searchFilter.trim().toLowerCase();
+          const sub = String(t.subject || '').toLowerCase();
+          const desc = String(t.description || '').toLowerCase();
+          if (!sub.includes(q) && !desc.includes(q)) return false;
+        }
+        return true;
+      });
+
+      // 项目清单
+      const projects = Array.from(new Set(allTasks.map(t => String(t.projectId || 'default')).filter(Boolean)));
+
+      // ── Notion 式卡片展开详情页面 ──────────────────────────────────────────
+      if (selectedTaskId) {
+        const currentTask = byId.get(String(selectedTaskId));
+        if (!currentTask) {
+          return h('div', { className: 'hwb-panel' },
+            h('button', { className: 'hwb-btn', onClick: () => setSelectedTaskId(null) }, '← 返回看板'),
+            h('p', { className: 'hwb-hint bad' }, '任务未找到或已被删除'));
+        }
+
+        return h(TaskDetailNotionView, {
+          task: currentTask,
+          allTasks,
+          // ★ 0.19.0 修：**必须把反馈状态传进详情页**。
+          //
+          // 第三轮对抗审查抓到的真回归，而且是**本轮我自己引入的**：把 `alert()`
+          // 换成内联横幅时，横幅的渲染点留在了看板/列表那一支（本函数末尾），
+          // 而这条 `return` 在它**之前**就返回了。于是「详情页里做的每一个写操作」
+          // ——保存/删除/批注/解决/按批注派发，也就是 `notify()` 的**全部** 16 个
+          // 调用点——**反馈一条都渲染不出来**：没有「已保存。」、没有「批注已写入。」、
+          // 更看不到「保存被拒: revision-mismatch」与「派发失败」。
+          // 而这恰恰是本项目反复记过的「说做了、其实没做」——写入确实到了服务端，
+          // 但用户看不到任何结果，包括**被拒绝**的结果。
+          // 旧实现用 `alert()` 时不会有这个问题（阻塞式弹窗与挂载分支无关），
+          // 所以这是换成内联反馈时丢掉的那一半。
+          notice: boardNotice,
+          onDismissNotice: () => setBoardNotice(null),
+          onBack: () => setSelectedTaskId(null),
+          onUpdate: (patch) => {
+            api('task-update', { taskId: currentTask.id, patch, expectedRevision: currentTask.revision })
+              .then((res) => {
+                // 服务端会用 `revision-mismatch` 拒掉过期写入（CAS）。**必须把拒绝
+                // 如实报出来**：这正是「两人同时改同一条任务」时用户唯一的线索。
+                const v = verdictOf(res, '保存');
+                if (!v.ok) { notify('bad', '保存被拒：' + v.error); return; }
+                notify('ok', '已保存。');
+                refreshLedger();
+              })
+              .catch(e => notify('bad', '更新失败: ' + e.message));
+          },
+          onDelete: () => {
+            // `confirm` 保留：删除是**不可逆**动作，官方对此类动作同样要一次确认
+            // （参考实现有独立的 `ConfirmDialog`）。非阻塞的替代品是自绘对话框，
+            // 那需要额外的焦点陷阱与 Esc 处理；在只此一处的前提下，原生 confirm
+            // 是更小且更可靠的代价。
+            if (confirm('确认删除任务 ' + currentTask.id + '？')) {
+              api('task-delete', { taskId: currentTask.id })
+                .then((res) => {
+                  const v = verdictOf(res, '删除');
+                  if (!v.ok) { notify('bad', '删除被拒：' + v.error); return; }
+                  setSelectedTaskId(null); refreshLedger();
+                })
+                .catch(e => notify('bad', '删除失败: ' + e.message));
+            }
+          },
+          onAddComment: (comment) => {
+            // 0.19.0：**必须带 expectedRevision**。服务端 `POST task-comment` 的
+            // 第五个参数就是 CAS（0.17.3 修的「批注 CAS 被静默吞掉」正是这条链路），
+            // 不带就等于放弃并发保护：两人同时对同一条任务批注时，后到的会覆盖先到的，
+            // 而双方都收到成功——这正是本项目记为「假成功」的那类缺陷。
+            api('task-comment', {
+              taskId: currentTask.id,
+              ...comment,
+              expectedRevision: currentTask.revision,
+            })
+              .then((res) => {
+                const v = verdictOf(res, '批注');
+                if (!v.ok) { notify('bad', '批注未写入：' + v.error); return; }
+                notify('ok', '批注已写入。');
+                refreshLedger();
+              })
+              .catch(e => notify('bad', '添加评论失败: ' + e.message));
+          },
+          onResolveComment: (commentId) => {
+            // 同 `onAddComment`：解决/取消解决也是一次写，必须吃 CAS。
+            api('task-comment-resolve', {
+              taskId: currentTask.id,
+              commentId,
+              expectedRevision: currentTask.revision,
+            })
+              .then((res) => {
+                const v = verdictOf(res, '批注状态变更');
+                if (!v.ok) { notify('bad', '批注状态未变更：' + v.error); return; }
+                refreshLedger();
+              })
+              .catch(e => notify('bad', '切换状态失败: ' + e.message));
+          },
+          onImplement: (commentId, quote, commentText) => {
+            // 0.17.3（第三轮自审抓到）：这里原先**只说一句「已向 AI 发起实施指令」**，
+            // 从不把服务端组装好的 prompt 投出去 —— 按钮是死的，而用户被告知已经发出。
+            // 这正是本项目反复记过的那一类缺陷（「说做了、其实没做」）。
+            // 现在：真派发，并把**真实回复或真实错误**显示出来，不再编一句话。
+            //
+            // 「正在派发…」用 `bad` 之外的**中性**措辞：它既不是成功也不是失败，
+            // 而 `boardNotice` 只有 ok/bad 两态。这里刻意**不**先报成功——先报成功
+            // 再失败，用户会先看到绿字再看到红字，与「先给承诺再反悔」同形。
+            notify('ok', '正在按批注派发，请稍候…');
+            api('task-implement', { taskId: currentTask.id, commentId, quote, commentText })
+              .then(res => {
+                const v = verdictOf(res, '组装实施指令');
+                if (!v.ok) { notify('bad', '发起实施失败: ' + v.error); return null; }
+                if (!res?.prompt) { notify('bad', '服务端没有返回可派发的指令，已中止（不假装已发送）。'); return null; }
+                const sid = res?.assignedModel?.siteId || 'deepseek';
+                // 带上 task.sessionKey：同一任务的多次实施落在**同一条会话**里，
+                // 这正是「以任务为核心实现会话」那一层的要求。
+                return api('chat', { siteId: sid, prompt: res.prompt, sessionKey: res.sessionKey })
+                  .then(r2 => {
+                    // 派发结果**必须按真实返回值分派**，不得无条件报成功。
+                    // 第三轮对抗审查指出：这一段此前**没有任何断言覆盖** —— 把它换成
+                    // 一句无条件的成功提示，测试仍全绿，而「派发失败被报成成功」正是
+                    // 本项目反复记过的假成功。现在与其它写链路统一走 `verdictOf`。
+                    const v2 = verdictOf(r2, '派发');
+                    if (v2.ok) notify('ok', '已按批注派发给「' + siteName(sid) + '」。回复：' + String(r2?.reply || '').slice(0, 400));
+                    else notify('bad', '派发失败: ' + v2.error);
+                  });
+              })
+              .catch(e => notify('bad', '实施调用异常: ' + e.message));
+          },
+        });
+      }
+
+      // ── 任务行（列表模式复用）──────────────────────────────────────────────
       const taskRow = (t, i, extra) => {
         const st = taskStatusOf(t?.status);
         const blocked = Array.isArray(t?.blockedBy) ? t.blockedBy : [];
-        // 未完成的阻塞者要逐个点名并带**它自己的状态**：否则「被 3 项卡住」看不出
-        // 是「还在跑」（正常等待）还是「已经失败」（需要人处理）。
         const unresolved = blocked
           .map(id => byId.get(String(id)))
           .filter(Boolean)
           .filter(b => String(b.status) !== 'completed');
-        return h('div', { key: 't' + i, className: 'hwb-panel-row' },
+        return h('div', {
+          key: 't' + i,
+          className: 'hwb-panel-row clickable',
+          onClick: () => setSelectedTaskId(t.id),
+        },
           h('span', { className: 'hwb-dot ' + st.k, 'aria-hidden': 'true' }),
           h('span', { className: 'hwb-panel-title', title: String(t?.id || '') }, String(t?.subject || t?.id || '（无标题）')),
+          t?.assignedModel?.siteId && h('span', { className: 'hwb-chip' }, siteName(t.assignedModel.siteId)),
           t?.ownerName && h('span', { className: 'hwb-chip' }, String(t.ownerName)),
           h('span', { className: 'hwb-panel-state' }, st.t),
+          Array.isArray(t?.comments) && t.comments.length > 0 && h('span', { className: 'hwb-chip' }, '💬 ' + t.comments.length),
           extra,
           unresolved.length > 0 && h('span', { className: 'hwb-panel-meta' },
             '等在 ' + unresolved.map(b => String(b.subject || b.id) + '（' + taskStatusOf(b.status).t + '）').join('、')),
           Array.isArray(t?.writeScopeWarnings) && t.writeScopeWarnings.length > 0
             && h('span', { className: 'hwb-chip warn' }, '写范围告警'));
       };
-      const ready = tasks.filter(t => String(t.status) === 'pending' && t.ready === true);
-      const blockedRows = tasks.filter(t => String(t.status) === 'pending' && t.ready !== true);
-      const running = tasks.filter(t => String(t.status) === 'in_progress');
-      const done = tasks.filter(t => String(t.status) === 'completed');
-      const group = (head, rows, emptyHint) => h('div', { className: 'hwb-panel-group' },
-        h('p', { className: 'hwb-panel-head' }, head + '（' + rows.length + '）'),
-        rows.length ? rows.map((t, i) => taskRow(t, head + i)) : (emptyHint ? h('p', { className: 'hwb-hint' }, emptyHint) : null));
-      return h('div', { className: 'hwb-panel' },
+
+      const ready = filteredTasks.filter(t => String(t.status) === 'pending' && t.ready === true);
+      const blockedRows = filteredTasks.filter(t => String(t.status) === 'pending' && t.ready !== true);
+      const running = filteredTasks.filter(t => String(t.status) === 'in_progress');
+      const done = filteredTasks.filter(t => String(t.status) === 'completed');
+      const failed = filteredTasks.filter(t => String(t.status) === 'failed');
+
+      // ── 看板列定义（5 列：可开工 / 进行中 / 被阻塞 / 已完成 / 失败）──────────────
+      const kanbanCols = [
+        { key: 'ready', title: '可开工 (Ready)', tasks: ready },
+        { key: 'in_progress', title: '进行中 (Running)', tasks: running },
+        { key: 'blocked', title: '被阻塞 (Blocked)', tasks: blockedRows },
+        { key: 'completed', title: '已完成 (Done)', tasks: done },
+        { key: 'failed', title: '失败 (Failed)', tasks: failed },
+      ];
+
+      return h('div', { className: 'hwb-panel hwb-taskboard-container' },
+        // 顶部控制条：模式切换、项目筛选、搜索、新建任务
+        h('div', { className: 'hwb-tb-toolbar' },
+          h('div', { className: 'hwb-tb-toolbar-left' },
+            h('button', {
+              className: 'hwb-btn ' + (viewMode === 'kanban' ? 'primary' : 'ghost'),
+              onClick: () => setViewMode('kanban'),
+            }, '看板视图'),
+            h('button', {
+              className: 'hwb-btn ' + (viewMode === 'list' ? 'primary' : 'ghost'),
+              onClick: () => setViewMode('list'),
+            }, '列表视图'),
+            projects.length > 0 && h('select', {
+              className: 'hwb-select',
+              value: projectFilter,
+              onChange: e => setProjectFilter(e.target.value),
+            },
+              h('option', { value: '' }, '全部项目 (' + allTasks.length + ')'),
+              projects.map(p => h('option', { key: p, value: p }, p))),
+          ),
+          h('div', { className: 'hwb-tb-toolbar-right' },
+            h('input', {
+              type: 'search',
+              className: 'hwb-input hwb-search',
+              placeholder: '搜索任务标题 / 描述…',
+              value: searchFilter,
+              onChange: e => setSearchFilter(e.target.value),
+            }),
+            h('button', {
+              className: 'hwb-btn primary',
+              onClick: () => setShowNewModal(true),
+            }, '+ 新建任务'),
+          ),
+        ),
+
+        // 操作回执 / 错误横幅（0.19.0：取代原先的 alert）。
+        // 放在工具条之下、状态概要之上——用户刚点的那个动作的结果就在那一带。
+        boardNotice && h('div', {
+          className: 'hwb-notice ' + (boardNotice.kind === 'bad' ? 'bad' : 'ok'),
+          role: boardNotice.kind === 'bad' ? 'alert' : 'status',
+        },
+          h('span', { className: 'hwb-notice-text' }, boardNotice.text),
+          h('button', {
+            className: 'hwb-btn-close',
+            title: '关闭',
+            onClick: () => setBoardNotice(null),
+          }, '✕')),
+
+        // 状态概要
         h('div', { className: 'hwb-panel-summary' },
-          h('span', { className: 'hwb-panel-stat' }, '共 ' + tasks.length),
+          h('span', { className: 'hwb-panel-stat' }, '共 ' + filteredTasks.length),
           ready.length > 0 && h('span', { className: 'hwb-panel-stat ok' }, '可开工 ' + ready.length),
           running.length > 0 && h('span', { className: 'hwb-panel-stat ok' }, '进行中 ' + running.length),
           blockedRows.length > 0 && h('span', { className: 'hwb-panel-stat bad' }, '被阻塞 ' + blockedRows.length),
-          done.length > 0 && h('span', { className: 'hwb-panel-stat' }, '已完成 ' + done.length)),
+          done.length > 0 && h('span', { className: 'hwb-panel-stat' }, '已完成 ' + done.length),
+          failed.length > 0 && h('span', { className: 'hwb-panel-stat bad' }, '失败 ' + failed.length)),
+
         taskErr && h('p', { className: 'hwb-hint bad' }, '任务板读不到（' + taskErr + '）——这不代表没有任务，而是数据源不可用。'),
-        !taskErr && tasks.length === 0
-          ? h('p', { className: 'hwb-hint' }, '本团队任务板为空。用 Team 工具 create_task 建任务后这里会实时出现（5 秒轮询）。')
+        !taskErr && filteredTasks.length === 0
+          ? h('p', { className: 'hwb-hint' }, '当前无任务。点击右上角「+ 新建任务」或由 AI 创建任务。')
           : null,
+
+        // ── 视图模式分流 ──────────────────────────────────────────────────────
+        viewMode === 'kanban'
+          ? h('div', { className: 'hwb-kanban-board' },
+            kanbanCols.map(col => h('div', { key: col.key, className: 'hwb-kanban-col', 'data-status': col.key },
+              h('div', { className: 'hwb-kanban-col-head' },
+                h('span', { className: 'hwb-kanban-col-title' }, col.title),
+                h('span', { className: 'hwb-kanban-col-count' }, col.tasks.length)),
+              h('div', { className: 'hwb-kanban-col-cards' },
+                col.tasks.map(t => {
+                  const blocked = Array.isArray(t?.blockedBy) ? t.blockedBy : [];
+                  const unresolved = blocked
+                    .map(id => byId.get(String(id)))
+                    .filter(Boolean)
+                    .filter(b => String(b.status) !== 'completed');
+                  return h('div', {
+                    key: t.id,
+                    className: 'hwb-kanban-card',
+                    onClick: () => setSelectedTaskId(t.id),
+                  },
+                    h('div', { className: 'hwb-kcard-head' },
+                      h('span', { className: 'hwb-kcard-id' }, t.id),
+                      t.assignedModel?.siteId && h('span', { className: 'hwb-chip' }, siteName(t.assignedModel.siteId))),
+                    h('div', { className: 'hwb-kcard-title' }, t.subject || '（无标题）'),
+                    t.description && h('div', { className: 'hwb-kcard-desc' },
+                      t.description.length > 80 ? t.description.slice(0, 80) + '…' : t.description),
+                    unresolved.length > 0 && h('div', { className: 'hwb-panel-meta' },
+                      '等在 ' + unresolved.map(b => String(b.subject || b.id) + '（' + taskStatusOf(b.status).t + '）').join('、')),
+                    h('div', { className: 'hwb-kcard-footer' },
+                      t.projectId && h('span', { className: 'hwb-tag' }, t.projectId),
+                      Array.isArray(t.comments) && t.comments.length > 0 && h('span', { className: 'hwb-comment-badge' }, '💬 ' + t.comments.length),
+                      t.ownerName && h('span', { className: 'hwb-chip' }, t.ownerName)));
+                }),
+                col.tasks.length === 0 && h('div', { className: 'hwb-kanban-empty' }, '无任务')),
+            )))
+          : h('div', { className: 'hwb-list-view' },
+            filteredTasks.map((t, i) => taskRow(t, i))),
+
         // ---- 图诊断：官方数据里没有的那一层 ----
         g && (g.cycles?.length || g.selfLoops?.length || g.missingEdges?.length)
           ? h('div', { className: 'hwb-panel-group' },
@@ -1145,7 +1441,7 @@ window.__ModuleLoader__.load({
               + g.missingEdges.slice(0, 8).map(e => e.from + ' → ' + e.to).join('、')
               + (g.missingEdges.length > 8 ? ' 等 ' + g.missingEdges.length + ' 条' : '')) : null)
           : null,
-        // ---- 关键路径：整批任务的下界，也是「并行度够不够」的唯一可核对判据 ----
+        // ---- 关键路径 ----
         g && g.acyclic && g.criticalPathLength > 0
           ? h('div', { className: 'hwb-panel-group' },
             h('p', { className: 'hwb-panel-head' }, '关键路径（' + g.criticalPathLength + ' 个任务）'),
@@ -1156,7 +1452,7 @@ window.__ModuleLoader__.load({
         g && g.acyclic === false
           ? h('p', { className: 'hwb-hint bad' }, '图里有环，无法计算关键路径与深度——先修上面的结构问题。')
           : null,
-        // ---- 当前阻塞点：第一行就是最该处理的那个 ----
+        // ---- 当前阻塞点 ----
         g && Array.isArray(g.blockedOn) && g.blockedOn.length > 0
           ? h('div', { className: 'hwb-panel-group' },
             h('p', { className: 'hwb-panel-head' }, '当前阻塞点（按卡住的下游数排序）'),
@@ -1168,85 +1464,531 @@ window.__ModuleLoader__.load({
               h('span', { className: 'hwb-chip' }, '卡住 ' + b.waitingCount + ' 项'))),
             h('p', { className: 'hwb-hint' }, '「为什么整块板没动」的答案在这里：处理第一行即可解锁最多的下游。'))
           : null,
-        group('可开工', ready, '当前没有就绪且未开工的任务。'),
-        group('被阻塞', blockedRows, '没有被阻塞的任务。'),
-        group('进行中', running),
-        group('已完成', done),
-        // ---- 执行语义（0.16.2）：graph 回答「结构长什么样」，这一层回答「现在允许开工吗」----
-        //
-        // 为什么必须**分开列出**「等依赖」与「等资源」：它们是两种完全不同的卡法，
-        // 动作也不同（前者去催上游，后者去腾一个成员）。旧实现把两者合成一个
-        // 「能不能开工」，于是「依赖全满足但没人空闲」看起来像卡死——而它其实
-        // 只要派个人；「有人空闲但依赖没满足」则是最难查的一类提前开工。
-        plan && plan.waitingDeps?.length
-          ? h('div', { className: 'hwb-panel-group' },
-            h('p', { className: 'hwb-panel-head' }, '等依赖（' + plan.waitingDeps.length + '）'),
-            plan.waitingDeps.slice(0, 8).map((w, i) => h('div', { key: 'wd' + i, className: 'hwb-panel-row' },
-              h('span', { className: 'hwb-dot', 'aria-hidden': 'true' }),
-              h('span', { className: 'hwb-panel-title' }, String(byId.get(String(w.id))?.subject || w.id)),
-              h('span', { className: 'hwb-panel-meta' },
-                '等在 ' + (w.edges || []).map(e => String(byId.get(String(e.id))?.subject || e.id)
-                  + '（' + taskStatusOf(e.status).t + '·' + e.kind + '）').join('、')))),
-            h('p', { className: 'hwb-hint' }, '这些在等上游。上游若是 failed 且边语义是 after-success，它**永远不会**就绪——要人去改边或重开上游。'))
-          : null,
-        plan && plan.waitingResource?.length
-          ? h('div', { className: 'hwb-panel-group' },
-            h('p', { className: 'hwb-panel-head' }, '等资源（' + plan.waitingResource.length + '）'),
-            plan.waitingResource.slice(0, 8).map((w, i) => h('div', { key: 'wr' + i, className: 'hwb-panel-row' },
-              h('span', { className: 'hwb-dot idle', 'aria-hidden': 'true' }),
-              h('span', { className: 'hwb-panel-title' }, String(byId.get(String(w.id))?.subject || w.id)),
-              w.ownerName && h('span', { className: 'hwb-chip' }, String(w.ownerName)),
-              h('span', { className: 'hwb-panel-state' }, '成员忙')))        ,
-            h('p', { className: 'hwb-hint' }, '依赖已满足，但归属的成员正在跑别的活。给它发消息或把任务移回共享池即可开工——这不是卡死。'))
-          : null,
-        plan && plan.retryable?.length
-          ? h('div', { className: 'hwb-panel-group' },
-            h('p', { className: 'hwb-panel-head' }, '可重试（' + plan.retryable.length + '）'),
-            plan.retryable.slice(0, 6).map((r, i) => h('div', { key: 'rt' + i, className: 'hwb-panel-row' },
-              h('span', { className: 'hwb-dot bad', 'aria-hidden': 'true' }),
-              h('span', { className: 'hwb-panel-title' }, String(byId.get(String(r.id))?.subject || r.id)),
-              h('span', { className: 'hwb-chip' }, '已试 ' + r.retry.used + '/' + r.retry.max))),
-            h('p', { className: 'hwb-hint' }, '这些失败过但还有额度。超时/取消/环境不可用**不占**重试次数——它们不是这个节点做错了。'))
-          : null,
-        plan?.validation && plan.validation.errors?.length
-          ? h('div', { className: 'hwb-panel-group' },
-            h('p', { className: 'hwb-panel-head bad' }, '计划结构错误（' + plan.validation.errors.length + '）'),
-            h('p', { className: 'hwb-hint bad' },
-              plan.validation.errors.slice(0, 6).map(e => e.code === 'cycle'
-                ? '环：' + (e.ring || []).join(' → ')
-                : (e.code === 'self-loop' ? '自环：' + e.taskId
-                  : e.code + '：' + (e.taskId || '') + ' → ' + (e.edge || ''))).join('；')),
-            h('p', { className: 'hwb-hint' }, '自环与环都会让环内任务**永远不会就绪**。自环改一行即可；真环要先看清成员再断一条边。'))
-          : null,
-        plan?.validation && plan.validation.warnings?.length
-          ? h('p', { className: 'hwb-hint' },
-            '计划警告：' + plan.validation.warnings.map(w => w.code === 'quorum-clamped'
-              ? '任务 ' + w.taskId + ' 的 quorum n=' + w.requested + ' 超出边数 ' + w.edges + '，已夹到上限'
-              : w.code).join('；'))
-          : null,
-        plan?.writeScopeConflicts?.length
-          ? h('div', { className: 'hwb-panel-group' },
-            h('p', { className: 'hwb-panel-head' }, '写范围冲突（' + plan.writeScopeConflicts.length + ' 对）'),
-            h('p', { className: 'hwb-hint' },
-              plan.writeScopeConflicts.slice(0, 5).map(c => c.a + ' × ' + c.b + '（' + c.paths.join('、') + '）').join('；')),
-            h('p', { className: 'hwb-hint' }, '两个都还没结束的任务会写同一批文件。这不是锁，只是提醒：官方明文没有 worktree，成员共享同一个 checkout。'))
-          : null,
-        plan?.termination
-          ? h('p', { className: 'hwb-hint' },
-            '终止性：还剩 ' + plan.termination.remaining + ' / ' + plan.termination.total + ' 个未终态'
-            + (plan.termination.deleted > 0 ? '（另有 ' + plan.termination.deleted + ' 条已删除，不计入图）' : '')
-            + '。' + (plan.termination.allSettled
-              ? (plan.termination.hasTerminalFailure ? '整批已结束，但**有终态失败**——那是另一种结局，不是成功。' : '整批已结束。')
-              : '整批还没跑完。'))
-          : null,
-        planErr && h('p', { className: 'hwb-hint bad' }, '执行语义读不到（' + planErr + '）——任务与图诊断不受影响。'),
-        // 来源标注 + 就绪判据的来源必须分开说：磁盘路径上**官方没给 ready**，
-        // 由 task-graph.js 按官方判据现算（readySource: 'computed'）。把这两件事
-        // 混成一句会让「就绪是谁算的」重新变成需要读代码才知道的事。
-        sourceText(data.tasksSource) && h('p', { className: 'hwb-hint' }, sourceText(data.tasksSource)),
+
+        // 来源标注与说明
+        sourceText(data?.tasksSource) && h('p', { className: 'hwb-hint' }, sourceText(data?.tasksSource)),
         h('p', { className: 'hwb-hint' },
           '就绪（ready）取官方算好的判据，桥不重算；阻塞明细、关键路径与结构检查由桥补算。'
-          + '写范围重叠只是提醒而不是锁：官方明文没有 worktree，成员共享同一个 checkout。'));
+          + '写范围重叠只是提醒而不是锁：官方明文没有 worktree，成员共享同一个 checkout。'),
+
+        // 新建任务弹窗
+        showNewModal && h(NewTaskModalDialog, {
+          onClose: () => setShowNewModal(false),
+          onCreate: (taskInput) => {
+            api('task-create', taskInput)
+              .then(res => {
+                const v = verdictOf(res, '创建任务');
+                if (v.ok) {
+                  setShowNewModal(false);
+                  notify('ok', '已创建任务 ' + (res?.task?.id || '') + '。');
+                  refreshLedger();
+                } else {
+                  notify('bad', '创建任务失败: ' + v.error);
+                }
+              })
+              .catch(e => notify('bad', '请求失败: ' + e.message));
+          },
+        }),
+      );
+    }
+
+    /**
+     * **新建任务弹窗**（对标 reference/dsh-task-board 的 NewTaskModal）。
+     *
+     * 校验反馈走**内联文案**而不是 `alert`：参考实现的 `TaskForm.tsx` 把
+     * `formError` 渲染在字段下方（`board.module.css` 的 `.formError` 用
+     * `--dsw-alias-state-error-primary`），这里同口径照做。理由与任务板级
+     * 横幅相同：`alert` 阻塞主线程，且不属于官方任何一种反馈形态。
+     */
+    function NewTaskModalDialog({ onClose, onCreate }) {
+      const [subject, setSubject] = React.useState('');
+      const [description, setDescription] = React.useState('');
+      const [siteId, setSiteId] = React.useState('deepseek');
+      const [slot, setSlot] = React.useState('0');
+      const [projectId, setProjectId] = React.useState('default');
+      const [writeScopes, setWriteScopes] = React.useState('');
+      // ── 排期与执行面（0.19.0）─────────────────────────────────────────────
+      //
+      // 参考实现 `dsh-task-board` 的 NewTaskModal 有 schedule(cron) / mode /
+      // permission / reuseSession 一整套，本桥移植任务板时**漏掉了整块**——
+      // 用户问的「为什么任务板没有设置开始时间等功能」就是它：不是坏了，
+      // 是从来没做（界面没有输入框，台账也没有落脚字段）。
+      //
+      // `startAt` 用原生 `<input type="datetime-local">`：自带日历、时区与格式
+      // 校验，**不需要引入日期库**（本文件是单文件 bundle，引不了依赖）。
+      // 读出的是本地时间字符串，`new Date(str).getTime()` 转毫秒。
+      const [startAt, setStartAt] = React.useState('');
+      const [cron, setCron] = React.useState('');
+      const [mode, setMode] = React.useState('');
+      const [permission, setPermission] = React.useState('');
+      const [reuseSession, setReuseSession] = React.useState(false);
+      const [formError, setFormError] = React.useState('');
+
+      const handleSubmit = (e) => {
+        e.preventDefault();
+        if (!subject.trim()) { setFormError('任务标题不能为空。'); return; }
+        // 开始时间填错就别提交：静默丢掉一个非法值会让用户以为排期设上了
+        //（本项目反复记过的「说做了、其实没做」）。
+        const startMs = startAt ? new Date(startAt).getTime() : null;
+        if (startAt && !Number.isFinite(startMs)) { setFormError('开始时间格式不正确，请重新选择。'); return; }
+        setFormError('');
+        onCreate({
+          subject: subject.trim(),
+          description: description.trim(),
+          assignedModel: { siteId, accountSlot: Number(slot) || 0 },
+          projectId: projectId.trim() || 'default',
+          writeScopes: writeScopes.split(/[\n,]+/).map(s => s.trim()).filter(Boolean),
+          schedule: { startAt: startMs, cron: cron.trim() },
+          mode: mode.trim(),
+          permission: permission.trim(),
+          reuseSession,
+        });
+      };
+
+      return h('div', { className: 'hwb-modal-overlay', onClick: onClose },
+        h('div', { className: 'hwb-modal-content', onClick: e => e.stopPropagation() },
+          h('div', { className: 'hwb-modal-header' },
+            h('h3', null, '新建任务'),
+            h('button', { className: 'hwb-btn ghost', onClick: onClose }, '✕')),
+          h('form', { onSubmit: handleSubmit, className: 'hwb-modal-form' },
+            h('label', { className: 'hwb-form-field' },
+              h('span', { className: 'hwb-field-label' }, '任务标题 (必填)'),
+              h('input', {
+                className: 'hwb-input',
+                value: subject,
+                placeholder: '简短描述要实现的功能或修复的目标…',
+                // 用户一动手就把上一次的校验错误清掉：错误文案是关于**上一次提交**的，
+                // 留在原地会让人以为「改了也还是错」。
+                onChange: e => { setFormError(''); setSubject(e.target.value); },
+                autoFocus: true,
+              }),
+              // 官方口径：错误紧贴字段下方（参考实现 `.formError`）。
+              formError && h('p', { className: 'hwb-form-error', role: 'alert' }, formError)),
+            h('label', { className: 'hwb-form-field' },
+              h('span', { className: 'hwb-field-label' }, '任务详细说明 (支持 Markdown)'),
+              h('textarea', {
+                className: 'hwb-textarea',
+                rows: 4,
+                value: description,
+                placeholder: '详细要求、验收标准与实现细节…',
+                onChange: e => setDescription(e.target.value),
+              })),
+            h('div', { className: 'hwb-form-row' },
+              h('label', { className: 'hwb-form-field' },
+                h('span', { className: 'hwb-field-label' }, '指定执行站点 / 模型'),
+                h('select', {
+                  className: 'hwb-select',
+                  value: siteId,
+                  onChange: e => setSiteId(e.target.value),
+                },
+                  h('option', { value: 'deepseek' }, 'DeepSeek (网页基线)'),
+                  h('option', { value: 'glm' }, '智谱清言 (GLM-4)'),
+                  h('option', { value: 'kimi' }, 'Kimi (Moonshot)'),
+                  h('option', { value: 'qwen' }, '通义千问 (Qwen)'),
+                  h('option', { value: 'doubao' }, '豆包 (Doubao)'),
+                  h('option', { value: 'zai' }, 'Z.ai (海外)'))),
+              h('label', { className: 'hwb-form-field' },
+                h('span', { className: 'hwb-field-label' }, '所属项目 (Project ID)'),
+                h('input', {
+                  className: 'hwb-input',
+                  value: projectId,
+                  placeholder: 'default',
+                  onChange: e => setProjectId(e.target.value),
+                }))),
+            h('label', { className: 'hwb-form-field' },
+              h('span', { className: 'hwb-field-label' }, '预期写入范围 (Write Scopes，每行一个路径前缀)'),
+              h('input', {
+                className: 'hwb-input',
+                value: writeScopes,
+                placeholder: 'package/dsh-webcode-bridge/lib/, doc/',
+                onChange: e => setWriteScopes(e.target.value),
+              })),
+            // ── 开始时间 / 排期 / 执行面（0.19.0）───────────────────────────
+            // 这三行就是用户问的「设置开始时间等功能」。它们**真的会落盘**：
+            // UI → POST task-create → applyCreate → scheduleOf → ledger.json
+            //（三跳缺任何一跳都会变成「填了没用」，因此每一跳都在护栏里钉住）。
+            h('div', { className: 'hwb-form-row' },
+              h('label', { className: 'hwb-form-field' },
+                h('span', { className: 'hwb-field-label' }, '开始时间（留空 = 不定时）'),
+                h('input', {
+                  type: 'datetime-local',
+                  className: 'hwb-input',
+                  value: startAt,
+                  onChange: e => { setFormError(''); setStartAt(e.target.value); },
+                })),
+              h('label', { className: 'hwb-form-field' },
+                h('span', { className: 'hwb-field-label' }, '周期排期 (cron，可选)'),
+                h('input', {
+                  className: 'hwb-input',
+                  value: cron,
+                  placeholder: '0 9 * * *',
+                  onChange: e => { setFormError(''); setCron(e.target.value); },
+                }))),
+            h('div', { className: 'hwb-form-row' },
+              h('label', { className: 'hwb-form-field' },
+                h('span', { className: 'hwb-field-label' }, '执行模式 (mode，可选)'),
+                h('input', {
+                  className: 'hwb-input',
+                  value: mode,
+                  placeholder: '留空 = 用默认预设',
+                  onChange: e => setMode(e.target.value),
+                })),
+              h('label', { className: 'hwb-form-field' },
+                h('span', { className: 'hwb-field-label' }, '权限档 (permission，可选)'),
+                h('input', {
+                  className: 'hwb-input',
+                  value: permission,
+                  placeholder: '留空 = 用默认权限',
+                  onChange: e => setPermission(e.target.value),
+                }))),
+            h('label', { className: 'hwb-form-field hwb-form-check' },
+              h('input', {
+                type: 'checkbox',
+                checked: reuseSession,
+                onChange: e => setReuseSession(e.target.checked),
+              }),
+              h('span', null, '复用同一网页会话（不勾则每个任务各持一条会话）')),
+            h('div', { className: 'hwb-modal-actions' },
+              h('button', { type: 'button', className: 'hwb-btn ghost', onClick: onClose }, '取消'),
+              h('button', { type: 'submit', className: 'hwb-btn primary' }, '创建任务')))));
+    }
+
+    /**
+     * **Notion 式卡片展开详情页面**（满足用户针对正文批注、指定模型实施、任务专用会话绑定的完整要求）。
+     */
+    function TaskDetailNotionView({ task, allTasks, notice, onDismissNotice, onBack, onUpdate, onDelete, onAddComment, onResolveComment, onImplement }) {
+      const [subject, setSubject] = React.useState(task.subject || '');
+      const [description, setDescription] = React.useState(task.description || '');
+      const [status, setStatus] = React.useState(task.status || 'pending');
+      const [siteId, setSiteId] = React.useState(task.assignedModel?.siteId || 'deepseek');
+      // 排期（0.19.0）：与 subject/description 同一条 dirty 规则——用户正在改时间时
+      // 后台 5 秒轮询**不许**覆盖他（那正是「人不能手动编辑任务」的成因）。
+      const [startAt, setStartAt] = React.useState('');
+      const [cronExpr, setCronExpr] = React.useState('');
+      const schedule = task.schedule && typeof task.schedule === 'object'
+        ? task.schedule
+        : { enabled: false, cron: '', startAt: null, nextRunAt: null, lastTriggeredAt: null };
+      const [selectedQuote, setSelectedQuote] = React.useState('');
+      const [commentText, setCommentText] = React.useState('');
+      const [taskChatMessages, setTaskChatMessages] = React.useState([]);
+      const [chatInput, setChatInput] = React.useState('');
+
+      // 同步外部变更 —— **只在任务换人时同步**（0.18.0 真缺陷修复）。
+      //
+      // 为什么这条注释必须这么长：这里原先依赖的是**整个 task 对象**，而 `task` 是从
+      // `TaskBoardPanel` 的 `byId` 里取的、**每 5 秒轮询一次** `task-ledger` 后
+      // 重新构造的对象。对象引用每次都变 ⇒ 这个 effect 每 5 秒跑一次 ⇒
+      // 用户正在输入的标题 / 正文 / 状态 / 模型**被静默重置回台账里的旧值**。
+      // 症状正是用户报的「人不能手动添加/编辑任务」：框在那儿，打进去的字会自己消失。
+      //
+      // 判据因此必须是**稳定标识**（任务 id）而不是对象引用。
+      const taskId = String(task?.id || '');
+      // dirtyRef：用户一旦在本页改过任何字段，后台轮询就**不许**再覆盖他。
+      // 这不是「更好的做法」，是「不这么做就等于把用户的输入丢掉」。
+      const dirtyRef = React.useRef(false);
+      const taskRevision = Number(task?.revision) || 0;
+      // 换了一条任务：无条件同步，并把 dirty 归零（新任务的字段属于新任务）。
+      React.useEffect(() => {
+        dirtyRef.current = false;
+        setSubject(task.subject || '');
+        setDescription(task.description || '');
+        setStatus(task.status || 'pending');
+        setSiteId(task.assignedModel?.siteId || 'deepseek');
+        setStartAt(toLocalInputValue(task.schedule?.startAt));
+        setCronExpr(String(task.schedule?.cron || ''));
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- 只认 id：见上面那段理由
+      }, [taskId]);
+
+      // 同一条任务被**外部**改了（另一个成员 / 另一个标签页）：只有用户没在编辑时
+      // 才同步。他正在打字就宁可这一拍不同步，也绝不把他的输入冲掉。
+      React.useEffect(() => {
+        if (dirtyRef.current) return;
+        setSubject(task.subject || '');
+        setDescription(task.description || '');
+        setStatus(task.status || 'pending');
+        setSiteId(task.assignedModel?.siteId || 'deepseek');
+        setStartAt(toLocalInputValue(task.schedule?.startAt));
+        setCronExpr(String(task.schedule?.cron || ''));
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- 依赖 revision：语义就是「外部改动」
+      }, [taskRevision]);
+
+      // 处理划词/摘录引用
+      const handleDescSelect = (e) => {
+        const sel = window.getSelection()?.toString()?.trim();
+        if (sel && sel.length > 2) setSelectedQuote(sel);
+      };
+
+      // 每个受控输入的 onChange 都先置 dirty —— 否则后台轮询会在下一拍把
+      // 用户刚敲的字覆盖掉（上面 effect 的注释写了完整成因）。
+      const markDirty = () => { dirtyRef.current = true; };
+
+      const handleAddComment = (e) => {
+        e.preventDefault();
+        if (!commentText.trim()) return;
+        onAddComment({ quote: selectedQuote, text: commentText.trim() });
+        setCommentText('');
+        setSelectedQuote('');
+      };
+
+      const handleSaveMeta = () => {
+        // 开始时间与 cron **必须一起提交**：只提交其中一个的话，`applyUpdate` 的合并
+        // 分支拿不到另一个的当前值就会把它当成「未提供」而保留旧值——用户清空
+        // 开始时间时会发现它自己又回来了。
+        const startMs = startAt ? new Date(startAt).getTime() : null;
+        onUpdate({
+          subject: subject.trim(),
+          description,
+          status,
+          assignedModel: { siteId, accountSlot: 0 },
+          schedule: {
+            startAt: Number.isFinite(startMs) ? startMs : null,
+            cron: cronExpr.trim(),
+          },
+        });
+        // 保存成功后解除 dirty：此后后台轮询可以正常同步外部变更
+        //（比如另一个成员改了这条任务）。
+        dirtyRef.current = false;
+      };
+
+      const comments = Array.isArray(task.comments) ? task.comments : [];
+      // 正文侧锚点：只收**有引用片段**的批注。
+      //
+      // 必须带上它在 `comments` 里的**原始下标**：右侧批注卡是按 `comments` 顺序
+      // 渲染的，锚点按钮要跳到「第 i 张卡」。如果这里只留文本、用数组下标去指卡片，
+      // 只要有一条无引用的批注夹在中间，后面的锚点就全部错位一格，点到别的批注上——
+      // 而这种错位在界面上完全看不出来（跳转目标看起来同样合理）。
+      const anchorQuotes = comments
+        .map((c, idx) => ({ quote: String(c?.quote || ''), idx }))
+        .filter(a => a.quote);
+
+      return h('div', { className: 'hwb-notion-page' },
+        // 头部操作条
+        h('div', { className: 'hwb-notion-header' },
+          h('button', { className: 'hwb-btn ghost', onClick: onBack }, '← 返回看板'),
+          h('div', { className: 'hwb-notion-actions' },
+            h('button', { className: 'hwb-btn primary', onClick: handleSaveMeta }, '保存修改'),
+            h('button', { className: 'hwb-btn danger', onClick: onDelete }, '删除任务'))),
+
+        // 写操作反馈横幅：**详情页是唯一能发起这些写操作的地方**，所以它必须也在这里。
+        // 只放在看板那一支的话，用户在此页做的每一次保存/批注/派发都看不到任何结果
+        //（含被 CAS 拒绝）——详见 `TaskBoardPanel` 里传 `notice` 处的完整说明。
+        notice && h('div', {
+          className: 'hwb-notice ' + (notice.kind === 'bad' ? 'bad' : 'ok'),
+          role: notice.kind === 'bad' ? 'alert' : 'status',
+        },
+          h('span', { className: 'hwb-notice-text' }, notice.text),
+          h('button', {
+            className: 'hwb-btn-close',
+            title: '关闭',
+            onClick: () => { if (typeof onDismissNotice === 'function') onDismissNotice(); },
+          }, '✕')),
+
+        // 任务主体信息
+        h('div', { className: 'hwb-notion-body' },
+          h('input', {
+            className: 'hwb-notion-title-input',
+            value: subject,
+            placeholder: '任务标题…',
+            onChange: e => { markDirty(); setSubject(e.target.value); },
+          }),
+
+          // 属性栅格（Status / Model / Project / SessionKey）
+          h('div', { className: 'hwb-notion-properties' },
+            h('div', { className: 'hwb-notion-prop-row' },
+              h('span', { className: 'hwb-prop-name' }, '状态 (Status)'),
+              h('select', {
+                className: 'hwb-select',
+                value: status,
+                onChange: e => { markDirty(); setStatus(e.target.value); },
+              },
+                h('option', { value: 'pending' }, '待办 (pending)'),
+                h('option', { value: 'in_progress' }, '进行中 (in_progress)'),
+                h('option', { value: 'completed' }, '已完成 (completed)'),
+                h('option', { value: 'failed' }, '失败 (failed)'))),
+            h('div', { className: 'hwb-notion-prop-row' },
+              h('span', { className: 'hwb-prop-name' }, '指定执行模型'),
+              h('select', {
+                className: 'hwb-select',
+                value: siteId,
+                onChange: e => { markDirty(); setSiteId(e.target.value); },
+              },
+                h('option', { value: 'deepseek' }, 'DeepSeek (网页基线)'),
+                h('option', { value: 'glm' }, '智谱清言 (GLM)'),
+                h('option', { value: 'kimi' }, 'Kimi (Connect-RPC)'),
+                h('option', { value: 'qwen' }, '通义千问 (Qwen)'),
+                h('option', { value: 'doubao' }, '豆包 (Doubao)'),
+                h('option', { value: 'zai' }, 'Z.ai (海外)'))),
+            h('div', { className: 'hwb-notion-prop-row' },
+              h('span', { className: 'hwb-prop-name' }, '项目归属'),
+              h('span', { className: 'hwb-chip' }, task.projectId || 'default')),
+            h('div', { className: 'hwb-notion-prop-row' },
+              h('span', { className: 'hwb-prop-name' }, '会话隔离 Key'),
+              h('span', { className: 'hwb-session-key', title: task.sessionKey }, task.sessionKey || '未绑定')),
+            // ── 开始时间 / 排期（0.19.0）───────────────────────────────────────
+            // 详情页是**唯一**能改一条已存在任务的地方，因此这两个输入框必须也在这里：
+            // 只在新建弹窗里能设的话，用户建完就再也改不了开始时间——那只是半个功能。
+            h('div', { className: 'hwb-notion-prop-row' },
+              h('span', { className: 'hwb-prop-name' }, '开始时间'),
+              h('input', {
+                type: 'datetime-local',
+                className: 'hwb-select',
+                value: toLocalInputValue(schedule.startAt),
+                onChange: e => { markDirty(); setStartAt(e.target.value); },
+              })),
+            h('div', { className: 'hwb-notion-prop-row' },
+              h('span', { className: 'hwb-prop-name' }, '周期排期 (cron)'),
+              h('input', {
+                className: 'hwb-input',
+                value: cronExpr,
+                placeholder: '留空 = 不定时（如 0 9 * * *）',
+                onChange: e => { markDirty(); setCronExpr(e.target.value); },
+              })),
+            // 时间戳如实显示：用户问的「开始时间」有一半指的是「这条任务什么时候建的、
+            // 最后一次动是什么时候」——而这两个字段在台账里一直有，界面**从不渲染**。
+            h('div', { className: 'hwb-notion-prop-row' },
+              h('span', { className: 'hwb-prop-name' }, '创建 / 更新'),
+              h('span', { className: 'hwb-chip' }, formatStamp(task.createdAt) + ' / ' + formatStamp(task.updatedAt))),
+            schedule.nextRunAt
+              ? h('div', { className: 'hwb-notion-prop-row' },
+                h('span', { className: 'hwb-prop-name' }, '下次触发'),
+                h('span', { className: 'hwb-chip' }, formatStamp(schedule.nextRunAt)))
+              : null),
+
+          // ── 审阅区：Office / Word 式「左正文 · 右批注栏」（0.18.0）────────────
+          //
+          // 用户原话（2026-09-22）：「然后是审批界面，参考 office 左正文，右划线
+          // 编辑评论并合理显示：完全参考 office 实现」。
+          //
+          // 为什么是左右分栏而不是上下堆叠（改前就是上下）：Word 的审阅窗格把
+          // **被审阅的正文**与**针对它的批注**并排，批注锚在右侧页边（margin），
+          // 引用片段与正文段落**水平对齐**。上下堆叠时用户得靠来回滚动才能对照
+          // 「这段文字」与「针对这段文字的意見」——那正是审阅最费神的地方。
+          //
+          // 三处对齐 Word 的细节：
+          //   · 右侧是**页边栏**（窄、独立滚动），不是第二篇文章；
+          //   · 每条批注带左侧竖线 + 引用片段斜体（Word 的批注标记形态）；
+          //   · 选中的引用片段在正文侧**留痕**（当前引用条），用户知道锚在哪。
+          h('div', { className: 'hwb-review-split' },
+            // ── 左：正文 ────────────────────────────────────────────────
+            h('div', { className: 'hwb-review-doc' },
+              h('div', { className: 'hwb-review-doc-head' },
+                h('h4', { className: 'hwb-section-title' }, '任务正文'),
+                h('span', { className: 'hwb-review-tip' }, '选中文字后到右侧写批注')),
+              h('textarea', {
+                className: 'hwb-notion-desc-textarea hwb-review-textarea',
+                rows: 18,
+                value: description,
+                onMouseUp: handleDescSelect,
+                onChange: e => { markDirty(); setDescription(e.target.value); },
+                placeholder: '在此输入详细的任务说明、实现思路或规范要求…（选中一段文字即可针对它写批注）',
+              }),
+              // ── 正文侧留痕：已被批注锚定的片段集合（Word 的「已评论文字」着色）──
+              //
+              // 这是 0.19.0 补上的一环。此前正文与批注之间**只有**一条「当前选中」
+              // 的临时提示，页面刷新或点开后用户就再也说不出「这几条批注到底说的是
+              // 正文的哪一段」——Word 正是靠**正文里被底纹标出的那段文字**回答这个
+              // 问题的。这里用同一份 `comments[].quote` 做锚点清单：每条引用片段一行，
+              // 点击它把右侧对应批注滚进视野。
+              //
+              // 刻意**不**把 textarea 换成 contenteditable：那会把「编辑正文」这件
+              // 事从原生控件换成自绘富文本，光标、输入法、撤销栈都要自己实现——收益
+              // 只是着色，代价是整块编辑体验。锚点清单用更小的代价给出同等信息。
+              anchorQuotes.length > 0 && h('div', { className: 'hwb-review-anchors' },
+                h('span', { className: 'hwb-review-anchors-label' }, '已批注 ' + anchorQuotes.length + ' 处：'),
+                anchorQuotes.map((a) => h('button', {
+                  key: 'q' + a.idx,
+                  className: 'hwb-review-anchor',
+                  title: '跳到该批注',
+                  onClick: (e) => {
+                    // 点了锚点就把对应批注卡滚进视野：Word 里点正文的批注标记
+                    // 会定位到页边那条卡，方向反过来也同样成立。
+                    const card = e?.currentTarget
+                      ?.closest?.('.hwb-review-split')?.querySelectorAll?.('.hwb-comment-card')?.[a.idx];
+                    if (card && typeof card.scrollIntoView === 'function') {
+                      card.scrollIntoView({ block: 'nearest' });
+                    }
+                  },
+                }, a.quote)))),
+
+            // ── 右：批注栏（Word 的 margin）─────────────────────────────
+            h('div', { className: 'hwb-review-margin' },
+              h('div', { className: 'hwb-review-margin-head' },
+                h('h4', { className: 'hwb-section-title' }, '批注（' + comments.length + '）'),
+                comments.some(c => !c.resolved) && h('span', { className: 'hwb-chip warn' },
+                  '待处理 ' + comments.filter(c => !c.resolved).length)),
+              h('div', { className: 'hwb-comments-list hwb-review-comments' },
+                comments.map(c => h('div', {
+                  key: c.id,
+                  className: 'hwb-comment-card' + (c.resolved ? ' resolved' : ''),
+                },
+                  c.quote && h('blockquote', { className: 'hwb-comment-quote' }, '“' + c.quote + '”'),
+                  h('div', { className: 'hwb-comment-text' }, c.text),
+                  h('div', { className: 'hwb-comment-footer' },
+                    h('span', { className: 'hwb-comment-time' }, new Date(c.createdAt).toLocaleTimeString()),
+                    h('button', {
+                      className: 'hwb-btn small ' + (c.resolved ? 'ghost' : 'primary'),
+                      onClick: () => onResolveComment(c.id),
+                    }, c.resolved ? '✓ 已解决' : '标记为已解决')),
+                  // 「指定 AI 依据此评论实施」是**审批动作**：把这条批注变成
+                  // 一次真实的模型执行。它单独一行、占满宽度，因为它是这一栏里
+                  // 唯一的「会改变代码」的按钮，不该与「已解决」挤在一行里被误点。
+                  h('button', {
+                    className: 'hwb-btn small primary hwb-comment-implement',
+                    onClick: () => onImplement(c.id, c.quote, c.text),
+                  }, '⚡ 指定 AI 依据此评论实施'))),
+                comments.length === 0 && h('p', { className: 'hwb-hint' },
+                  '暂无批注。在左侧选中文字，或直接在下面写一条。')),
+
+              // 添加新批注表单
+              h('form', { onSubmit: handleAddComment, className: 'hwb-comment-form' },
+                selectedQuote && h('div', { className: 'hwb-quote-preview' },
+                  h('span', { className: 'hwb-quote-label' }, '引用：'),
+                  h('span', { className: 'hwb-quote-val' }, '“' + selectedQuote + '”'),
+                  h('button', { type: 'button', className: 'hwb-btn-close', onClick: () => setSelectedQuote('') }, '✕')),
+                h('input', {
+                  className: 'hwb-input',
+                  placeholder: selectedQuote ? '针对这段引用的修改建议…' : '先选中左侧文字，或直接写一条批注…',
+                  value: commentText,
+                  onChange: e => setCommentText(e.target.value),
+                }),
+                h('button', { type: 'submit', className: 'hwb-btn primary' }, '添加批注')))),
+
+          // ── 以任务为核心的会话与实施联动区 ──────────────────────────────
+          h('div', { className: 'hwb-notion-section' },
+            h('h4', { className: 'hwb-section-title' }, '以任务为核心的会话流 (' + (task.sessionKey || 'task-session') + ')'),
+            h('p', { className: 'hwb-hint' }, '针对本任务的对话将独立在此会话中闭环，实现“以任务组织上下文与团队工作”。'),
+            h('div', { className: 'hwb-task-chat-box' },
+              h('div', { className: 'hwb-task-chat-history' },
+                taskChatMessages.map((m, idx) => h('div', { key: idx, className: 'hwb-chat-msg ' + m.role },
+                  h('strong', null, m.role === 'user' ? '用户: ' : 'AI (' + siteName(siteId) + '): '),
+                  h('span', null, m.text))),
+                taskChatMessages.length === 0 && h('p', { className: 'hwb-hint' }, '尚无会话记录。输入消息或点击评论中的「指定 AI 实施」即可开始。')),
+              h('div', { className: 'hwb-task-chat-input-row' },
+                h('input', {
+                  className: 'hwb-input',
+                  placeholder: '在此发送指令给分配的模型 (' + siteName(siteId) + ')…',
+                  value: chatInput,
+                  onChange: e => setChatInput(e.target.value),
+                  onKeyDown: e => {
+                    if (e.key === 'Enter' && chatInput.trim()) {
+                      const msg = chatInput.trim();
+                      setChatInput('');
+                      setTaskChatMessages(prev => [...prev, { role: 'user', text: msg }]);
+                      onImplement(null, '', msg);
+                    }
+                  },
+                }),
+                h('button', {
+                  className: 'hwb-btn primary',
+                  onClick: () => {
+                    if (chatInput.trim()) {
+                      const msg = chatInput.trim();
+                      setChatInput('');
+                      setTaskChatMessages(prev => [...prev, { role: 'user', text: msg }]);
+                      onImplement(null, '', msg);
+                    }
+                  },
+                }, '发送指令'))))));
     }
 
     /**
@@ -1522,7 +2264,7 @@ window.__ModuleLoader__.load({
               h('button', { disabled: busySite !== null, onClick: () => checkLogin(s.accountKey) }, '检测'),
               h('button', {
                 disabled: busySite !== null,
-                title: '把本机真实 Edge 里该站点的登录态导入桥 profile（读取你的 Edge cookies；无需在桥里再登录一次）',
+                title: '把本机已安装浏览器里该站点的登录态导入桥 profile（读取其 cookies；无需在桥里再登录一次）',
                 onClick: () => importCookies(s.accountKey),
               }, '导入本机登录态'),
               h('button', {
@@ -1536,8 +2278,8 @@ window.__ModuleLoader__.load({
           }, (results[s.accountKey].ok ? '✓ ' : '✗ ') + s.displayName + '：' + results[s.accountKey].text))),
         h('p', { className: 'hwb-hint indent' },
           subHint
-            ? '子代理所选站点的账户行：登录/更换账户与其它站点同一套逻辑（真实 Edge 窗口一次性登录），登录态按站点各自持久化；与主线同站点时两者天然共享登录。'
-            : '登录会打开真实 Edge 窗口，请在窗口内完成一次性登录（扫码/验证码/密码均可），检测到成功后自动切回无头运行。'
+            ? '子代理所选站点的账户行：登录/更换账户与其它站点同一套逻辑（打开浏览器窗口一次性登录），登录态按站点各自持久化；与主线同站点时两者天然共享登录。'
+            : '登录会打开浏览器窗口（本插件自带 Chromium，无需你另外安装），请在窗口内完成一次性登录（扫码/验证码/密码均可），检测到成功后自动切回无头运行。'
             + '各站点登录态分开保存在各自 profile 里，互不串号；账户失效时在这里「更换账户」即可。'));
     }
 
@@ -1575,6 +2317,274 @@ window.__ModuleLoader__.load({
      * 就继续只吃一个普通的 `sessionId` 值——这也是 `client-render.test.mjs` 直接
      * 调 `Settings(props)` 的既有契约。
      */
+    /**
+     * **中央区三列模型并列对比视图**（0.17.3，用户需求 5：发挥多站点优势，在中心对话区并列不同模型回复）。
+     */
+    /**
+     * **并列多会话 Team（0.18.0 重构；原 0.17.3 的「三列对比视图」）。**
+     *
+     * ## 用户要的到底是什么（原话，2026-09-22）
+     *
+     *   「team不是指的官方team那样，我想更多指的是能够充分发挥本多站点（如果实现）的优势，
+     *    能够做到中心对话区域做到：并列不同模型对话进行回复」
+     *   「重构team功能，本插件的并列多会话组成的team」
+     *
+     * 即：Team = **若干条各自独立的网页会话并排**。一次提问同时发车、各答各的，
+     * 每列可继续追问（各持会话）。它不是官方 AgentTeams 的花名册。
+     *
+     * ## 0.17.3 那版的三个真缺陷（本轮全部修掉，不是风格重写）
+     *
+     *   ① **硬编码三列**：三个独立 state（col1Site/col2Site/col3Site）+ 三段复制粘贴的
+     *      JSX。用户要的是「2~4 列」，而三份复制既加不了第四列、也删不掉第三列。
+     *      现在改成**一个数组驱动**，加/删列各是一次数组操作。
+     *   ② **用 `msgs[msgs.length - 1]` 定位回复**：并发回来时若用户已发下一轮，
+     *      后到的回复会把**新一轮的用户消息**覆盖掉。现在每条消息带 `id`，按 id 精确回填。
+     *   ③ **不带 `sessionKey`**：每次发起对话都开一条新网页会话，「多会话 Team」
+     *      名存实亡——第二轮模型完全不记得第一轮。现在每列首次发送时铸一个稳定
+     *      `sessionKey` 并**一直复用**，这才是「各自接着聊」。
+     *
+     * 错误语义按用户 §4-Q1 的默认：**某一列失败只标那一列，其余列照常**——
+     * 对比的价值就在于不被一列拖垮。
+     */
+    function MultiModelCompareView(props) {
+      // 站点清单可由宿主注入；拿不到用内置六个（与 providers.js 的登录站点一致）。
+      const siteOptions = Array.isArray(props?.siteOptions) && props.siteOptions.length > 0
+        ? props.siteOptions
+        : [
+          { id: 'deepseek', name: 'DeepSeek (网页基线)' },
+          { id: 'glm', name: '智谱清言 (GLM)' },
+          { id: 'kimi', name: 'Kimi' },
+          { id: 'qwen', name: '通义千问 (Qwen)' },
+          { id: 'doubao', name: '豆包 (Doubao)' },
+          { id: 'zai', name: 'Z.ai' },
+        ];
+
+      // 会话身份：由宿主注入（每个 DSH 会话一套并列会话）。
+      const sessionScope = String(props?.sessionId || 'local');
+
+      // ★ 唯一的列状态：一个数组。加列 = 展开，删列 = filter，改站点 = map。
+      const [cols, setCols] = React.useState(() => [
+        { key: 'c1', siteId: 'deepseek', sessionKey: '', messages: [], status: 'idle', error: '' },
+        { key: 'c2', siteId: 'glm', sessionKey: '', messages: [], status: 'idle', error: '' },
+        { key: 'c3', siteId: 'kimi', sessionKey: '', messages: [], status: 'idle', error: '' },
+      ]);
+      const [prompt, setPrompt] = React.useState('');
+      const [sending, setSending] = React.useState(false);
+      const seqRef = React.useRef(0);
+      const aliveRef = React.useRef(true);
+      // 在途列数计数器。**必须在组件体顶层创建**（0.19.0 第四轮自查抓到的阻断级缺陷）。
+      //
+      // 它的第一版被写在 `handleSendAll` 的函数体里 —— 那是**事件处理器**，不是渲染期。
+      // 真实 React 在渲染之外把 dispatcher 换成「只会抛错」的那一个，于是 `useRef`
+      // 当场抛 `Invalid hook call`：点一次「同时发送」整块视图就炸，一列都发不出去，
+      // 而它本来要修的是「按钮永久锁死」——修出来的病比原病更重。
+      // 即便某个 React 版本容忍这种写法，每次点击都会新建一个 ref 对象，
+      // 「计数在途列数」的语义也就不再跨渲染稳定。
+      //
+      // 为什么 887 条单测全绿也没看见：`test/client-render.test.mjs` 的 React 桩是
+      // `useRef: (init) => ({ current: init })`，它**在任何位置都工作**，结构上无法
+      // 察觉 hooks 规则；而 `team-compare.test.mjs` 的判据只断言源码文本里
+      // **存在** `const pendingRef = React.useRef(0)` ——写在事件处理器里同样满足。
+      // 两处判据都已按「位置」而不是「存在」重写，见对应测试文件的注释。
+      const pendingRef = React.useRef(0);
+
+      React.useEffect(() => () => { aliveRef.current = false; }, []);
+
+      const MIN_COLS = 2;
+      const MAX_COLS = 4;
+
+      const addCol = () => {
+        setCols((prev) => {
+          if (prev.length >= MAX_COLS) return prev;
+          const used = new Set(prev.map((c) => c.siteId));
+          // 优先挑一个还没被占用的站点；全占了就重复第一个 ——
+          // 同站多账号（accountSlot）也是合法来源，不算冲突。
+          const pick = siteOptions.find((o) => !used.has(o.id))?.id || siteOptions[0].id;
+          seqRef.current += 1;
+          return [...prev, {
+            key: 'c' + Date.now().toString(36) + seqRef.current,
+            siteId: pick, sessionKey: '', messages: [], status: 'idle', error: '',
+          }];
+        });
+      };
+
+      const removeCol = (key) => {
+        setCols((prev) => (prev.length <= MIN_COLS ? prev : prev.filter((c) => c.key !== key)));
+      };
+
+      /** 改某列的站点。**必须清空该列的会话与消息**：sessionKey 绑定在
+       *  「站点+账号」上，换了站点还续用旧 key 会把消息发到一个完全陌生的会话里。
+       *  这是一次有意的、用户可见的重置，因此 status/error 一并归零。 */
+      const setColSite = (key, siteId) => {
+        setCols((prev) => prev.map((c) => (c.key === key
+          ? { ...c, siteId, sessionKey: '', messages: [], status: 'idle', error: '' }
+          : c)));
+      };
+
+      /**
+       * 同时发送给所有列。
+       *
+       * 每列**独立**发车、独立收尾：一列失败只标那一列，不 await 全体，
+       * 也不让一列的 rejection 影响其它列。
+       */
+      const handleSendAll = (e) => {
+        e?.preventDefault();
+        const p = String(prompt || '').trim();
+        if (!p || sending) return;
+        setPrompt('');
+        setSending(true);
+
+        // 先给每一列挂上「用户消息 + 占位回复」；占位回复带 id 供精确回填。
+        // jobs 在这里就收集好（含该列的 sessionKey），因为 setCols 的回调
+        // 在 React 里可能被延后执行，不能依赖它的副作用顺序。
+        const jobs = [];
+        setCols((prev) => prev.map((c) => {
+          seqRef.current += 1;
+          const n = seqRef.current;
+          const userId = 'u' + n;
+          const botId = 'b' + n;
+          // 首次发送时为该列铸一个**稳定会话键**，之后每轮复用 ——
+          // 这就是「并列多会话」里「会话」二字的落点。
+          const sessionKey = c.sessionKey || ('team-' + sessionScope + '-' + c.key + '-' + c.siteId);
+          jobs.push({ key: c.key, siteId: c.siteId, sessionKey, botId });
+          return {
+            ...c,
+            sessionKey,
+            status: 'streaming',
+            error: '',
+            messages: [
+              ...c.messages,
+              { id: userId, role: 'user', text: p },
+              { id: botId, role: 'assistant', text: '正在向 ' + siteName(c.siteId) + ' 发送并等待回复…' },
+            ],
+          };
+        }));
+
+        // 逐列独立收尾；**用计数器判「全体都回来了」**，而不是事后去猜列状态。
+        //
+        // 0.19.0 修掉的真缺陷（第三轮对抗审查抓到，本文件自己的护栏没覆盖）：
+        // 原先的做法是「排一个微任务，在 `setCols` 的 updater 里扫一遍列状态，没有
+        // `streaming` 残留才解锁」。它**必然不解锁**——那段微任务排进队列时，上面刚把
+        // 每一列设成 `streaming`，而下面那句 POST chat 的网络往返还没回来，于是每列都被
+        // 判为「仍在回复」，updater 提前返回，解锁那一行**永不执行**。
+        // 后果是**一次挂载只能问一句**：三列最终都显示「已完成」，而发送按钮永远停在
+        // 「发送中…」且 disabled —— 而 `conversation.view` 是中央常驻视图、不随交互卸载，
+        // 所以不会自愈。（此处**刻意不逐字引用旧写法**：本仓库有多处判据按源码**文本**
+        // 解析且不剥注释，写下可被解析成真实调用的字面量会被它们读成真代码，见
+        // `doc/verify.md` 0.19.0 补记第六节。）
+        //
+        // 修法两条：① 用 `pendingRef` 计数（每列发出 +1、回来 -1），归零才解锁；
+        // ② **在 updater 之外**调 `setSending`——在 `setCols` 的 updater 里调另一个
+        // setState 是**不纯的 reducer**，StrictMode 双调用下行为未定义，即便修好
+        // 提前返回也不该这么写。
+        //
+        // ① 的 `pendingRef` 声明在**组件体顶层**（本函数上方），不是这里 ——
+        // 第一版把它写在本函数体里，那是事件处理器，真实 React 会抛
+        // `Invalid hook call`。完整成因见那个声明处的注释。
+        pendingRef.current += jobs.length;
+        for (const job of jobs) {
+          api('chat', { siteId: job.siteId, prompt: p, sessionKey: job.sessionKey })
+            .then((res) => {
+              if (!aliveRef.current) return;
+              const ok = res?.ok !== false;
+              setCols((prev) => prev.map((c) => (c.key !== job.key ? c : {
+                ...c,
+                status: ok ? 'done' : 'error',
+                error: ok ? '' : String(res?.error || '未知错误'),
+                // ★ 按 **id** 回填，而不是按「最后一条」。
+                //   并发下「最后一条」可能已是用户刚发的下一轮消息。
+                messages: c.messages.map((m) => (m.id !== job.botId ? m : {
+                  ...m,
+                  text: ok
+                    ? String(res?.reply || res?.text || '（空回复）')
+                    : '[' + siteName(job.siteId) + ' 失败] ' + String(res?.error || '未知错误'),
+                })),
+              })));
+            })
+            .catch((err) => {
+              if (!aliveRef.current) return;
+              setCols((prev) => prev.map((c) => (c.key !== job.key ? c : {
+                ...c,
+                status: 'error',
+                error: String(err?.message || err),
+                messages: c.messages.map((m) => (m.id !== job.botId ? m : {
+                  ...m,
+                  text: '[' + siteName(job.siteId) + ' 异常] ' + String(err?.message || err),
+                })),
+              })));
+            })
+            .finally(() => {
+              // 计数归零 = 本轮全线收尾。`finally` 保证**无论成功/失败**都会减，
+              // 因此不存在「某一列异常导致按钮永久锁死」。
+              pendingRef.current -= 1;
+              if (pendingRef.current <= 0 && aliveRef.current) {
+                pendingRef.current = 0;
+                setSending(false);
+              }
+            });
+        }
+      };
+
+      const statusText = (c) => (c.status === 'streaming' ? '回复中…'
+        : c.status === 'done' ? '已完成'
+          : c.status === 'error' ? '失败' : '待发');
+
+      return h('div', { className: 'hwb-compare-view' },
+        h('div', { className: 'hwb-compare-header' },
+          h('h3', { className: 'hwb-compare-title' }, '并列多会话 Team'),
+          h('p', { className: 'hwb-hint' },
+            '同一句话同时发给每一列；每列各持一条独立网页会话，可继续追问，互不干扰。'),
+          h('div', { className: 'hwb-compare-tools' },
+            h('span', { className: 'hwb-chip' }, cols.length + ' 列'),
+            h('button', {
+              className: 'hwb-btn small',
+              onClick: addCol,
+              disabled: cols.length >= MAX_COLS,
+              title: cols.length >= MAX_COLS ? '最多 ' + MAX_COLS + ' 列' : '再加一列',
+            }, '+ 加一列'))),
+
+        h('div', { className: 'hwb-compare-columns', 'data-cols': String(cols.length) },
+          cols.map((c) => h('div', {
+            key: c.key,
+            className: 'hwb-compare-col' + (c.status === 'error' ? ' bad' : ''),
+          },
+            h('div', { className: 'hwb-compare-col-head' },
+              h('select', {
+                className: 'hwb-select',
+                value: c.siteId,
+                onChange: (e) => setColSite(c.key, e.target.value),
+              }, siteOptions.map((o) => h('option', { key: o.id, value: o.id }, o.name))),
+              h('span', { className: 'hwb-compare-state ' + c.status }, statusText(c)),
+              cols.length > MIN_COLS && h('button', {
+                className: 'hwb-btn-close',
+                title: '移除这一列',
+                onClick: () => removeCol(c.key),
+              }, '✕')),
+
+            // 会话身份可见：用户要能核对「这一列到底续在哪条会话上」。
+            c.sessionKey && h('div', { className: 'hwb-compare-session', title: c.sessionKey },
+              '会话 ' + c.sessionKey.slice(-12)),
+
+            h('div', { className: 'hwb-compare-col-body' },
+              c.messages.length === 0 && h('p', { className: 'hwb-hint' }, '等待输入提示词…'),
+              c.messages.map((m) => h('div', { key: m.id, className: 'hwb-chat-msg ' + m.role },
+                h('strong', null, m.role === 'user' ? '用户: ' : siteName(c.siteId) + ': '),
+                h('span', null, m.text)))),
+
+            // 失败只标这一列，其余列照常。
+            c.status === 'error' && c.error && h('p', { className: 'hwb-hint bad' }, c.error)))),
+
+        h('form', { onSubmit: handleSendAll, className: 'hwb-compare-input-bar' },
+          h('input', {
+            className: 'hwb-input',
+            placeholder: '输入问题，同时发送给上述 ' + cols.length + ' 个模型…',
+            value: prompt,
+            onChange: (e) => setPrompt(e.target.value),
+          }),
+          h('button', { type: 'submit', className: 'hwb-btn primary', disabled: sending },
+            sending ? '发送中…' : '同时发送给 ' + cols.length + ' 个模型')));
+    }
+
     function SettingsSection(props) {
       const sessionId = useCurrentSessionId(props);
       return h(Settings, { ...props, sessionId });
@@ -2661,8 +3671,81 @@ window.__ModuleLoader__.load({
       const ids = Object.keys(SITE_NAMES);
       const accountsOf = sid => (rows || []).filter(r => r && r.siteId === sid);
       const open = (sid, slot) => { if (typeof onOpenSite === 'function') onOpenSite(sid, slot || ''); };
+
+      /**
+       * 把 `glm#2` 拆成 `{ siteId:'glm', slot:'2' }`（服务端 `accountKeyOf` 的入口形状）。
+       *
+       * **为什么在这里重写一份**：`SiteAccounts` 里那份 `siteSlot` 是**该组件的局部
+       * 函数**（定义在它的函数体内），本组件取不到——直接调用会在点击时抛
+       * `ReferenceError`（这正是本轮自查抓到的一处真缺陷：静态看没问题，一按就炸）。
+       * 抽到模块作用域当然更干净，但那会动到 `SiteAccounts` 的既有代码；这里按
+       * 「两处各一小段纯函数」处理，并在两侧都注明对偶关系，避免将来只改一处。
+       * 语义必须与 `SiteAccounts` 的 `siteSlot` **逐字一致**（都按 `#` 切）。
+       */
+      const slotOf = (key) => {
+        const i = String(key).indexOf('#');
+        return i === -1
+          ? { siteId: String(key), slot: '' }
+          : { siteId: String(key).slice(0, i), slot: String(key).slice(i + 1) };
+      };
+
+      // 正在开窗的**站点集合**（不是单个站点）。
+      //
+      // 为什么必须是集合：这条请求要等浏览器真的起来（最长 120s）。用单值 `busySid`
+      // 时，「点 A → 点 B → B 先返回」会把忙碌态**清空**，而 A 其实还在开 —— A 的
+      // 按钮随即重新可点，再点一次就拉起了**第二个窗口**覆盖同一个 profile。
+      // 这正是这个忙碌态本来要防的那件事（本轮自查用状态机模拟复现：
+      // click A / click B / done B ⇒ busy 为空但 A 仍在途）。
+      const [busySids, setBusySids] = React.useState([]);
+      const [notice, setNotice] = React.useState(null);
+      const isBusy = (sid) => busySids.includes(sid);
+
+      /**
+       * 打开**桥自己的**浏览器窗口去登录某个站点（0.19.0）。
+       *
+       * ## 为什么必须是这一个落点
+       *
+       * 本轮修掉的缺陷是：目录里的账户菜单项写着「登录」，实际调
+       * `openTab('browser')`（回落 `window.open`）。那两处**都不是桥的浏览器**——
+       * 前者是官方 `ui-sidebar-browser` 的 iframe（另一个进程、另一份 cookie 罐），
+       * 后者是用户的日常浏览器。**在那里登录，桥永远不知道**，而界面承诺了「可登录」。
+       * 这正是用户报的「设置界面和右侧的登录必须落实一处」。
+       *
+       * 落点因此统一为 `POST window {action:'open'}`——与站点工具条 🌐、账户卡片
+       * 「登录窗口」**同一个控制面动作**，因而共享同一条 profile。入口可以有多个，
+       * **落点只有一个**（0.18.0 已真机验证：关掉驱动再重开，`loggedIn` 仍为 true）。
+       *
+       * ## 防连点按**站点**而非全局（0.19.0 独立审查抓到后修正）
+       *
+       * 初版用 `if (busySid) return;` 做全局锁。窗口要等最长 120s 才起来，于是
+       * 在这段时间里点**其它站点**会被**静默丢弃**——用户只看到上一个站点的成功
+       * 回执，自己这次点击毫无反馈。那正是本项目反复记过的「说做了、其实没做」：
+       * 点击被吞掉，界面上却一切正常。
+       *
+       * 现在按站点判：正在开的那个站点再点才是重复（忽略），**其它站点照常受理**
+       * （同时开两个窗口是合法需求）。
+       *
+       * @param {string} sid 站点 id（用于文案与回退）
+       * @param {string} accountKey `glm` 或 `glm#2`
+       */
+      async function openLoginWindow(sid, accountKey) {
+        // 只拦「同一站点」的重复点击；其它站点不受影响（同时开两个窗口是合法需求）。
+        if (isBusy(sid)) return;
+        setBusySids((prev) => (prev.includes(sid) ? prev : [...prev, sid]));
+        setNotice(null);
+        // `slotOf` 把 `glm#2` 拆成 `{siteId, slot}`——服务端 `accountKeyOf` 要的就是
+        // 这个形状。不能自己拼 `{siteId: 'glm#2'}`：那样会绕过拆分而找不到站点。
+        const r = await apiSoft('window', { ...slotOf(accountKey || sid), action: 'open' }, 120000);
+        if (!r.ok) setNotice({ kind: 'bad', text: '打开登录窗口失败：' + r.error });
+        else if (r.data?.alreadyOpen) setNotice({ kind: 'ok', text: '窗口已存在——已聚焦弹到最前。' });
+        else setNotice({ kind: 'ok', text: '已打开「' + siteName(sid) + '」的桥窗口，请在该窗口内登录；登录态会被保存并用于自动化。' });
+        // 只摘掉**自己**这一站：其它站点的在途请求必须保持忙碌（见上面那段理由）。
+        setBusySids((prev) => prev.filter((x) => x !== sid));
+      }
       return h('div', { className: 'hwb-catalog' },
         error && h('p', { className: 'hwb-hint bad' }, '站点状态读不到：' + error + '（这行不代表「没有站点」，只是读不到）'),
+        notice && h('div', { className: 'hwb-notice ' + (notice.kind === 'bad' ? 'bad' : 'ok') },
+          h('span', { className: 'hwb-notice-text' }, notice.text)),
         h('div', { className: 'hwb-catalog-list' },
           ids.map(sid => {
             const accounts = accountsOf(sid);
@@ -2686,7 +3769,22 @@ window.__ModuleLoader__.load({
                 // `description !== undefined && …` 才画第二行。单账户站点给一句
                 // 「1 个账户」是噪音，不如让它长得像左栏那些朴素行。
                 multi && h('span', { className: 'hwb-site-desc' }, accounts.length + ' 个账户可选')));
-            if (!multi) return h('div', { className: 'hwb-site-card', key: sid }, main);
+            // 0.19.0：单账户站点原先**没有**任何登录入口 —— 账户菜单只在 `multi`
+            // 时渲染，于是「登录」那一项对绝大多数站点根本不可达；而工具条的 🌐
+            // 只在已经进过该站点标签页之后才出现。这里为单账户站点补一个显式的
+            // 登录按钮，落点与多账户菜单项、工具条 🌐 **完全相同**（同一个控制面动作
+            // `POST window {action:'open'}`），因此三者共享同一条 profile。
+            if (!multi) {
+              return h('div', { className: 'hwb-site-card', key: sid },
+                main,
+                h(Button, {
+                  variant: 'ghost', className: 'hwb-site-login',
+                  disabled: isBusy(sid),
+                  title: '打开桥自带的浏览器窗口登录（这里的登录会被保存并用于自动化）',
+                  'aria-label': siteName(sid) + ' 登录',
+                  onClick: () => openLoginWindow(sid, accounts[0]?.accountKey || sid),
+                }, isBusy(sid) ? '打开中…' : '登录'));
+            }
             return h('div', { className: 'hwb-site-card', key: sid },
               main,
               // 右端触发器 + 官方 `Menu`：与 `TerminalGuide` 逐字同构。
@@ -2697,17 +3795,23 @@ window.__ModuleLoader__.load({
                 className: 'hwb-site-menu',
                 items: [
                   ...accounts.map(a => ({ id: a.accountKey || a.siteId, label: a.displayName || siteName(sid) })),
-                  { id: '__browser__' + sid, label: '🌐 在内置浏览器打开/登录' },
+                  // `disabled` 是**必须的**：只改文案（「正在打开登录窗口…」）会让这一项
+                  // 看起来仍可点，用户连点会拉起多个窗口覆盖同一个 profile。
+                  // 官方 `Menu` 的 item 支持 `disabled`，与终端菜单同口径。
+                  {
+                    id: '__browser__' + sid,
+                    disabled: isBusy(sid),
+                    label: isBusy(sid) ? '正在打开登录窗口…' : '登录（打开桥自己的浏览器窗口）',
+                  },
                 ],
                 onClose: () => setOpenId(''),
                 onSelect: (key) => {
                   setOpenId('');
                   if (key === '__browser__' + sid) {
-                    const url = siteOrigin(sid);
-                    if (url) {
-                      try { ctx.sidebarRight?.openTab('browser', { params: { url } }); }
-                      catch (e) { window.open(url, '_blank'); }
-                    }
+                    // 0.19.0 修：这一项原先调 `openTab('browser')`（回落
+                    // `window.open`），两者都不是桥的浏览器——在那里登录桥不知道。
+                    // 成因与落点说明见 `openLoginWindow` 的函数头。
+                    openLoginWindow(sid, accounts[0]?.accountKey || sid);
                     return;
                   }
                   const hit = accounts.find(a => (a.accountKey || a.siteId) === key);
@@ -2802,7 +3906,34 @@ window.__ModuleLoader__.load({
         }).catch(() => {});
         refreshSites();
         const statusTimer = setInterval(refreshSites, 5000);
-        winState().then(w => { const open = Object.keys(w?.windows || {}); if (alive && open.length && !open.includes(siteId)) setSiteId(open[0]); });
+        // ── 「有独立窗口就自动切过去」的守卫（0.19.0 修，用户报的 ①）──────────────
+        //
+        // 用户原话：「质谱清言等网站的登录没问题，但是回点击直接打开 deepseek?」
+        //
+        // 现场：这条自动采纳**无条件覆盖**当前站点。只要**任何一个别的站点**开着独立
+        // 窗口（DeepSeek 的窗口是常驻的，`GET window` 实测 `windows.deepseek.open=true`），
+        // 挂载一个「智谱清言」标签就会被 `setSiteId('deepseek')` 顶掉——标签标题写着
+        // 智谱清言，正文区却是 DeepSeek 镜像（`siteBase('deepseek')` 就是中继根）。
+        // 于是「点开站点 → 直接打开 DeepSeek」，而登录本身一直是好的（登录走的是
+        // 另一个控制面动作 `POST window`，与这里无关）——这正是用户观察到的组合。
+        //
+        // 它为什么能活这么久：这段代码是 0.11.0 单站点时代的遗留（那时面板只显示
+        // 「当前那个站点」，跟着窗口走是对的）。0.16.35 起每个站点有**自己的标签**、
+        // 站点由标签的 `navigation.params` 决定，这条自动采纳就从「合理」变成了
+        // 「**推翻用户明确的选择**」。
+        //
+        // 修法：只在**没有明确站点**时才采纳窗口站点（`controlledSite` 为空 ⇒ 首屏
+        // 网格 / 分屏这类不受控用法）。受控标签（从目录点进来的站点标签）一律
+        // **尊重标签自己的 siteId**，绝不被窗口改写。
+        const adoptWindowSite = !controlledSite;
+        if (adoptWindowSite) {
+          winState().then(w => {
+            const open = Object.keys(w?.windows || {});
+            if (alive && open.length && !open.includes(siteId)) setSiteId(open[0]);
+          });
+        } else {
+          winState();
+        }
         const poll = setInterval(() => winState(), 5000);
         return () => { alive = false; clearInterval(poll); clearInterval(statusTimer); };
       }, []);
@@ -2974,18 +4105,18 @@ window.__ModuleLoader__.load({
             }, h(IconRightUpOutline16, { size: 15 })),
             h('button', {
               className: 'hwb-act-btn',
-              title: '在 Harness 官方内置浏览器中打开此站点（可在右栏独立标签内登录/浏览）',
-              'aria-label': '在官方内置浏览器中打开',
-              onClick: () => {
-                const url = siteOrigin(siteId);
-                if (!url) return;
-                try {
-                  ctx.sidebarRight?.openTab('browser', { params: { url } });
-                } catch (e) {
-                  warn('openTab browser', e);
-                  window.open(url, '_blank');
-                }
-              },
+              // 0.18.0：这个按钮原先调 `ctx.sidebarRight.openTab('browser', { url })` ——
+              // 打开的是**官方 iframe 浏览器**（ui-sidebar-browser，自述「在 sandbox 中
+              // 访问 HTTP(S) 页面」，不注入任何能力）。在那里登录，桥的 Chromium profile
+              // **完全不知道**：它是另一个进程、另一份 cookie 罐。
+              //
+              // 这与用户指出的「登录入口有两套」是同一类问题：界面承诺「可在这里登录」，
+              // 实际登了不算数。现在改为打开**桥自己的**登录窗口 —— 那才是登录态真的会被
+              // 保存下来的地方（真机实测：关闭驱动再重开，loggedIn 仍为 true）。
+              title: '在桥自带的浏览器窗口中打开此站点（这里的登录会被保存并用于自动化；' +
+                '官方内置浏览器是独立 iframe，在那里登录桥不会知道）',
+              'aria-label': '在桥自带的浏览器窗口打开并登录',
+              onClick: toggleWindow,
             }, h(IconGlobe, { size: 15 })),
             onSplit && h('button', {
               className: 'hwb-act-btn', title: '在新面板中打开（可同时看两个不同站点）',
@@ -3355,6 +4486,9 @@ window.__ModuleLoader__.load({
         ".hwb-site-title{color:var(--dsw-alias-label-primary,inherit);white-space:nowrap;text-overflow:ellipsis;font-size:15px;line-height:1.4;overflow:hidden}",
         ".hwb-site-desc{color:var(--dsw-alias-label-caption,var(--dsw-alias-label-tertiary,#8a8f98));white-space:nowrap;text-overflow:ellipsis;font-size:13px;line-height:1.4;overflow:hidden}",
         ".hwb-site-trigger{border-radius:0 24px 24px 0;flex:none;align-self:stretch;width:44px;height:auto;padding:0}",
+        // 单账户站点的登录入口（0.19.0）：与官方 ghost 按钮同族，右端圆角对齐卡片刻度，
+        // 不抢主区的视觉权重（主区仍是「进入该站点」的主动作）。
+        ".hwb-site-login{border-radius:0 24px 24px 0;flex:none;align-self:stretch;height:auto;padding:0 18px;font-size:13px;color:var(--dsw-alias-label-secondary,inherit)}",
         // 0.16.35：这一组里的**浮层形态已删**——`.hwb-picker.inline` / `.hwb-picker-trigger`
         //（含 hover/focus/name/caret）/ `.hwb-picker-surface` 的绝对定位变体，全都服务于
         // 已被用户否掉的工具条站点下拉。留下来的只有**首屏网格**（文档流里的一张卡片）
@@ -3420,7 +4554,7 @@ window.__ModuleLoader__.load({
         ".hwb-menu-item{display:block;width:100%;padding:6px 10px;font:inherit;font-size:13px;line-height:20px;text-align:left;color:var(--dsw-alias-label-primary,inherit);background:transparent;border:0;border-radius:8px;cursor:pointer}",
         ".hwb-menu-item:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,#8882)}",
         ".hwb-menu-item:disabled{color:var(--dsw-alias-label-dimmed,#aaa);cursor:default}",
-        // ---- Team 面板 / 任务板面板（0.15.12）--------------------------------
+        // ---- 面板类名（0.15.12）--------------------------------------------
         //
         // 尺寸与间距逐条来自 doc/research/agent-ui-design-references.md 的既有约束，
         // 不新造数值：
@@ -3431,9 +4565,10 @@ window.__ModuleLoader__.load({
         //   • 删线用间距（§2「spacing creates logical sections without lines」）：
         //     分组之间只有 16px 间距，没有分隔线。
         //
-        // 两个面板共用一套类名，因为它们的信息结构相同（摘要行 + 若干分组 + 若干行），
-        // 差别只在数据来源。两套类名会让「任务板的行高比 Team 面板大一像素」这类
-        // 漂移永远没人发现。
+        // 任务板与设置页花名册共用一套类名，因为它们的信息结构相同
+        //（摘要行 + 若干分组 + 若干行），差别只在数据来源。两套类名会让
+        //「任务板的行高比花名册大一像素」这类漂移永远没人发现。
+        //（0.19.0：原先还有第三个消费者「Team 面板」，已按用户要求删除。）
         ".hwb-panel{display:flex;flex-direction:column;gap:16px;padding:12px 12px 16px;color:inherit;font-size:13px;line-height:20px}",
         ".hwb-panel-summary{display:flex;flex-wrap:wrap;align-items:center;gap:8px}",
         ".hwb-panel-stat{font-size:12px;line-height:18px;padding:1px 8px;border-radius:9px;border:.5px solid var(--dsw-alias-border-l3,#8885);color:var(--dsw-alias-label-secondary,inherit);font-variant-numeric:tabular-nums;white-space:nowrap}",
@@ -3490,6 +4625,144 @@ window.__ModuleLoader__.load({
         // 在这里就是重复留白。.hwb-panel 本身**不改**——它同时挂在右栏窄条与
         // 设置页下，那两处的内边距是对的，动了会让它们一起漂移。
         ".hwb-main>.hwb-panel{padding:0}",
+        // ── 任务看板（Kanban）与 Notion 式卡片详情样式 ──
+        ".hwb-taskboard-container{display:flex;flex-direction:column;gap:16px;width:100%}",
+        ".hwb-tb-toolbar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;padding:8px 0;border-bottom:.5px solid var(--dsw-alias-border-l3,#8884)}",
+        ".hwb-tb-toolbar-left,.hwb-tb-toolbar-right{display:flex;align-items:center;gap:8px}",
+        ".hwb-btn{height:28px;padding:0 12px;font:inherit;font-size:12px;border-radius:8px;cursor:pointer;display:inline-flex;align-items:center;gap:4px;border:.5px solid var(--dsw-alias-border-l3,#8885);background:var(--dsw-alias-bg-layer-1,transparent);color:var(--dsw-alias-label-primary,inherit);transition:background .12s ease}",
+        // 主按钮的字色与底色都走官方 token，逐项对照参考实现
+        // （`reference/dsh-task-board/src/client/board.module.css` 的 `.primaryButton`，
+        // 用户明确指定以它为标准）：
+        //   · 底色 = `--dsw-alias-button-info-fill`（**不是** `brand-primary`——
+        //     官方按钮语义 token 才有配套的 hover 档，`brand-primary` 没有）；
+        //   · 字色 = `--dsw-alias-label-primary-foreground`（**不是** `#fff`：
+        //     官方 token 家族里**没有**「label-inverse」这个名字，凭直觉写一个
+        //     不存在的 token 会静默落到回落值，换主题时字色不跟随）；
+        //   · hover 换底色 = `--dsw-alias-button-info-hover`（官方口径），
+        //     而不是整块 `opacity:.9`（那会把文字一起调淡）。
+        ".hwb-btn.primary{background:var(--dsw-alias-button-info-fill,#3b82f6);color:var(--dsw-alias-label-primary-foreground,#fff);border-color:transparent}",
+        ".hwb-btn.primary:hover:not(:disabled){background:var(--dsw-alias-button-info-hover,#2563eb)}",
+        ".hwb-btn.ghost{background:transparent;border-color:transparent;color:var(--dsw-alias-label-secondary,inherit)}",
+        // 危险按钮同理：`#dc2626` 是写死的十六进制，换主题不会跟着变。
+        // 官方语义 token `--dsw-alias-state-error-primary` 才是「危险」的唯一真相。
+        ".hwb-btn.danger{background:var(--dsw-alias-state-error-primary,#dc2626);color:var(--dsw-alias-label-primary-foreground,#fff);border-color:transparent}",
+        ".hwb-btn.small{height:22px;padding:0 8px;font-size:11px}",
+        // hover 不再整块 `opacity:.9`：那会把边框、文字一起调淡（官方按钮 hover
+        // 只换底色，文字保持全对比）。改用官方交互底色 token。
+        ".hwb-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,#8882)}",
+        ".hwb-btn:disabled{opacity:.5;cursor:not-allowed}",
+        ".hwb-search{width:200px;height:28px;font-size:12px;padding:0 8px;border-radius:8px;border:.5px solid var(--dsw-alias-border-l3,#8885);background:var(--dsw-alias-bg-layer-1,transparent);color:inherit}",
+        // 五列看板必须是**可收缩**的：写死 `repeat(5,1fr)` 时每列最小宽度由内容
+        // 决定，窄面板下五列一起被压到读不出字。官方的做法是给列一个可用下限、
+        // 超出就横向滚动（`.hwb-kanban-col` 的 `min-width` 与这里的 `auto-fit` 配对）。
+        ".hwb-kanban-board{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;align-items:start;overflow-x:auto;padding-bottom:16px}",
+        ".hwb-kanban-col{background:var(--dsw-alias-bg-layer-1,#f8f9fa);border:.5px solid var(--dsw-alias-border-l4,#8883);border-radius:12px;display:flex;flex-direction:column;min-width:180px;max-height:80vh}",
+        ".hwb-kanban-col-head{padding:10px 12px;display:flex;align-items:center;justify-content:space-between;border-bottom:.5px solid var(--dsw-alias-border-l4,#8883)}",
+        ".hwb-kanban-col-title{font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary,inherit)}",
+        ".hwb-kanban-col-count{font-size:11px;padding:1px 6px;border-radius:9px;background:var(--dsw-alias-border-l4,#8883);color:var(--dsw-alias-label-tertiary,#888)}",
+        ".hwb-kanban-col-cards{padding:8px;display:flex;flex-direction:column;gap:8px;overflow-y:auto}",
+        ".hwb-kanban-card{background:var(--dsw-alias-bg-base,#fff);border:.5px solid var(--dsw-alias-border-l3,#8884);border-radius:8px;padding:10px;cursor:pointer;display:flex;flex-direction:column;gap:6px;transition:box-shadow .15s ease,border-color .15s ease}",
+        // 卡片 hover 不再 `transform:translateY(-1px)`：官方列表行 hover **不位移**
+        // （位移会让整列文字在鼠标扫过时抖动，是「不安静」的界面）。只换边框 + 阴影，
+        // 阴影走官方 elevation token，不写死 rgba。
+        ".hwb-kanban-card:hover{border-color:var(--dsw-alias-border-l2,#8885);box-shadow:var(--dsw-elevation-prominent,0 2px 8px rgba(0,0,0,.08))}",
+        ".hwb-kcard-head{display:flex;align-items:center;justify-content:space-between;font-size:11px}",
+        ".hwb-kcard-id{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--dsw-alias-label-tertiary,#888)}",
+        ".hwb-kcard-title{font-size:13px;font-weight:500;line-height:1.4;color:var(--dsw-alias-label-primary,inherit)}",
+        ".hwb-kcard-desc{font-size:12px;color:var(--dsw-alias-label-tertiary,#666);line-height:1.4}",
+        ".hwb-kcard-footer{display:flex;align-items:center;flex-wrap:wrap;gap:4px;margin-top:4px}",
+        ".hwb-tag{font-size:11px;padding:1px 6px;border-radius:8px;background:var(--dsw-alias-border-l4,#8883);color:var(--dsw-alias-label-secondary,inherit)}",
+        ".hwb-comment-badge{font-size:11px;color:var(--dsw-alias-label-secondary,inherit)}",
+        ".hwb-kanban-empty{text-align:center;padding:24px 8px;font-size:12px;color:var(--dsw-alias-label-tertiary,#888)}",
+        // 操作回执 / 错误横幅（0.19.0，取代 alert）。形态对齐官方内联提示：
+        // 12px 行高 18px、语义色走 state token、不写死颜色。
+        ".hwb-notice{display:flex;align-items:flex-start;gap:8px;padding:8px 10px;border-radius:8px;font-size:12px;line-height:18px;border:.5px solid var(--dsw-alias-border-l3,#8884);background:var(--dsw-alias-bg-layer-1,transparent)}",
+        ".hwb-notice-text{flex:1 1 auto;min-width:0;word-break:break-word}",
+        ".hwb-notice.ok{color:var(--dsw-alias-state-success-primary,#2e7d32);border-color:var(--dsw-alias-state-success-primary,#2e7d32)}",
+        ".hwb-notice.bad{color:var(--dsw-alias-state-error-primary,#93443e);border-color:var(--dsw-alias-state-error-primary,#93443e)}",
+        // 字段级校验错误：逐项对照参考实现的 `.formError`
+        // （12px / 零边距 / `--dsw-alias-state-error-primary`）。
+        ".hwb-form-error{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary,#93443e)}",
+        // 表单输入走官方输入底与聚焦色（参考实现 `.input` / `.input:focus`）。
+        ".hwb-modal-form .hwb-input,.hwb-modal-form .hwb-textarea,.hwb-modal-form .hwb-select{background:var(--dsw-specific-input-major,transparent);border:.5px solid var(--dsw-alias-border-l2,#8885)}",
+        ".hwb-modal-form .hwb-input:focus,.hwb-modal-form .hwb-textarea:focus,.hwb-modal-form .hwb-select:focus{outline:none;border-color:var(--dsw-alias-state-business-primary,#3b82f6)}",
+        // ── 审阅区：Office / Word 式「左正文 · 右批注栏」（0.18.0）────────────
+        // 用户要求：「参考 office 左正文，右划线编辑评论并合理显示：完全参考 office 实现」。
+        // 布局取 Word 审阅窗格的三条本质：正文占主区、批注走**右侧页边**、两者各自滚动。
+        // 窄屏（<720px）回落为上下——硬撑两栏会让两栏都窄到不能用。
+        ".hwb-review-split{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(240px,1fr);gap:20px;align-items:start}",
+        "@media (max-width:720px){.hwb-review-split{grid-template-columns:1fr}}",
+        ".hwb-review-doc{display:flex;flex-direction:column;gap:8px;min-width:0}",
+        ".hwb-review-doc-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px}",
+        ".hwb-review-tip{font-size:11px;color:var(--dsw-alias-label-tertiary,#888)}",
+        ".hwb-review-textarea{min-height:340px}",
+        // 正文侧的「已批注片段」锚点清单：Word 用正文底纹表达这件事，这里用可点的
+        // 片段行表达（见组件处对「为何不改 contenteditable」的说明）。
+        ".hwb-review-anchors{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:8px}",
+        ".hwb-review-anchors-label{font-size:11px;color:var(--dsw-alias-label-tertiary,#888);flex:none}",
+        ".hwb-review-anchor{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:inherit;font-size:11px;line-height:18px;padding:0 8px;border-radius:9px;cursor:pointer;background:var(--dsw-alias-brand-subtle,#eef2ff);color:var(--dsw-alias-label-secondary,inherit);border:.5px solid var(--dsw-alias-border-l3,#8884)}",
+        ".hwb-review-anchor:hover{background:var(--dsw-alias-interactive-bg-hover,#8882)}",
+        // 页边栏：独立滚动，宽度随内容自适应但不挤掉正文
+        ".hwb-review-margin{display:flex;flex-direction:column;gap:10px;min-width:0;padding-left:16px;border-left:.5px solid var(--dsw-alias-border-l3,#8884)}",
+        ".hwb-review-margin-head{display:flex;align-items:center;justify-content:space-between;gap:8px}",
+        ".hwb-review-comments{max-height:420px;overflow-y:auto;padding-right:4px}",
+        ".hwb-comment-implement{align-self:stretch;margin-top:2px}",
+        // Notion 式详情页
+        ".hwb-notion-page{width:100%;max-width:1100px;margin:0 auto;display:flex;flex-direction:column;gap:20px;padding:16px 0}",
+        ".hwb-notion-header{display:flex;align-items:center;justify-content:space-between;border-bottom:.5px solid var(--dsw-alias-border-l3,#8884);padding-bottom:12px}",
+        ".hwb-notion-actions{display:flex;align-items:center;gap:8px}",
+        ".hwb-notion-body{display:flex;flex-direction:column;gap:18px}",
+        ".hwb-notion-title-input{font-size:24px;font-weight:600;border:0;outline:0;background:transparent;color:var(--dsw-alias-label-primary,inherit);width:100%}",
+        ".hwb-notion-properties{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;padding:12px;border-radius:8px;background:var(--dsw-alias-bg-layer-1,#f9fafb);border:.5px solid var(--dsw-alias-border-l4,#8883)}",
+        ".hwb-notion-prop-row{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px}",
+        ".hwb-prop-name{color:var(--dsw-alias-label-tertiary,#888)}",
+        ".hwb-session-key{font-family:monospace;font-size:11px;color:var(--dsw-alias-label-secondary,inherit);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+        ".hwb-notion-section{display:flex;flex-direction:column;gap:10px}",
+        ".hwb-section-title{margin:0;font-size:14px;font-weight:600;color:var(--dsw-alias-label-primary,inherit)}",
+        ".hwb-notion-desc-textarea{width:100%;box-sizing:border-box;font:inherit;font-size:13px;line-height:1.6;padding:10px;border-radius:6px;border:.5px solid var(--dsw-alias-border-l3,#8885);background:var(--dsw-alias-bg-base,#fff);color:inherit;resize:vertical}",
+        ".hwb-comments-list{display:flex;flex-direction:column;gap:10px}",
+        ".hwb-comment-card{padding:10px 12px;border-radius:6px;border:.5px solid var(--dsw-alias-border-l3,#8884);background:var(--dsw-alias-bg-layer-1,#fafafa);display:flex;flex-direction:column;gap:6px}",
+        ".hwb-comment-card.resolved{opacity:.65;border-style:dashed}",
+        ".hwb-comment-quote{margin:0;padding-left:8px;border-left:3px solid var(--dsw-alias-brand-primary,#3b82f6);font-size:12px;color:var(--dsw-alias-label-secondary,#555);font-style:italic}",
+        ".hwb-comment-text{font-size:13px;line-height:1.5;color:var(--dsw-alias-label-primary,inherit)}",
+        ".hwb-comment-footer{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11px}",
+        ".hwb-comment-time{color:var(--dsw-alias-label-tertiary,#888)}",
+        ".hwb-comment-form{display:flex;flex-direction:column;gap:8px;margin-top:8px}",
+        ".hwb-quote-preview{display:flex;align-items:center;gap:6px;font-size:12px;padding:6px 10px;border-radius:4px;background:var(--dsw-alias-brand-subtle,#eff6ff);border:.5px solid var(--dsw-alias-brand-primary,#3b82f6)}",
+        ".hwb-quote-label{color:var(--dsw-alias-brand-primary,#3b82f6);font-weight:500}",
+        ".hwb-quote-val{font-style:italic;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+        ".hwb-btn-close{background:0 0;border:0;cursor:pointer;font-size:12px;color:var(--dsw-alias-label-tertiary,#888)}",
+        ".hwb-comment-input-row{display:flex;gap:8px}",
+        ".hwb-task-chat-box{border:.5px solid var(--dsw-alias-border-l3,#8884);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:12px;background:var(--dsw-alias-bg-layer-1,#fafafa)}",
+        ".hwb-task-chat-history{display:flex;flex-direction:column;gap:8px;max-height:220px;overflow-y:auto}",
+        ".hwb-chat-msg{font-size:13px;line-height:1.5;padding:6px 10px;border-radius:6px;background:var(--dsw-alias-bg-base,#fff);border:.5px solid var(--dsw-alias-border-l4,#8883)}",
+        ".hwb-chat-msg.user{background:var(--dsw-alias-brand-subtle,#eff6ff)}",
+        ".hwb-task-chat-input-row{display:flex;gap:8px}",
+        // Modal 弹窗
+        ".hwb-modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:grid;place-items:center;z-index:9999}",
+        ".hwb-modal-content{width:90%;max-width:540px;background:var(--dsw-alias-bg-base,#fff);border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,.15);border:.5px solid var(--dsw-alias-border-l3,#8884);display:flex;flex-direction:column}",
+        ".hwb-modal-header{padding:14px 18px;display:flex;align-items:center;justify-content:space-between;border-bottom:.5px solid var(--dsw-alias-border-l4,#8883)}",
+        ".hwb-modal-header h3{margin:0;font-size:15px;font-weight:600}",
+        ".hwb-modal-form{padding:18px;display:flex;flex-direction:column;gap:14px}",
+        ".hwb-form-field{display:flex;flex-direction:column;gap:6px;font-size:12px}",
+        ".hwb-field-label{font-weight:500;color:var(--dsw-alias-label-secondary,inherit)}",
+        ".hwb-form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}",
+        ".hwb-modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}",
+        // 并列多会话视图样式（列布局按 data-cols 自适应 2~4 列，见下）
+        ".hwb-compare-view{display:flex;flex-direction:column;gap:16px;width:100%;height:100%;padding:16px;box-sizing:border-box}",
+        ".hwb-compare-header{display:flex;flex-direction:column;gap:4px}",
+        ".hwb-compare-title{margin:0;font-size:18px;font-weight:600}",
+        // 列数**按实际列数**排（0.18.0）：原先写死 repeat(3,1fr)，于是「加一列」
+        // 加出来的第四列会被挤到第二行 —— 那是 0.17.3 硬编码三列的另一半。
+        ".hwb-compare-columns{display:grid;gap:16px;flex:1;min-height:0;grid-auto-rows:minmax(0,1fr)}",
+        ".hwb-compare-columns[data-cols=\"2\"]{grid-template-columns:repeat(2,minmax(0,1fr))}",
+        ".hwb-compare-columns[data-cols=\"3\"]{grid-template-columns:repeat(3,minmax(0,1fr))}",
+        ".hwb-compare-columns[data-cols=\"4\"]{grid-template-columns:repeat(4,minmax(0,1fr))}",
+        ".hwb-compare-col{background:var(--dsw-alias-bg-layer-1,#f8f9fa);border:.5px solid var(--dsw-alias-border-l4,#8883);border-radius:8px;display:flex;flex-direction:column;overflow:hidden}",
+        ".hwb-compare-col-head{padding:10px 12px;background:var(--dsw-alias-bg-base,#fff);border-bottom:.5px solid var(--dsw-alias-border-l4,#8883);display:flex;align-items:center;gap:8px}",
+        ".hwb-col-idx{font-weight:600;font-size:12px}",
+        ".hwb-compare-col-body{padding:12px;display:flex;flex-direction:column;gap:8px;flex:1;overflow-y:auto}",
+        ".hwb-compare-input-bar{display:flex;gap:8px;padding-top:12px;border-top:.5px solid var(--dsw-alias-border-l3,#8884)}",
       ].join('');
       document.head.appendChild(style);
       const disposers = [() => style.remove()];
@@ -3535,13 +4808,16 @@ window.__ModuleLoader__.load({
 
       // ---- 官方右侧栏（@deepseek-ai/dsh-client-ui-sidebar-right）--------
       //
-      // **两个**标签页，各自一个独立的 kind（0.16.18 起由三个减为两个）：
-      //   • webcode-bridge —— 网页镜像（可多开、可浮动）；
-      //   • webcode-team   —— Team 面板：谁在团队里、各自在忙什么。
+      // **一个**标签页 kind（0.16.18 由三个减为两个，0.19.0 再减为一个）：
+      //   • webcode-bridge —— 网页镜像（可多开、可浮动）。
       //
-      // 任务板原来也是这里的一个 kind（webcode-tasks），0.16.18 删掉了：它与左栏
-      // 全局面板同数据同组件，两个入口互相打架，而右栏窄条也放不下依赖图。现在
-      // 任务板只走左栏 `sidebar.panellist` + `main`（见下方注册处）。
+      // 另两个 kind 都是在各自的时点被**删除**的，理由不同：
+      //   • `webcode-tasks`（0.16.18）—— 与左栏全局面板同数据同组件，两个入口互相
+      //     打架，而右栏窄条也放不下依赖图。任务板现在只走左栏 `sidebar.panellist`
+      //     + `main`（见下方注册处）；
+      //   • `webcode-team`（0.19.0）—— 它读的是官方 `agentTeams` 花名册，用户明确
+      //     指出「参考错误了」。本插件的 Team 是中央对话区的**并列多会话**
+      //     （`MultiModelCompareView`），完整理由见下方「Team 面板标签页：已删除」。
       //
       // 为什么每个面板一个**独立 kind** 而不是一个 kind 内部再分栏：官方契约
       //（tab-registry.d.ts）里 kind 就是「这是什么类型的标签页」，每个 kind 有自己
@@ -3558,8 +4834,8 @@ window.__ModuleLoader__.load({
       // 而 pane.tab 座位是 keyed 的（按定义 id 派发），所以各注册各的正文即可。
       const SITE_ID = 'dsh-webcode-bridge/site';
       const SITE_KIND = 'webcode-site';
-      const TEAM_ID = 'dsh-webcode-bridge/team';
-      const TEAM_KIND = 'webcode-team';
+      // 0.19.0：`TEAM_ID` / `TEAM_KIND` 已随「官方花名册 Team 面板」一并删除，见下方
+      // 「Team 面板标签页：已删除」处的完整理由（本插件的 Team 是并列多会话，不是花名册）。
       // 左栏全局面板（`sidebar.panellist` + `main`）的 id。与上面两个是**不同域**：
       // 那两个是右侧栏的标签页类型/实例 id，这个既是侧栏行的 list id、也是中央列
       // main 座位的 key——官方契约要求这两者**逐字相同**（「Each list id addresses
@@ -3745,33 +5021,30 @@ window.__ModuleLoader__.load({
         } catch (e) { warn('pane.tab title (site)', e); }
       });
 
-      // ---- Team 面板标签页（0.15.12）------------------------------------
+      // ---- Team 面板标签页：**已删除**（0.19.0）------------------------------
       //
-      // 两个新面板都**不接 address**（patterns 省略）：它们是 page type——
-      // 官方契约说得很清楚，省略 patterns 的类型「is opened by kind」，
-      // 不做地址识别。团队与任务板本来就没有「打开某个资源」的语义。
-      own(() => {
-        try {
-          return ctx.sidebarRightTabs.register({
-            id: TEAM_ID,
-            kind: TEAM_KIND,
-            priority: 'extension',
-            title: () => 'Team',
-            guide: [{
-              order: 56,
-              title: () => 'Team 面板',
-              description: () => '谁在这个团队里、各自在忙什么：角色、模型、任务归属与可唤醒状态（只读）',
-            }],
-          });
-        } catch (e) { warn('sidebarRightTabs.register (team)', e); }
-      });
-      own(() => {
-        try {
-          return ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
-            name: 'sidebar.right.pane.tab', key: TEAM_ID,
-          }, TeamPanel));
-        } catch (e) { warn('pane.tab body (team)', e); }
-      });
+      // 0.15.12 曾在右栏注册 kind `webcode-team`（id `…/team`），渲染 `TeamPanel`：
+      // 一张读官方 `agentTeams.listMembers` 花名册的只读视图。**参考错了。**
+      //
+      // 用户 2026-09-22 的两次澄清（`doc/user-voice-log.md:3670` 为逐字原话）：
+      //
+      //   「team不是指的官方team那样，我想更多指的是能够充分发挥本多站点（如果实现）
+      //    的优势，能够做到中心对话区域做到：并列不同模型对话进行回复」
+      //   「删除参考官方用的team面板，和我设想的team不同，参考错误了……重构team功能，
+      //    本插件的并列多会话组成的team」
+      //
+      // 即：本插件的 Team = **若干条各自独立的网页会话并排**（每列一个站点、各自持
+      // 稳定 `sessionKey`、各自接着聊），落点是**中央对话区**，不是右栏的一份花名册。
+      // 官方 AgentTeams 描述的是「同一 checkout 里的多个 agent 会话」——那是官方
+      // 包自己的模型，与本插件「多站点并排」的目标不是一回事，照抄它等于把别人的
+      // 概念装进这个插件。
+      //
+      // 正解是 `MultiModelCompareView`（本文件内，注册在下方 `conversation.view`）。
+      // 这个标签页连同它的 `TEAM_ID` / `TEAM_KIND` 常量一并删除；**不得复活**——
+      // 护栏见 `test/team-compare.test.mjs` 与 `test/client-render.test.mjs`。
+      //
+      // `roster.js` 对官方 `agentTeams` 的读取**保留**：它仍是任务板 `listTasks`
+      // 的官方来源与设置页花名册的数据源，删的是「把它当成本插件的 Team」这一层呈现。
 
       // ---- 任务板的右栏标签页：**已删除**（0.16.18）------------------------
       //
@@ -3898,6 +5171,26 @@ window.__ModuleLoader__.load({
             name: 'conversation.session.header.corner',
           }, CornerButton));
         } catch (e) { warn('header corner button', e); }
+      });
+
+      // ---- 中央区并列多会话 Team（0.17.3 起，0.19.0 收敛为本插件唯一的 Team 形态）----
+      //
+      // 这是用户需求 5 的落点：「中心对话区域做到：并列不同模型对话进行回复」。
+      // 它是本插件对「Team」的**唯一**实现——右栏那份官方花名册 Team 面板已于
+      // 0.19.0 删除（理由见上方注册处）。
+      //
+      // `label` 必须与真实能力一致：列数由 `MultiModelCompareView` 的数组状态驱动，
+      // 支持 2~4 列（`MIN_COLS`/`MAX_COLS`）。旧标签「三列模型对比」在用户加到
+      // 第四列时就是一句假陈述，故改为「并列多会话」。
+      own(() => {
+        try {
+          return ctx.slots.inject('conversation.view', () => ctx.slots.register({
+            name: 'conversation.view',
+            id: 'webcode-compare-view',
+            order: 15,
+            label: () => '并列多会话',
+          }, MultiModelCompareView));
+        } catch (e) { warn('conversation.view compare', e); }
       });
 
       return () => disposers.reverse().forEach(d => { try { d(); } catch (_) {} });

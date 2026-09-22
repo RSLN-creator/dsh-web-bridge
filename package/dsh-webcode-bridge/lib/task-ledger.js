@@ -71,6 +71,75 @@ const TRANSITIONS = {
   deleted: [],
 };
 
+/**
+ * 毫秒时间戳归一：**非正数、null、NaN、非数字一律回 null**。
+ *
+ * 为什么不能只判 `Number.isFinite(Number(x))`：`Number(null)` 是 **0** 且
+ * `Number.isFinite(0)` 为真，于是「没有排期」会被读成 **1970-01-01**——
+ * 界面上就显示成「开始时间 1970/1/1」，看起来像一个真实但荒谬的排期。
+ * 本项目在 `stall-settle` 那条上记过**同一个** `Number(null)` 陷阱。
+ *
+ * @param {*} x 候选值
+ * @returns {number|null} 正整数毫秒，或 null
+ */
+function msOrNull(x) {
+  if (x === null || x === undefined || x === '') return null;
+  const n = Number(x);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
+
+/**
+ * 排期与执行面的字段归一（0.19.0）。
+ *
+ * ## 为什么这些字段现在才有（用户 2026-09-22 原话）
+ *
+ * 「功能我要能够实现 graph 布置任务，**设置接任务智能体和时间**，以及**模式，权限**
+ * 等等等详细的」「任务面板手动点击填写内容，自动放入**审批等待我的通过**」。
+ * 参考实现 `reference/dsh-task-board` 的 `NewTaskModal` 有 schedule（cron）/ mode /
+ * permission / model / reuseSession 一整套；本桥 0.17.3 移植任务板时**只搬了
+ * subject/description/model/projectId/writeScopes**，于是「设置开始时间」在界面上
+ * 根本没有输入框、在台账里也没有落脚字段——不是坏了，是**从来没做**。
+ *
+ * ## 口径
+ *
+ * · `schedule.cron` —— 周期排期（与参考实现同一套 cron 词，见 `isValidCron`）。
+ * · `schedule.startAt` —— **一次性开始时间**（毫秒时间戳）。用户说的「开始时间」
+ *   主要指这个；两者可同时存在，`startAt` 只作「最早不早于」约束。
+ * · `mode` / `permission` —— 执行预设与权限档（参考实现的同名词，原样存字符串，
+ *   本模块**不解释**它们的取值合法性：那是执行侧的事，这里存不住才是缺陷）。
+ * · `reuseSession` —— 是否复用同一网页会话。
+ *
+ * 非法/缺省一律**回落成「没排期」**（`{enabled:false}`），绝不抛错：这是人手填的
+ * 表单，一个填错的时间不该让整条任务写不进去。
+ *
+ * @param {object} input 任务输入（含 `schedule` / `startAt` / `mode` / `permission` / `reuseSession`）
+ * @returns {object} 要摊进任务行的字段
+ */
+function scheduleOf(input) {
+  const raw = input?.schedule && typeof input.schedule === 'object' ? input.schedule : {};
+  // `startAt` 允许写在顶层或 schedule 里：界面两种写法都有人在用，读两处而不是
+  // 押一个（押错了表现就是「我填了时间但它没保存」，而且界面上看不出来）。
+  const startAtRaw = raw.startAt !== undefined ? raw.startAt : input?.startAt;
+  const startAt = msOrNull(startAtRaw);
+  const cron = String(raw.cron || input?.cron || '').trim();
+  const enabled = raw.enabled === true || startAt !== null || cron !== '';
+  const out = {
+    schedule: {
+      enabled,
+      cron,
+      startAt,
+      // nextRunAt 由排期侧现算后回填；这里只保证字段存在且为 null 而不是 undefined
+      //（前端按键取值，缺字段会让那一行显示成 undefined）。
+      nextRunAt: msOrNull(raw.nextRunAt),
+      lastTriggeredAt: msOrNull(raw.lastTriggeredAt),
+    },
+    mode: String(input?.mode || ''),
+    permission: String(input?.permission || ''),
+    reuseSession: input?.reuseSession === true,
+  };
+  return out;
+}
+
 /** 空台账。 */
 export function emptyLedger() {
   return { version: LEDGER_VERSION, taskSeq: 0, tasks: [] };
@@ -187,12 +256,30 @@ function mintTask(input, id, now) {
   // 否则 validatePlan 会报 duplicate-edge —— 那是给**手写**数据用的判据，
   // 不该被桥自己的写入路径触发。
   const uniqBlocked = [...new Set(blockedBy)];
+  const isPlainObj = (o) => Boolean(o && typeof o === 'object' && !Array.isArray(o));
+  const assignedModel = isPlainObj(input?.assignedModel)
+    ? {
+      siteId: String(input.assignedModel.siteId || 'deepseek'),
+      accountSlot: Math.max(0, Math.floor(Number(input.assignedModel.accountSlot) || 0)),
+      modelId: String(input.assignedModel.modelId || ''),
+    }
+    : null;
+  const sessionKey = String(input?.sessionKey || `task-session-${id}-${now.toString(36)}`);
+  const projectId = String(input?.projectId || 'default');
+  const comments = Array.isArray(input?.comments) ? input.comments : [];
+
   return {
     id,
     subject: String(input?.subject || '').trim(),
     description: String(input?.description || ''),
     status: 'pending',
     ownerName: input?.ownerName ? String(input.ownerName) : null,
+    assignedModel,
+    sessionKey,
+    projectId,
+    comments,
+    // 排期与执行面（0.19.0 补齐，见文件末尾「为什么这些字段现在才有」）。
+    ...scheduleOf(input),
     blockedBy: uniqBlocked,
     ...(edges.length > 0 ? { edges } : {}),
     ...(input?.join ? { join: input.join } : {}),
@@ -348,6 +435,41 @@ export function applyUpdate(ledger, taskId, patch, now, expectedRevision = null)
   }
   if (patch?.description !== undefined) next.description = String(patch.description);
   if (patch?.ownerName !== undefined) next.ownerName = patch.ownerName ? String(patch.ownerName) : null;
+  if (patch?.assignedModel !== undefined) {
+    next.assignedModel = patch.assignedModel && typeof patch.assignedModel === 'object'
+      ? {
+        siteId: String(patch.assignedModel.siteId || 'deepseek'),
+        accountSlot: Number(patch.assignedModel.accountSlot) || 0,
+        modelId: String(patch.assignedModel.modelId || ''),
+      }
+      : null;
+  }
+  if (patch?.sessionKey !== undefined) next.sessionKey = String(patch.sessionKey || '');
+  if (patch?.projectId !== undefined) next.projectId = String(patch.projectId || 'default');
+  if (patch?.comments !== undefined && Array.isArray(patch.comments)) next.comments = patch.comments;
+  // 排期/执行面（0.19.0）：与 mintTask 走**同一个**归一函数，避免「建的时候存得住、
+  // 改的时候存不住」这种一分为二的口径。
+  if (patch?.schedule !== undefined || patch?.startAt !== undefined || patch?.cron !== undefined) {
+    const curSchedule = cur.schedule && typeof cur.schedule === 'object' ? cur.schedule : {};
+    const given = patch.schedule && typeof patch.schedule === 'object' ? patch.schedule : {};
+    // **`enabled` 不参与合并**——它必须由「合并之后的 startAt / cron 是否为空」重新算出来。
+    // 若把旧的 `enabled: true` 一起摊进去，用户清空开始时间与 cron 之后那条任务会
+    // 永远停在「有排期」，而界面上两个框都是空的：一个再也关不掉的排期。
+    const merged = scheduleOf({
+      schedule: {
+        cron: given.cron !== undefined ? given.cron : curSchedule.cron,
+        startAt: given.startAt !== undefined ? given.startAt : curSchedule.startAt,
+        nextRunAt: given.nextRunAt !== undefined ? given.nextRunAt : curSchedule.nextRunAt,
+        lastTriggeredAt: given.lastTriggeredAt !== undefined ? given.lastTriggeredAt : curSchedule.lastTriggeredAt,
+      },
+      startAt: patch.startAt,
+      cron: patch.cron,
+    });
+    next.schedule = merged.schedule;
+  }
+  if (patch?.mode !== undefined) next.mode = String(patch.mode || '');
+  if (patch?.permission !== undefined) next.permission = String(patch.permission || '');
+  if (patch?.reuseSession !== undefined) next.reuseSession = patch.reuseSession === true;
   if (patch?.writeScopes !== undefined) {
     next.writeScopes = (Array.isArray(patch.writeScopes) ? patch.writeScopes : []).map(String).filter(Boolean);
   }
@@ -408,6 +530,91 @@ export function applyDelete(ledger, taskId, now) {
 }
 
 /**
+ * 往任务里追加一条正文行间/段落评论（Notion 式批注）。
+ *
+ * @param {object} ledger 当前台账
+ * @param {string} taskId 目标任务 id
+ * @param {{quote?: string, text: string, author?: string}} comment 批注内容
+ * @param {number} now 当前时刻
+ * @returns {{ledger: object, comment: object|null, error: string|null}}
+ */
+export function applyAddComment(ledger, taskId, comment, now, expectedRevision = null) {
+  const base = ledger && Array.isArray(ledger.tasks) ? ledger : emptyLedger();
+  const at = base.tasks.findIndex((t) => String(t.id) === String(taskId));
+  if (at < 0) return { ledger: base, comment: null, error: 'task-not-found' };
+  const cur = base.tasks[at];
+  // CAS：本模块的头注把「每次写都要带 expectedRevision」列为三道防线之一，而
+  // web-control.js 的 `POST task-comment` 一直在传第五个参数。0.17.3 实测发现
+  // 函数签名**没有**这个形参 —— 传进来的值被静默丢弃，两个成员同时批注同一条
+  // 任务时后到的会覆盖前者且双方都收到 ok。这不是「少了个校验」，是**假成功**。
+  if (expectedRevision !== null && Number(cur.revision) !== Number(expectedRevision)) {
+    return { ledger: base, comment: null, error: `revision-mismatch: expected ${expectedRevision}, actual ${cur.revision}` };
+  }
+  const text = String(comment?.text || '').trim();
+  if (!text) return { ledger: base, comment: null, error: 'empty-comment-text' };
+
+  const commentItem = {
+    id: 'c-' + now.toString(36) + '-' + Math.random().toString(36).slice(2, 6),
+    quote: String(comment?.quote || '').trim(),
+    text,
+    author: String(comment?.author || 'user'),
+    createdAt: now,
+    resolved: false,
+  };
+
+  const nextComments = [...(Array.isArray(cur.comments) ? cur.comments : []), commentItem];
+  const nextTask = {
+    ...cur,
+    comments: nextComments,
+    revision: (Number(cur.revision) || 0) + 1,
+    updatedAt: now,
+  };
+
+  const tasks = [...base.tasks];
+  tasks[at] = nextTask;
+  return { ledger: { ...base, tasks }, comment: commentItem, error: null };
+}
+
+/**
+ * 切换评论的解决状态（resolved）。
+ *
+ * @param {object} ledger 当前台账
+ * @param {string} taskId 目标任务 id
+ * @param {string} commentId 批注 id
+ * @param {number} now 当前时刻
+ * @returns {{ledger: object, comment: object|null, error: string|null}}
+ */
+export function applyResolveComment(ledger, taskId, commentId, now, expectedRevision = null) {
+  const base = ledger && Array.isArray(ledger.tasks) ? ledger : emptyLedger();
+  const at = base.tasks.findIndex((t) => String(t.id) === String(taskId));
+  if (at < 0) return { ledger: base, comment: null, error: 'task-not-found' };
+  const cur = base.tasks[at];
+  // CAS：与 applyAddComment 同一条缺陷、同一个修法（见那里的注释）。
+  if (expectedRevision !== null && Number(cur.revision) !== Number(expectedRevision)) {
+    return { ledger: base, comment: null, error: `revision-mismatch: expected ${expectedRevision}, actual ${cur.revision}` };
+  }
+  const comments = Array.isArray(cur.comments) ? cur.comments : [];
+  const cIndex = comments.findIndex((c) => String(c.id) === String(commentId));
+  if (cIndex < 0) return { ledger: base, comment: null, error: 'comment-not-found' };
+
+  const target = comments[cIndex];
+  const updatedComment = { ...target, resolved: !target.resolved, resolvedAt: target.resolved ? null : now };
+  const nextComments = [...comments];
+  nextComments[cIndex] = updatedComment;
+
+  const nextTask = {
+    ...cur,
+    comments: nextComments,
+    revision: (Number(cur.revision) || 0) + 1,
+    updatedAt: now,
+  };
+
+  const tasks = [...base.tasks];
+  tasks[at] = nextTask;
+  return { ledger: { ...base, tasks }, comment: updatedComment, error: null };
+}
+
+/**
  * 台账 → 面板行（与 roster.js 的塑形口径**逐字对齐**）。
  *
  * 刻意不产出 `ready`：判据归 task-plan.js，它会按官方判据现算并标
@@ -427,6 +634,29 @@ export function rowsOf(ledger) {
       description: String(t?.description || ''),
       status: String(t?.status || ''),
       ownerName: t?.ownerName ? String(t.ownerName) : null,
+      assignedModel: t?.assignedModel || null,
+      sessionKey: String(t?.sessionKey || ''),
+      projectId: String(t?.projectId || 'default'),
+      comments: Array.isArray(t?.comments) ? t.comments : [],
+      // 排期/执行面（0.19.0）：行必须带出去，否则台账里存住了、面板上读不到
+      //（「说做了、其实没做」的存储版）。缺字段时给空形状而不是 undefined。
+      schedule: t?.schedule && typeof t.schedule === 'object'
+        ? {
+          enabled: t.schedule.enabled === true,
+          cron: String(t.schedule.cron || ''),
+          startAt: msOrNull(t.schedule.startAt),
+          nextRunAt: msOrNull(t.schedule.nextRunAt),
+          lastTriggeredAt: msOrNull(t.schedule.lastTriggeredAt),
+        }
+        : { enabled: false, cron: '', startAt: null, nextRunAt: null, lastTriggeredAt: null },
+      mode: String(t?.mode || ''),
+      permission: String(t?.permission || ''),
+      reuseSession: t?.reuseSession === true,
+      // 时间戳（0.19.0）：任务行一直有这两个字段，但界面**从不渲染**它们，
+      // 于是用户看不到「什么时候建的、最后一次动是什么时候」。这里一并透出，
+      // 由面板显示——用户问的「开始时间」有一半指的是这个。
+      createdAt: Number(t?.createdAt) || 0,
+      updatedAt: Number(t?.updatedAt) || 0,
       blockedBy: Array.isArray(t?.blockedBy) ? t.blockedBy.map(String) : [],
       ...(Array.isArray(t?.edges) && t.edges.length ? { edges: t.edges.map((e) => ({ id: String(e?.id || ''), kind: String(e?.kind || 'after-success') })) } : {}),
       ...(t?.join ? { join: t.join } : {}),

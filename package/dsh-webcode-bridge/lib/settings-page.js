@@ -293,6 +293,16 @@ pre.preset {
         </div>
       </div>
       <div class="form-row">
+        <label>浏览器（内置，无需外部依赖）</label>
+        <div class="hint">本插件自带浏览器能力：优先用随插件安装的 Chromium，与你的日常浏览器完全隔离。登录一次后持久保存。</div>
+        <div id="browserLine" class="hint">浏览器状态读取中…</div>
+        <div style="display:flex; gap:8px; align-items:center; margin-top:6px; flex-wrap:wrap;">
+          <button type="button" id="browserRefresh" class="mini">刷新状态</button>
+          <button type="button" id="browserInstall" class="mini" style="display:none;">下载浏览器</button>
+          <span id="browserHint" class="hint" style="margin:0;"></span>
+        </div>
+      </div>
+      <div class="form-row">
         <label>首轮提示词模板（只读）</label>
         <div class="hint">各网站实际使用的传输协议与本地存储文件（可点击直接打开）。</div>
         <div id="sitePrompts">加载中…</div>
@@ -376,8 +386,7 @@ pre.preset {
             <span id="subSiteState" class="state idle">待检查</span>
             <button type="button" id="subLogin" class="mini">登录</button>
             <button type="button" id="subVerify" class="mini">检测</button>
-            <button type="button" id="subWindow" class="mini">独立窗口</button>
-            <button type="button" id="subOpenSite" class="mini">打开网站</button>
+            <button type="button" id="subWindow" class="mini">登录窗口</button>
           </div>
           <div id="subAccountStatus" class="hint"></div>
         </div>
@@ -602,6 +611,59 @@ pre.preset {
     }
   });
 
+  // ---- 浏览器（内置，零外部依赖）------------------------------------------------
+  //
+  // 兑现用户要求「尽量对应本插件外的少干扰少依赖，确保人人下载安装可用本插件所有功能」。
+  // 这里只做两件事：**显示实际用的是哪个浏览器**、缺了就**给一个下载按钮**。
+  // 判定与安装都在服务端（lib/browser-runtime.js 是唯一真相），前端不重算。
+  async function loadBrowserRuntime() {
+    const line = document.getElementById('browserLine');
+    const hint = document.getElementById('browserHint');
+    const installBtn = document.getElementById('browserInstall');
+    try {
+      const d = await fetch(API_BASE + '/browser-runtime').then((r) => r.json());
+      if (!d || !d.ok) throw new Error((d && d.error) || 'HTTP');
+      // 路径也显示出来：用户要能核对「到底跑的是哪个文件」，这是可以用一次请求
+      // 验证的性质，不该只活在代码里。
+      line.textContent = d.line + (d.executablePath ? '：' + d.executablePath : '');
+      installBtn.style.display = d.ready ? 'none' : '';
+      hint.textContent = d.ready ? '' : (d.hint || '');
+    } catch (e) {
+      line.textContent = '浏览器状态读取失败：' + (e && e.message ? e.message : e);
+    }
+  }
+
+  document.getElementById('browserRefresh').addEventListener('click', loadBrowserRuntime);
+
+  document.getElementById('browserInstall').addEventListener('click', async () => {
+    // 下载约 150 MB，是明确的外部动作 —— 先征得同意再跑（与附件探针同一条纪律）。
+    if (!window.confirm('将从 playwright 官方 CDN 下载 Chromium（约 150 MB，仅此一次）。继续？')) return;
+    const btn = document.getElementById('browserInstall');
+    const line = document.getElementById('browserLine');
+    btn.disabled = true;
+    line.textContent = '正在下载浏览器…（可能需要几分钟，请不要关闭此页面）';
+    try {
+      const d = await fetch(API_BASE + '/browser-install', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      }).then((r) => r.json());
+      if (d && d.ok) {
+        line.textContent = '浏览器已就绪：' + (d.executablePath || '');
+      } else {
+        // 失败时**把真实原因显示出来**（含命令输出尾部），不编一句「安装失败」。
+        line.textContent = '下载失败（' + ((d && d.code) || '未知') + '）：' + String((d && d.output) || '').slice(0, 400);
+      }
+    } catch (e) {
+      line.textContent = '下载请求失败：' + (e && e.message ? e.message : e);
+    } finally {
+      btn.disabled = false;
+      loadBrowserRuntime();
+    }
+  });
+
+  loadBrowserRuntime();
+
   // ---- 子代理账户与登录管理（与原生面板同一套端点：login / verify-login / window） ----
   const subAccountBlock = document.getElementById('subAccountBlock');
   const subAccountFollow = document.getElementById('subAccountFollow');
@@ -688,7 +750,7 @@ pre.preset {
     btns.forEach((b) => { b.disabled = true; });
     try {
       if (kind === 'login') {
-        subAccountStatus.textContent = '等待登录完成…（最长 5 分钟，请在弹出的 Edge 窗口内完成登录）';
+        subAccountStatus.textContent = '等待登录完成…（最长 5 分钟，请在弹出的浏览器窗口内完成登录）';
         const r = await apiSoftPost('login', { siteId: site, wait: true, timeoutMs: 300000 });
         if (!r.ok) {
           subAccountStatus.textContent = '✗ ' + r.error;
@@ -733,35 +795,21 @@ pre.preset {
     }
   }
 
-  const SITE_NAMES_MAP = {
-    deepseek: 'DeepSeek', glm: '智谱清言', chatgpt: 'ChatGPT', kimi: 'Kimi',
-    qwen: '通义千问', doubao: '豆包', grok: 'Grok', claude: 'Claude',
-    gemini: 'Gemini', zai: 'Z.ai'
-  };
-  const SITE_ORIGINS_MAP = {
-    deepseek: 'https://chat.deepseek.com',
-    glm: 'https://chatglm.cn',
-    chatgpt: 'https://chatgpt.com',
-    kimi: 'https://kimi.com',
-    qwen: 'https://chat.qwen.ai',
-    doubao: 'https://www.doubao.com',
-    grok: 'https://grok.com',
-    claude: 'https://claude.ai',
-    gemini: 'https://gemini.google.com',
-    zai: 'https://chat.z.ai'
-  };
+  // 0.18.0：原先这里有两个常量表 SITE_NAMES_MAP / SITE_ORIGINS_MAP，只为上面那个
+  // 已删除的「打开网站」按钮服务。删按钮后它们成了死代码，一并移除 —— 站点名与
+  // 源地址的权威来源是服务端 providers.js（面板从 /status 与 /models 读），前端
+  // 另存一份迟早与后端漂移。
 
   document.getElementById('subLogin').addEventListener('click', () => subAction('login'));
   document.getElementById('subVerify').addEventListener('click', () => subAction('verify'));
   document.getElementById('subWindow').addEventListener('click', () => subAction('window'));
-  document.getElementById('subOpenSite').addEventListener('click', () => {
-    const site = document.getElementById('subAgentSite').value;
-    if (!site || site === 'follow') return;
-    const url = SITE_ORIGINS_MAP[site] || ('https://' + site);
-    window.open(url, '_blank');
-    subAccountStatus.textContent = '已打开 ' + (SITE_NAMES_MAP[site] || site) + '（在 Harness 内可直接通过右侧栏 Web Bridge 或内置浏览器打开与登录）。';
-    subAccountStatus.className = 'hint';
-  });
+  // 0.18.0：原先这里还有一个「打开网站」按钮，它调 window.open(url) —— 打开的
+  // 是**用户日常浏览器**，而桥跑在它自己独占的 Chromium profile 里。用户在那边
+  // 登录，桥**永远不会知道**（探针报「未登录」而用户坚称「我登了」，两边都是真的，
+  // 说的却不是同一份 profile）。这正是用户指出的「登录入口有两套」里最误导的一套，
+  // 已删除。要登录就用上面这个「登录窗口」——它开的是桥自己的浏览器，登录态
+  // 持久保存在桥的 profile 里（真机实测：关闭驱动再重开，loggedIn 仍为 true）。
+  // 注意：本文件整体是一个模板字符串，注释里**不得出现反引号**（会截断它）。
   document.getElementById('subAgentSite').addEventListener('change', refreshSubAccount);
   setInterval(refreshSubAccount, 20000);
   // 投递读数轮询（15s）：真机出问题时用户往往就停在这一页上，读数必须自己更新，

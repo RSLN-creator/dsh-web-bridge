@@ -1,14 +1,10 @@
 // tool-transport.js — 「站点 → 工具调用传输形状」的只读路由立面（2026-09-21）。
 //
-// ⚠ 本模块当前只被单测引用，**未接线到任何调用点**（2026-09-22 审查核实）。
-//   教学与解析的真实入口仍是 lib/agent-preset.js 的 transportNoteFor 与
-//   parseAgentReply——index.js 直接调它们。因此不要以为改了本模块就改了行为：
-//   它现在是一张「形状速查表」，不是一个生效的中间层。
-//   去留由计划 2026-09-21-domestic-sites-protocol.md 的 Task 1.4 决定：要么接线
-//   （把 index.js 的教/解析改成经由此处），要么删掉；留着不管才是唯一的错。
-//   审查结论见 doc/review-0.17.x.md 第 6、8 节。
+// 经过 2026-09-22 接入：已在 lib/index.js 正式接线，作为站点传输协议教学（teachFor）
+// 与形状路由（transportShapeForSite）的统一门面，委托 lib/agent-preset.js 成熟的实现。
 //
 // ## 为什么它只做路由、不实现协议（plan Task 1.1 的收口结论）
+
 //
 // 计划《2026-09-21-domestic-sites-protocol.md》Task 1 本想在新建的
 // lib/tool-parser.js / lib/tool-transport.js 里「建立统一工具调用转换层」。
