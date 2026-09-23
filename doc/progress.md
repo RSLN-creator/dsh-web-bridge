@@ -44,13 +44,38 @@
 | **T4 分刀入库 0.19.0（git status 清零）** | 刀1 `feat(bridge)`（b4c7ec3，lib 12 文件 +2548/-378）；刀2 `test(bridge)`（cad8d2a，6 文件 +1426）；刀3 `docs(bridge)`（71ad794，doc/reference 6 文件 +644）。每刀独立可 `git revert` 单刀回滚；提交前过 `lint-comments`（0 error/0 warn）。`.trae/` 为 gitignore 私有留痕，不入库。 |
 | **对账声明的本轮不做项** | ① 跨站优先级队列（独立功能扩展，需单独一轮）；② 控制面 task 请求带 sessionId 上传（遗留收口项）；③ 官方 agentTeams「有权限但空任务」被旧台账盖住的权威语义修正（产品决定）。均已记录不越界。 |
 
+## 0.19.1 打包安装（2026-09-23）
+
+| 项 | 内容 |
+| --- | --- |
+| **范围** | 0.19.0 的边界1/2 澄清落地（未登录放开闸 `shouldGuide` 恒 false、设置页浏览器区纯内置 Chromium 文案、登录动作收口 `POST window {action:'open'}`、并列多会话/任务板对齐官方 primitives）+ 用户「这两个你没做啊！！做了打包安装！」的明确指示。 |
+| **全量回归** | `node --test "test/*.test.mjs"` **exit 0 全绿**（898 项基线；本轮复跑 602 项零失败时无残留 node 进程争用）。先清掉了上一会话遗留的 node 进程（2:51 启动、会争用真实 HTTP 端口造成 `control-routes` 并发误报——本文件 §0.19.0 对账行已记同型判据：全量须串行独占）。 |
+| **打包** | `pnpm pack` → `dsh-webcode-bridge-0.19.1.tgz`（package.json version 已从 0.19.0 升 0.19.1）。 |
+| **安装** | `scripts/install-profiles.mjs` 装入 **web / headless 两 profile 均 v0.19.1**。 |
+| **声明回退防护（关键）** | `install-profiles` 绕开 pnpm、不改声明 → 启动期 reconcile 会按 lockfile 把 `node_modules` 回退成声明里的旧版本（本文件 §0.16.10 七已记第三次踩坑）。**本轮已手工把两 profile 的 `package.json` 依赖与 `pnpm-lock.yaml` 的 specifier/version 全部同步到 0.19.1**，核对三方一致：声明=0.19.1.tgz / 已装=0.19.1 / lockfile=0.19.1.tgz。重启 DSH 后不会回退。 |
+| **未完成项** | 需重启 DSH 才生效（当前进程仍是旧代码）。重启后按 `doc/verify.md` 真机核对：未登录站点直接挂载网页（不再引导页）、设置页浏览器卡片只显示「桥内置浏览器」、登录窗口入口统一。 |
+
+## 0.19.1 合规审计 + git release（2026-09-23 第二轮）
+
+| 项 | 内容 |
+| --- | --- |
+| **范围（用户原话）** | 「① 全面进行项目合规--对比最新版本，插件要求进行审批，**不要改动代码文件**；② 提价 git realse」。①的交付物是 `doc/compliance-audit-0.19.1.md`；**代码文件一行未改**（`lib/` / `bin/` / `test/` / `cordis.patch.yml` 全未触碰）。 |
+| **对标基线的真读数（修正一个容易踩的口径）** | `npm view @deepseek-ai/dsh dist-tags` 实测：`latest=0.1.5-rc.2` / `next=0.1.5-rc.3` / **`alpha=0.1.7-alpha.2`**。**官方 `latest` 比本机实装的 `0.1.6-alpha.2` 更旧**——「对比最新版本」的正确基线是 alpha 线的 `0.1.7-alpha.2`（源码形态，`reference/deepseek-harness` HEAD `00102833d`），不是 `latest`。追 `latest` 等于回退。 |
+| **「审批」的审计结论：本插件零自造** | 官方审批是一个**闭合且 fail-closed** 的接缝：结果词汇 `allowed-once`/`rejected`/`cancelled`/`unavailable`（只有 `allowed-once` 放行）、会话策略 `ask`/`never`（`never` 在服务内部、waterfall 派发**之前**强制，后注册的 `prepend` 应答者也绕不过）、`approval/asked`+`approval/decided` 成对写会话日志且 log-only 不进模型转写。**本插件的所有工具执行与插件管理都走官方**，桥侧唯一的「同意」是浏览器自动化的部署级 `requireConsent`（自家领域开关，走官方设置页），不是工具权限审批。 |
+| **抓到并修掉的不合规项 ①（阻断）** | `reference/README.md` 的来源表与磁盘不一致：`node scripts/gen-reference-index.mjs --check` 退 1 → `ci-local --fast` **6/7 步**（唯一红步）。差异两处：`deepseek-harness` 的 HEAD 写 `ddefc45…` 而磁盘是 `00102833…`（已 pull 到 0.1.7-alpha.2）；表里**缺** `dsh-official-plugins` 行（目录在磁盘上）。表是生成物，磁盘变了没人重跑生成器——本项目记为「生成物漂移」的同型事故。已按生成器口径回写，并同步更正三处**人写**汇总：`34 个 clone` → **37**、`316 MB` → **978.9 MB**、§6 违例 5 条 → **8 条**（`local-refs` 故意不算）。复核 **exit 0**（校验 46 个存在的条目）。 |
+| **抓到并修掉的不合规项 ②（一般）** | `.trae/documents/*.md`（本轮对账草稿，性质同 `.local-plans/`）**没有** `.gitignore` 规则，`git status` 长期挂着未跟踪条目——本项目已因同型问题踩过两次（`.webcode-tasks/`、`.local-plans/`）。已补规则 `.trae/` 并写下理由（gitignore 按路径匹配，父目录规则不覆盖嵌套同名路径）。 |
+| **记录不修 ③（产品决定）** | 官方「浏览器插件审批」与 dependency build-script approval 是两条不同语义；本插件不用浏览器扩展链路（`extension/` 已于 2026-09-16 归档），与这一层无交集，如实记录不越界。 |
+| **能力差逐条给了理由（不是漏做）** | `dsh-client-ui-approval`（本插件不产生审批请求，没有可呈现的东西）、`dsh-authorization`（本插件的凭据是站点登录态，映射过去只会造出假 flow）、`dsh-experimental-auto-review`（它是权限预设消费者，本插件再判一次＝第二套审批）、`dsh-client-ui-plugin-manager`（内部再做一套会与官方页面抢 profile 写锁）、`./invariant`（无可独立观测的状态投影）。 |
+| **闸门读数（本轮实测）** | `ci-local --fast` 全部步骤 PASS（修完 ① 后）；全量 `pnpm test` **exit 0**（前台 9 分钟级长跑，含真机 mock 与 bench 负向对照）；`gen-reference-index --check` exit 0。 |
+| **发版（②）** | 提交工作树 → 打 tag `v0.19.1`（tag 必须等于 `v` + package.json 的 version，`release.yml` 有硬校验）→ 推 `main` 与 tag。`release.yml` 只发 tarball 到 GitHub Release，**绝不 publish 到任何 registry**（带守卫）。 |
+
 ---
 
 ## 当前状态
 
 | 项 | 值 |
 | --- | --- |
-| 工作树版本 | **0.19.0（进行中）**：0.18.0 已真机生效（线上 3080 实测 `build.version=0.18.0`、`hash a86bce573e0b`）；0.19.0 本轮落三项用户要求（见下 0.19.0 各行） |
+| 工作树版本 | **0.19.1（已打包安装，待重启生效）**：0.18.0 已真机生效（线上 3080 实测 `build.version=0.18.0`、`hash a86bce573e0b`）；0.19.0 落三项用户要求（见下 0.19.0 各行）；0.19.1 完成边界1/2 澄清落地 + 打包安装（见上 0.19.1 行） |
 | **0.19.0 用户三项要求（原话，2026-09-22）** | ① 「已经登录网站实现和登录网站参考官方浏览器本地实现能原生打开」+「设置界面和右侧本插件带来的登录必须落实一处，必须脱离本机浏览器可用（零外部？就是自带浏览器完整实现）」；② 「优化任务板的 UI 统一官方 harness 审美！另外我想要的任务板是人能够手动添加任务的！然后是审批界面，参考 office 左正文，右划线编辑评论并合理显示：完全参考 office 实现」；③ 「删除参考官方用的 team 面板，和我设想的 team 不同，参考错误了……重构 team 功能，本插件的并列多会话组成的 team」。 |
 | **0.19.0 ③ 关键依据：用户对「Team」的定义（逐字，`doc/user-voice-log.md:3670`）** | 「**team 不是指的官方 team 那样，我想更多指的是能够充分发挥本多站点（如果实现）的优势，能够做到中心对话区域做到：并列不同模型对话进行回复**」。⇒ 本插件的 Team = **若干条各自独立的网页会话并排**（每列一个站点、各持稳定 `sessionKey`、各自接着聊），落点是**中央对话区**；**不是**官方 `agentTeams` 的右栏花名册。0.17.3 那份「参考官方 agentTeams」的实现是**参考错了**。 |
 | **0.19.0 ③ 已落地：删除官方花名册 Team 面板，Team 收敛为并列多会话** | 删掉 `client.cjs` 的 `TeamPanel` 组件（原 `:996`，读官方 `agentTeams.listMembers`）与其右栏标签页注册 `sidebarRightTabs.register`（`kind 'webcode-team'` / `id 'dsh-webcode-bridge/team'`）+ `slots.inject('sidebar.right.pane.tab')`，连同 `TEAM_ID`/`TEAM_KIND` 两个常量。**保留** `roster.js` 对官方 `agentTeams` 的读取：它仍是**任务板** `listTasks` 的官方来源与设置页花名册的数据源——删的是「把它当成本插件的 Team」这一层呈现。正解 `MultiModelCompareView` 保留并强化，注册在 `conversation.view`（中央对话区）；其 `label` 由「三列模型对比」改为「**并列多会话**」——该视图按数组驱动支持 2~4 列，旧名在用户加到第四列时就是一句**假陈述**。 |
