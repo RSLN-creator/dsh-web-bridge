@@ -394,36 +394,89 @@ test('⑦ 登录入口不得指向桥以外的浏览器（登了不算数）', (
   assert.ok(new RegExp('(?<![\\w$])' + name + '\\s*\\(').test(bodyLines.join('\n')),
     '本组件定义了拆解函数 ' + name + ' 却没用它 —— 登录会用到未定义的函数');
 
-  // ⑥ 0.19.0：目录登录的忙碌态必须
-  //    ① 按**站点**判定（不得全局锁），② 两个入口都要有 disabled/文案反馈，
-  //    ③ **能同时表示多个站点在途**（集合，不是单值）。
+  // ⑥ 0.19.0 起：目录开窗的忙碌态必须是**集合**（不得全局锁）。
+  //    0.19.4 起：粒度为**账号**（用户指令「能够同时开多个账号的窗口/标签」）——
+  //    按站点判会把「给同站再加一个账号」静默丢弃，用户点「新账号」毫无反应。
   //
   //    ① 的成因：初版用 `if (busySid) return;` 做**全局**锁，而这条请求要等浏览器
   //    起来（最长 120s）——期间点**其它站点**会被静默丢弃，用户只看到上一个站点的
   //    成功回执、自己这次点击毫无反馈（本项目记为「说做了、其实没做」的那类）。
   //
-  //    ③ 的成因（本轮自查用状态机模拟抓到）：把全局锁改成 `busySid === sid` 后仍
-  //    只是**单值**，存在这条交错 —— `点A → 点B → B 先返回` ⇒ 忙碌态被清空，而 A
-  //    其实还在开窗 ⇒ A 的按钮重新可点 ⇒ 再点一次拉起**第二个窗口**覆盖同一个
-  //    profile，正是这个忙碌态本来要防的事。修法是换成**集合**。
-  assert.match(catalog, /const \[busySids, setBusySids\] = React\.useState\(\[\]\)/,
-    '忙碌态必须用集合 —— 单值无法表示多站点同时在途（点A→点B→B先返回会把 A 的忙碌态清掉）');
-  assert.match(catalog, /const isBusy = \(sid\) => busySids\.includes\(sid\)/,
-    '必须有 isBusy(sid) 判据');
+  //    ③ 的成因（0.19.0 自查用状态机模拟抓到）：把全局锁改成单值后仍存在这条交错 ——
+  //    `点A → 点B → B 先返回` ⇒ 忙碌态被清空，而 A 其实还在开窗 ⇒ A 随即重新可点
+  //    ⇒ 再点一次拉起**第二个窗口**覆盖同一个 profile，正是这个忙碌态本来要防的事。
+  assert.match(catalog, /const \[busyAccounts, setBusyAccounts\] = React\.useState\(\[\]\)/,
+    '忙碌态必须用集合 —— 单值无法表示多个账号同时在途');
+  assert.match(catalog, /const isBusy = \(key\) => busyAccounts\.includes\(key\)/,
+    '必须有 isBusy(key) 判据，且键是 accountKey');
   assert.ok(!/if \(busySid\) return;/.test(catalog),
     '不得用全局 `if (busySid) return;` —— 那会静默吞掉其它站点的点击');
-  assert.ok(!/setBusySid\(/.test(catalog),
-    '不得再对单值 setBusySid 操作 —— 已改为集合后必须按站点 filter');
-  // 单账户按钮与多账户菜单项都必须反映忙碌态。
-  const disabledCount = (catalog.match(/disabled:\s*isBusy\(sid\)/g) || []).length;
-  assert.ok(disabledCount >= 2,
-    '单账户按钮与多账户菜单项都必须带 `disabled: isBusy(sid)`，实际=' + disabledCount
-    + '（只改文案而不禁用，看起来仍可点，连点会拉起多个窗口互相覆盖）');
-  assert.match(catalog, /正在打开登录窗口/,
-    '多账户菜单项必须有忙碌文案（否则用户不知道为什么点不动）');
-  // 入集合去重 + 解锁只摘自己那一站。
-  assert.match(catalog, /setBusySids\(\(prev\) => \(prev\.includes\(sid\) \? prev : \[\.\.\.prev, sid\]\)\)/,
-    '入集合必须去重（连点同一站不得重复入集合）');
-  assert.match(catalog, /setBusySids\(\(prev\) => prev\.filter\(\(x\) => x !== sid\)\)/,
-    '解锁必须只摘掉自己那一站（其它站点的在途请求要保持忙碌）');
+  assert.ok(!/busySids/.test(catalog),
+    '按**站点**判的旧忙碌态必须清干净 —— 否则同站加第二个账号会被误判成「正在开窗」而丢弃');
+  // 两个入口都必须反映忙碌态：账号下拉底部那行「新账号」，以及开窗函数自身的守卫。
+  assert.match(catalog, /disabled: isBusy\('__new__' \+ sid\)/,
+    '「新账号」那一行必须在新增进行中被禁用 —— 连点会一次加出两个空槽');
+  assert.match(catalog, /if \(isBusy\(acctKey\)\) return;/,
+    '开窗函数必须有按账号的守卫 —— 没有它，连点同一个账号会拉起多个窗口覆盖同一份 profile');
+  // 入集合去重 + 解锁只摘自己那一个账号。
+  assert.match(catalog, /setBusyAccounts\(\(prev\) => \(prev\.includes\(acctKey\) \? prev : \[\.\.\.prev, acctKey\]\)\)/,
+    '入集合必须去重（连点同一账号不得重复入集合）');
+  assert.match(catalog, /setBusyAccounts\(\(prev\) => prev\.filter\(\(x\) => x !== acctKey\)\)/,
+    '解锁必须只摘掉自己那一个账号（其它账号的在途必须保持忙碌）');
+  // 新增账号的「正在新增」位用**合成键**占位，且必须 finally 释放——
+  // 早退路径（account-add 失败）不释放的话，「新账号」会永久变灰。
+  assert.match(catalog, /const guard = '__new__' \+ sid;/,
+    '新增账号必须有独立的防连点键');
+  assert.match(catalog, /finally \{[\s\S]{0,200}setBusyAccounts\(\(prev\) => prev\.filter\(\(x\) => x !== guard\)\)/,
+    '新增账号的防连点键必须在 finally 里释放（失败路径也要放）');
+});
+
+// ── ⑧ 附件探针不得回到任何面向用户的界面（0.19.6）────────────────────────────
+//
+// 用户 2026-09-24 原话：「附件探针……探针是你自己使用！不需要！然后是解释不需要！！
+// 无意义！！面向用户使用！！」。核实到**两处**入口：原生设置面板（client.cjs 的
+// 「提示词投递」卡）与独立设置页（settings-page.js，由 index.js 挂载
+// `/__webcode/settings-page`）。两处都在本轮撤掉。
+//
+// 为什么判据要落在**渲染出的 HTML** 上而不是源码上：探针的名字会留在注释里（说明
+// 「为什么撤掉」是仓库的台账纪律），用源码正则会把注释也算成命中。因此独立页走
+// `renderSettingsPage()` 的返回值，原生面板走渲染出的文本。
+//
+// 能力本身（服务端 `POST attach-probe`）**保留**——它是开发者自用的读数通路，需要时
+// 直接调 HTTP；本条禁的是「用户界面上出现这个按钮/读数」，不是删能力。
+test('⑧ 附件探针与「最近一次实际投递」不得出现在用户界面上（两处入口都算）', async () => {
+  // ① 独立设置页：`renderSettingsPage` 返回的就是整份 HTML（含 `<script>`），因此
+  //    判据要**去掉注释行**再查——注释里写「为什么撤掉探针」是仓库的台账纪律，
+  //    不能被当成界面回潮。id 只在标记里出现，可直接查。
+  const { renderSettingsPage } = await import('../lib/settings-page.js');
+  const html = renderSettingsPage([]);
+  assert.ok(!html.includes('attachProbeBtn'), '独立设置页又有了探针按钮（id=attachProbeBtn）');
+  assert.ok(!html.includes('transportProbeLine'), '独立设置页又有了探针读数行（id=transportProbeLine）');
+  assert.ok(!html.includes('transportLastLine'), '独立设置页又有了「最近一次实际投递」行');
+  const pageVisible = html.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+  assert.ok(!pageVisible.includes('附件探针'), '独立设置页的可见文案又出现「附件探针」');
+  assert.ok(!pageVisible.includes('最近一次实际投递'), '独立设置页的可见文案又出现「最近一次实际投递」');
+
+  // ② 原生设置面板的「提示词投递」卡区段：可见文案（去掉注释行）里不得出现。
+  const client = fs.readFileSync(path.join(LIB, 'client.cjs'), 'utf8');
+  const start = client.indexOf("'提示词投递'");
+  assert.ok(start > 0, '找不到「提示词投递」卡 —— 本测试的分区锚点失效，先修解析');
+  const end = client.indexOf("'连接'", start);
+  assert.ok(end > start, '找不到「连接」卡（提示词投递卡的下一个锚点），先修解析');
+  const card = client.slice(start, end);
+  const visible = card.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+  for (const banned of ['附件探针', '最近一次实际投递', 'runAttachProbe', 'probeBusy', 'probeResult']) {
+    assert.ok(!visible.includes(banned), '原生设置面板的投递卡又出现 ' + banned);
+  }
+
+  // ③ 正判据（只删不加 = 用户失去形态选择）：形态单选与当前生效读数必须还在。
+  assert.ok(visible.includes('附件投递') && visible.includes('纯文本'), '投递形态的两个选项必须保留');
+  assert.ok(/当前生效/.test(visible), '「当前生效」读数必须保留');
+  assert.ok(pageVisible.includes('提示词投递形态') && pageVisible.includes('transportLine'),
+    '独立设置页的投递形态行必须保留（不能连功能一起删）');
+
+  // ④ 服务端能力不得被顺手删掉（探针通路仍在，只是没有用户界面入口）。
+  const server = fs.readFileSync(path.join(LIB, 'web-control.js'), 'utf8');
+  assert.ok(server.includes('attach-probe'),
+    '服务端的 attach-probe 动作被删了 —— 本轮只撤界面，不删能力');
 });

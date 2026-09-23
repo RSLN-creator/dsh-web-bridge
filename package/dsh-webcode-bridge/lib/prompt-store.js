@@ -29,8 +29,18 @@ import path from 'node:path';
 
 export const DEFAULT_PROMPT_STORE_DIR = path.join(os.homedir(), '.dsh', 'webcode');
 
-/** 站点 id 是透明 token，仍约束到安全字母表（与 dsh-drop-caret 同款纪律）。 */
-function sanitizeToken(raw, { max = 80 } = {}) {
+/**
+ * 把一个透明 token 消毒成单段安全路径名（与 dsh-drop-caret 同款纪律）。
+ *
+ * 为什么导出：本模块之外还有第二处需要同一套规则——`continue-budget.js` 的
+ * 会话累计文件（`continuations/<token>.json`）。两处各写一份消毒正则必然会漂移，
+ * 而漂移的后果是同一会话在两个文件名下有两份状态（或更糟：路径逃逸）。
+ *
+ * @param {unknown} raw 原始 token（站点 id / 会话键）。
+ * @param {{max?: number}} [options] 截断上限，默认 80。
+ * @returns {string} 只含 `[A-Za-z0-9_-]` 的单段路径名；清洗后为空时返回 `anonymous`。
+ */
+export function sanitizeToken(raw, { max = 80 } = {}) {
   const cleaned = String(raw || '').replace(/[^A-Za-z0-9_-]+/g, '_').slice(0, max);
   return cleaned === '' ? 'anonymous' : cleaned;
 }

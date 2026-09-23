@@ -381,7 +381,21 @@ const LABEL_TRANSPORT = '\n[本地工具传输协议]\n必须使用 <tool_call>{
 
 /** deepseek 立场：骨架逐字来自 officialToolCallSkeletonFor（与首轮/再教学同源）。 */
 function deepseekTransport(tools) {
-  return "\n[本地工具传输协议]\n用官方工具调用格式（DeepSeek 原生模板）发起工具调用，形状：" + officialToolCallSkeletonFor(tools) + "。标记必须逐字完整：竖线、词间连接符（▁）、begin/end 一个都不能少，不要改成空格、不要拆行。sep 之后是完整 JSON 对象，required 的每个必填参数都要在；无参数的工具 arguments 写 {}；不要加 ```json 围栏。工具名和参数必须严格匹配上面的 schema。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。";
+  // 0.19.3 精简（deepseek 分支专属）：删除两句与**同一份首轮提示词**逐字重复的约束。
+  //
+  // 依据（真机读数 + 文献）：
+  //   · 实测同一份 deepseek 首轮里，本段与「# 工具调用格式」段共重复 202 字符，
+  //     其中「标记必须逐字完整：竖线、词间连接符（▁）…」与「sep 之后是完整 JSON
+  //     对象…不要加 ```json 围栏」两句是**逐字**重复；
+  //   · arXiv 2510.05381「长上下文本身损害性能，即使检索完美」→ 首轮不是越长越好
+  //     （doc/research/prompt-engineering-evidence-2026-09-14.md §2.2）；
+  //   · 重复的约束不增加信息量，只增加上下文长度。
+  //
+  // **保留骨架**：本段是最后一个注入的（serializeFirstTurn 把它排在末尾），
+  // 「临出手前再看到一次形状」是有价值的位置；且它还被自动续跑轮单独复用
+  // （teachFor → transportNoteFor），那时没有 preset 在场，骨架不可省。
+  // 只删重复的**句子**，不动骨架、不动独有内容（Calling:/立即发起调用 那两句）。
+  return "\n[本地工具传输协议]\n用官方工具调用格式（DeepSeek 原生模板）发起工具调用，形状：" + officialToolCallSkeletonFor(tools) + "。工具名和参数必须严格匹配上面的 schema。Calling:、伪代码、描述将要读取，都不会执行工具。一旦判定需要真实数据，就立即发起调用，输出调用后立即停止，等待真实工具结果，不得虚构文件内容；拿到全部所需结果后，直接给出简洁的最终答复收束本回合，不要继续无谓思考或重复推测。";
 }
 
 /**
@@ -477,7 +491,17 @@ export function buildPreset(options = {}) {
       // 却不带 pwsh 必填的 description → DSH 拒绝 missing required property
       // "description"。schema 全文有教（required 在列）但模型没守，这里点名说破。
       'arguments 必须包含对应工具 schema 里 required 列出的每一个字段（例如 pwsh 必须同时给 command 和 description——description 是 5-10 词英文主动语态的命令概述）；purpose 只是执行原因备注，不能替代任何必填参数。',
-      '一次回复可以包含多个工具调用代码块，会按顺序执行；有依赖的调用请分多轮等待结果。',
+      // 0.19.3 措辞纠错（deepseek 分支）：deepseek 教的是**官方 token 形状**，不是
+      // ```json 代码块——同一段里刚说完「不要加 ```json 围栏」，下一句却把它叫
+      // 「工具调用代码块」，是自相矛盾的措辞。真机里模型据此产出裸 ```json 块
+      // （与教学目标相反的形状）的风险不值得留着。
+      //
+      // **默认路径零位移**：这一句在 ZERO_DRIFT_BASELINE 里逐字存在
+      //（test/prompt-variants.test.mjs），因此只对 deepseek 换词，其余站点
+      //（含 default/glm）**逐字不动**。
+      options.siteId === 'deepseek'
+        ? '一次回复可以包含多个工具调用，会按顺序执行；有依赖的调用请分多轮等待结果。'
+        : '一次回复可以包含多个工具调用代码块，会按顺序执行；有依赖的调用请分多轮等待结果。',
       '工具执行结果会作为用户消息自动回填给你，格式：{"mcp_action":"result","name":"…","status":"success","output":"…"}（失败为 "status":"error","error":"…"）。',
       '重要：如果上一次工具调用因参数无效而失败，收到了 status:"error" 的结果，请在下一轮把参数修正后重新调用，不要因为失败而放弃工具改用猜测。',
       '回填结果中的每一轮调用（含失败）都会编号出现；继续任务时请基于真实结果，不要虚构文件内容。',

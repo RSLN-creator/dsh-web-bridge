@@ -27,14 +27,15 @@ const bridgeSrcFrom = (rel) => readFileSync(path.resolve(here, '../lib/', rel), 
 /**
  * 渲染组件时喂进去的 props，形状与官方槽 `inject` 的产物一致。
  *
- * 0.15.0 起设置页需要当前会话 id（花名册的 subagentCatalog 是会话级投影，
- * 见 lib/roster.js 的 projectSubAgents）。这里用固定的假 id 而不是 null：
- * `null` 会让花名册走「no-session-id」降级分支，那条路径另有用例专门覆盖。
+ * 0.15.0 起任务板面板需要当前会话 id（花名册的 subagentCatalog 是会话级投影，
+ * 见 lib/roster.js 的 projectSubAgents；0.19.x 起设置页已不再消费它）。这里用固定
+ * 的假 id 而不是 null：`null` 会让花名册走「no-session-id」降级分支，任务板那条
+ * 「读不到时必须给原因」的用例专门覆盖它。
  */
 const SESSION_PROPS = { sessionId: 'session-render-test' };
 
 /** 在当前进程里加载 client.cjs 并跑若干渲染周期，返回每次渲染捕获的异常。 */
-async function renderPane({ payloads, which = 'pane', sites = [], roster = null, primitiveOmit = [], waitStats = null, openMenu = false, tabParams = undefined, noTabActions = false, settingsTab = '', sessionProps = SESSION_PROPS } = {}) {
+async function renderPane({ payloads, which = 'pane', sites = [], roster = null, primitiveOmit = [], waitStats = null, openMenu = false, tabParams = undefined, noTabActions = false, settingsTab = '', sessionProps = SESSION_PROPS, iconNaming = 'legacy' } = {}) {
   // 0.16.38：设置页按作用域切成「全局页 / 站点页」。站点的账户、模型、提示词三张卡
   // 只在站点页渲染，护栏必须能直接渲染站点页才谈得上验证它们——否则只能断言
   // 「全局页看不见」，那证明不了站点页是对的。`initialSettingsTab` 是给这个用的
@@ -215,6 +216,22 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
         IconFullscreenOutline16: () => null,
         IconPanelLeftOutline16: () => null,
       };
+      // 0.19.2：**图标导出改名**这条真机事故的桩开关。
+      //
+      // DSH 0.1.7-alpha.2 起，primitives 的图标名不再带像素后缀
+      //（`IconQueueOutline14` → `IconQueueOutlineRegular`，同族还有 `…Medium`）。
+      // 桩若永远只给旧名，「客户端按旧名取到 undefined → 渲染期 h(undefined) 抛错
+      // → 整块 UI 静默消失」这条路径在护栏里就是空白的——而它正是用户报的
+      // 「底部发送等待时间没了」。
+      //
+      // `iconNaming: 'current'` 把旧名整批换成新名（**不留旧名**），模拟真机 0.1.7：
+      // 客户端必须靠自己的多代名字查找活下来，而不是靠桩的宽容。
+      if (iconNaming === 'current') {
+        for (const legacy of Object.keys(stub)) {
+          const renamed = legacy.replace(/Outline(14|16)$/, 'OutlineRegular');
+          if (renamed !== legacy) { stub[renamed] = stub[legacy]; delete stub[legacy]; }
+        }
+      }
       for (const k of primitiveOmit) delete stub[k];
       return stub;
     }
@@ -253,6 +270,13 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
             subAgentsError: roster.subAgentsError ?? null,
             teamError: roster.teamError ?? null,
             tasksError: roster.tasksError ?? null,
+            // 0.19.x：来源标注也必须能被夹具驱动。此前这个响应体从不带
+            // `teamSource` / `tasksSource`，于是任务板里那一行
+            // `sourceText(data?.teamSource)` 在**所有**渲染用例里恒不执行——
+            // 「服务端算、前端读」这一跳只有源码正则护栏，测不出「字段没送到」。
+            // 缺省 null 而不是编一个值，保持「没有该字段」与「字段为空」可区分。
+            teamSource: roster.teamSource ?? null,
+            tasksSource: roster.tasksSource ?? null,
           } : {}) };
       }
       else if (u.includes('/__webcode/settings')) body = { ok: true, extraPrompt: '', sendGapMs: 10000, thinkMode: 'auto', subAgentMode: 'own', subAgentSite: 'follow' };
@@ -415,11 +439,11 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
     } else {
       assert.ok(Target, '未注册座位 ' + which + '（已注册：' + [...PaneComponents.keys()].join(', ') + '）');
     }
-    // 0.15.0：设置页的官方槽 inject 会喂进**当前会话 id**（花名册的
+    // 0.15.0：设置页的官方槽 inject 曾喂进**当前会话 id**（花名册的
     // subagentCatalog 是会话级投影，服务端要用它去 sessions.get(sessionId)）。
     // 旧 harness 直接 `Target()` 调，等于模拟了一个「inject 什么都没给」的宿主；
     // 这里改成把真实的 props 形状传进去，并把「拿不到会话身份」单独做成一个
-    // 用例（见「花名册：读不到」那条），两种宿主行为都被覆盖。
+    // 用例（见「任务板：读不到时必须给原因」那条），两种宿主行为都被覆盖。
     let tree = null;
     // 组件每次渲染都会调 useState(false) 重建菜单的开合状态，因此「打开菜单」必须
     // 是**渲染前**的常量条件，不能在渲染后翻转：桩是同步无状态的，翻转不会带来
@@ -573,7 +597,9 @@ test('★ 0.16.38 设置页作用域：全局页与站点页各只有自己那�
   assert.ok(!gt.includes('的账户与登录'), '全局页不该有站点账户卡');
   assert.ok(!gt.includes('的首轮提示词'), '全局页不该有站点提示词卡');
   assert.ok(!gt.includes('的模型'), '全局页不该有站点模型卡');
-  for (const keep of ['正在运行（子代理 / Team）', '提示词投递', '连接', '速度与等待', '会话与子代理', '全局指令', '发送间隔（全局）']) {
+  // 0.19.x：「正在运行（子代理 / Team）」卡已按用户要求删除，故不在 keep 列表里；
+  // 它的「不得复活」由下面「文案精简」用例的反向断言钉住。
+  for (const keep of ['提示词投递', '连接', '速度与等待', '会话与子代理', '全局指令', '发送间隔（全局）']) {
     assert.ok(gt.includes(keep), '全局页缺少卡片：' + keep);
   }
   const site = await renderPane({ payloads: [emptyWindows], which: 'settings', settingsTab: 'deepseek', sites: [
@@ -603,6 +629,43 @@ test('★ 0.16.38 设置页作用域：全局页与站点页各只有自己那�
   // 「这个站点没有模型」，而真相是「还没读到」）。此处目录已加载，故只钉
   //「该站点那一支必须在」这一半。
   assert.ok(st.includes('本网站默认模型'), '站点页缺少本网站默认模型行');
+});
+
+test('★ 0.19.x 设置页文案：解释性长句与开发者自用读数不得回潮', async () => {
+  // 用户原话：「需要参考官方解释长短以及功能安排 UI」——一行标签 + 一行状态/动作，
+  // 解释留文档不留界面。这条把本轮删掉的句子钉成反向断言（删掉即回潮）。
+  const { errors, tree } = await renderPane({ payloads: [emptyWindows], which: 'settings' });
+  assert.deepEqual(errors, [], '全局页渲染抛错：' + errors.map(e => e.message).join('; '));
+  const text = treeText(tree);
+  const src = bridgeSrcFrom('client.cjs');
+  // 5.1 整卡删除（含因此成死代码的组件）。
+  assert.ok(!text.includes('正在运行（子代理 / Team）'), '设置页又出现「正在运行（子代理 / Team）」卡');
+  assert.ok(!/function AgentRoster/.test(src), 'AgentRoster 组件不该复活（唯一的卡已删）');
+  // 5.2 限流退避的机制说明不再占用设置页。
+  assert.ok(!/自动退避重试/.test(text), '限流退避解释回潮了：' + text.slice(0, 400));
+  // 5.3 附件探针（开发者自用工具）与真机事故叙述不得出现在用户设置界面。
+  assert.ok(!/附件探针/.test(text), '设置页又出现「附件探针」');
+  assert.ok(!/最近一次实际投递/.test(text), '设置页又出现「最近一次实际投递」');
+  assert.ok(!/41\.7 万字符/.test(text), '设置页又出现真机事故叙述');
+  assert.ok(!/runAttachProbe|probeBusy/.test(src), '探针的客户端接线应随卡片一并删除');
+  // 5.4 「连接」卡只留短状态。
+  assert.ok(!/已永久保存到本机/.test(text), '连接卡又写了一整句解释');
+  assert.ok(text.includes('已启用（本机永久保存）'), '连接卡缺少短状态读数');
+  assert.ok(/'.*未启用/.test(src), '连接卡未启用态必须给一句短状态');
+  // 5.9 开发者向的内部机制描述不出现在界面上。
+  assert.ok(!/回落链/.test(text), '设置页又写了「回落链」这类内部机制');
+  // 5.9 等待口径那句长解释（「发送间隔补满 + 限流退避重试…同源同口径」）压成一句。
+  assert.ok(!/发送间隔补满/.test(text), '等待口径的长解释回潮了：' + text.slice(0, 400));
+  // 界面文案不得出现字面 `**`（它是 markdown 记号，渲染出来就是两个星号）。
+  assert.ok(!/\*\*/.test(text), '设置页可见文案里出现了字面 ** —— 那是 markdown 记号，用户看到的是星号');
+  // 5.7 全局指令说明只出现一次（用户报「重复！」）。
+  const count = (s, sub) => s.split(sub).length - 1;
+  assert.equal(count(text, '追加一段 [全局指令] 注入每个新网页会话的首条消息。'), 1,
+    '全局指令说明重复出现');
+  // 5.8 首轮提示词只读卡的信息面不因美化而丢。
+  for (const keep of ['DeepSeek 网页版', '实际使用：', 'OFFICIAL-PROMPT-TEXT', '本会话工具：', '查看完整模板']) {
+    assert.ok(text.includes(keep), '首轮提示词卡丢了信息：' + keep);
+  }
 });
 
 test('★ 0.16.35 站点目录：从上往下列出全部站点，且不显示登录态', async () => {
@@ -886,145 +949,16 @@ test('右栏账户头像：per-slot 会话丢失读数缺失时退化为 idle，
   assert.ok(!/hwb-avatar dead/.test(classes), '缺 sessionLostCount 时不得编造「会话没了」的红态');
 });
 
-// ------------------------------------------------------------------ 0.14.9
-
-test('花名册：子代理与 Team 成员必须分成两区，子代理缩进、Team 平级', async () => {
-  // 用户原话：「子代理和team效果需要单独区分」。
-  // 依据是两者的结构性差异（doc/research/agent-ui-design-references.md §4.5）：
-  // 子代理结果回报给调用方 → 从属于发起它的会话（缩进）；Team 成员互相发消息、
-  // 共享任务板 → 平级。合成一个列表会把这两种关系画错。
-  const sites = [];
-  const { errors, tree } = await renderPane({ payloads: [emptyWindows], sites, which: 'settings' });
-  assert.deepEqual(errors, [], '花名册渲染抛错：' + errors.map(e => e.message).join('; '));
-  // 空态是个**状态**（确实没有在跑的），不是错误：必须给出可读文案。
-  //
-  // 0.15.5（P3-4）改口径：旧文案「当前没有正在运行的子代理或 Team 成员」把
-  // 两件不同的事混成一句——官方语义下「每个普通顶层会话都是隐式 Team 的 Lead」
-  //（agent-team README.md:128），而 Team 工具只对成员安装
-  //（tool-agent-team/lib/index.js:533）。所以「空」的正确解释是
-  //「本会话不是 Team 成员（Team 工具未挂载）」，不是「团队里没人」。
-  // 断言随之改成新口径，**判据强度不变**：仍要求给出可读、可执行的状态说明。
-  const empty = treeText(tree);
-  assert.ok(/本会话不是 Team 成员/.test(empty),
-    '空花名册未说明「本会话不是 Team 成员」：' + empty.slice(0, 300));
-  assert.ok(/没有正在运行的子代理/.test(empty),
-    '空花名册未说明子代理侧为空：' + empty.slice(0, 300));
-  // 反向：空态不得被当成错误（那是把「没有」与「读不到」混成一句）。
-  assert.ok(!/读不到花名册/.test(empty), '确实为空时不得报「读不到」：' + empty.slice(0, 300));
-});
-
-test('花名册：有成员时两区标题与状态词都可能被读到（颜色不是唯一载体）', async () => {
-  // 这条用真实 payload 形状：status 里的 subAgents / team 两段。
-  const { errors, tree } = await renderPane({
-    payloads: [emptyWindows], which: 'settings',
-    roster: {
-      subAgents: [{ id: 'sa1', name: '修 OOM 的子代理', status: 'running' }],
-      team: [{ id: 't1', name: 'benchdev', status: 'idle', taskCount: 3 }],
-    },
-  });
-  assert.deepEqual(errors, [], '花名册（有成员）渲染抛错：' + errors.map(e => e.message).join('; '));
-  const text = treeText(tree);
-  // 两个分区标题必须同时在——这是「单独区分」的直接可验证形态。
-  assert.ok(text.includes('子代理（属于本会话）'), '缺少子代理分区标题：' + text.slice(0, 300));
-  assert.ok(text.includes('Team 成员（平级）'), '缺少 Team 分区标题：' + text.slice(0, 300));
-  // 状态词必须可读（不能只有一个色点）。
-  assert.ok(text.includes('工作中') && text.includes('空闲'), '状态词未渲染为可读文本：' + text.slice(0, 300));
-  // 共享 checkout 的事实必须如实说明，不能让「并行面板」看起来像隔离环境。
-  assert.ok(/共享同一个 checkout/.test(text), '未说明 Team 共享 checkout（会让人以为文件系统也隔离）');
-});
-
-// ------------------------------------------------------------------ 0.15.0 花名册接真实数据源
-
-test('★ 花名册：读不到时必须说「读不到」而不是「没有成员」（不得把两者画成同一句话）', async () => {
-  // 0.15.0 把 subAgents/team 从写死的空数组换成了真实投影，于是多出一种状态：
-  // **读不到**（官方包没装 / 服务没注册 / 凭据解析失败）。旧实现只有「确实没有」
-  // 一句话，用户无法区分「Team 没在用」和「桥坏了」——这正是接真实数据源之后
-  // 最容易出现的倒退，所以必须有护栏钉住。
-  const { errors, tree } = await renderPane({
-    payloads: [emptyWindows], which: 'settings',
-    roster: {
-      subAgents: [], team: [],
-      teamError: 'official-team-package-not-loaded',
-      subAgentsError: 'session-projections-unavailable',
-    },
-  });
-  assert.deepEqual(errors, [], '花名册（读不到）渲染抛错：' + errors.map(e => e.message).join('; '));
-  const text = treeText(tree);
-  assert.ok(/读不到花名册/.test(text), '未如实报告「读不到」：' + text.slice(0, 300));
-  assert.ok(text.includes('official-team-package-not-loaded'), '未给出可排查的原因：' + text.slice(0, 300));
-  assert.ok(/不代表没有成员在跑/.test(text), '未澄清「读不到 ≠ 没有」：' + text.slice(0, 300));
-  // 关键反向断言：不能同时又宣称「当前没有正在运行的…」——那是把两种状态混成一句。
-  assert.ok(!/当前没有正在运行的子代理/.test(text), '「读不到」时不得同时断言「确实没有」');
-});
-
-test('★ 花名册：部分分区读不到时仍渲染已有分区，并说明缺的那一半', async () => {
-  // Team 侧读不到、子代理侧有真实数据。旧实现会因为「两段都空才提示」的结构
-  // 而完全不提 Team 侧的问题，用户看到子代理列表就以为一切都好。
-  const { errors, tree } = await renderPane({
-    payloads: [emptyWindows], which: 'settings',
-    roster: {
-      subAgents: [{ id: 'sa1', name: 'recon 子代理', status: 'running' }],
-      team: [], teamError: 'no-team-member-authority', subAgentsError: null,
-    },
-  });
-  assert.deepEqual(errors, [], '花名册（部分可用）渲染抛错：' + errors.map(e => e.message).join('; '));
-  const text = treeText(tree);
-  assert.ok(text.includes('子代理（属于本会话）'), '可用分区必须照常渲染：' + text.slice(0, 300));
-  assert.ok(text.includes('recon 子代理'), '可用的成员行必须照常渲染：' + text.slice(0, 300));
-  assert.ok(/部分分区读不到/.test(text), '缺的那一半必须被说明：' + text.slice(0, 300));
-  assert.ok(text.includes('no-team-member-authority'), '未给出缺那一半的原因：' + text.slice(0, 300));
-});
-
-// ------------------------------------------------------------------ 0.15.4 团队任务板
-
-test('★ 花名册：Team 任务板必须与成员一起渲染（否则「平级」只剩一个名字）', async () => {
-  // 官方 TeamView 是 `{ members, tasks }` —— 任务板是**团队级**事实，不是成员的属性。
-  // 0.15.4 之前桥只透出成员行，用户看不到「他们在协作什么」：谁在做什么、
-  // 被谁卡住、写哪些文件。这条护栏钉住任务板真的到达了界面。
-  const { errors, tree } = await renderPane({
-    payloads: [emptyWindows], which: 'settings',
-    roster: {
-      subAgents: [],
-      team: [{ id: 't1', name: 'reviewer', role: 'teammate', status: 'running', model: 'deepseek:deepseek', taskCount: 1 }],
-      tasks: [{
-        id: 'task-1', subject: '修 POST 405', status: 'in_progress', ownerName: 'reviewer',
-        blockedBy: ['task-0'], writeScopes: ['lib/'], ready: false, writeScopeWarnings: ['与 task-2 重叠'],
-      }],
-    },
-  });
-  assert.deepEqual(errors, [], '任务板渲染抛错：' + errors.map(e => e.message).join('; '));
-  const text = treeText(tree);
-  assert.ok(text.includes('Team 任务板'), '缺少任务板分区：' + text.slice(0, 400));
-  assert.ok(text.includes('修 POST 405'), '任务标题必须渲染：' + text.slice(0, 400));
-  assert.ok(text.includes('进行中'), '任务状态必须是可读文本而不是黑话：' + text.slice(0, 400));
-  assert.ok(text.includes('reviewer'), '任务归属必须显示：' + text.slice(0, 400));
-  assert.ok(/阻塞于 1 项/.test(text), '被阻塞的任务必须能看出「被什么卡住」：' + text.slice(0, 400));
-  assert.ok(/写范围告警/.test(text), '写范围告警（官方算好的）必须透出：' + text.slice(0, 400));
-  // 成员行上的模型：Team 与子代理最直观的差别之一。
-  assert.ok(text.includes('deepseek:deepseek'), '成员模型必须显示：' + text.slice(0, 400));
-  // 写范围是 advisory 而不是锁 —— 官方明文，界面必须说清楚，否则用户会以为有互斥。
-  assert.ok(/写范围只是提醒而不是锁/.test(text), '未说明写范围是 advisory 而非锁');
-});
-
-test('★ 花名册：teamError 与 tasksError 同源失败时不得把同一句话重复两遍', async () => {
-  // Team 成员与任务板都走官方 agentTeams 服务：同一个失败会在两处各报一次。
-  // 旧实现用 ' / ' 硬拼，于是界面出现「X / X」——读起来像两个独立问题。
-  const { errors, tree } = await renderPane({
-    payloads: [emptyWindows], which: 'settings',
-    roster: {
-      subAgents: [], team: [], tasks: [],
-      teamError: 'caller-not-live', subAgentsError: 'no-session-id',
-    },
-  });
-  assert.deepEqual(errors, [], '渲染抛错：' + errors.map(e => e.message).join('; '));
-  const text = treeText(tree);
-  assert.ok(/读不到花名册/.test(text), '未如实报告「读不到」：' + text.slice(0, 300));
-  assert.ok(text.includes('caller-not-live') && text.includes('no-session-id'),
-    '两个**不同**的原因都要出现：' + text.slice(0, 300));
-  // 同一个原因出现两次就是噪音，不是信息。
-  assert.equal((text.match(/caller-not-live/g) || []).length, 1,
-    '同一原因被重复渲染：' + text.slice(0, 300));
-});
+// ------------------------------------------------ 花名册（设置页那份已删，0.19.x）
+//
+// 设置页的「正在运行（子代理 / Team）」卡已按用户要求整卡删除（原话「为什么设置
+// 界面需要？？？」），构成它的组件 AgentRoster 随之删除。这里原先的六条用例
+//（空态口径 / 有成员时两区标题与状态词 / 「读不到」≠「确实没有」/ 部分分区读不到 /
+// Team 任务板 / 同源失败去重）验证的对象已不存在，故随对象一并删除。它们要保住的
+// 判据没有丢：
+//   · 「读不到 ≠ 确实没有」与 Team 任务板 → 任务板面板那几条（which: 'tasks'）；
+//   · teamSource/tasksSource 三段接线 → 见下方 0.19.0 一致性用例。
+// 「不得复活」由「设置页作用域」与「文案精简」两条用例里的反向断言钉住。
 
 // ------------------------------------------------------------------ 0.14.9 去臃肿
 
@@ -1102,6 +1036,21 @@ test('★ 等待药丸：展开面板含「正在等待发送」行（与药丸�
   // 空态判定要把 liveValue 算进去：在途但账本还空时（首次等待）不能落到
   // 「本会话尚无等待记录」——那正是「首次等待整枚药丸不渲染」的同族缺陷。
   assert.ok(/\(data\?\.liveValue \|\| rows\.length\)/.test(src), '空态判定必须包含 liveValue');
+});
+
+test('★ 0.19.2：药丸在 primitives 改名后（0.1.7-alpha.2）仍必须渲染出来', async () => {
+  // 真机事故：DSH 0.1.7-alpha.2 把 primitives 的图标导出整体改名——
+  // `IconQueueOutline14` → `IconQueueOutlineRegular`（同族 `…Medium`）。
+  // 等待药丸用的是无兜底解构的那个名字，于是取到 undefined、渲染期
+  // `h(undefined)` 抛错，整块 dock 条目消失：用户报的「底部发送等待时间没了」，
+  // 而控制台里没有本插件自己的告警。
+  //
+  // 这条用 iconNaming:'current' 的桩（只有新名、没有旧名）逼客户端走多代查找，
+  // 断言药丸**真的渲染出读数**——不是「源码里有兜底」那种转述式断言。
+  const { errors, tree } = await renderPane({ which: 'dock', payloads: [{}], iconNaming: 'current' });
+  assert.deepEqual(errors, [], 'primitives 改名后药丸渲染抛错：' + errors.map(e => e.message).join('; '));
+  const text = treeText(tree);
+  assert.match(text, /3 秒 · 等待占比 30%/, 'primitives 改名后药丸必须仍然显示读数（不得整块消失）');
 });
 
 test('★ 等待药丸：可点（onClick 存在），且 aria 契约完整', async () => {
@@ -1530,6 +1479,37 @@ test('★ 任务板：读不到时必须给原因，不得画成「确实没有�
 });
 
 /**
+ * 来源标注必须真的**渲染出来**（0.19.x）。
+ *
+ * 为什么需要这条：`roster.js` 一直在算 `teamSource` / `tasksSource`，0.19.0 起唯一的
+ * 界面消费者是任务板面板。第二轮独立审查抓到过一个形态——服务端算、前端不读，而护栏
+ * 只做源码正则（`assert.match(client, /sourceText\(data\?\.teamSource\)/)`），于是
+ * 「字段根本没送到组件」这种情况照样全绿：正则匹配的是**代码里有没有这行**，不是
+ * 「这行有没有跑」。所以判据必须落在**渲染出的文本**上。
+ *
+ * 两个值都要覆盖：`disk`（AgentTeams 未提供实时数据）与 `ledger`（桥自有任务台账）——
+ * 前者是「没有实时数据」的如实交代，后者是本项目 0.19.0 补过映射的那个键；只测一个
+ * 会让另一个的映射缺失重新变成静默空白。
+ */
+test('★ 任务板：来源标注（teamSource / tasksSource）必须渲染出可读文本', async () => {
+  const roster = {
+    team: [], tasks: [{ id: 'a', subject: 'A', status: 'pending' }],
+    teamSource: 'disk', tasksSource: 'ledger',
+  };
+  const { errors, tree } = await renderPane({ payloads: [emptyWindows], which: 'tasks', roster });
+  assert.deepEqual(errors, [], '带来源标注渲染抛错：' + errors.map(e => e.message).join('; '));
+  const text = treeText(tree);
+  assert.ok(text.includes('来源：磁盘状态'), 'teamSource=disk 未渲染成可读文本：' + text.slice(0, 400));
+  assert.ok(text.includes('来源：桥自有任务台账'), 'tasksSource=ledger 未渲染成可读文本：' + text.slice(0, 400));
+
+  // 反向面：字段缺省时**不得**凭空空渲染一句「来源：」——
+  // 那会把「服务端没给来源」写成「来源不明」，是造事实。
+  const none = await renderPane({ payloads: [emptyWindows], which: 'tasks', roster: { team: [], tasks: [] } });
+  assert.deepEqual(none.errors, [], '无来源标注渲染抛错：' + none.errors.map(e => e.message).join('; '));
+  assert.ok(!/来源：/.test(treeText(none.tree)), '服务端没给来源时不该渲染任何来源行');
+});
+
+/**
  * 两个新面板不得在浏览器侧重算图论。
  *
  * 图诊断由服务端 `lib/task-graph.js` 算好后经 /status 透出。在浏览器侧再写一份
@@ -1596,8 +1576,14 @@ test('设置页：useSessions 缺席时优雅降级为 null，不得整块崩掉
   const src = bridgeSrcFrom('client.cjs');
   // 回落链必须是 useSessions → props.sessionId → null：测试桩与「会话尚未建立」
   // 都走这条路，且这是**正常情况**而非错误（面板会如实说 no-session-id）。
-  assert.ok(/return current \|\| props\?\.sessionId \|\| null;/.test(src),
-    'useCurrentSessionId 的回落链变了：应为 useSessions → props.sessionId → null');
+  // 0.19.2：两条来源都要过 `sessionIdOf` 归一（见该函数的注释）——官方 standard prop
+  // 给字符串，而槽 inject 的绑定键在作用域漂移时可能是包装对象；只认字符串就会
+  // 静默拿到 null。断言因此钉「归一后的回落链」，而不是「裸值或运算」。
+  assert.ok(/return sessionIdOf\(current\) \|\| sessionIdOf\(props\?\.sessionId\);/.test(src),
+    'useCurrentSessionId 的回落链变了：应为 sessionIdOf(useSessions) → sessionIdOf(props.sessionId)');
+  // 归一函数必须认三种已知形态：字符串 / 带 key 的绑定对象 / 带 sessionId 的对象。
+  assert.ok(/typeof value === 'string'/.test(src) && /typeof value\.key === 'string'/.test(src),
+    'sessionIdOf 必须同时认字符串与绑定对象形态（否则 wait-stats 拿到对象、label 为空、药丸整行不渲染）');
   // 无条件调用 hook（条件调用会复现 SiteAccounts 那类 hooks 顺序违规）。
   assert.ok(/const useSessions = typeof props\?\.useSessions === 'function' \? props\.useSessions : noSessions;/.test(src),
     'useSessions 的取值被写成条件分支外的形式之外了；必须常量选择后再无条件调用');
@@ -1697,6 +1683,39 @@ test('★ 0.16.36：面板内横向站点条已删除，配套代码不残留', 
  *  ④ 上一轮那套左栏 `panelRow` 口径（`.hwb-catalog-row`）**不得复活**——
  *     「只是在半路」指的就是它。
  */
+/**
+ * ★ 0.19.4 站点目录右侧：**统一**账号下拉（真实头像/昵称 + 「新账号」）。
+ *
+ * 用户原话：「右侧就是每个选择框右侧现在是登录字样的下拉！！然后是改为类似新建终端框
+ * 右侧选择！」「下拉取后显示已登录头像和昵称，以及额外加一行登录选择」「下拉框没那么宽！
+ * 文本显示尽量不要有括号补充！精简！新账号这三个字就行了」。
+ */
+test('★ 0.19.4 站点目录右侧统一成账号下拉：真实头像/昵称 + 新账号，旧「登录」按钮不得复活', async () => {
+  const src = bridgeSrcFrom('client.cjs');
+  // ① 一种形状：`!multi` 的单按钮分支必须消失（否则单账号站加不了第二个账号）
+  assert.ok(!/if \(!multi\)/.test(src), '单账号站点的分支必须消失 —— 每一行都是同一种下拉');
+  assert.ok(!/\.hwb-site-login\{/.test(src), '0.19.0 单账号「登录」按钮的 CSS 规则必须删掉（死规则会误导下一个改样式的人）');
+  assert.ok(!/className: 'hwb-site-login'/.test(src), '0.19.0 单账号「登录」按钮必须随统一下拉删除');
+  // ② 昵称：抓到的真实值优先，抓不到回落槽名
+  assert.ok(/const acctName = \(a\) => a\.accountName \|\| a\.displayName/.test(src),
+    '昵称必须「真实值 → 回落槽名」，不许只显示槽名');
+  // ③ 头像：真实值优先，抓不到回落站点标记（不许留空）
+  assert.ok(/const url = a\.avatarUrl \|\| null/.test(src), '头像必须取真实值');
+  assert.ok(/hwb-acct-glyph/.test(src), '抓不到头像必须回落站点标记');
+  assert.ok(/\.hwb-acct-img\{[^}]*border-radius:50%/.test(src), '头像必须是圆框（与站点标记同列宽）');
+  // ④ 底部固定一行「新账号」：**三个字**，且不许有括号补充
+  assert.ok(/\{ id: '__new__' \+ sid, label: '新账号'/.test(src), '「新账号」那一行缺失或文案被改长');
+  assert.ok(!/登录（打开桥自己的浏览器窗口）/.test(src), '带括号的长文案必须清掉');
+  // ⑤ 新增账号只有一个服务端入口（槽位合法性只有 accounts.js 说了算）
+  assert.ok(/apiSoft\('account-add'/.test(src), '「新账号」必须调服务端的 account-add，不许面板自己算空槽');
+  // ⑥ 打开下拉时顺手刷一次真实身份（手动在网页里登录后，缓存还是空的）
+  assert.ok(/refreshIdentities\(accounts\)/.test(src), '打开下拉必须顺手刷新真实昵称/头像');
+  // ⑦ 忙碌粒度是**账号**：按站点判会把「同站加第二个账号」静默丢弃
+  assert.ok(/const isBusy = \(key\) => busyAccounts\.includes\(key\)/.test(src),
+    '开窗的忙碌状态必须按账号判（用户要求「能够同时开多个账号的窗口」）');
+  assert.ok(!/busySids/.test(src), '按站点判的旧忙碌状态必须清干净');
+});
+
 test('★ 0.16.37 站点目录：官方「新建终端」同款胶囊 + 右侧官方 Menu 账户展开', async () => {
   const src = bridgeSrcFrom('client.cjs');
   // ① 胶囊外壳：逐项对齐官方 TerminalGuide.module.css 的 .entry
@@ -1822,8 +1841,9 @@ test('★ 0.18.0 任务详情页：轮询不得覆盖用户正在编辑的字段
  * `TeamPanel` 渲染过它。面板删掉后这条链路就断了——服务端算、前端不读，属于
  * 本项目记过的「只声明不接线」形态（数据层还在产出，用户永远看不到）。
  *
- * 判据要求**三点同时成立**，缺一即变红：① `useRoster` 把它取进来；② 存活的花名册
- * 渲染它；③ 服务端仍在透出它（不能靠删字段来「消除」这条判据）。
+ * 判据要求**三点同时成立**，缺一即变红：① `useRoster` 把它取进来；② 存活的消费者
+ *（0.19.x 起只剩任务板面板）渲染它；③ 服务端仍在透出它（不能靠删字段来「消除」
+ * 这条判据）。
  *
  * 为什么不干脆删掉服务端那两个字段：`roster.test.mjs:391/400` 把 `teamSource` /
  * `tasksSource` 钉为 `projectRoster` 的公开契约（并以「两个来源都没读到时不得谎报
@@ -1833,19 +1853,17 @@ test('★ 0.18.0 任务详情页：轮询不得覆盖用户正在编辑的字段
 test('★ 0.19.0 一致性：teamSource/tasksSource 必须「服务端透出 → 客户端取 → 界面渲染」三段齐全', () => {
   const client = bridgeSrcFrom('client.cjs');
 
-  // ① 客户端必须把它取进 rows。
-  assert.match(client, /teamSource:\s*r\?\.teamSource\s*\?\?\s*null/,
-    'useRoster 未取回 teamSource —— 服务端算它、前端不读，链路是断的');
-  assert.match(client, /tasksSource:\s*r\?\.tasksSource\s*\?\?\s*null/,
-    'useRoster 未取回 tasksSource');
-  // 兜底分支也必须给这两个键，否则读不到时渲染成 undefined 而不是「无来源」。
-  assert.match(client, /teamSource:\s*null,\s*tasksSource:\s*null/,
-    'useRoster 的异常兜底分支缺少 teamSource/tasksSource —— 读不到时状态会漂');
-  // ② 存活的花名册必须真的渲染它（不是取进来放着）。
-  assert.match(client, /sourceText\(rows\.teamSource\)/,
-    '花名册没有渲染 teamSource —— 取进来却不显示，等于没接');
-  assert.match(client, /sourceText\(rows\.tasksSource\)/,
-    '花名册没有渲染 tasksSource');
+  // ① 客户端必须把它取回来：`useRoster` 整份透传 /status 载荷，消费点在 `data` 上。
+  assert.match(client, /function useRoster\(sessionId, intervalMs\)/,
+    'useRoster 不存在 —— 花名册载荷没有统一入口');
+  assert.match(client, /const \{ data, err \} = useRoster\(sessionId, 5000\)/,
+    '任务板面板没有从 useRoster 取载荷 —— 来源标注无从渲染');
+  // ② 存活的花名册（0.19.x：设置页那张卡已删，只剩任务板面板）必须真的渲染它
+  //    （不是取回来放着）。
+  assert.match(client, /sourceText\(data\?\.teamSource\)/,
+    '没有界面渲染 teamSource —— 服务端算它、前端不读，链路是断的');
+  assert.match(client, /sourceText\(data\?\.tasksSource\)/,
+    '没有界面渲染 tasksSource');
   // ③ 服务端两侧都必须在（防止有人用「删字段」来让本条变绿）。
   const roster = bridgeSrcFrom('roster.js');
   const wc = bridgeSrcFrom('web-control.js');

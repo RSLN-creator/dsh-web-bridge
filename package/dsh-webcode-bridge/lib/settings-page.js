@@ -317,12 +317,9 @@ pre.preset {
           <label style="display:flex; gap:6px; align-items:center; font-weight:400; font-size:13px; cursor:pointer;">
             <input type="radio" name="promptTransport" value="inline" style="width:auto;"> 纯文本输入
           </label>
-          <button type="button" id="attachProbeBtn" class="mini">附件探针</button>
         </div>
-        <div class="hint">长文本改走附件上传，避免超大正文灌入输入框引起页面卡死或截断。探针可在不消耗会话的情况下核验上传能力。</div>
+        <div class="hint">长文本改走附件上传，避免超大正文灌入输入框引起页面卡死或截断。</div>
         <div id="transportLine" class="hint">投递状态加载中…</div>
-        <div id="transportLastLine" class="hint"></div>
-        <div id="transportProbeLine" class="hint"></div>
       </div>
     </div>
 
@@ -563,53 +560,28 @@ pre.preset {
     if (e.target.value !== 'custom') document.getElementById('sendGapMs').value = e.target.value;
   });
 
-  // ---- 投递形态的「生效值 + 最近一次实际结果」（0.16.3） ----------------------
-  // 三行文案全部由服务端算好（GET /attach-status）：这条读数的口径与驱动内的判据
-  // 同源，浏览器侧再写一份格式化就会出现「面板说成功了、驱动其实回落了」。
+  // ---- 投递形态的「当前生效值」（0.16.3；0.19.6 精简） -----------------------
+  // 文案由服务端算好（GET /attach-status）：这条读数的口径与驱动内的判据同源，
+  // 浏览器侧再写一份格式化就会出现「面板说成功了、驱动其实回落了」。
   // 记录成因（用户原话）：「没有做到能够把提示词放入文本（设置界面也改为打开文本）
   // 导致输出对话一开头就很长 token 窗口」——真机读数是 attachTransport
   // {fallback:true, code:'ATTACH_NOT_CONFIRMED', total:417276}，而当时面板上
   // 一个字都没有，用户只能看到「对话一开头很长」。
+  //
+  // 0.19.6：这里原先还渲染「最近一次实际投递」与一枚**附件探针**按钮。两者都按
+  // 用户要求从用户界面撤掉——探针是开发者自用的能力（一次真实上传），不该出现在
+  // 设置页；能力本身仍在服务端（POST /__webcode/attach-probe），需要时直接调 HTTP。
+  // 只留一行当前生效值；lastLine / probeLine 服务端照旧返回，本页不再消费。
   async function loadTransportStatus() {
     const line = document.getElementById('transportLine');
     try {
       const d = await fetch(API_BASE + '/attach-status').then((r) => r.json());
       if (!d || !d.ok) throw new Error((d && d.error) || 'HTTP');
       line.textContent = '当前生效：' + d.transportLine;
-      document.getElementById('transportLastLine').textContent = '最近一次实际投递：' + d.lastLine;
-      document.getElementById('transportProbeLine').textContent = '附件探针：' + d.probeLine;
     } catch (e) {
       line.textContent = '投递状态读取失败：' + (e && e.message ? e.message : e);
     }
   }
-
-  document.getElementById('attachProbeBtn').addEventListener('click', async () => {
-    // 探针有副作用（一次真实上传），因此先显式征得同意再跑——上传是外部动作，
-    // 不该由一个「看看」的点击悄悄触发。清理路径在服务端（probeAttachment 的
-    // cleanupAttachment），无论成功失败都会被走到。
-    if (!window.confirm('附件探针会向当前网页会话上传一个 webcode-probe.md（只上传、绝不发送），上传后立即尝试清理。继续？')) return;
-    const btn = document.getElementById('attachProbeBtn');
-    const out = document.getElementById('transportProbeLine');
-    btn.disabled = true;
-    out.textContent = '附件探针运行中（最多 20 秒）…';
-    try {
-      // 这里**不用** apiPost：探针「未确认附件」时回的是 { ok:false, ... } 但
-      // HTTP 仍是 200，而 apiPost 会把 ok:false 当异常抛掉——那样最要紧的那次
-      // 读数（失败现场）就正好被显示层吞了。
-      const res = await fetch(API_BASE + '/attach-probe', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: '# webcode attach probe\n' + new Date().toISOString() + '\n' }),
-      });
-      const text = await res.text().catch(() => '');
-      out.textContent = '附件探针返回：' + (text || '(空响应)').slice(0, 600);
-    } catch (e) {
-      out.textContent = '附件探针请求失败：' + (e && e.message ? e.message : e);
-    } finally {
-      btn.disabled = false;
-      loadTransportStatus();
-    }
-  });
 
   // ---- 浏览器（内置，零外部依赖）------------------------------------------------
   //

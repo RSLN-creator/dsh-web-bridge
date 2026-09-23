@@ -19,7 +19,8 @@ const NOW = Date.UTC(2026, 8, 14, 12, 0, 0);
 // (31 小时) 对上 totalDurationMs=521868 (8.7 分钟)，于是「平均会话等待时长占比」
 // 被印成 **100%**。根因不是公式，是**分母的覆盖范围与分子不一致**：
 // durationMs 是 0.17.0 才引入的字段，8579 轮里绝大多数发生在此之前，分母贡献是 0。
-// 这三条把「覆盖率」这个判据钉死——删掉 durationTurns 判定，第 2 条必红。
+// 这两条把「覆盖率」这个判据钉死——删掉 durationTurns 的零覆盖分支，零覆盖那条必红。
+// 而部分覆盖**不再**附「（覆盖 n/N 轮）」：面向用户的读数只给结论，分母口径不出现。
 test('waitRatio：耗时记账零覆盖 → 说「未记录」，不许印 0% 或 100%', () => {
   // 这正是线上那份老账本的形状：有等待、有耗时、但没有覆盖率信息。
   assert.equal(waitRatio({ waitMs: 113_215_468, durationMs: 521_868, durationTurns: 0, turns: 8579 }), '未记录');
@@ -27,9 +28,12 @@ test('waitRatio：耗时记账零覆盖 → 说「未记录」，不许印 0% �
   assert.equal(waitRatio({ waitMs: 60_000, durationMs: 0, turns: 5 }), '未记录');
 });
 
-test('waitRatio：全覆盖 → 纯百分比；部分覆盖 → 带上覆盖轮次', () => {
+test('waitRatio：全覆盖与部分覆盖都给纯百分比（不附覆盖轮次）', () => {
   assert.equal(waitRatio({ waitMs: 60_000, durationMs: 40_000, durationTurns: 10, turns: 10 }), '60%');
-  assert.equal(waitRatio({ waitMs: 60_000, durationMs: 40_000, durationTurns: 4, turns: 10 }), '60%（覆盖 4/10 轮）');
+  // 用户原话：「等待发送的『（覆盖 1813/10539 轮）』去除」——部分覆盖只报同一个百分比。
+  const partial = waitRatio({ waitMs: 60_000, durationMs: 40_000, durationTurns: 4, turns: 10 });
+  assert.equal(partial, '60%');
+  assert.ok(!partial.includes('覆盖'), '部分覆盖不得再带「（覆盖 n/N 轮）」尾巴');
 });
 
 test('waitRatio：没等待过就不给占比（分子为 0 时没有可讨论的比重）', () => {
@@ -326,6 +330,15 @@ test('waitStatDetailRows：累计为 0 时不出现任何累计行', () => {
   const rows = waitStatDetailRows({ session: { totalWaitMs: 1000, turns: 1, waitedTurns: 1 }, total: emptyWaitStats() });
   assert.ok(!rows.some(r => r.label.includes('累计')));
   assert.ok(!rows.some(r => r.label.includes('平均会话等待时长占比')));
+});
+
+test('waitStatDetailRows：部分覆盖也只用纯百分比（面板读数里没有分母口径）', () => {
+  // 用户在真机上看到的是药丸面板里的「（覆盖 1813/10539 轮）」，这条钉它不会再回来。
+  const rows = waitStatDetailRows({
+    session: { totalWaitMs: 10_000, totalDurationMs: 10_000, durationTurns: 3, turns: 8, waitedTurns: 1 },
+  });
+  assert.equal(rows.find(r => r.label === '本次会话占比').value, '50%');
+  assert.ok(!rows.some(r => r.value.includes('覆盖')), '「（覆盖 n/N 轮）」必须从面板读数里消失');
 });
 
 // ---- waitStatRows ---------------------------------------------------------

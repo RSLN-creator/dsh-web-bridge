@@ -24,6 +24,10 @@ import { DEFAULT_SLOT, normalizeSlot } from './accounts.js';
 import { selectWebModel, pickerUsable } from './model-picker.js';
 import { deriveLastRate, shouldSettleWip, shouldSettleStalledThinking, answerDomLength } from './metrics.js';
 import { emptyWebResponseError } from './zero-progress.js';
+// 只用 ATTACH_PICK_SRC：判定主体注入浏览器执行（见 pageAttachEvidence）。
+// 不 import pickAttachEvidence 本身——那是给单测直接驱动用的，在这里 import 会成死导入
+// （本仓库对死导入有过明确处置：0.19.0 删过 transportNoteFor）。
+import { ATTACH_PICK_SRC } from './attach-scope.js';
 import child_process from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -607,6 +611,13 @@ export function createBrowserDriver(options = {}) {
   // 可核对的字段：成功 `{ at, name, chars, payloadChars, truncated, evidence, total }`，
   // 回落 `{ at, fallback: true, code, total }`。null = 本轮次没触发过附件投递。
   let attachTransport = null;
+  // 0.19.5：最近一轮**图片投递**的结果读数。与 attachTransport 并列而不是合并——
+  // 文字附件与图片是两条独立路径，合成一个字段会让「这一轮到底有没有把图送上去」
+  // 无从判断。图片失败**不再终止整轮**（见 runTurn 的调用点），因此这一格是唯一凭据：
+  // 成功 `{ at, ok:true, count, evidence, names }`，失败 `{ at, ok:false, code, fallback:true, diag }`。
+  // **必须声明在驱动级**：status() 是另一个闭包，写在 runTurn 里会让它整个抛
+  // ReferenceError（本文件 0.19.5 一度如此，被 stall-settle / settings-transport 抓住）。
+  let imageTransport = null;
   // 0.16.3：`POST /__webcode/attach-probe`（只上传、绝不发送）最近一次的读数。
   // 与 attachTransport **分列**而不是合并：那个记的是「真实轮次实际走了哪条路」，
   // 这个记的是「探针此时此刻的观测」。合成一个字段的话，跑一次探针就会覆盖掉
@@ -766,6 +777,84 @@ export function createBrowserDriver(options = {}) {
     return p.evaluate(() => typeof window.__webcodeChunk === 'function' && window.__webcodeCaptureInstalled === true).catch(() => false);
   }
   let selectedModel = null;
+  // ---- 账号真实身份（0.19.4）--------------------------------------------------
+  // 用户指令：「右侧要能够获取真实登录状态登录后就会显示下拉选择（像新建终端的下拉
+  // 选择）……下拉取后显示已登录头像和昵称」，并明确「抓真实值 + 抓不到回落槽名」。
+  //
+  // 这里是**尽力而为**的一次 DOM 读取，不是保证：站点改版、头像走懒加载、登录后
+  // 才渲染，任何一种都能让它读不到。读不到时字段留 null，界面回落成槽名——
+  // 绝不拿槽名冒充昵称（本项目的「不造假状态」纪律）。
+  let accountIdentity = null;   // { name, avatarUrl, capturedAt, basis }
+  /**
+   * 站点的账号身份选择器：站点自己声明优先，否则用一组通用猜测。
+   *
+   * 通用列表刻意做成「类名里含 user/account/avatar」这一族：命中率不保证，
+   * 但**误报代价低**（读不到就是 null），而站点声明需要真机取证——本项目不在没有
+   * 真机证据的情况下编选择器，因此 `providers.js` 只给已取证的站点声明。
+   */
+  const GENERIC_NAME_SELECTORS = [
+    '[class*="user-name"]', '[class*="userName"]', '[class*="username"]', '[class*="nickname"]',
+    '[class*="nick-name"]', '[class*="account-name"]', 'header [class*="name"]',
+  ];
+  const GENERIC_AVATAR_SELECTORS = [
+    'img[class*="avatar"]', '[class*="avatar"] img', 'header img[src*="avatar"]',
+    'img[src*="avatar"]', '[class*="user"] img',
+  ];
+  /** 明显不是昵称的文本（登录入口/按钮文案）——命中就当没读到。 */
+  const NOT_A_NAME_RE = /^(登录|登陆|注册|sign\s*in|log\s*in|login|sign\s*up|account|设置|settings)$/i;
+
+  /**
+   * 从当前页面读「这个账号真实的昵称与头像 URL」。
+   *
+   * @returns {Promise<{name: string|null, avatarUrl: string|null, basis: string, capturedAt: string|null}>}
+   *   读不到时 `name`/`avatarUrl` 为 null；`basis` 说明来源（site-probe / generic / no-page）。
+   */
+  async function readAccountIdentity() {
+    const probe = site.accountProbe || null;
+    const nameSels = (probe?.name?.length ? probe.name : GENERIC_NAME_SELECTORS);
+    const avatarSels = (probe?.avatar?.length ? probe.avatar : GENERIC_AVATAR_SELECTORS);
+    const p = page;   // 本驱动当前持有的页面（一个账号一个驱动）
+    if (!p || p.isClosed?.()) return { name: null, avatarUrl: null, basis: 'no-page', capturedAt: null };
+    const raw = await p.evaluate(({ nameSels: ns, avatarSels: as }) => {
+      const textOf = (sels) => {
+        for (const s of sels) {
+          let el = null;
+          try { el = document.querySelector(s); } catch { continue; }
+          const t = el && String(el.textContent || '').trim();
+          if (t) return t;
+        }
+        return null;
+      };
+      const srcOf = (sels) => {
+        for (const s of sels) {
+          let el = null;
+          try { el = document.querySelector(s); } catch { continue; }
+          if (!el) continue;
+          const direct = el.currentSrc || el.src || (el.getAttribute && el.getAttribute('src'));
+          if (direct) return String(direct);
+          try {
+            const bg = getComputedStyle(el).backgroundImage || '';
+            const m = bg.match(/url\(["']?([^"')]+)/);
+            if (m) return m[1];
+          } catch { /* 计算样式读不到就继续 */ }
+        }
+        return null;
+      };
+      return { name: textOf(ns), avatarUrl: srcOf(as) };
+    }, { nameSels, avatarSels }).catch(() => ({ name: null, avatarUrl: null }));
+
+    // 昵称后处理：截断 + 排除登录入口文案 + 排除纯符号。
+    let name = raw?.name ? String(raw.name).replace(/\s+/g, ' ').trim() : null;
+    if (name && (name.length > 40 || NOT_A_NAME_RE.test(name) || !/[\p{L}\p{N}]/u.test(name))) name = null;
+    const avatarUrl = raw?.avatarUrl && /^(https?:|data:image\/)/i.test(raw.avatarUrl) ? String(raw.avatarUrl).slice(0, 2048) : null;
+    if (name || avatarUrl) {
+      accountIdentity = { name, avatarUrl, basis: probe ? 'site-probe' : 'generic', capturedAt: new Date().toISOString() };
+    } else if (!accountIdentity) {
+      accountIdentity = { name: null, avatarUrl: null, basis: probe ? 'site-probe' : 'generic', capturedAt: null };
+    }
+    return accountIdentity;
+  }
+
   let dsUi = null; // DeepSeek 网页 UI 代际缓存：'classic' | 'unified'（见 detectDeepSeekUi）
   let requestMetadata = null;
   let launching = null;
@@ -918,6 +1007,12 @@ export function createBrowserDriver(options = {}) {
       // 账户槽（0.14.7）：面板据此把「glm」与「glm#2」分成两行，并知道该读哪个目录。
       slot,
       accountKey: slot === DEFAULT_SLOT ? siteId : siteId + '#' + slot,
+      // 真实昵称/头像（0.19.4）：只透出**缓存里由 readAccountIdentity 抓到的东西**，
+      // 读不到就是 null——界面据此回落成槽名，绝不把槽名当昵称显示。
+      accountName: accountIdentity?.name ?? null,
+      avatarUrl: accountIdentity?.avatarUrl ?? null,
+      accountIdentityAt: accountIdentity?.capturedAt ?? null,
+      accountIdentityBasis: accountIdentity?.basis ?? null,
       profileDir: cfg.profileDir,
       // 0.18.0：**用的哪个浏览器**必须可核对。用户要的「零外部依赖、下载插件即可用」
       // 是可以用一次 GET 验证的性质，不该只活在代码里。
@@ -977,6 +1072,9 @@ export function createBrowserDriver(options = {}) {
       // 降级的现场：at/code/total）两格——「为什么这站不走附件」从此一眼可分。
       attachForbidden: attachForbiddenFor(siteId),
       attachForbiddenStatic: ATTACH_FORBIDDEN_SITES.has(siteId),
+      // 图片投递读数（0.19.5）：图片失败不再终止整轮，所以这一格是「本轮到底有没有把
+      // 图送上去」的唯一凭据。与 attachTransport 并列，两条投递路径各自可核对。
+      imageTransport,
       attachBlocked: dynamicAttachBlock(siteId),
       siteId,
       // 0.16.3：探针最近一次读数（见 attachProbe 声明处）。
@@ -1606,6 +1704,38 @@ export function createBrowserDriver(options = {}) {
     // 「一次性写还是分块写」由纯函数决定（可断言，见 composerWritePlan 的注释）。
     const plan = composerWritePlan({ length: text.length, chunkChars: cfg.composerChunkChars, kind });
     if (kind === 'field') {
+      // ① 首选：原生 value setter + input 事件（0.19.5）。
+      //    这是本轮「长文本桥接失败」的根因修复，真机读数如下（同一台机器、同一个
+      //    DeepSeek composer，只写不发送）：
+      //
+      //      | 写入量  | 逐块 insertText（旧实现） | 原生 setter |
+      //      | ---    | ---                     | ---        |
+      //      | 100k   | 4.5s                    | 10ms       |
+      //      | 200k   | 16s                     | 15ms       |
+      //      | 400k   | **72s**                 | **28ms**   |
+      //      | 800k   | （未测，按 O(n²) 外推 >5min） | **57ms** |
+      //
+      //    逐块路径的代价是 O(n²)：每插一块都要让网页重新处理整段已写文本，且
+      //    `page.keyboard.insertText` 每块都是一次跨进程往返。400k 时 72 秒已经
+      //    逼近链路里最小的那条预算（适配器看门狗首字节相位窗口 216s 的 1/3，
+      //    而整轮 240s 预算还要留给网页 prefill 与生成）——真机上表现为「长文本
+      //    一轮卡很久然后超时」，正是用户报的「长文本桥接失败」。
+      //
+      //    为什么这条路是**安全**的（不是把判据绕过去）：
+      //      · 时序已验证：写后**立即**回读长度就等于请求长度，等 500ms 再读仍然相等
+      //        —— React 受控组件没有用旧 state 回写覆盖；
+      //      · 元素无 maxLength（真机读数 `maxLength:-1, hasMaxLengthAttr:false`），
+      //        因此「原生 setter 绕过 maxLength」这一风险在该站点上不存在；
+      //      · 写入后**照旧**走下面的 readComposer 回读校验，长度对不上仍然抛
+      //        PROMPT_TRUNCATED（那才是「网页端真的截断」的判据，不因写入方式而放宽）。
+      //    ② 原生路径拿不到长度（元素形态不同 / setter 被覆写）→ 回落既有分块路径，
+      //       保持对不认识的站点与富文本形态零位移。
+      const native = await writeFieldNative(locator, text);
+      if (native === text.length) return { kind, wrote: native };
+      if (native >= 0) {
+        warn('native composer write returned ' + native + '/' + text.length
+          + ' chars — falling back to chunked write');
+      }
       if (plan.mode === 'single') { await locator.fill(text); return { kind, wrote: text.length }; }
       return { kind, wrote: await writeFieldChunked(locator, text, plan.chunkChars) };
     }
@@ -1632,11 +1762,42 @@ export function createBrowserDriver(options = {}) {
   }
 
   /**
-   * textarea/input 的分块写入。
+   * 表单控件（textarea/input）的**原生写入**：value setter + input 事件。
+   *
+   * 返回实际写入长度；任何一步拿不到可信结果就返回 -1（由调用方回落分块路径）。
+   * 为什么不用 `locator.fill()`：Playwright 的 fill 对超长文本会在网页侧整段卡住
+   * （真机会话 turn/end 里留着 80 万字符 30s 超时的现场，见 fillComposer 注释），
+   * 而 setter 是**同步**的，写入成本与文本长度基本无关（实测 800k = 57ms）。
+   *
+   * 关键细节：必须用 `HTMLTextAreaElement.prototype` 上的**原生** setter。React 会
+   * 在元素实例上重定义 value 属性来做受控绑定，直接 `el.value = text` 只会更新 React
+   * 的内部记录、不触发它的 onChange；原生 setter 之后补一个冒泡的 `input` 事件，
+   * React 才会真正把这段文本收进 state（真机已验证：写后立即回读长度相等，等 500ms
+   * 再读仍相等，没有回滚）。
+   */
+  async function writeFieldNative(locator, text) {
+    try {
+      return await locator.evaluate((el, v) => {
+        const proto = el.tagName === 'INPUT' ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype;
+        const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+        if (!desc || typeof desc.set !== 'function') return -1;
+        desc.set.call(el, v);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        return el.value.length;
+      }, text);
+    } catch { return -1; }
+  }
+
+  /**
+   * textarea/input 的分块写入（**回落路径**）。
+   *
+   * 0.19.5 起它不再是首选：首选是 `writeFieldNative`（同步、O(1) 量级）。这条路径
+   * 保留给「原生 setter 拿不到」的形态，并继续承担两项它在行内特有的职责：
+   *   · 每块后回读长度 → 停滞判定（PROMPT_WRITE_STALLED，带已写/总长/元素现场）；
+   *   · 真机已知它会随长度平方级变慢，因此只在原生路径失败时才走。
    *
    * 第一块用 `fill`（它会先清空，语义最干净），后续块用键盘级 `insertText`
-   * ——对 textarea 也成立，且不会像 `fill` 那样每次都重建整个值（那正是
-   * 超长文本卡死的来源）。每块后回读长度，用于停滞判定。
+   * ——对 textarea 也成立，且不会像 `fill` 那样每次都重建整个值。
    */
   async function writeFieldChunked(locator, text, chunkChars) {
     await locator.fill(text.slice(0, chunkChars));
@@ -1748,27 +1909,71 @@ export function createBrowserDriver(options = {}) {
    *
    * @returns {Promise<{tag:string, cls:string, id:string, snippet:string}|null>}
    */
+  /**
+   * 「网页会话正文」节点选择器（transcript）——用来把**正文里的同名文本**排除出附件证据。
+   *
+   * ## 为什么必须有它（2026-09-24 真机取证，本判据的由来）
+   *
+   * 旧 `filenameEvidence` 扫的是 `document.querySelectorAll('body *')` 全页，只加两道
+   * 过滤（文本长度 ≤ 文件名 + 80、取最深命中）。这两道**挡不住「同名文本出现在正文
+   * 里」**——而本桥自己的投递指令就写着 `webcode-context.md` 这个名字，于是从第二轮起
+   * 判据恒为真。真机读数（`POST /__webcode/attach-probe`）：
+   *
+   *   `nameHit: { tag: 'code', cls: '', snippet: "<code>ok:true, evidence:'text:webcode-probe.md'</code>" }`
+   *   同时 10 条类名候选**全部 count:0、visible:0**
+   *
+   * 即「附件节点一个都没出现，却报了 ok:true」。后果是最坏的一种：文件真没上去，桥报
+   * 成功，正文被替换成一句「请先读取该附件全文」——模型只能说看不到附件。
+   *
+   * ## 判据为什么长这样（同一轮真机实测的层高读数）
+   *
+   * 从 textarea 逐层往上测「是否含真附件 chip / 是否含正文节点」：
+   *
+   * | 层 | 节点 | 含附件 chip | 含正文 |
+   * | --- | --- | --- | --- |
+   * | 2 | `div._020ab5b`（含文件入口） | 0 | 0 |
+   * | 5 | `div._871cbca` | **2** | **0** |
+   * | 6 | `div.ds-virtual-list…` | 2 | **3** |
+   *
+   * ⇒ **composer 作用域 = 从输入框往上、最高的「含文件入口且不含正文节点」的祖先**
+   * （这里是第 5 层）。它同时满足两件事：包含真 chip、排除正文里的假阳性。
+   * 这条判据**不依赖任何站点类名**（类名是构建期哈希、随发版变化），只用
+   * 「谁是输入框的祖先」与「谁含正文」两个结构事实。
+   */
+  const TRANSCRIPT_SELECTOR = ".ds-markdown, .markdown, [data-message-author-role], [data-role='assistant'], [data-role='user']";
+
   async function filenameEvidence(name) {
+    if (!String(name || '')) return null;
+    const e = await pageAttachEvidence(name);
+    return e.nameHit;
+  }
+
+  /**
+   * composer 作用域 + 附件证据的**唯一**页内取样函数（0.19.5）。
+   *
+   * 为什么必须只有一个：本仓库反复记过「同一个判断写两份，一份改了另一份没改」。
+   * 附件证据有三个消费点（`waitForAttachment` 的确认、`attachEvidenceDiag` 的失败
+   * 现场、`cleanupAttachment` 的清理回读），三者必须用**同一套**判据，否则会出现
+   * 「探针说有附件、投递说没有」这种自相矛盾的现场。
+   *
+   * 判据与真机依据见 `TRANSCRIPT_SELECTOR` 与 `filenameEvidence` 上方注释。
+   */
+  async function pageAttachEvidence(name) {
     const target = String(name || '');
-    if (!target) return null;
-    return page.evaluate(({ NAME, MAX }) => {
-      const hit = [...document.querySelectorAll('body *')].filter((el) => {
-        const tag = el.tagName;
-        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'INPUT' || tag === 'TEXTAREA') return false;
-        const t = (el.textContent || '').trim();
-        return t.includes(NAME) && t.length <= MAX;
-      });
-      if (!hit.length) return null;
-      // 最深命中：没有任何其它命中节点在它里面
-      const deep = hit.filter((el) => !hit.some((o) => o !== el && el.contains(o)));
-      const node = deep[0] || hit[0];
-      return {
-        tag: node.tagName.toLowerCase(),
-        cls: String(node.getAttribute('class') || '').slice(0, 120),
-        id: node.id || null,
-        snippet: node.outerHTML.replace(/\s+/g, ' ').trim().slice(0, 200),
-      };
-    }, { NAME: target, MAX: target.length + 80 }).catch(() => null);
+    const sels = attachCandidates();
+    // 判定主体**只有一份**：lib/attach-scope.js 的 pickAttachEvidence。这里把它以源码
+    // 字符串注入浏览器执行，因此「页面里跑的那份」与「护栏驱动的那份」逐字同一。
+    // 为什么不在这里内联写：内联那份无法被单测真正驱动，护栏只能查字符串是否存在——
+    // 反向验证证明那种护栏是装饰品（把过滤条件短路掉仍然全绿，见 attach-scope.js 头注）。
+    return page.evaluate(({ NAME, MAX, T_SEL, INPUT_SEL, sels, PICK_SRC }) => {
+      // eslint-disable-next-line no-new-func
+      const pick = new Function('return (' + PICK_SRC + ')')();
+      const input = document.querySelector(INPUT_SEL);
+      const ta = [...document.querySelectorAll('textarea')]
+        .find((e) => { const r = e.getBoundingClientRect(); return r.width > 40 && r.height > 0; }) || input;
+      return pick({ doc: document, input, ta, name: NAME, max: MAX, transcriptSel: T_SEL, sels });
+    }, { NAME: target, MAX: (target || '').length + 80, T_SEL: TRANSCRIPT_SELECTOR, INPUT_SEL: contract.attachSelector || "input[type='file']", sels, PICK_SRC: ATTACH_PICK_SRC })
+      .catch(() => ({ candidates: [], nameHit: null, domSnippet: null, scoped: false, scopeDesc: null, transcriptNodes: -1 }));
   }
 
   /** 轮询等待附件在页面上出现。返回命中的选择器（文件名证据返回 `text:<name>`），或 null（超时）。
@@ -1776,19 +1981,15 @@ export function createBrowserDriver(options = {}) {
    * `name` 是**本轮真正上传的文件名**：传了它才会启用文件名证据（见 filenameEvidence）。
    * 不传（图片轮）时行为与 0.16.2 逐字相同——只认类名清单，不动图片轮已确认过的路径。 */
   async function waitForAttachment(timeoutMs = 15_000, { name = null } = {}) {
-    const candidates = attachCandidates();
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-      for (const sel of candidates) {
-        try {
-          const loc = page.locator(sel).first();
-          if (await loc.count() && await loc.isVisible().catch(() => false)) return sel;
-        } catch { /* 选择器语法或页面转场：试下一个 */ }
-      }
-      if (name) {
-        const hit = await filenameEvidence(name);
-        if (hit) return 'text:' + name;
-      }
+      // 一次取样同时回答两件事：类名候选命中（作用域内计数）与文件名证据。
+      // 不再分成「Playwright locator 逐个试」+「evaluate 扫全页」两条路径——
+      // 那两条用的判据不同（一个看可见性、一个扫全页文本），正是假阳性的温床。
+      const e = await pageAttachEvidence(name);
+      const cand = (e.candidates || []).find((c) => c.visible > 0);
+      if (cand) return cand.sel;
+      if (name && e.nameHit) return 'text:' + name;
       if (Date.now() >= deadline) return null;
       await page.waitForTimeout(250);
     }
@@ -1800,43 +2001,22 @@ export function createBrowserDriver(options = {}) {
    *
    * 一次 evaluate 取全，不做 N 次往返：失败路径本身已经等了 20s，再逐个选择器
    * 往返会把现场拖到与页面状态不同步（页面转场后读到的是另一个界面）。
+   *
+   * **判据与确认路径同源（0.19.5）**：本函数直接复用 `pageAttachEvidence` 的返回。
+   * 0.19.4 及以前这里另写了一份「扫全页、不排除正文」的取样——于是探针能拿到的
+   * 假阳性（正文里的同名 `<code>`）与投递路径**各写各的**，这正是本仓库记过多次的
+   * 「同一个判断写两份，一份改了另一份没改」。
    */
   async function attachEvidenceDiag(name) {
-    return page.evaluate(({ NAME, sels, inputSel, MAX }) => {
-      const pick = (sel) => { try { return [...document.querySelectorAll(sel)]; } catch { return []; } };
-      const visible = (el) => Boolean(el.offsetWidth || el.offsetHeight || el.getClientRects?.().length);
-      const candidates = (sels || []).map((sel) => {
-        const els = pick(sel);
-        return { sel, count: els.length, visible: els.filter(visible).length };
-      });
-      const hits = [...document.querySelectorAll('body *')].filter((el) => {
-        const tag = el.tagName;
-        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'INPUT' || tag === 'TEXTAREA') return false;
-        const t = (el.textContent || '').trim();
-        return NAME && t.includes(NAME) && t.length <= MAX;
-      });
-      const deep = hits.filter((el) => !hits.some((o) => o !== el && el.contains(o)));
-      const node = deep[0] || hits[0] || null;
-      // 兜底现场：把上传入口往上的两级容器抄下来。没有它，失败读数只剩
-      // 「一张清单 × 一堆 0」，看不出页面究竟变成了什么样。
-      let near = null;
-      const input = pick(inputSel)[0] || null;
-      let box = input;
-      for (let i = 0; i < 2 && box?.parentElement; i += 1) box = box.parentElement;
-      if (box) near = box.outerHTML.replace(/\s+/g, ' ').trim().slice(0, MAX);
-      return {
-        candidates,
-        nameHit: node ? {
-          tag: node.tagName.toLowerCase(),
-          cls: String(node.getAttribute('class') || '').slice(0, 120),
-          snippet: node.outerHTML.replace(/\s+/g, ' ').trim().slice(0, MAX),
-        } : null,
-        domSnippet: node
-          ? node.outerHTML.replace(/\s+/g, ' ').trim().slice(0, MAX)
-          : near,
-      };
-    }, { NAME: String(name || ''), sels: attachCandidates(), inputSel: contract.attachSelector || "input[type='file']", MAX: 200 })
-      .catch((e) => ({ error: String(e?.message || e).slice(0, 120), candidates: [], nameHit: null, domSnippet: null }));
+    const e = await pageAttachEvidence(name);
+    return {
+      candidates: e.candidates || [],
+      nameHit: e.nameHit ? { ...e.nameHit, snippet: String(e.nameHit.snippet || '').slice(0, 200) } : null,
+      domSnippet: e.domSnippet ?? null,
+      scoped: e.scoped === true,
+      scopeDesc: e.scopeDesc ?? null,
+      transcriptNodes: e.transcriptNodes ?? null,
+    };
   }
 
   async function uploadImages(files, { timeoutMs = 15_000 } = {}) {
@@ -1860,17 +2040,38 @@ export function createBrowserDriver(options = {}) {
     // 时按 Enter 发送，网页端收到的就是一条**没有附件**的消息，模型于是说
     //「我没有看到图片」。现在必须看到可见的附件证据才放行；看不到就明确报错，
     // 绝不发一条注定「没有图」的消息。
-    const hit = await waitForAttachment(timeoutMs);
+    //
+    // 0.19.5：**图片轮也必须给名字证据**。旧实现调用时 `name` 缺省为 null，只剩
+    // 类名清单这一条路，而该清单在 DeepSeek 上真机零命中（见 ATTACH_PREVIEW_FALLBACK
+    // 的 2026-09-17 反证）——等于图片附件在 DeepSeek 上永远确认不了。文件名是我们
+    // 自己传给 setInputFiles 的，出现在**composer 作用域内**只有一种解释：网页收到了
+    // 这个文件并渲染了它（判据与作用域定义见 pageAttachEvidence）。
+    // 多图时逐个试：任一张确认即算上传成功（各图共享同一个 composer 作用域）。
+    const deadline = Date.now() + timeoutMs;
+    let hit = null;
+    for (;;) {
+      const e = await pageAttachEvidence(null);
+      const cand = (e.candidates || []).find((c) => c.visible > 0);
+      if (cand) { hit = cand.sel; break; }
+      for (const p of payloads) {
+        const one = await pageAttachEvidence(p.name);
+        if (one.nameHit) { hit = 'text:' + p.name; break; }
+      }
+      if (hit) break;
+      if (Date.now() >= deadline) break;
+      await page.waitForTimeout(250);
+    }
     if (!hit) {
-      const diag = await composerSnippet();
+      const diag = await attachEvidenceDiag(payloads[0]?.name || null);
       const err = new Error('ATTACH_NOT_CONFIRMED: 已选择 ' + payloads.length
         + ' 个文件，但 ' + Math.round(timeoutMs / 1000) + 's 内页面上没有出现附件'
-        + (diag ? ' — 输入框附近可点项：' + diag : '')
         + '（网页可能拒绝了该格式/大小，或上传入口与预览节点都已改版）');
       err.code = 'ATTACH_NOT_CONFIRMED';
+      // 现场挂到 err 上，由调用点原样写进读数——只 warn 到控制台等于没有读数。
+      err.attachDiag = diag;
       throw err;
     }
-    return { attached: payloads.length, evidence: hit };
+    return { attached: payloads.length, evidence: hit, names: payloads.map((p) => p.name) };
   }
 
   /**
@@ -1965,18 +2166,27 @@ export function createBrowserDriver(options = {}) {
    */
   async function cleanupAttachment(name) {
     const fi = page.locator(contract.attachSelector || "input[type='file']").first();
+    // 回读用与确认路径**同一个**判据：清理成功的定义就是「那条证据不再命中」。
+    // 旧实现用 filenameEvidence，而它当时扫全页——正文里写着这个名字时清理会永远
+    // 报 cleaned:false（真机探针读数 `cleanup: no-delete, still: true`），用户看到
+    // 的却是「探针没清干净」。判据收紧后这一条自动一致。
     const gone = async () => !(await filenameEvidence(name));
     try {
       if (await fi.count()) await fi.setInputFiles([]);
     } catch { /* 清空失败照样走下面的回读与 ② */ }
     if (await gone()) return { cleaned: true, cleanedBy: 'input-cleared' };
-    const clicked = await page.evaluate(({ NAME, MAX }) => {
+    const clicked = await page.evaluate(({ NAME, MAX, T_SEL }) => {
       // 附件 chip 的最深命中节点（真机实拍：`<div class="e70accd6">webcode-probe.md</div>`）。
       // 它自己就是 chip 的文本节点，**删除控件不一定在它的祖先里**——所以下面
       // 除了沿祖先链找，还要横向找兄弟（见 `roots`）。
+      //
+      // 0.19.5：**必须排除正文节点**。旧实现扫全页，于是「正文里写着这个文件名」时
+      // 它会去点正文里的那个节点旁边的控件——那可能是复制按钮、引用按钮，甚至无关链接。
+      // 这正是真机探针读数 `cleanup: no-delete` 之后仍然报「没清干净」的一半原因。
       const hits = [...document.querySelectorAll('body *')].filter((el) => {
         const tag = el.tagName;
         if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'INPUT' || tag === 'TEXTAREA') return false;
+        try { if (el.closest(T_SEL) !== null) return false; } catch { /* 选择器不支持：按旧行为 */ }
         const t = (el.textContent || '').trim();
         return t.includes(NAME) && t.length <= NAME.length + 80;
       });
@@ -2032,7 +2242,7 @@ export function createBrowserDriver(options = {}) {
         }
       }
       return null;
-    }, { NAME: String(name || ''), MAX: 200 }).catch(() => null);
+    }, { NAME: String(name || ''), MAX: 200, T_SEL: TRANSCRIPT_SELECTOR }).catch(() => null);
     if (!clicked) {
       return { cleaned: false, cleanedBy: 'none', note: '未找到清除入口（只试了 setInputFiles([]) 与附件节点自身容器内的删除控件；多附件时不按位置猜——点错会删掉别人的附件）' };
     }
@@ -2130,6 +2340,10 @@ export function createBrowserDriver(options = {}) {
     let timer = null;
     let stopClick = null;
     let attachEvidence = null;   // 本轮图片上传的确认结果 { attached, evidence }
+    // 本轮图片投递读数写的是**驱动级** imageTransport（见上方声明）——status() 在另一个
+    // 闭包，这里若再声明一个同名的局部量，就会把它遮住：status 读不到本轮结果，
+    // 而局部量在函数返回后即消失。0.19.5 首版正是这样写错的。
+    imageTransport = null;
     if (signal?.aborted) { busy = false; throw abortError(); }
     const throwIfAborted = () => { if (signal?.aborted) throw abortError(); };
     const onAbort = () => {
@@ -2307,8 +2521,29 @@ export function createBrowserDriver(options = {}) {
       throwIfAborted();
       if (Array.isArray(images) && images.length) {
         // 上传后**确认**附件真的进了网页才继续（见 uploadImages 的注释）：
-        // 拿不到可见证据就抛 ATTACH_NOT_CONFIRMED，绝不发一条注定「没有图」的消息。
-        attachEvidence = await uploadImages(images);
+        // 拿不到可见证据就抛 ATTACH_NOT_CONFIRMED。
+        //
+        // 0.19.5：**图片失败不再杀掉整轮**。旧实现在这里直接 await（没有 try），
+        // 于是确认失败会把本轮判死——用户看到的是「一发图就整轮失败」，而不是
+        // 「图没上去、正文照常」。这与文字附件那条路径的纪律不一致（后者失败一律
+        // 回落 inline）。现在改为：失败**如实记读数**（imageTransport，含现场），
+        // 然后**继续以纯文本发送**——宁可这一轮没有图，也不要一个什么都做不了的
+        // 失败轮。判据与文字附件共用同一套证据（pageAttachEvidence）。
+        try {
+          attachEvidence = await uploadImages(images);
+          imageTransport = {
+            at: Date.now(), ok: true, count: attachEvidence.attached,
+            evidence: attachEvidence.evidence, names: attachEvidence.names || null,
+          };
+        } catch (err) {
+          imageTransport = {
+            at: Date.now(), ok: false, code: err?.code || null, count: images.length,
+            fallback: true, reason: 'image-attach-failed',
+            diag: err?.attachDiag || null,
+          };
+          warn('image attachment failed, continuing text-only: ' + (err?.code || err?.message));
+          onThink?.('⚠ 图片未能附加到网页（' + (err?.code || '未知原因') + '），本轮将以纯文本发送');
+        }
         throwIfAborted();
       }
       // 新一轮开始：把两段现场读数清空再采（0.16.3）。**必须清**，理由就是这次事故本身：
@@ -3572,7 +3807,7 @@ export function createBrowserDriver(options = {}) {
   // sessionSlot 与 status().sessionSlot 同源（sessionSlotFor）：控制面
   //（`GET/POST /__webcode/session-slot`）与面板都要能按 key 直接问一次，
   // 而不是只能读「最近一个 key」的 status 投影。省略 key = 最近一次 sendTurn 的 key。
-  return { sendPrompt, sendTurn, resetConversation, conversationFor, sessionSlot: sessionSlotFor, connect, interact, openLogin, openWindow, closeWindow, importStorageFromProfile, status, close, diagnostics, getToken, profileCookies, writeProfileCookies, userAgent, probeAttachment, get page() { return page; }, webApi, listSessions, fetchHistory, screenshotBase64, setImageLimitsProvider };
+  return { sendPrompt, sendTurn, resetConversation, conversationFor, sessionSlot: sessionSlotFor, connect, interact, openLogin, openWindow, closeWindow, importStorageFromProfile, status, close, diagnostics, getToken, profileCookies, writeProfileCookies, userAgent, probeAttachment, readAccountIdentity, get page() { return page; }, webApi, listSessions, fetchHistory, screenshotBase64, setImageLimitsProvider };
 }
 
 function abortError() {

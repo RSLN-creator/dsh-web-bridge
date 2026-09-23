@@ -441,7 +441,11 @@ test('⑥b 节流等待中途被 abort：本轮按中止收场，且绝不发起
     ],
   });
   const sessionId = 'sess-throttle-abort';
-  const bridge = await openBridge({ driver, sessionRebuildThrottleMs: 5_000 });
+  // `minSendIntervalMs: 0`：0.19.4 起的**全局发送错峰**（生产默认 1s）会让本用例
+  // 的三次发送之间各插入 1s 等待，而本用例的判据是「abort 时已经发生过几次发送」——
+  // 一个与「中止安全」正交的节流不该决定这条断言。这里显式关掉它，让判据只测中止语义
+  // （错峰本身由 test/relay-lanes.test.mjs 单独钉住）。
+  const bridge = await openBridge({ driver, sessionRebuildThrottleMs: 5_000, minSendIntervalMs: 0 });
   try {
     const r1 = await bridge.stream({ sessionId, messages: messagesAt(1) });
     assert.equal(r1.ok, false, '第一轮按剧本失败（建立节流记录）');
@@ -695,10 +699,16 @@ test('⑩ 整段重建必须从落盘文件读回（文件是投递源，不是�
     // 先跑一轮把文件写出来（fresh 首轮会落盘）。
     const first = await bridge.stream({ sessionId, messages: messagesAt(1) });
     assert.equal(first.ok, true, '首轮应当正常落盘：' + String(first.error?.message || '').slice(0, 200));
-    const sessionFile = path.join(storeDir, 'sessions', sessionId + '.md');
-    assert.ok(fs.existsSync(sessionFile),
-      '首轮没有落下会话文件，文件投递无从谈起：' + JSON.stringify(
-        fs.existsSync(path.join(storeDir, 'sessions')) ? fs.readdirSync(path.join(storeDir, 'sessions')) : 'dir-missing'));
+    // 会话文件名 **0.19.4 起带账号段**（`<sessionId>__<accountKey>.md`）：会话键里含
+    // accountKey 是「一个对话对应唯一账号」的结构性保证（见 index.js 的 keyPath 注释）。
+    // 因此这里按**前缀**找文件（判据关心的是「有没有落盘、重建是不是从它读回」，
+    // 不是文件名拼接），并额外钉住账号段确实在名字里。
+    const sessionsDir = path.join(storeDir, 'sessions');
+    const names = fs.existsSync(sessionsDir) ? fs.readdirSync(sessionsDir) : [];
+    const hit = names.find((n) => n.startsWith(sessionId + '__') && n.endsWith('.md'));
+    assert.ok(hit, '首轮没有落下会话文件，文件投递无从谈起：' + JSON.stringify(names));
+    assert.match(hit, /__[A-Za-z0-9_-]+\.md$/, '会话文件名必须带账号段（一个对话一个账号）');
+    const sessionFile = path.join(sessionsDir, hit);
 
     // 把哨兵塞进磁盘上的正本 —— 下一次重建若真从文件读，就会把它带走。
     fs.appendFileSync(sessionFile, '\n' + SENTINEL + '\n');

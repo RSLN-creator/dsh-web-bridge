@@ -160,30 +160,37 @@ export function formatPercent(num) {
  * 占比本身没错，错的是**分母的覆盖范围与分子不一致**：分子覆盖全部 8579 轮，分母只覆盖
  * 其中一小撮。判据因此必须是「耗时记账覆盖了几轮」，而不是「耗时 > 0」。
  *
- * 三种读数（都不是猜的）：
- *   · 全覆盖  → `61%`
- *   · 零覆盖  → `未记录`（一个百分比都不给，避免把无数据印成 0% 或 100%）
- *   · 部分覆盖 → `61%（覆盖 40/57 轮）`——数字带上它的适用边界
+ * 两种读数（都不是猜的）：
+ *   · 有覆盖记账 → `61%`（全覆盖与部分覆盖给同一个形状，只报结论）
+ *   · 零覆盖     → `未记录`（一个百分比都不给，避免把无数据印成 0% 或 100%）
+ *
+ * ## 为什么不再显示覆盖轮次（用户要求）
+ *
+ * 用户原话：「等待发送的『（覆盖 1813/10539 轮）』去除」。覆盖率是**本模块内部的分母判据**，
+ * 不是用户要读的信息：面向用户的读数只给结论，分母口径一律不出现在药丸与统计面板里——
+ * 写上去只是噪声，还得再配一句解释才读得懂。判据本身照旧生效：零覆盖仍是 `未记录`
+ * （那条护栏防的是「假 100%」，与显示无关），只是部分覆盖不再被标注。
  *
  * @param {object} o
  * @param {number} o.waitMs 分子：等待发送
  * @param {number} o.durationMs 分母中的模型耗时
- * @param {number} o.durationTurns 有耗时记账的轮次
- * @param {number} o.turns 总轮次
+ * @param {number} o.durationTurns 有耗时记账的轮次——只用于零覆盖护栏
  * @returns {string|null} 无可核对的分母时返回 null
+ *
+ * `o.turns` 已不在签名里：调用方照旧传整份账本（多传的属性无害），但输出不再依赖总轮次。
+ * 留一个不读的形参只会让下一个人以为覆盖率还在算。
  */
-export function waitRatio({ waitMs, durationMs, durationTurns, turns } = {}) {
+export function waitRatio({ waitMs, durationMs, durationTurns } = {}) {
   const w = Math.max(0, Number(waitMs) || 0);
   const d = Math.max(0, Number(durationMs) || 0);
   const covered = Math.max(0, Math.round(Number(durationTurns) || 0));
-  const total = Math.max(0, Math.round(Number(turns) || 0));
   if (w <= 0) return null;
   // 零覆盖：分母完全不可用。**不返回百分比**——0% 与 100% 都是错的，而任何一个数字都会
   // 被当成结论读走。如实说「没记」是这里唯一不撒谎的答案。
   if (covered === 0) return '未记录';
-  const pct = formatPercent((w / (w + d)) * 100);
-  if (total > 0 && covered < total) return pct + '（覆盖 ' + covered + '/' + total + ' 轮）';
-  return pct;
+  // 部分覆盖也照报同一个百分比：覆盖率不再显示（见上「为什么不再显示覆盖轮次」），
+  // 药丸与统计面板拿到的永远是纯百分比。
+  return formatPercent((w / (w + d)) * 100);
 }
 
 /**
@@ -399,11 +406,11 @@ export function composerWaitPillLabel({ session, metrics, live, now } = {}) {
   // 结算补上，相加项自然归零，读数不变——这正是它不再跳变的原因。
   const projectedMs = s.totalWaitMs + liveWaitMs(live, now);
   if (projectedMs > 0) {
-    // 药丸是 13px 单行，容不下「（覆盖 40/57 轮）」这种尾巴——因此这里只在**全覆盖**
-    // 时给出百分比；未覆盖就只报时长，让点开的面板去说明边界（waitStatDetailRows）。
+    // 药丸是 13px 单行，只放得下一个数 + 一个后缀。占比只给结论、不附分母口径（用户要求，
+    // 见 waitRatio 的说明）：覆盖轮次既无处解释、也不该出现在这里。
     const ratio = waitRatio({ waitMs: projectedMs, durationMs: s.totalDurationMs, durationTurns: s.durationTurns, turns: s.turns });
-    // 只接受**纯百分比**：`未记录` 与 `61%（覆盖 40/57 轮）` 都带不了——药丸是 13px 单行，
-    // 容不下覆盖率尾巴；而「未记录」写上去比不写更长且更费解。边界一律交给点开的面板。
+    // 只接受**纯百分比**：`未记录` 写上去比不写更长且更费解，一律交给点开的面板
+    // （waitStatDetailRows）。waitRatio 已经不返回覆盖率尾巴了。
     const suffix = ratio && /^\d+(\.\d+)?%$/.test(ratio) ? ' · 等待占比 ' + ratio : '';
     parts.push(formatElapsed(projectedMs) + suffix);
   }
@@ -422,6 +429,9 @@ export function composerWaitPillLabel({ session, metrics, live, now } = {}) {
  * 累计在后，每行一个可核对的标签值对。空账本不出行——面板不留 `0 ms` 噪音。
  *
  * 0.17.0：详细展开面板中新增显示「本次会话占比」与「平均会话等待时长占比」。
+ *
+ * 两条占比行只给结论、不附「（覆盖 n/N 轮）」：面向用户的读数不该带分母口径，理由见
+ * {@link waitRatio}（用户要求）。
  *
  * @param {object} o
  * @param {object} [o.session] 本会话账本

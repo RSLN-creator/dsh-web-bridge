@@ -77,7 +77,7 @@ function publicStatus(relay) {
  * 快照：设置页改完就该立刻生效，快照会让改动看起来「没保存成功」。
  *
  * @param {object} relay createRelay 的实例
- * @param {object} modelInfo { modelId, modelName, providerId, sendGapMsOf }
+ * @param {object} modelInfo { modelId, modelName, providerId, sendGapMsOf, sendGapBasisOf, usageFixedOverheadTokens }
  * @returns {object} 前端实例（handle(req,res,pathname) 等）
  */
 export function createOpenAiFront(relay, modelInfo) {
@@ -93,6 +93,12 @@ export function createOpenAiFront(relay, modelInfo) {
   // 为什么必须一起传：两个口径同一条设置下给出**不同**的等待结论，只传间隔
   // 会让 end-to-start 在这条路径上静默失效（读数上还看不出）。
   const gapBasis = () => (typeof sendGapBasisOf === 'function' ? sendGapBasisOf() : undefined);
+  // 「网页自身上下文」的固定开销（一次性）。与适配器路径同源：取值只允许有一份口径，
+  // 否则 OpenAI 前端报的 prompt_tokens 会比 GUI 里的用量小一截，同一个问题两个答案。
+  const usageOverhead = () => {
+    const n = Math.round(Number(modelInfo.usageFixedOverheadTokens));
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  };
 
   function sendJson(res, code, obj) {
     const body = JSON.stringify(obj);
@@ -195,7 +201,7 @@ export function createOpenAiFront(relay, modelInfo) {
           onImage: (img) => { try { res.write('data: ' + frame({ images: [img] }, null) + '\n\n'); } catch {} },
         }).then(({ text }) => {
           if (!text.trim()) throw new Error('empty response from web AI');
-          const usage = { prompt_tokens: estimateTokens(prompt), completion_tokens: estimateTokens(text), total_tokens: estimateTokens(prompt) + estimateTokens(text) };
+          const usage = { prompt_tokens: estimateTokens(prompt) + usageOverhead(), completion_tokens: estimateTokens(text), total_tokens: estimateTokens(prompt) + usageOverhead() + estimateTokens(text) };
           res.write('data: ' + frame({}, 'stop', usage) + '\n\n');
           res.write('data: [DONE]\n\n');
           res.end();
@@ -214,7 +220,7 @@ export function createOpenAiFront(relay, modelInfo) {
       const qualified = qualifyModelId(selectedModel, selectedSiteId);
       const { text, thinking, images: genImages } = await relay.submit(prompt, { meta: { model: qualified, siteId: selectedSiteId, images, thinkMode, sendGapMs: gapMs(), sendGapBasis: gapBasis() }, signal: controller.signal });
       if (!text.trim()) throw new Error('empty response from web AI');
-      const usage = { prompt_tokens: estimateTokens(prompt), completion_tokens: estimateTokens(text), total_tokens: estimateTokens(prompt) + estimateTokens(text) };
+      const usage = { prompt_tokens: estimateTokens(prompt) + usageOverhead(), completion_tokens: estimateTokens(text), total_tokens: estimateTokens(prompt) + usageOverhead() + estimateTokens(text) };
       const parts = [{ type: 'text', text }];
       const imgs = imageParts(genImages);
       if (imgs.length) parts.push(...imgs);

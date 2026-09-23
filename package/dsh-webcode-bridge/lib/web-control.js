@@ -372,6 +372,23 @@ export function createWebControl(deps = {}) {
     return baseMs + Math.max(0, Math.min(now, ceiling) - startedAt);
   }
 
+  /**
+   * 登录/检测之后刷新「这个账号真实的昵称与头像」（0.19.4）。
+   *
+   * 为什么必须**顺手**做而不是只在用户点开下拉时才做：登录窗口刚关掉那一刻是页面
+   * 最完整的时刻（已登录、头部已渲染）；等到用户下次点下拉，页面可能已经被导航走、
+   * 或者驱动已经回收。读不到就保持 null，界面回落槽名——身份是装饰，
+   * **绝不允许**影响登录/检测本身的结果。
+   *
+   * @param {string} accountKey `glm` 或 `glm#2`。
+   */
+  async function captureIdentity(accountKey) {
+    try {
+      const drv = relay?.config?.siteConnect?.(accountKey);
+      if (drv && typeof drv.readAccountIdentity === 'function') await drv.readAccountIdentity();
+    } catch { /* 装饰性读数：吞掉异常，不回传失败 */ }
+  }
+
   /** One route table keyed by "METHOD path-suffix". */
   const actions = {
     'POST connect': async (body) => {
@@ -473,7 +490,12 @@ export function createWebControl(deps = {}) {
       const raw = String(body?.text ?? ('# webcode attach probe\n' + new Date().toISOString() + '\n'));
       const text = raw.slice(0, PROBE_MAX);
       const name = String(body?.name || 'webcode-probe.md').replace(/[\\/:*?"<>|]/g, '_').slice(0, 80) || 'webcode-probe.md';
-      const r = await driver.probeAttachment(text, { name });
+      // cleanup 必须真的透传（0.19.5 修正）。旧实现只把 `cleanupRequested` 算进返回，
+      // 却**从未**把它交给驱动 —— 于是 `{cleanup:false}` 的探针照样会去清理，而返回里
+      // 那句 cleanupRequested 还在说「调用方要求不清除」。这正是本仓库记过多次的
+      // 「读数与事实不符」，而且它会把一次取证悄悄变成一次副作用。
+      const wantCleanup = body?.cleanup !== false;
+      const r = await driver.probeAttachment(text, { name, cleanup: wantCleanup });
       return {
         ...r,
         // 请求侧读数与结论分开列：一眼能看出「探针收到多少字符 / 真正传了多少」，
@@ -965,6 +987,29 @@ export function createWebControl(deps = {}) {
       const result = settingsStore.set(updated);
       return { ok: true, ...result };
     },
+    'POST account-add': async (body) => {
+      // 「新账号」（0.19.4，用户指令）：下拉底部那一行点下去要为该站点**新增一个槽**。
+      //
+      // 为什么放在服务端而不是让面板自己拼 settings：槽位的合法性只有 accounts.js
+      // 说了算（`default` 的规范名、`#1` 是别名、槽名允许的字符集）。面板自己算
+      // 「下一个空槽」必然出现第二套规则，而两套规则一旦分叉，用户会得到
+      // 「界面上多了一行、但驱动解析不了这个 accountKey」这种半成品状态。
+      if (!settingsStore) return { ok: false, error: 'settings store unavailable' };
+      const siteId = String(body?.siteId ?? '').trim();
+      if (!getSite(siteId)) return { ok: false, error: 'unknown site: ' + siteId };
+      const current = settingsStore.get() || {};
+      const accounts = normalizeAccounts(current.accounts);
+      const used = new Set(accounts.filter((a) => a.siteId === siteId).map((a) => a.slot));
+      used.add(DEFAULT_SLOT);              // 默认槽总是存在，不占编号
+      let n = 2;
+      while (used.has(String(n))) n += 1;
+      const slot = String(n);
+      const next = [...accounts.map(({ siteId: s, slot: sl, enabled }) => ({ siteId: s, slot: sl, enabled })), { siteId, slot, enabled: true }];
+      settingsStore.set({ ...current, accounts: next });
+      const accountKey = formatAccountKey(siteId, slot);
+      log(`account-add: ${siteId} → 槽 ${slot}（${accountKey}）`);
+      return { ok: true, siteId, slot, accountKey };
+    },
     'GET preset': async () => {
       const info = presetInfo?.() ?? null;
       if (!info) return { ok: true, prompt: null, note: '尚未发送过首轮请求——发送第一条消息后这里显示实际注入的完整提示词模板' };
@@ -1034,6 +1079,8 @@ export function createWebControl(deps = {}) {
       if (loginAndReport && wait) {
       const r = await loginAndReport(accountKey || 'deepseek', { timeoutMs: body?.timeoutMs });
       const message = r?.ok ? (r?.note || '登录完成') : (r?.error || '登录失败');
+      // 登录刚成功＝页面最完整的一刻，顺手取真实昵称/头像（读不到留 null）。
+      if (r?.ok) await captureIdentity(accountKey || r?.siteId || 'deepseek');
       return {
         ok: r?.ok === true,
         siteId: r?.siteId,
@@ -1060,7 +1107,18 @@ export function createWebControl(deps = {}) {
       const target = relay?.config?.siteConnect?.(accountKey);
       if (!target) return { ok: false, error: 'no driver' };
       const r = await target.connect();
+      // 刚核验过＝页面是热的，顺手把真实昵称/头像读下来（读不到就留 null）。
+      if (r?.loggedIn === true) await captureIdentity(accountKey);
       return { ok: true, siteId: accountKey, accountKey, loggedIn: r?.loggedIn ?? null };
+    },
+    'POST account-identity': async (body) => {
+      // 打开账号下拉时的一次轻量刷新：只读 DOM，不导航、不发送。
+      // 前端据此把「抓不到就回落槽名」这件事变成可重试的（用户登录完点一下下拉即可）。
+      const accountKey = accountKeyOf(body);
+      const drv = relay?.config?.siteConnect?.(accountKey);
+      if (!drv || typeof drv.readAccountIdentity !== 'function') return { ok: false, error: 'no driver' };
+      const id = await drv.readAccountIdentity().catch(() => null);
+      return { ok: true, accountKey, name: id?.name ?? null, avatarUrl: id?.avatarUrl ?? null, basis: id?.basis ?? null };
     },
     // 「导入本机登录态」：把用户真实 Edge profile 的 cookies 采纳进所选站点的桥
     // profile。动机（真机 2026-09-13）：桥 profile 里除 deepseek 外**没有任何站点
@@ -1113,6 +1171,10 @@ export function createWebControl(deps = {}) {
           slot: DEFAULT_SLOT,
           accountKey: st.id,
           displayName: st.name,
+          // 真实昵称/头像（0.19.4）：有就带上，没有就是 null。
+          // 前端据此决定「显示真昵称+真头像」还是「回落槽名+站点矢量标记」。
+          accountName: s?.accountName ?? null,
+          avatarUrl: s?.avatarUrl ?? null,
           initialized: s?.initialized === true,
           loggedIn: s?.loggedIn ?? null,
           loginState: s?.loginState || 'idle',
@@ -1130,6 +1192,8 @@ export function createWebControl(deps = {}) {
           slot: s.slot || DEFAULT_SLOT,
           accountKey: s.accountKey || s.siteId,
           displayName: s.displayName || s.siteName || getSite(s.siteId).name,
+          accountName: s.accountName ?? null,
+          avatarUrl: s.avatarUrl ?? null,
           initialized: s.initialized === true,
           loggedIn: s.loggedIn ?? null,
           loginState: s.loginState || 'idle',

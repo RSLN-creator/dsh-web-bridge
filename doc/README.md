@@ -38,6 +38,7 @@
 | [settings-copy.md](settings-copy.md) | **设置界面文案总表**：每句界面提示对应的完整解释（被精简掉的部分全在这里）、以及「哪张卡属于全局页/站点页」的作用域表 | 改设置页文案或卡片归属前 |
 | [review-0.17.x.md](review-0.17.x.md) | **0.17.x 审查报告**：基线核验、0.17.0 等待占比 `100%` 真缺陷、0.17.1 台账归因不成立、交付卫生（零提交/零 tag）、三份交付物不一致、计划完成度 | 接手 0.17 之后的版本前 |
 | [official-contract-audit.md](official-contract-audit.md) | **官方契约审计**：`dsh.client` 声明、懒 CJS bundle 形状、六个插槽契约（实读结果）、主题 token、可访问性、primitives 回退、本地闸门；含「renderer-v2」这个名字在本机的查证结论 | 对齐官方写法、评审「这算不算偏离官方」时 |
+| [diagnosis-2026-09-23-dsh-0.1.7-alpha.2.md](diagnosis-2026-09-23-dsh-0.1.7-alpha.2.md) | **DSH 升到 0.1.7-alpha.2 后的诊断（0.19.2）**：① `settingsScope` → `configForms` 改名（阻断级：Cordis `inject` 永不就绪 → 客户端半侧整块不挂载）；② primitives 图标导出改名（`IconXxxOutline14` → `…Regular`，致底部等待药丸渲染期抛错消失）；③ 官方 compaction 新增 `headroomTokens` 把 deepseek 压缩阈值从 800k 压到 678k 的口径解释；含装机不一致与三条自证方法 | 排查「升级后插件不见 / 药丸不见 / 上下文变小」时 |
 | [compliance-audit-0.19.1.md](compliance-audit-0.19.1.md) | **项目合规审计（对标 DSH 0.1.7-alpha.2）**：发布标签口径（`latest` 比实装更旧）、插件声明层、客户端 bundle 契约、**审批的官方落点**（本插件零自造）、能力差逐条理由、本轮发现的不合规项与修法、闸门读数 | 对齐最新官方版本、回答「审批在哪」时 |
 
 ## 与账户槽（0.14.7）相关的代码位置
@@ -83,6 +84,10 @@
 - `task-board-vs-agentteams-graph.md` — **Graph Engineering 对照分析**：`dsh-task-board`（cron 驱动的执行台账，无依赖边）与官方 AgentTeams 任务图（`blockedBy` DAG + 全图环检测，但**无调度器**）的逻辑拆解，以及落地一张可自动推进的任务图还需要考虑什么
 - `prompt-engineering-evidence-2026-09-14.md` — **提示词工程实测证据与差评**（NeurIPS/ACL/arXiv 五篇；含「不能宣称最优」「必须披露 harness」两条立场）
 - `agent-ui-design-references.md` — **UI 设计语言**（Apple HIG 可执行约束、Fluent 4px 间距全表、Harness 官方 token 实测清单、teammate 面板信息架构）
+- `2026-09-23-longrun-two-rounds-thinking.md` — **长跑健全性两轮思考**（纯文档，零代码）：第一轮从「什么会杀死长会话」落到「压缩路径从未被行使」；第二轮换起点从「桥凭什么相信网页」落到「防护全是单轮闭环」；两轮独立成立并给出共同结构与可检验的下一步
+- `2026-09-23-dsh-longrun-and-compaction.md` — **DSH 长跑健全性与压缩机制真机取证报告**：`threshold = floor(min(W×0.8, W−O−headroom))` 的完整推导、`W` 来自 adapter 的 `resolveModel`、304 份会话里 `compaction/*` **零命中**的取证、最高压力只到 **59.4%**（阈值 80%）→「web 端不能自动压缩」的更正、四个可调旋钮与长跑姿势；含六条未证实项
+- `2026-09-23-longrun-rounds-3-4.md` — **长上下文第三、四轮思考**（纯文档）：第三轮从「压力读数量的是谁」落到**两个上下文账本从未对账**（分子分母都是桥的自述；`index.js:844` 注释承诺 128k、代码给出 1M）；第四轮从「auto_continue 是不是免费的」落到**每次救活都在给下一次加长**（完整提醒 = 26,264 字符常驻），给出两条可检验的解决方向（对账探针 / 恢复预算 + 重建而不是加长）与 10 条文献引证
+- `2026-09-23-token-density-calibration.md` — **token 密度标定（官方真实数据）**：官方文档给的是平均密度（中文 0.6 / 英文 0.3），本文用本机凭据对**官方端点实测**六类样本，先修掉「上下文缓存让同一段文本两次差 1.86 倍」的测量陷阱，再拟合出「每类都不低于实测」的三类单价（CJK 0.75 / 散文 ASCII 0.30 / 其余 ASCII 0.70）——**旧口径 0.7/0.25 在源码上低估 33%、数字符号低估 63%**，正是编码 agent 的日常流量
 - `real-probe-*.json`、`sse-samples/` — 真机探针输出与 SSE 样本
 - `autonomous-marathon-vs-official-api-*.md`、`thinking-trace-*.md` — 专题调研
 - `awesome-deepseek-harness-README.zh-CN.md` — 外部资料留档

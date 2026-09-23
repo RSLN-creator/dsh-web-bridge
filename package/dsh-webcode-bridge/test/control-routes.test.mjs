@@ -327,6 +327,47 @@ test('POST settings：站点级字典归一化（未知站点丢弃、跨站点�
     '站点指令必须 trim，且空串表示「没配」而不是「配了空值」');
 });
 
+test('POST account-add：「新账号」必须由服务端分配下一个空槽，且不动既有槽', async () => {
+  // 用户指令（0.19.4）：「一个网址可以多个账号，多个对话」。下拉底部那行「新账号」
+  // 点下去要为该站点加一个槽——**槽位合法性只有 accounts.js 说了算**，
+  // 面板自己算「下一个空槽」必然长出第二套规则（`default` 的规范名、`#1` 是别名）。
+  let saved = null;
+  const control = createWebControl({
+    driver: { status: () => ({}) }, relay: { status: () => ({}) },
+    config: {}, host: {}, logger,
+    presetInfo: () => null,
+    settingsStore: { get: () => ({ accounts: [{ siteId: 'glm', slot: '2', enabled: true }] }), set: (v) => { saved = v; return v; } },
+  });
+  const r = await call(control, 'POST', '/__webcode/account-add', { siteId: 'glm' });
+  assert.equal(r.status, 200);
+  const body = JSON.parse(r.text);
+  assert.equal(body.ok, true);
+  assert.equal(body.slot, '3', '已占用 2 时必须给 3（不是覆盖 2）');
+  assert.equal(body.accountKey, 'glm#3', 'accountKey 必须是 accounts.js 的规范形状');
+  assert.ok(saved, '必须落进设置（只回一个 key 而不保存＝界面上多一行、驱动解析不到）');
+  assert.ok(saved.accounts.some((a) => a.siteId === 'glm' && a.slot === '2' && a.enabled === true),
+    '既有槽必须原样保留（新账号是「增加」不是「替换」）');
+  assert.ok(saved.accounts.some((a) => a.siteId === 'glm' && a.slot === '3'),
+    '新槽必须写进 accounts');
+  // 未知站点必须**明确失败**：悄悄建一个永远解析不了的槽，症状会推迟到用户点它时才出现。
+  const bad = JSON.parse((await call(control, 'POST', '/__webcode/account-add', { siteId: 'nope' })).text);
+  assert.equal(bad.ok, false, '未知站点必须报错');
+});
+
+test('POST account-identity：读不到驱动时如实失败，绝不返回伪造昵称', async () => {
+  // 用户口径是「抓真实值 + 抓不到回落槽名」。这条钉住「抓不到」那半边：
+  // 服务端必须说「没有」，而不是编一个名字——界面靠这个 null 回落成槽名。
+  const control = createWebControl({
+    driver: { status: () => ({}) }, relay: { status: () => ({}) },
+    config: {}, host: {}, logger,
+    presetInfo: () => null,
+    settingsStore: { get: () => ({}), set: (v) => v },
+  });
+  const body = JSON.parse((await call(control, 'POST', '/__webcode/account-identity', { siteId: 'glm' })).text);
+  assert.equal(body.ok, false, '没有驱动时必须明确失败');
+  assert.equal(body.name, undefined, '失败时不得给出任何名字（伪造昵称比没有昵称更糟）');
+});
+
 test('GET settings：两个站点级字典永远回对象，不回 undefined', async () => {
   const control = createWebControl({
     driver: { status: () => ({}) }, relay: { status: () => ({}) },

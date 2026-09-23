@@ -1,6 +1,6 @@
 # Harness Web Bridge
 
-已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.16.40（已打包并装入 web / headless 两个 profile；重启 DSH 后生效）。
+已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.19.6（已打包并装入 web / headless 两个 profile；重启 DSH 后生效）。
 
 安装（本包**不发 npm registry**，只以 `.tgz` 交付）：
 
@@ -14,6 +14,31 @@
 > 0.14.5 起发布流程收进仓库：`scripts/verify-pack.mjs` 逐文件核对 tarball 与工作树
 > （改完代码忘了重新 pack 时直接报错），`scripts/install-profiles.mjs` 先删旧目录再解包
 > （绕开 pnpm 对同版本 tarball「Already up to date」不重解的坑）。两条都是真实踩过的坑。
+
+## 0.19.6
+
+**两件事：界面文案按「官方解释长短」收紧、插件市场整页崩溃修复。**
+
+### 一、设置界面与右栏：只留状态与动作，解释不进界面
+
+用户反馈（2026-09-24）逐条落地：等待占比不再输出「（覆盖 n/N 轮）」；agent preset
+展示名改为 **`wecode模式`**，description 与 persona 压成简短声明；设置页删掉
+「正在运行（子代理 / Team）」整卡、限流退避说明、「附件探针」与「最近一次实际投递」、
+真机事故叙述、会话隔离的机制句、重复的全局指令说明；「首轮提示词（只读）」卡重排美化
+且信息面不变。判据落在**渲染出的文本**上，不看源码注释（`test/settings-transport.test.mjs` ⑧
+与 `test/client-render.test.mjs` 的新契约用例）。
+
+一条要紧的口径：**探针是开发者自用的读数通路，不是用户功能**。它的服务端动作
+（`POST /__webcode/attach-probe`）保留，但按钮与读数已从两处用户界面（原生设置面板、
+独立设置页 `/__webcode/settings-page`）全部撤掉。
+
+### 二、插件市场（dshmarket）整页崩溃：图标导出改名
+
+市场页报 `Minified React error #130`。根因不是市场本身逻辑，而是 **DSH 0.1.7-alpha.2
+把 primitives 的图标导出整体改了名**（`IconXxxOutline14` / `…16` → `…Regular` / `…Medium`），
+而 dshmarket 1.55.0 的 bundle 直接解构旧名 → `undefined` 被当组件调用 → 整棵 React 树崩。
+修法：把 web profile 的 `dshmarket` 升到 **1.59.0**——它的 bundle 带 `ICON_ALIASES`
+两代名字回落（0.1.7+ 的 `…Regular` 与 0.1.7 之前的 `…16/14` 依次取值）。
 
 ## 0.16.9
 

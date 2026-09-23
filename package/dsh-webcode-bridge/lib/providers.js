@@ -103,8 +103,10 @@ export function conversationUrlFor(siteId, origin, sessionId) {
  *
  * 即：**网页输入框在 120 万字符处仍未触顶**，所以「输入框容量」从来不是这些站点的
  * 瓶颈（旧注释里把它当成未知数、随手写 1_000_000 当占位，方向就错了）。
- * 按本仓库自己的估算口径（CJK≈0.7 tok/字符 + 10% 余量）折算，120 万字符 ≈ 92 万
- * token，因此 1_000_000 是**有实测支撑的下界**，而不是乐观估计。
+ * 按本仓库的估算口径折算，120 万字符 ≈ 92 万 token（旧单价）／≈ 99 万 token
+ *（0.19.4 起的三类实测单价 + 10% 余量，中文主体约 0.825 tok/字符）——**两种口径下
+ * 1_000_000 都落在或紧贴这个下界**，因此它是「有实测支撑的下界」，不是乐观估计；
+ * 但也正因为如此，它**没有余量**：口径一收紧就顶到线。要不要往上调属用户决策。
  *
  * 仍然要说清它不是什么：它**不是模型注意力窗口的规格**——那个数探针测不到（要看
  * 站点服务端的截断行为），并且会随网页改版变化。真实语义是「本桥愿意让 transcript
@@ -178,6 +180,14 @@ export const GLM = site({
     // 「已有用户名」——两向都不再依赖输入框兜底。
     bad: 'p.sidebar-user-name:has-text("登录"), p:has-text("登录"), button:has-text("登录"), a:has-text("登录"), button:has-text("Sign in"), a:has-text("Sign in")',
     ok: '.userInfoBar, p.sidebar-user-name',
+  },
+  // 真实昵称/头像（0.19.4）：只声明**已有真机证据**的站点。依据就是上面 loginProbe
+  // 的取证原文——「同一节点登录后变为用户名文本（如 `<p class="sidebar-user-name">RSYHN</p>`），
+  // 且已登录页常驻 `.userInfoBar`（用户名 + 积分）」。未取证的站点留空，
+  // 由 browser-driver 的通用猜测兜底，读不到就回落槽名。
+  accountProbe: {
+    name: ['p.sidebar-user-name', '.userInfoBar p', '.userInfoBar span'],
+    avatar: ['.userInfoBar img', '[class*="avatar"] img', 'img[class*="avatar"]'],
   },
   // 模型选择契约 —— 真机 dump（2026-09-13，test-mock/out/model-dropdown-glm-*.json）：
   //   触发  <div class="think-mode-trigger mode-button …"><span class="think-label">GLM-5.3</span>极致</div>

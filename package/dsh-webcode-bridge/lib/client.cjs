@@ -10,7 +10,7 @@
 //
 // 本文件承载四块界面：
 //   1. 官方右侧栏的网页镜像面板（sidebar.right.pane.tab）与标签动作菜单；
-//   2. 原生设置页「网页桥接」分区（settings.section）：账户/登录、花名册、模型、提示词；
+//   2. 原生设置页「网页桥接」分区（settings.section）：账户/登录、站点模型、提示词；
 //   3. 输入框底下的等待速览（conversation.composer.dock）与会话头右上角开关；
 //   4. 左栏全局面板入口（sidebar.panellist）与同名中央列页面（main）：任务板。
 //
@@ -49,9 +49,32 @@ window.__ModuleLoader__.load({
     //   · useDismissOnOutsidePointer 缺位 → no-op（外点关闭退化为 Esc/再点触发器）。
     // 旧版本 primitives（< 0.1.6）没有 FishLogo/FISH_LOGO_* 导出时走的就是这套。
     const primitives = require('@deepseek-ai/dsh-client-ui-primitives');
-    const {
-      IconCodeOutline16, IconQueueOutline14,
-    } = primitives;
+    /**
+     * 取一颗官方图标组件：**按「这一代 + 上一代」两套名字依次找**，都取不到才回退空组件。
+     *
+     * 为什么不能只写一个名字（0.19.2 的真机事故）：DSH 0.1.7-alpha.2 把 primitives 的
+     * 图标导出整体改了名——`IconXxxOutline14` / `IconXxxOutline16` 变成
+     * `IconXxxOutlineRegular`（同族还有 `…Medium`，1.3px 描边）。**同一颗图标、同一个
+     * 尺寸**，只是名字不再带像素后缀；旧名在 0.1.7 里一个都不剩。
+     *
+     * 于是任何一处「无兜底解构 + 渲染期当组件调用」都会变成
+     * `h(undefined)` → React 抛错 → 整棵注册树崩掉。真机症状正是用户报的
+     * 「底部发送等待时间没了」：`IconQueueOutline14` 为 undefined，等待药丸那一块
+     * 在渲染期抛错，而控制台里看不到本插件自己的告警。
+     *
+     * 这与 0.16.21 那次白屏是同一形状（无回退解构 + 桩缺导出 → 6 条渲染测试全崩），
+     * 因此沿用同一判据：**取名字时就把两代名字都列出来**。多写一个字符串的成本，
+     * 换的是「官方改一次名就静默少一块 UI」这类缺陷不再发生。
+     *
+     * @param {...string} names 候选导出名，按优先级排列
+     * @returns {Function} 官方图标组件，或一个返回 null 的等价空组件
+     */
+    const iconOf = (...names) => {
+      for (const n of names) { if (typeof primitives[n] === 'function') return primitives[n]; }
+      return () => null;
+    };
+    const IconCodeOutline16 = iconOf('IconCodeOutline16', 'IconCodeOutlineRegular');
+    const IconQueueOutline14 = iconOf('IconQueueOutline14', 'IconQueueOutlineRegular');
     // 0.16.39：官方统计弹层的定位钩子（与官方 stat-dialog 同一颗）。
     // 官方的等待/用量药丸就是这么摆的：`side:'top', gap:8, margin:12`，返回
     // `{left, top}` 固定坐标 —— **左边缘与药丸左边缘对齐**、贴近视口时夹紧在
@@ -69,11 +92,13 @@ window.__ModuleLoader__.load({
     //   IconRightUpOutline16     独立窗口（官方 browser 的外部打开就是它）
     //   IconFullscreenOutline16  新面板分屏（把网页放到另一块面板里）
     //   IconPanelLeftOutline16   浮动面板（官方右栏的分屏/面板图标族）
-    const IconRefreshOutline14 = primitives.IconRefreshOutline14 || (() => null);
-    const IconRightUpOutline16 = primitives.IconRightUpOutline16 || (() => null);
-    const IconFullscreenOutline16 = primitives.IconFullscreenOutline16 || (() => null);
-    const IconPanelLeftOutline16 = primitives.IconPanelLeftOutline16 || (() => null);
-    const IconGlobe = primitives.IconGlobeOutline14 || primitives.IconBrowseOutline16 || (() => null);
+    // 0.19.2：五个名字都补上 0.1.7 的 `…Regular` 别名（改名事实见 iconOf 的注释）。
+    const IconRefreshOutline14 = iconOf('IconRefreshOutline14', 'IconRefreshOutlineRegular');
+    const IconRightUpOutline16 = iconOf('IconRightUpOutline16', 'IconRightUpOutlineRegular');
+    const IconFullscreenOutline16 = iconOf('IconFullscreenOutline16', 'IconFullscreenOutlineRegular');
+    const IconPanelLeftOutline16 = iconOf('IconPanelLeftOutline16', 'IconPanelLeftOutlineRegular');
+    const IconGlobe = iconOf('IconGlobeOutline14', 'IconGlobeOutlineRegular',
+      'IconBrowseOutline16', 'IconBrowseOutlineRegular');
     // 0.16.35：`Menu` 不再解构。它曾服务于工具条那颗站点下拉按钮（0.16.33 的二级菜单），
     // 而用户 0.16.35 明确不要那颗按钮，`SiteMenu` 随之删除——保留一个不再使用的解构，
     // 只会让旧版 primitives 的「缺位回退」注释看起来仍然重要。
@@ -96,11 +121,11 @@ window.__ModuleLoader__.load({
     // 缺位时回退成空组件，面板照常渲染，只是该处退化。
     const Button = primitives.Button || (({ children, ...rest }) => h('button', { type: 'button', ...rest }, children));
     const Menu = primitives.Menu || (() => null);
-    const IconChevronDown = primitives.IconChevronDownOutline14 || (() => null);
+    const IconChevronDown = iconOf('IconChevronDownOutline14', 'IconChevronDownOutlineRegular');
     // 等待统计用的图标：官方 primitives 没有 gauge/clock 图标，队列图标是同一
     // 语义域里最近的一个（「还没轮到发送」）。与官方一样只取 14px 线框图标。
     const IconWait = ({ size }) => h(IconQueueOutline14, { size });
-    const inject = ['slots', 'settingsScope', 'sidebarRightTabs', 'sidebarRight'];
+    const inject = ['slots', 'sidebarRightTabs', 'sidebarRight'];
     const RELAY_PORT = 8931;
     const relayBase = 'http://127.0.0.1:' + RELAY_PORT;
     // 每个站点一个独立源：<siteId>.localhost:<port>。
@@ -207,32 +232,6 @@ window.__ModuleLoader__.load({
       if (src === 'ledger') return '来源：桥自有任务台账（.webcode-tasks/ledger.json）';
       if (src === 'disk') return '来源：磁盘状态（AgentTeams 未提供实时数据）';
       return null;
-    }
-
-    /**
-     * 花名册行的状态词与颜色档。
-     *
-     * **词必须与颜色同时出现**（doc/research/agent-ui-design-references.md §1
-     * 点名：颜色不得是唯一载体），因此返回的是 `{k, t}` 一对，调用方两个都要画。
-     *
-     * `inactive` 的官方语义是「成员存在但未加载，唤醒时仍会收到排队消息」
-     *（agent-team README.md:63）。旧实现把它显示成「已停止」，用户会以为成员
-     * 没了、要去重新创建——而正确动作只是发消息唤醒它。真正终态（done/completed）
-     * 与停用（stopped）另算，不与该词混用。
-     *
-     * 提到模块作用域是因为设置页花名册与任务板读**同一份**状态语义：
-     * 两处各写一份迟早会出现「花名册说空闲、任务板说工作中」。
-     *（0.19.0：原先这里还并列了「Team 面板」，那份右栏花名册面板已删除。）
-     */
-    function rosterStateOf(x) {
-      const s = String(x?.status || x?.state || '').toLowerCase();
-      if (['running', 'working', 'busy'].includes(s)) return { k: 'ok', t: '工作中' };
-      if (['idle'].includes(s)) return { k: 'idle', t: '空闲' };
-      if (['provisioning', 'starting', 'pending'].includes(s)) return { k: 'idle', t: '启动中' };
-      if (['failed', 'error'].includes(s)) return { k: 'bad', t: '失败' };
-      if (['inactive'].includes(s)) return { k: '', t: '未加载（可唤醒）' };
-      if (['stopped', 'done', 'completed'].includes(s)) return { k: '', t: '已结束' };
-      return { k: '', t: s || '未知' };
     }
 
     const MODEL_NAMES = { deepseek: 'DeepSeek' };
@@ -439,7 +438,7 @@ window.__ModuleLoader__.load({
         h('div', { className: 'hwb-stat-cols' },
           blocks.map((b, i) => h(React.Fragment, { key: b.title || i },
             block(b.title, Array.isArray(b.rows) ? b.rows : [], i === 0 ? 'live' : '')))),
-        h('p', { className: 'hwb-hint' }, '口径：只统计**发送前那段主动等待**（发送间隔补满 + 限流退避重试），不含模型思考与生成耗时；与本会话输入框底下那枚药丸同源同口径。'));
+        h('p', { className: 'hwb-hint' }, '口径：只统计发送前的主动等待，不含模型思考与生成耗时（与输入框底下的药丸同源）。'));
     }
 
     // ---- 0.16.18：官方 dock 行的适配（**旧实现已失效，这里说清为什么**）---------
@@ -479,8 +478,45 @@ window.__ModuleLoader__.load({
     // `display:inline-flex` 的药丸：居中、间距、换行全部由官方那条 `uV2eYG_dock`
     // 决定。跨度更小、依赖更少，也不再需要盯着 body 等官方行出现。
 
+    /**
+     * 会话身份的**容错归一**（0.19.2）。
+     *
+     * 为什么需要它：`conversation.composer.dock` 是 `scope: 'session'` 槽，宿主把
+     * 作用域绑定的 `key` 作为第一个位置参数传给我们声明的 `inject`。0.1.7 的
+     * `runInject`（ui-renderer/src/client/scoped-slots.tsx）与 0.1.6 逐字相同，仍是
+     * `args.push(binding.key)`，而 ui-session 的会话绑定把 `key` 设为 `binding.sessionId`
+     * ——按契约它应该是**字符串**。
+     *
+     * 但本项目已经在同一个槽位上踩过一次「形状漂移」：设置页那处 `inject: (sessionId) =>
+     * …` 在 root 作用域下拿到的是 actions 对象，于是服务端收到一个对象、花名册恒回
+     * `no-session-id`（见 `SettingsSection` 上方 0.15.3 的注释）。代价是**静默的**：
+     * `wait-stats` 用非字符串的 sessionId 会回 `label: ''`，而本组件在 `label` 为空时
+     * 整行不渲染——用户看到的就是「药丸没了」，控制台一句错误都没有。
+     *
+     * 真机实测（本机 0.1.7-alpha.2，POST /__webcode/wait-stats）：
+     *   sessionId 为字符串        → label「29 分 39 秒 · 等待占比 67%」
+     *   sessionId 为对象/缺省/null → label 为空 ⇒ 整行不渲染
+     *
+     * 因此这里把三种已知形态都接住，而不是赌宿主一定给字符串。多认一种形态的成本是
+     * 三行代码，漏认的代价是一块 UI 无声消失。
+     *
+     * @param {unknown} value inject 传进来的会话身份
+     * @returns {string|null} 可用的会话 id
+     */
+    function sessionIdOf(value) {
+      if (typeof value === 'string') return value || null;
+      if (value && typeof value === 'object') {
+        if (typeof value.key === 'string' && value.key) return value.key;
+        if (typeof value.sessionId === 'string' && value.sessionId) return value.sessionId;
+      }
+      return null;
+    }
+
     function WaitLine(owner) {
-      const sessionId = owner?.sessionId || null;
+      // 会话身份走与设置页**同一个**取值函数：官方 standard prop `useSessions` 优先，
+      // 槽 inject 的绑定键回落。只认 inject 那一条，就是「药丸整行消失而控制台无声」
+      // 那个缺陷的形状（见 sessionIdOf）。
+      const sessionId = useCurrentSessionId(owner);
       const [data, setData] = React.useState(null);
       const [open, setOpen] = React.useState(false);
       // 0.16.24：本轮是否**正在等待发送**。服务端在 live 期间每秒现算文案，
@@ -687,7 +723,7 @@ window.__ModuleLoader__.load({
               row?.file || (data ? '（未提供路径）' : '加载中…')),
             h('button', { type: 'button', disabled: !row, onClick: openFile }, '用默认程序打开'),
             openNotice && h('span', { className: 'hwb-hint' }, openNotice))),
-        h('p', { className: 'hwb-hint' }, '本网站指令：只对本站点生效，注入该站点新网页会话的首条消息。'),
+        h('p', { className: 'hwb-hint' }, '本网站指令：只对本站点生效。'),
         h('textarea', {
           className: 'hwb-prompt-input', value: draft, rows: 4, maxLength: 4000,
           placeholder: '例如：本网站回答保持中文，先给结论再给依据。',
@@ -726,14 +762,13 @@ window.__ModuleLoader__.load({
           ? h('p', { className: 'hwb-hint' }, '当前工具清单是占位示例——发送第一条消息后换成该会话的真实清单。')
           : null,
         rows.map(row => h('div', { key: row.siteId, className: 'hwb-site-prompt' },
-          h('div', { className: 'hwb-row' },
-            h('span', { className: 'hwb-row-label' }, row.siteName),
-            h('div', { className: 'hwb-row-main' },
-              h('span', { className: 'hwb-hint' },
-                '实际使用：' + ((variantById.get(row.variantId) || {}).label || row.variantId)),
-              h('code', { className: 'hwb-filepath', title: row.file || '' }, row.file || ''))),
+          h('div', { className: 'hwb-site-prompt-head' },
+            h('span', { className: 'hwb-site-prompt-name' }, row.siteName),
+            h('span', { className: 'hwb-site-prompt-variant' },
+              '实际使用：' + ((variantById.get(row.variantId) || {}).label || row.variantId))),
+          h('code', { className: 'hwb-filepath hwb-site-prompt-path', title: row.file || '' }, row.file || ''),
           h('details', { className: 'hwb-site-prompt-details' },
-            h('summary', null, '查看该协议的完整模板'),
+            h('summary', null, '查看完整模板'),
             h('pre', null, row.text)))),
         data.active?.tools?.length
           ? h('p', { className: 'hwb-hint' }, '本会话工具：' + data.active.tools.join(', '))
@@ -756,15 +791,13 @@ window.__ModuleLoader__.load({
         try {
           const r = await api('settings', { extraPrompt: value });
           setSaved(r.extraPrompt || ''); setValue(r.extraPrompt || '');
-          setNotice('已保存，后续每个新网页会话的首轮提示词都会包含「全局指令」。');
+          setNotice('已保存。');
           onSaved?.();
         } catch (e) { setError(e.message); }
         finally { setBusy(false); }
       }
       return h('div', { className: 'hwb-import' },
-        // 0.16.38：文案压到一句（完整解释见 doc/settings-copy.md §2.1）。站点页的
-        // 「本网站指令」是另一段，两者分开之后这里不再需要「唯一可编辑」那套说明。
-        h('p', { className: 'hwb-hint' }, '追加一段 [全局指令] 注入每个新网页会话的首条消息。'),
+        // 说明只在卡头那一句（0.19.x：这里与卡头各写一遍，用户报「重复！」）。
         h('textarea', {
           className: 'hwb-prompt-input', value, rows: 5, maxLength: 4000,
           placeholder: '例如：始终保持工具调用格式；回答简洁；先读文件再下结论。',
@@ -812,12 +845,12 @@ window.__ModuleLoader__.load({
       const emptyOption = placeholder ? h('option', { key: '__follow', value: '' }, placeholder) : null;
       return h('select', { className: 'hwb-model-select', value: value || '', disabled, onChange: e => onChange(e.target.value) },
         emptyOption,
-        aliasHit ? h('option', { key: aliasHit.id, value: aliasHit.id }, aliasHit.name + '（兼容别名）') : null,
+        aliasHit ? h('option', { key: aliasHit.id, value: aliasHit.id }, aliasHit.name + ' · 兼容别名') : null,
         [...groups.entries()].map(([sid, list]) => h('optgroup', { key: sid, label: siteName(sid) },
           // 0.14.0 起 m.name 自带站点短键（`z.ai/glm-5.3`），这里不再重复拼
           // siteName——旧写法会渲染成「Z.ai (GLM 海外版) · z.ai/glm-5.3」。
           list.map(m => h('option', { key: m.id, value: m.id },
-            m.name + (m.experimental ? '（实验）' : '') + (m.thinking ? ' · 深度思考' : '') + (m.vision ? ' · 识图' : ''))))));
+            m.name + (m.experimental ? ' · 实验' : '') + (m.thinking ? ' · 深度思考' : '') + (m.vision ? ' · 识图' : ''))))));
     }
 
     /**
@@ -830,171 +863,19 @@ window.__ModuleLoader__.load({
      * onlySiteId：只渲染该站点一行（子代理卡内联所选子代理站点的账户管理，
      * 与「账户与登录管理」卡片同一套状态与端点，不另起第二套真相）。
      */
-    /**
-     * 「谁在跑」只读花名册：把**子代理**与 **Team 成员**分开展示（0.14.9）。
-     *
-     * 用户原话：「子代理和team效果需要单独区分」。为什么必须分开，而不是合成
-     * 一个列表——依据是两者的**结构性差异**（doc/research/agent-ui-design-references.md
-     * §4.5，引官方文档对比表）：
-     *   - 子代理：结果**回报给调用方** → 在 UI 上**从属于**发起它的会话（缩进层级）。
-     *   - Team：成员**互相发消息**、共享任务板 → 在 UI 上**平级**（同一层级）。
-     * 混在一起会出现两种误导：把「父会话的一个子任务」看成与 Team 成员同等，
-     * 或把平级的 teammate 画成某个会话的下属。
-     *
-     * 数据来源纪律（与账户头像同一条）：**只读、不造假状态**。
-     * 这里只消费 /__webcode/status 的四段：`subAgents`（子代理）、`team`/`members`
-     * （Team 成员，两个名字同值，官方 TeamView 用 members）、`tasks`（团队任务板）。
-     * 0.15.0 起由服务端 lib/roster.js 从官方 agentTeams / subagents 服务与本会话
-     * 的 subagentCatalog 投影**真实读出**，不再是空数组占位。
-     *
-     * 四个分区各自可能「读不到」而不是「为空」，两者在界面上必须分开说：
-     *   • 确实没有成员 → 「当前没有正在运行的子代理或 Team 成员。」
-     *   • 读不到       → 「读不到花名册：<原因>」
-     * 旧实现把两者都画成同一句话，用户无法判断是 Team 没在用还是桥坏了。
-     * 空列表是**状态**（确实没有），不是错误；`*Error` 才是错误。
-     *
-     * sessionId 必须一起带上：subagentCatalog 是**父会话自己的**持久化投影，
-     * 不带会话身份的话服务端只能猜，多会话并行时会显示别人的子代理。
-     * 0.15.4 起服务端还会用它当 Team 的**唯一权威凭据**——旧实现挨个试
-     * `agents.list()`，而官方 `tryMembership` 对任何顶层会话都返回 lead 且不抛错，
-     * 于是面板读到的是「进程里第一个别的会话的 lead」。
-     */
-    function AgentRoster({ sessionId }) {
-      const [rows, setRows] = React.useState(null);
-      React.useEffect(() => {
-        if (!sessionId) { setRows({ sub: [], team: [], tasks: [], err: null, taskErr: null }); return () => {}; }
-        let alive = true;
-        const pull = () => api('status', { sessionId })
-          .then(r => {
-            if (!alive) return;
-            setRows({
-              sub: Array.isArray(r?.subAgents) ? r.subAgents : [],
-              // 两个名字取同一个值：官方 TeamView 叫 members，0.15.0 起本项目
-              // 叫 team。哪一端改名都不会让这行读到 undefined。
-              team: Array.isArray(r?.team) ? r.team : (Array.isArray(r?.members) ? r.members : []),
-              tasks: Array.isArray(r?.tasks) ? r.tasks : [],
-              // 原因合并成一个可读句子；**同类原因只报一次**（Team 侧与任务板
-              // 同源失败时会把同一句话重复两遍，读起来像两个问题）。
-              err: uniqReasons([r?.teamError || r?.membersError, r?.subAgentsError]),
-              taskErr: uniqReasons([r?.tasksError]),
-              // 来源标注（0.19.0）：服务端一直在透出这两个字段，但此前**只有已删的
-              // 右栏 Team 面板**读它。花名册是存活的那个消费者，必须一并取进来，
-              // 否则下面的 `sourceText(rows.teamSource)` 恒为 undefined —— 看着像
-              // 「接上了」，实际什么都没显示（本项目记过的「只声明不接线」形态）。
-              teamSource: r?.teamSource ?? null,
-              tasksSource: r?.tasksSource ?? null,
-            });
-          })
-          .catch(e => {
-            if (alive) {
-              setRows({
-                sub: [], team: [], tasks: [], err: String(e?.message || e), taskErr: null,
-                teamSource: null, tasksSource: null,
-              });
-            }
-          });
-        pull();
-        const t = setInterval(pull, 5000);
-        return () => { alive = false; clearInterval(t); };
-      }, [sessionId]);
-      if (rows === null) return h('p', { className: 'hwb-hint' }, '花名册加载中…');
-      // 状态词必须与颜色**同时**出现（调研 §5 点名：颜色不得是唯一载体）。
-      // 语义本体在模块作用域的 rosterStateOf——任务板与这里读同一份。
-      const stateOf = rosterStateOf;
-      const row = (x, key, nested) => {
-        const st = stateOf(x);
-        return h('div', { key, className: 'hwb-roster-row' + (nested ? ' nested' : '') },
-          h('span', { className: 'hwb-dot ' + st.k, 'aria-hidden': 'true' }),
-          h('span', { className: 'hwb-roster-name' },
-            // 平级/从属的差别在**缩进**里表达（nested 走 CSS padding-left），
-            // 不靠颜色，也不靠文案重复解释。
-            String(x?.name || x?.id || x?.agentId || '（未命名）')),
-          // 模型（Team 成员行才有）：谁跑在哪个模型上是 Team 与子代理最直观的
-          // 差别之一，只读展示，不做解释。
-          x?.model && h('span', { className: 'hwb-roster-model' }, String(x.model)),
-          h('span', { className: 'hwb-roster-state' }, st.t),
-          // 任务归属：**只统计归到这个成员名下的**任务（服务端按官方 ownerName 算）。
-          // 旧实现给的是团队任务总数，对每个成员都一样——那是假事实。
-          x?.taskCount != null && h('span', { className: 'hwb-roster-task' }, '任务 ' + x.taskCount));
-      };
-      /**
-       * 任务板：**团队级**事实（官方 TeamView.tasks），不是某个成员的属性。
-       *
-       * 为什么值得单独一块 UI：「Team 成员平级」如果只显示名字，用户看不出他们
-       * 在协作什么。这里如实显示状态、归属、被谁卡住、写哪些文件、是否就绪
-       * ——全部原样来自官方 `listTasks`，桥不重新解释。
-       */
-      const taskBoard = (tasks) => h('div', { className: 'hwb-roster-group' },
-        h('p', { className: 'hwb-roster-head' }, 'Team 任务板'),
-        tasks.map((t, i) => {
-          const s = String(t?.status || '');
-          const label = s === 'in_progress' ? '进行中' : s === 'completed' ? '已完成' : s === 'pending' ? '待办' : (s || '未知');
-          const k = s === 'in_progress' ? 'ok' : s === 'completed' ? '' : 'idle';
-          return h('div', { key: 'k' + i, className: 'hwb-roster-row' },
-            h('span', { className: 'hwb-dot ' + k, 'aria-hidden': 'true' }),
-            h('span', { className: 'hwb-roster-name' }, String(t?.subject || t?.id || '（无标题）')),
-            t?.ownerName && h('span', { className: 'hwb-roster-model' }, String(t.ownerName)),
-            h('span', { className: 'hwb-roster-state' }, label),
-            // 被阻塞的任务必须能看出「被什么卡住」，否则「ready=false」只是一句黑话。
-            Array.isArray(t?.blockedBy) && t.blockedBy.length > 0
-              && h('span', { className: 'hwb-roster-task' }, '阻塞于 ' + t.blockedBy.length + ' 项'),
-            // 写范围重叠是 advisory 而不是锁（官方 writeScopeWarnings）——
-            // 官方已经算好了，原样透出，不在桥里重算。
-            Array.isArray(t?.writeScopeWarnings) && t.writeScopeWarnings.length > 0
-              && h('span', { className: 'hwb-roster-task' }, '写范围告警'));
-        }),
-        h('p', { className: 'hwb-hint' }, '任务板是团队级的：成员平级、写范围只是提醒而不是锁。'));
-      const sub = rows.sub, team = rows.team, tasks = rows.tasks;
-      if (!sub.length && !team.length && !tasks.length) {
-        // 「确实没有」与「读不到」是两件事，界面必须分开说：
-        // 前者是正常状态，后者是桥/官方包的问题，用户要能据此去排查。
-        if (rows.err) {
-          return h('div', { className: 'hwb-roster' },
-            h('p', { className: 'hwb-hint' }, '读不到花名册（' + rows.err + '）：这不代表没有成员在跑，而是数据源不可用。'));
-        }
-        // 0.15.5（P3-4）：空 Team + 无错误时，必须明说「本会话不是 Team 成员」。
-        //
-        // 官方语义（agent-team README.md:128）：**每个普通顶层会话都是隐式 Team 的
-        // Lead**；而 Team 工具只对成员安装（tool-agent-team/lib/index.js:533）。
-        // 所以「自己是 lead」不等于「存在一个团队」——旧实现只画一行 lead，
-        // 让用户以为有团队在协作，实际上 `spawn_teammate` 根本没挂载。
-        // 这里如实说明状态，并给出可执行的下一条动作。
-        return h('div', { className: 'hwb-roster' },
-          h('p', { className: 'hwb-hint' }, '本会话不是 Team 成员（Team 工具未挂载）。'),
-          h('p', { className: 'hwb-hint' }, '也没有正在运行的子代理。子代理与 Team 是两件事：子代理从属于发起它的会话，Team 成员是同一 Lead 下的平级协作域。'));
-      }
-      return h('div', { className: 'hwb-roster' },
-        // 部分可用时同样要说清楚：有 Team 行但子代理读不到，不能装作子代理为空。
-        rows.err && h('p', { className: 'hwb-hint' }, '部分分区读不到（' + rows.err + '）。'),        // 子代理区：缩进——它们是**本会话**派生出来的，不是平级的同事。
-        sub.length > 0 && h('div', { className: 'hwb-roster-group' },
-          h('p', { className: 'hwb-roster-head' }, '子代理（属于本会话）'),
-          sub.map((x, i) => row(x, 's' + i, true))),
-        // Team 区：平级。并如实说明「并行的是会话与呈现，不是文件系统」
-        // ——官方明文没有 worktree、没有文件锁，假装隔离会误导。
-        team.length > 0 && h('div', { className: 'hwb-roster-group' },
-          h('p', { className: 'hwb-roster-head' }, 'Team 成员（平级）'),
-          team.map((x, i) => row(x, 't' + i, false)),
-          h('p', { className: 'hwb-hint' }, 'Team 成员共享同一个 checkout：并行的是会话与呈现，不是文件系统。')),
-        tasks.length > 0 && taskBoard(tasks),
-        // 来源标注（0.19.0 补）：`roster.js` 一直在算 `teamSource` / `tasksSource`，
-        // 但此前**只有右栏那份 Team 面板**渲染过它。那份面板已按用户要求删除，
-        // 于是 `teamSource` 失去了唯一消费者（第二轮独立审查抓到这一点）。
-        // 这里把它接到**存活的花名册**上：磁盘回落时成员/任务没有实时 activity，
-        // 用户必须知道，否则「空闲」会被读成「真的空闲」而不是「这里没有实时数据」。
-        sourceText(rows.teamSource) && h('p', { className: 'hwb-hint' }, sourceText(rows.teamSource)),
-        sourceText(rows.tasksSource) && h('p', { className: 'hwb-hint' }, sourceText(rows.tasksSource)));
-    }
 
     /**
      * 花名册数据的**唯一**拉取点（0.15.12）。
      *
-     * 任务板面板与设置页花名册读的是同一份 `/__webcode/status`。
+     * 任务板面板从它取 `/__webcode/status` 的花名册载荷（含 `teamSource` /
+     * `tasksSource` 来源标注）。
      * （0.19.0：原先这里还写着「Team 面板」——那份右栏花名册面板已按用户要求删除，
-     * 理由见下方「Team 面板标签页：已删除」处；本函数剩下的两个消费者是任务板与
-     * 设置页花名册，两者仍在用，故本函数与 `roster.js` 的官方读取都保留。）
-     * 三处各写一遍 fetch 会有两个立刻可见的代价：轮询相位不同（同屏出现
+     * 理由见下方「Team 面板标签页：已删除」处。0.19.x：设置页那张「正在运行
+     * （子代理 / Team）」卡也按用户要求删除，于是消费者只剩任务板面板；本函数与
+     * `roster.js` 的官方读取仍在用，保留。）
+     * 旧实现三处各写一遍 fetch 会有两个立刻可见的代价：轮询相位不同（同屏出现
      * 「3 个成员」与「2 个成员」），以及错误处理各不相同（一处说「读不到」、
-     * 另一处静默空列表）。所以只留一个 hook，三处都从这里取。
+     * 另一处静默空列表）。所以只留一个 hook，需要的地方都从这里取。
      *
      * 返回 `data === null` 表示**还没拿到第一份**（渲染加载态），与
      * `data.{team,tasks}` 为空数组（确实没有）是两件不同的事——这与本文件
@@ -1025,7 +906,7 @@ window.__ModuleLoader__.load({
       return state;
     }
 
-    /** 官方任务状态 → 中文标签与色档。任务板与设置页花名册共用，避免两处措辞漂移。 */
+    /** 官方任务状态 → 中文标签与色档（任务板面板在用；色点只是加强，词与色同时出现）。 */
     function taskStatusOf(s) {
       const v = String(s || '');
       if (v === 'in_progress') return { k: 'ok', t: '进行中' };
@@ -1465,7 +1346,10 @@ window.__ModuleLoader__.load({
             h('p', { className: 'hwb-hint' }, '「为什么整块板没动」的答案在这里：处理第一行即可解锁最多的下游。'))
           : null,
 
-        // 来源标注与说明
+        // 来源标注与说明。0.19.x：`teamSource` 原先只由设置页那张花名册卡渲染，
+        // 卡片按用户要求删除后它一度没有消费者（服务端算、前端不读，正是本项目
+        // 记过的「只声明不接线」）。花名册载荷的存活消费者是这里，因此由它接上。
+        sourceText(data?.teamSource) && h('p', { className: 'hwb-hint' }, sourceText(data?.teamSource)),
         sourceText(data?.tasksSource) && h('p', { className: 'hwb-hint' }, sourceText(data?.tasksSource)),
         h('p', { className: 'hwb-hint' },
           '就绪（ready）取官方算好的判据，桥不重算；阻塞明细、关键路径与结构检查由桥补算。'
@@ -2276,11 +2160,8 @@ window.__ModuleLoader__.load({
             className: 'hwb-hint indent ' + (results[s.accountKey].ok ? 'ok' : results[s.accountKey].tone === 'idle' ? '' : 'bad'),
             role: 'status',
           }, (results[s.accountKey].ok ? '✓ ' : '✗ ') + s.displayName + '：' + results[s.accountKey].text))),
-        h('p', { className: 'hwb-hint indent' },
-          subHint
-            ? '子代理所选站点的账户行：登录/更换账户与其它站点同一套逻辑（打开浏览器窗口一次性登录），登录态按站点各自持久化；与主线同站点时两者天然共享登录。'
-            : '登录会打开浏览器窗口（本插件自带 Chromium，无需你另外安装），请在窗口内完成一次性登录（扫码/验证码/密码均可），检测到成功后自动切回无头运行。'
-            + '各站点登录态分开保存在各自 profile 里，互不串号；账户失效时在这里「更换账户」即可。'));
+        subHint ? null : h('p', { className: 'hwb-hint indent' },
+          '登录会打开浏览器窗口，请在窗口内完成一次性登录，成功后自动切回无头运行。'));
     }
 
     // 0.15.10：设置页的「累计等待发送」区块（WaitStats）已删除。
@@ -2291,7 +2172,7 @@ window.__ModuleLoader__.load({
     // 「默认只给一个数、点开才有明细」的统计药丸契约一致。
 
     /**
-     * 设置页外壳：把「当前会话 id」接进来，再交给 `Settings` 渲染。
+     * 设置页外壳：经官方 standard prop 取会话身份，再交给 `Settings` 渲染。
      *
      * ## 为什么不直接用槽的 `inject`
      *
@@ -2313,9 +2194,10 @@ window.__ModuleLoader__.load({
      * ## 为什么要包一层组件
      *
      * hook 必须在组件体内无条件调用。`Settings` 是纯展示组件（它自己的 useState
-     * 序列不能因为我们偶尔多调一次 hook 而变化），把会话读取放在这一层，`Settings`
-     * 就继续只吃一个普通的 `sessionId` 值——这也是 `client-render.test.mjs` 直接
-     * 调 `Settings(props)` 的既有契约。
+     * 序列不能因为我们偶尔多调一次 hook 而变化），所以会话读取留在这一层。
+     *（0.19.x：设置页里的花名册卡已按用户要求删除，`Settings` 本体不再消费会话
+     * id；这一层与 `useCurrentSessionId` 保留——那个 hook 仍是任务板面板与等待药丸
+     * 的会话身份入口，本槽「不得用 root 槽的 inject 冒充会话来源」也由护栏钉住。）
      */
     /**
      * **中央区三列模型并列对比视图**（0.17.3，用户需求 5：发挥多站点优势，在中心对话区并列不同模型回复）。
@@ -2597,26 +2479,24 @@ window.__ModuleLoader__.load({
      * 读当前会话 id：优先官方 `useSessions`，回落到 props 上已有的 `sessionId`。
      *
      * 回落分支是给**测试桩**与「会话尚未建立」这两种正常情况用的：此时拿不到
-     * 会话身份，花名册会如实显示「读不到：no-session-id」，而不是整块面板崩掉。
+     * 会话身份，消费它的面板会如实显示「读不到：no-session-id」，而不是整块崩掉。
      */
     function useCurrentSessionId(props) {
       const useSessions = typeof props?.useSessions === 'function' ? props.useSessions : noSessions;
       // 无条件调用——条件调用正是本文件上方 SiteAccounts 刚踩过的那条 hooks 规则。
       const current = useSessions(s => (s && s.current) || null);
-      return current || props?.sessionId || null;
+      // 两条来源都过 sessionIdOf：官方 standard prop 给的是字符串，而 inject 那条在
+      // 作用域漂移时可能是包装对象（见 sessionIdOf 的注释）。
+      return sessionIdOf(current) || sessionIdOf(props?.sessionId);
     }
      /**
      * 设置页本体（纯展示）。
      *
-     * `sessionId` 由 `SettingsSection` 经官方 `useSessions` 取好后作为普通 prop 传进来。
-     * 这里刻意写成 `props?.sessionId` 而不是解构，因为渲染入口不止一个：
-     * 宿主槽调用、以及测试里直接调 `Settings()` 都会走到这里，而
-     * 「拿不到会话身份」是一个**必须能优雅降级**的正常情况（降级后花名册给
-     * 「读不到：no-session-id」，而不是整块面板崩掉）。
-     * 用解构会让缺 props 直接抛 TypeError，把整页设置打成白屏。
+     * 会话身份由外层 `SettingsSection` 经官方 standard prop `useSessions` 取好；
+     * 本页不再消费它——原先唯一的消费者是「正在运行」卡的花名册，那张卡已按用户
+     * 要求删除。那一层与 `useCurrentSessionId` 保留：任务板与等待药丸都在用。
      */
     function Settings(props) {
-      const sessionId = props?.sessionId || null;
       const [status, setStatus] = React.useState(null);
       const [error, setError] = React.useState('');
       const [pending, setPending] = React.useState(false);
@@ -2690,12 +2570,10 @@ window.__ModuleLoader__.load({
       const [slotGaps, setSlotGaps] = React.useState({});
       const [slotGapSaved, setSlotGapSaved] = React.useState({});
       const [slotGapNotice, setSlotGapNotice] = React.useState('');
-      // 服务端算好的投递读数（当前生效值 / 最近一次实际投递 / 探针），见
-      // web-control 的 GET attach-status：文案只在服务端算一份，bundle 里不写第二份
-      // （本文件是单文件 bundle，import 不到 lib/，两份格式化必然漂移）。
+      // 服务端算好的投递读数（当前生效值），见 web-control 的 GET attach-status：
+      // 文案只在服务端算一份，bundle 里不写第二份（本文件是单文件 bundle，
+      // import 不到 lib/，两份格式化必然漂移）。
       const [attachStatus, setAttachStatus] = React.useState(null);
-      const [probeBusy, setProbeBusy] = React.useState(false);
-      const [probeResult, setProbeResult] = React.useState('');
       const refresh = () => api('status').then(s => setStatus(s)).catch(() => {});
       React.useEffect(() => {
         let alive = true;
@@ -2830,36 +2708,7 @@ window.__ModuleLoader__.load({
         } catch (e) { setError(e.message); }
         finally { setPending(false); }
       }
-      /**
-       * 附件探针：只上传、**绝不发送**（0.16.3）。
-       *
-       * 为什么需要一个按钮：「附件到底行不行」此前只能靠发一条真消息（看模型有没有
-       * 读到附件）来回答——那是拿一次真实会话与一次站点风控换一个读数。真机失败读数
-       * `attachTransport = {fallback:true, code:'ATTACH_NOT_CONFIRMED', total:417276}`
-       * 正是卡在这上面：入口在（GET attach-entry: available:true、accept 含 .md），
-       * 上传后却拿不到任何可见证据，于是 41.7 万字符整段回落纯文本。
-       *
-       * `apiSoft` 而不是 `api`：探针「未确认附件」时服务端回 `{ ok:false, code, … }`
-       * 但 HTTP 是 200，`api` 会把 ok:false 当异常抛——那个失败现场（候选选择器 ×
-       * 命中数 × DOM 片段）恰恰是最要紧的读数，不能被显示层吞掉。
-       */
-      async function runAttachProbe() {
-        setProbeBusy(true); setError('');
-        try {
-          const r = await apiSoft('attach-probe', { text: '# webcode attach probe\n' + new Date().toISOString() + '\n' }, 45000);
-          const d = r.data || {};
-          const clean = '；清理 ' + (d.cleaned ? '成功（' + (d.cleanedBy || '') + '）'
-            : '未完成（' + (d.cleanupNote || d.cleanedBy || '') + '）');
-          setProbeResult(d.code
-            ? '探针未确认：' + d.code + '（' + (d.chars || 0) + ' 字符' + clean + '）'
-              + (d.domSnippet ? ' 现场 ' + d.domSnippet : '')
-            : '探针已确认：证据 ' + (d.evidence || '(无)') + '（' + (d.chars || 0) + ' 字符' + clean + '）');
-          if (!r.data) setProbeResult('探针失败：' + (r.error || '无响应'));
-          const s2 = await apiSoft('attach-status');
-          if (s2.ok) setAttachStatus(s2.data);
-        } catch (e) { setError(String(e?.message || e)); }
-        finally { setProbeBusy(false); }
-      }
+
       const relay = status?.relay;
       const driver = status?.driver;
       const build = status?.build;
@@ -2874,7 +2723,9 @@ window.__ModuleLoader__.load({
       return h('section', { className: 'hwb-settings' },
         h('h2', null, 'Harness Web Bridge'),
         build?.hash && h('p', { className: 'hwb-build' }, '构建指纹：' + build.hash + (build.version ? ' · v' + build.version : '')),
-        h('p', { className: 'hwb-lead' }, '用已登录的 Edge 网页驱动内容服务：右侧直接显示可操作的真实网页，模型生成与工具调用均以网页原生流程执行，与 API 调用同源。'),
+        // 0.19.x：原文写的是「用已登录的 Edge 网页」，那是驱动改造前的措辞——桥用的是
+        // 自带的 Chromium（系统浏览器只是兜底），写 Edge 会让用户以为要另装一个。
+        h('p', { className: 'hwb-lead' }, '用已登录的网页驱动内容服务：右侧直接显示可操作的真实网页，模型生成与工具调用均以网页原生流程执行，与 API 调用同源。'),
 
         // ---- 站点 tab 条（0.16.33，0.16.38 改为滚轮横向滚动）------------------
         //
@@ -2937,7 +2788,7 @@ window.__ModuleLoader__.load({
                     setSlotGaps(p => ({ ...p, [settingsTab]: Number(e.target.value) }));
                   },
                 },
-                  presets.map(p => h('option', { key: p, value: String(p) }, p === 0 ? '0 秒（关闭）' : (p / 1000) + ' 秒')),
+                  presets.map(p => h('option', { key: p, value: String(p) }, p === 0 ? '关闭' : (p / 1000) + ' 秒')),
                   h('option', { value: 'custom' }, '自定义…')),
                 h('input', {
                   type: 'number', className: 'hwb-model-select', style: { maxWidth: '130px' },
@@ -2958,9 +2809,8 @@ window.__ModuleLoader__.load({
                 slotGapNotice && h('span', { className: 'hwb-hint' }, slotGapNotice))),
             h('p', { className: 'hwb-hint indent' },
               cur === null
-                ? '当前**未覆盖**：该站点跟随上面的全局间隔（' + (Math.round(Number(sendGapMs) || 0) / 1000) + ' 秒）。保存后只影响 ' + siteName(settingsTab) + '。'
-                : '当前**已覆盖**为 ' + (cur / 1000) + ' 秒——只对 ' + siteName(settingsTab) + ' 生效，其它站点不受影响。点「跟随全局」可清除。'),
-            h('p', { className: 'hwb-hint indent' }, '回落链：本站点覆盖 → 全局间隔。这与账户槽是同一套设计（lib/accounts.js 的 sendGapForSlot），本版只是把这一档接上界面。'));
+                ? '未覆盖：跟随全局间隔 ' + (Math.round(Number(sendGapMs) || 0) / 1000) + ' 秒'
+                : '已覆盖为 ' + (cur / 1000) + ' 秒，只对本站点生效（点「跟随全局」清除）'));
         })(),
 
         // ---- 站点页：模型管理（0.16.38）-------------------------------------
@@ -3001,7 +2851,7 @@ window.__ModuleLoader__.load({
               siteModelNotice && h('span', { className: 'hwb-hint' }, siteModelNotice))),
           h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '主线落点'),
             h('div', { className: 'hwb-row-main' },
-              h('span', { className: 'hwb-hint' }, (defaultModel || '（未设置）') + ' · ' + currentModelName(defaultModel)),
+              h('span', { className: 'hwb-hint' }, defaultModel ? defaultModel + ' · ' + currentModelName(defaultModel) : '（未设置）'),
               h('button', {
                 disabled: pending || !models,
                 title: '把主线默认模型设为本站点的默认模型',
@@ -3021,9 +2871,9 @@ window.__ModuleLoader__.load({
           settingsTab === 'deepseek' && h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '深度思考'),
             h('div', { className: 'hwb-row-main' },
               h('select', { className: 'hwb-model-select', value: thinkMode, disabled: pending, onChange: e => setThinkMode(e.target.value) },
-                h('option', { value: 'auto' }, '自动（按所选模型的默认思考行为）'),
-                h('option', { value: 'on' }, '始终开启（强制打开网页「深度思考」开关）'),
-                h('option', { value: 'off' }, '始终关闭（追求速度）')),
+                h('option', { value: 'auto', title: '按所选模型的默认思考行为' }, '自动'),
+                h('option', { value: 'on', title: '强制打开网页「深度思考」开关' }, '始终开启'),
+                h('option', { value: 'off', title: '追求速度' }, '始终关闭')),
               h('button', { disabled: pending || thinkMode === thinkSaved, onClick: () => saveSetting('thinkMode', thinkMode, r => { const v = ['on', 'off', 'auto'].includes(r.thinkMode) ? r.thinkMode : thinkMode; setThinkMode(v); setThinkSaved(v); setThinkNotice('已保存。下次生成起生效。'); }) }, '保存'),
               thinkNotice && h('span', { className: 'hwb-hint' }, thinkNotice))),
           h('p', { className: 'hwb-hint indent' }, '当前网页模型：' + (driver?.selectedModel ? currentModelName(driver.selectedModel) : '未选择（按默认模型）'))),
@@ -3046,12 +2896,9 @@ window.__ModuleLoader__.load({
             disabled: pending,
           })),
 
-        // 谁在跑：子代理与 Team 成员**分开两区**（0.14.9）。
-        // 0.16.38：与其它四张卡一样**只在全局页**出现——「正在运行」是进程级事实，
-        // 不属于任何一个站点 tab。
-        !settingsTab && h('div', { className: 'hwb-card' },
-          h('h3', { className: 'hwb-group first' }, '正在运行（子代理 / Team）'),
-          h(AgentRoster, { sessionId })),
+        // 0.19.x：原先这里有一张「正在运行（子代理 / Team）」卡（渲染 AgentRoster）。
+        // 用户判定它不属于设置界面（原话「为什么设置界面需要？？？」），整卡与组件
+        // 一并删除；花名册数据仍由任务板面板经 useRoster 消费，不在这里画第二份。
 
         // ---- 全局页：全局发送间隔（0.16.38）--------------------------------
         //
@@ -3068,7 +2915,7 @@ window.__ModuleLoader__.load({
                 return [
                   h('select', { key: 'gap-preset', className: 'hwb-model-select', style: { maxWidth: '150px' }, value: presets.includes(gap) ? String(gap) : 'custom', disabled: pending,
                     onChange: e => { if (e.target.value !== 'custom') setSendGapMs(Number(e.target.value)); } },
-                    presets.map(p => h('option', { key: p, value: String(p) }, p === 0 ? '0 秒（关闭）' : (p / 1000) + ' 秒')),
+                    presets.map(p => h('option', { key: p, value: String(p) }, p === 0 ? '关闭' : (p / 1000) + ' 秒')),
                     h('option', { value: 'custom' }, '自定义…')),
                   h('input', { key: 'gap-input', type: 'number', className: 'hwb-model-select', style: { maxWidth: '130px' }, min: 0, max: 600000, step: 500, value: gap, disabled: pending,
                     placeholder: '毫秒', title: '两次向同一网站发送之间的最小间隔（毫秒）',
@@ -3091,51 +2938,47 @@ window.__ModuleLoader__.load({
             h('div', { className: 'hwb-row-main' },
               h('select', { className: 'hwb-model-select', value: sendGapBasis, disabled: pending,
                 onChange: e => setSendGapBasis(e.target.value === 'end-to-start' ? 'end-to-start' : 'send-to-send') },
-                h('option', { value: 'send-to-send' }, '距上次发出（send-to-send，防限流）'),
-                h('option', { value: 'end-to-start' }, '距上次回复完成（end-to-start，防贴太紧）')),
+                h('option', { value: 'send-to-send', title: '防限流：距上次发出' }, '距上次发出'),
+                h('option', { value: 'end-to-start', title: '防贴太紧：距上次回复完成' }, '距上次回复完成')),
               h('span', { className: 'hwb-hint' }, sendGapBasis === 'end-to-start'
                 ? '答完那一刻起重新数满间隔。'
-                : '按请求到达计，上一轮跑得久时本轮无需再等。'))),
-          h('p', { className: 'hwb-hint indent' }, '被限流时按 max(间隔, 10 秒) 自动退避重试，最多 2 次。站点级覆盖见该站点的 tab。')),
+                : '按请求到达计，上一轮跑得久时本轮无需再等。')))),
 
         // 提示词投递形态（0.16.3）。用户原话：「没有做到能够把提示词放入文本
         //（设置界面也改为打开文本）导致输出对话一开头就很长 token 窗口」——
         // 附件投递此前既没有开关、也没有读数，用户改不了也看不见。
         // 0.16.38：只在全局页——投递形态是进程级选择，站点差异走驱动自己的站点禁令。
+        //
+        // 0.19.x：机制说明、「最近一次实际投递」与「附件探针」按用户要求撤掉——
+        // 探针是开发者自用工具，不该出现在用户设置界面。只留形态选择 + 一行当前
+        // 生效值；探针能力仍在服务端（POST /__webcode/attach-probe），需要时从 HTTP
+        // 直接调。两个形态的差别挪进 title：界面一行读得完，信息不丢。
         !settingsTab && h('div', { className: 'hwb-card' },
           h('h3', { className: 'hwb-group first' }, '提示词投递'),
           h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '投递形态'),
             h('div', { className: 'hwb-row-main' },
-              h('label', { className: 'hwb-consent', key: 'pt-attach' },
+              h('label', { className: 'hwb-consent', key: 'pt-attach', title: '超过阈值的正文改为附件上传；任何一步失败都自动回落纯文本' },
                 h('input', {
                   type: 'radio', name: 'hwb-prompt-transport', checked: promptTransport === 'attach', disabled: pending,
                   onChange: () => setPromptTransport('attach'),
                 }),
-                h('span', null, '附件投递（默认）')),
-              h('label', { className: 'hwb-consent', key: 'pt-inline' },
+                h('span', null, '附件投递')),
+              h('label', { className: 'hwb-consent', key: 'pt-inline', title: '正文逐字写进网页输入框（旧行为）' },
                 h('input', {
                   type: 'radio', name: 'hwb-prompt-transport', checked: promptTransport === 'inline', disabled: pending,
                   onChange: () => setPromptTransport('inline'),
                 }),
-                h('span', null, '纯文本（永远写进输入框）')),
+                h('span', null, '纯文本')),
               h('button', {
                 disabled: pending || promptTransport === promptTransportSaved,
                 onClick: () => saveSetting('promptTransport', promptTransport, r => {
                   const v = r.promptTransport === 'inline' ? 'inline' : 'attach';
                   setPromptTransport(v); setPromptTransportSaved(v);
-                  setPromptTransportNotice('已保存。下一轮起生效（当前生效值见下方读数）。');
+                  setPromptTransportNotice('已保存。下一轮起生效。');
                 }),
               }, '保存'),
               promptTransportNotice && h('span', { className: 'hwb-hint' }, promptTransportNotice))),
-          h('p', { className: 'hwb-hint indent' }, '「附件投递」把超过阈值的正文改为附件上传，绕开网页输入框的写入卡死与截断（真机事故：41.7 万字符纯文本灌进输入框，整轮 112 秒零事件）；任何一步失败都会自动回落纯文本，消息不会发不出去。「纯文本」= 逐字回到旧行为。'),
-          h('p', { className: 'hwb-hint indent' }, '当前生效：' + (attachStatus?.transportLine || '读数加载中…')),
-          h('p', { className: 'hwb-hint indent' }, '最近一次实际投递：' + (attachStatus?.lastLine || '读数加载中…')),
-          h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '附件探针'),
-            h('div', { className: 'hwb-row-main' },
-              h('button', { disabled: pending || probeBusy, onClick: runAttachProbe },
-                probeBusy ? '探针运行中…（只上传·不发送）' : '只上传·不发送'),
-              h('span', { className: 'hwb-hint' }, probeResult || ('探针 ' + (attachStatus?.probeLine || '尚未运行。'))))),
-          h('p', { className: 'hwb-hint indent' }, '探针会向当前网页会话上传一个 webcode-probe.md，上传后立即尝试清理，并如实报回证据节点、命中数与清理结果——这是「附件到底行不行」唯一不消耗真实会话的读数。')),
+          h('p', { className: 'hwb-hint indent' }, '当前生效：' + (attachStatus?.transportLine || '读数加载中…'))),
 
         !settingsTab && h('div', { className: 'hwb-card' },
           h('h3', { className: 'hwb-group first' }, '连接'),
@@ -3145,7 +2988,7 @@ window.__ModuleLoader__.load({
           //「默认会落到哪个站点」。点它直接跳到对应站点 tab。
           h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '主线落点'),
             h('div', { className: 'hwb-row-main' },
-              h('span', { className: 'hwb-hint' }, (defaultModel || '（未设置）') + ' · ' + currentModelName(defaultModel)),
+              h('span', { className: 'hwb-hint' }, defaultModel ? defaultModel + ' · ' + currentModelName(defaultModel) : '（未设置）'),
               (() => {
                 const sid = String(defaultModel || '').split(':')[0];
                 return sid && SITE_NAMES[sid]
@@ -3161,8 +3004,8 @@ window.__ModuleLoader__.load({
               h('span', null, '启用网页自动化')),
             h('span', { className: 'hwb-hint' },
               consent
-                ? (relay?.consentPersistent ? '已永久保存到本机，首次授权一次即可长期使用。' : '当前运行有效，配置目录不可写入。')
-                : '首次使用请授权一次；关闭后所有网页调用都会被拒绝。'))),
+                ? (relay?.consentPersistent ? '已启用（本机永久保存）' : '已启用（仅本次运行）')
+                : '未启用'))),
 
         !settingsTab && h('div', { className: 'hwb-card' },
           h('h3', { className: 'hwb-group first' }, '速度与等待'),
@@ -3213,8 +3056,8 @@ window.__ModuleLoader__.load({
           h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '子代理网页会话'),
             h('div', { className: 'hwb-row-main' },
               h('select', { className: 'hwb-model-select', value: subAgentMode, disabled: pending, onChange: e => setSubAgentMode(e.target.value) },
-                h('option', { value: 'own' }, '独立（推荐）：每个子代理自己的新网页对话'),
-                h('option', { value: 'share' }, '共用：所有子代理与主会话共用一个网页对话')),
+                h('option', { value: 'own' }, '独立（推荐）：每个子代理一个新对话'),
+                h('option', { value: 'share' }, '共用：与主会话同一对话')),
               h('button', { disabled: pending || subAgentMode === subAgentSaved, onClick: () => saveSetting('subAgentMode', subAgentMode, r => { const v = r.subAgentMode === 'share' ? 'share' : 'own'; setSubAgentMode(v); setSubAgentSaved(v); setSubAgentNotice('已保存。对之后新开的子代理生效。'); }) }, '保存'),
               subAgentNotice && h('span', { className: 'hwb-hint' }, subAgentNotice))),
           h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '子代理站点'),
@@ -3240,7 +3083,7 @@ window.__ModuleLoader__.load({
           // 在 doc/settings-copy.md。
           h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '会话隔离'),
             h('div', { className: 'hwb-row-main' }, h('span', { className: 'hwb-hint' },
-              (driver?.conversationCount ?? 0) + ' 个网页会话槽；子代理按 agentId 分到同账号新对话，与主线上下文互不污染。')))),
+              (driver?.conversationCount ?? 0) + ' 个网页会话槽')))),
 
         // ---- 全局页：全局指令（0.16.38）-------------------------------------
         //
@@ -3258,7 +3101,7 @@ window.__ModuleLoader__.load({
         // 在教什么，展开对应站点页的只读模板即可（那是唯一正本）。
         !settingsTab && h('div', { className: 'hwb-card' },
           h('h3', { className: 'hwb-group first' }, '首轮提示词（只读）'),
-          h('p', { className: 'hwb-hint' }, '模板由桥按本会话工具清单生成，只读；可编辑的只有全局指令与各站点自己的那一段。'),
+          h('p', { className: 'hwb-hint' }, '只读：模板按本会话工具清单生成；可编辑的是全局指令与各站点自己的那一段。'),
           h(PromptSection)),
         relay?.lastError ? h('p', { role: 'alert', className: 'hwb-hint' }, '最近错误: ' + relay.lastError) : null,
         error && h('p', { role: 'alert' }, error));
@@ -3611,16 +3454,19 @@ window.__ModuleLoader__.load({
           : { siteId: String(key).slice(0, i), slot: String(key).slice(i + 1) };
       };
 
-      // 正在开窗的**站点集合**（不是单个站点）。
+      // 正在开窗的**账号集合**（0.19.4 起按 accountKey，不再是站点）。
       //
-      // 为什么必须是集合：这条请求要等浏览器真的起来（最长 120s）。用单值 `busySid`
-      // 时，「点 A → 点 B → B 先返回」会把忙碌态**清空**，而 A 其实还在开 —— A 的
-      // 按钮随即重新可点，再点一次就拉起了**第二个窗口**覆盖同一个 profile。
-      // 这正是这个忙碌态本来要防的那件事（本轮自查用状态机模拟复现：
-      // click A / click B / done B ⇒ busy 为空但 A 仍在途）。
-      const [busySids, setBusySids] = React.useState([]);
+      // 为什么粒度必须是账号：用户指令「能够同时开多个账号的窗口/标签」。按站点判的话，
+      // 「给 GLM 再加一个账号」会被判成「GLM 正在开窗」而静默丢弃——用户点「新账号」
+      // 没有任何反应。粒度改成 accountKey 之后，同站不同账号可以各开各的窗口，
+      // 而同**一个**账号的重复点击仍被拦下（那才是会覆盖同一份 profile 的操作）。
+      //
+      // 集合而不是单值：这条请求要等浏览器真的起来（最长 120s）。用单值 `busyKey` 时，
+      // 「点 A → 点 B → B 先返回」会把忙碌态**清空**，而 A 其实还在开 —— A 随即重新可点，
+      // 再点一次就拉起了**第二个窗口**覆盖同一个 profile。这正是忙碌态本来要防的那件事。
+      const [busyAccounts, setBusyAccounts] = React.useState([]);
       const [notice, setNotice] = React.useState(null);
-      const isBusy = (sid) => busySids.includes(sid);
+      const isBusy = (key) => busyAccounts.includes(key);
 
       /**
        * 打开**桥自己的**浏览器窗口去登录某个站点（0.19.0）。
@@ -3651,18 +3497,60 @@ window.__ModuleLoader__.load({
        * @param {string} accountKey `glm` 或 `glm#2`
        */
       async function openLoginWindow(sid, accountKey) {
-        // 只拦「同一站点」的重复点击；其它站点不受影响（同时开两个窗口是合法需求）。
-        if (isBusy(sid)) return;
-        setBusySids((prev) => (prev.includes(sid) ? prev : [...prev, sid]));
+        // 只拦**同一个账号**的重复点击；同站其它账号、其它站点都不受影响
+        //（同时开两个窗口是合法需求，用户 0.19.4 明确要求「能够同时开多个账号的窗口」）。
+        const acctKey = accountKey || sid;
+        if (isBusy(acctKey)) return;
+        setBusyAccounts((prev) => (prev.includes(acctKey) ? prev : [...prev, acctKey]));
         setNotice(null);
         // `slotOf` 把 `glm#2` 拆成 `{siteId, slot}`——服务端 `accountKeyOf` 要的就是
         // 这个形状。不能自己拼 `{siteId: 'glm#2'}`：那样会绕过拆分而找不到站点。
-        const r = await apiSoft('window', { ...slotOf(accountKey || sid), action: 'open' }, 120000);
+        const r = await apiSoft('window', { ...slotOf(acctKey), action: 'open' }, 120000);
         if (!r.ok) setNotice({ kind: 'bad', text: '打开登录窗口失败：' + r.error });
-        else if (r.data?.alreadyOpen) setNotice({ kind: 'ok', text: '窗口已存在——已聚焦弹到最前。' });
-        else setNotice({ kind: 'ok', text: '已打开「' + siteName(sid) + '」的桥窗口，请在该窗口内登录；登录态会被保存并用于自动化。' });
-        // 只摘掉**自己**这一站：其它站点的在途请求必须保持忙碌（见上面那段理由）。
-        setBusySids((prev) => prev.filter((x) => x !== sid));
+        else if (r.data?.alreadyOpen) setNotice({ kind: 'ok', text: '窗口已在，已置前' });
+        else setNotice({ kind: 'ok', text: '已打开 ' + siteName(sid) + ' 登录窗口' });
+        // 只摘掉**自己**这一个账号：其它在途的必须保持忙碌（见上面那段理由）。
+        setBusyAccounts((prev) => prev.filter((x) => x !== acctKey));
+      }
+
+      /**
+       * 下拉底部那一行「新账号」：先为该站点**新增一个槽**，再打开它的登录窗口。
+       *
+       * 两步必须都在服务端落定：槽位合法性只有 `accounts.js` 说了算（`default` 的规范名、
+       * `#1` 是别名、槽名字符集），面板自己算「下一个空槽」就会长出第二套规则。
+       * 新增成功后面板靠既有的 8s 轮询把新账号行读回来，不需要额外的本地状态。
+       */
+      async function addAccountAndLogin(sid) {
+        // 「新增」这一步本身也要防连点：它会写设置，连点会一次加出两个空槽。
+        // 用一个**合成键**（不是任何真实 accountKey）占住这个站点的「正在新增」位。
+        const guard = '__new__' + sid;
+        if (isBusy(guard)) return;
+        setBusyAccounts((prev) => [...prev, guard]);
+        try {
+          const r = await apiSoft('account-add', { siteId: sid }, 30000);
+          if (!r.ok || !r.data?.accountKey) {
+            setNotice({ kind: 'bad', text: '新增账号失败：' + (r.error || '未知原因') });
+            return;
+          }
+          setNotice({ kind: 'ok', text: '已新增 ' + siteName(sid) + ' 账号 ' + r.data.slot });
+          await openLoginWindow(sid, r.data.accountKey);
+        } finally {
+          setBusyAccounts((prev) => prev.filter((x) => x !== guard));
+        }
+      }
+
+      /**
+       * 打开下拉时顺手刷一次「真实昵称/头像」。
+       *
+       * 为什么要刷新而不是只靠 8s 轮询：轮询读的是驱动**缓存**里的身份，而缓存只在
+       * 登录/检测那两刻写过。用户在站点网页里**手动登录**之后，缓存仍是空的——
+       * 点开下拉就是他能主动触发的一次刷新，刷不到就照旧回落槽名。
+       */
+      function refreshIdentities(accounts) {
+        for (const a of accounts) {
+          const acctKey = a.accountKey || a.siteId;
+          apiSoft('account-identity', { ...slotOf(acctKey) }, 20000).catch(() => {});
+        }
       }
       return h('div', { className: 'hwb-catalog' },
         error && h('p', { className: 'hwb-hint bad' }, '站点状态读不到：' + error + '（这行不代表「没有站点」，只是读不到）'),
@@ -3687,26 +3575,29 @@ window.__ModuleLoader__.load({
                 h(SiteGlyph, { sid, size: 26 })),
               h('span', { className: 'hwb-site-text' },
                 h('span', { className: 'hwb-site-title' }, siteName(sid)),
-                // 说明行**只在多账户时出现**：官方 `TerminalGuide` 也是
-                // `description !== undefined && …` 才画第二行。单账户站点给一句
-                // 「1 个账户」是噪音，不如让它长得像左栏那些朴素行。
-                multi && h('span', { className: 'hwb-site-desc' }, accounts.length + ' 个账户可选')));
-            // 0.19.0：单账户站点原先**没有**任何登录入口 —— 账户菜单只在 `multi`
-            // 时渲染，于是「登录」那一项对绝大多数站点根本不可达；而工具条的 🌐
-            // 只在已经进过该站点标签页之后才出现。这里为单账户站点补一个显式的
-            // 登录按钮，落点与多账户菜单项、工具条 🌐 **完全相同**（同一个控制面动作
-            // `POST window {action:'open'}`），因此三者共享同一条 profile。
-            if (!multi) {
-              return h('div', { className: 'hwb-site-card', key: sid },
-                main,
-                h(Button, {
-                  variant: 'ghost', className: 'hwb-site-login',
-                  disabled: isBusy(sid),
-                  title: '打开桥自带的浏览器窗口登录（这里的登录会被保存并用于自动化）',
-                  'aria-label': siteName(sid) + ' 登录',
-                  onClick: () => openLoginWindow(sid, accounts[0]?.accountKey || sid),
-                }, isBusy(sid) ? '打开中…' : '登录'));
-            }
+                // 说明行**只在多账号时出现**：官方 `TerminalGuide` 也是
+                // `description !== undefined && …` 才画第二行。单账号站点给一句
+                // 「1 个账号」是噪音，不如让它长得像左栏那些朴素行。
+                multi && h('span', { className: 'hwb-site-desc' }, accounts.length + ' 个账号')));
+            // 每一行都给**同一种右侧下拉**（用户指令：「改为类似新建终端框右侧选择」）。
+            //
+            // 为什么单账号站点也要给：没有它，「给这个站点加第二个账号」就没有入口——
+            // 而用户明确要求「一个网址可以多个账号」。下拉底部固定一行「新账号」承担
+            // 这件事，顺带把 0.19.0 那颗孤立的「登录」按钮统一掉了（同一个落点、
+            // 少一种控件形状）。
+            const acctIcon = (a) => {
+              const url = a.avatarUrl || null;
+              if (!url) return h('span', { className: 'hwb-acct-glyph' }, h(SiteGlyph, { sid, size: 16 }));
+              // 真实头像（0.19.4）。跨域 CDN 可能拒热链 → onError 时把 img 藏掉，
+              // 露出后面的站点标记；**不造假**：读不到就不用槽名冒充头像。
+              return h('img', {
+                className: 'hwb-acct-img', src: url, alt: '', loading: 'lazy',
+                onError: (e) => { try { e.currentTarget.style.display = 'none'; } catch { /* 忽略 */ } },
+              });
+            };
+            // 昵称优先级：**抓到的真实昵称** → 桥生成的槽名。这一行是本轮要求的
+            // 「抓真实值 + 抓不到回落槽名」在界面上的唯一落点。
+            const acctName = (a) => a.accountName || a.displayName || siteName(sid);
             return h('div', { className: 'hwb-site-card', key: sid },
               main,
               // 右端触发器 + 官方 `Menu`：与 `TerminalGuide` 逐字同构。
@@ -3716,34 +3607,34 @@ window.__ModuleLoader__.load({
                 open: expanded, portal: true, autoFocus: true, align: 'end',
                 className: 'hwb-site-menu',
                 items: [
-                  ...accounts.map(a => ({ id: a.accountKey || a.siteId, label: a.displayName || siteName(sid) })),
-                  // `disabled` 是**必须的**：只改文案（「正在打开登录窗口…」）会让这一项
-                  // 看起来仍可点，用户连点会拉起多个窗口覆盖同一个 profile。
-                  // 官方 `Menu` 的 item 支持 `disabled`，与终端菜单同口径。
-                  {
-                    id: '__browser__' + sid,
-                    disabled: isBusy(sid),
-                    label: isBusy(sid) ? '正在打开登录窗口…' : '登录（打开桥自己的浏览器窗口）',
-                  },
+                  ...accounts.map(a => ({
+                    id: a.accountKey || a.siteId,
+                    label: acctName(a),
+                    icon: acctIcon(a),
+                  })),
+                  { type: 'separator', id: '__sep__' + sid },
+                  // 文案按用户要求压到三个字（「新账号」），括号补充一律去掉。
+                  // `disabled` 是**必须的**：只改文案会让这一项看起来仍可点，
+                  // 连点会为同一个槽拉起多个窗口（官方 Menu 的 item 支持 disabled）。
+                  { id: '__new__' + sid, label: '新账号', disabled: isBusy('__new__' + sid) },
                 ],
                 onClose: () => setOpenId(''),
                 onSelect: (key) => {
                   setOpenId('');
-                  if (key === '__browser__' + sid) {
-                    // 0.19.0 修：这一项原先调 `openTab('browser')`（回落
-                    // `window.open`），两者都不是桥的浏览器——在那里登录桥不知道。
-                    // 成因与落点说明见 `openLoginWindow` 的函数头。
-                    openLoginWindow(sid, accounts[0]?.accountKey || sid);
-                    return;
-                  }
+                  if (key === '__new__' + sid) { addAccountAndLogin(sid); return; }
                   const hit = accounts.find(a => (a.accountKey || a.siteId) === key);
                   if (hit) open(sid, hit.slot || '');
                 },
                 anchor: h(Button, {
                   variant: 'ghost', className: 'hwb-site-trigger',
-                  'aria-label': siteName(sid) + ' 的账户（共 ' + accounts.length + ' 个）',
+                  'aria-label': siteName(sid) + ' 账号',
                   'aria-haspopup': 'menu', 'aria-expanded': expanded,
-                  onClick: () => setOpenId(expanded ? '' : sid),
+                  onClick: () => {
+                    const next = expanded ? '' : sid;
+                    setOpenId(next);
+                    // 打开时顺手刷一次真实昵称/头像（读不到就保持槽名）。
+                    if (next) refreshIdentities(accounts);
+                  },
                 }, h(IconChevronDown, { size: 14 })),
               }));
           })));
@@ -4115,7 +4006,7 @@ window.__ModuleLoader__.load({
             },
             onError: () => setConnectError('网页代理加载失败，请确认中继服务已启动'),
           })),
-          active && !active.ready && !connectError && h('div', { className: 'hwb-frame-status' }, '正在加载 ' + siteName(siteId) + ' 网页…（加载后可直接在右侧操作，生成任务由网页原生执行）')));
+          active && !active.ready && !connectError && h('div', { className: 'hwb-frame-status' }, '正在加载 ' + siteName(siteId) + ' 网页…')));
     }
 
     function apply(ctx) {
@@ -4209,20 +4100,8 @@ window.__ModuleLoader__.load({
         // 两者对文字标记同样成立（SiteGlyph 的文字分支也是 svg），所以这一条
         // 同时覆盖有官方矢量与只有文字标记的站点，不需要第二条规则。
         ".hwb-avatar-glyph{display:inline-flex;align-items:center;justify-content:center;font-size:12px;line-height:1;color:var(--dsw-alias-label-secondary,inherit);pointer-events:none}",
-        // 花名册（0.14.9）：子代理缩进、Team 平级。
-        // 缩进用 padding-left（24px = Fluent size240）而不是符号/颜色——层级是
-        // 空间关系，用空间表达最直接；颜色已经被「状态」占用，复用会语义冲突。
-        ".hwb-roster{display:flex;flex-direction:column;gap:12px;padding:4px 0}",
-        ".hwb-roster-group{display:flex;flex-direction:column;gap:4px}",
-        ".hwb-roster-head{font-size:12px;line-height:18px;margin:0;color:var(--dsw-alias-label-tertiary,#8a8f98)}",
-        ".hwb-roster-row{display:flex;align-items:center;gap:8px;font-size:13px;line-height:20px;min-height:24px}",
-        ".hwb-roster-row.nested{padding-left:24px}",
-        ".hwb-roster-name{color:var(--dsw-alias-label-primary,inherit);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
-        ".hwb-roster-state{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,inherit);flex:none}",
-        ".hwb-roster-task{font-size:12px;line-height:18px;padding:0 8px;border-radius:9px;flex:none;color:var(--dsw-alias-label-secondary,inherit);border:.5px solid var(--dsw-alias-border-l3,#8885)}",
-        // 成员跑在哪个模型上：与「任务 N」同族的只读小标签，但不是计数，
-        // 所以不给边框（边框在本面板里一直表示「一条可读的状态/计数」）。
-        ".hwb-roster-model{font-size:12px;line-height:18px;flex:none;color:var(--dsw-alias-label-tertiary,#8a8f98);max-width:40%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
+        // 花名册那组 `.hwb-roster*` 类名随设置页「正在运行（子代理 / Team）」卡
+        //（0.19.x）一并删除——它们的唯一消费者是 AgentRoster，留着就是没人用的样式。
         ".hwb-site-state{font-size:12px;line-height:18px;padding:1px 8px;border-radius:10px;border:.5px solid var(--dsw-alias-border-l3,#8885);color:var(--dsw-alias-label-secondary,inherit)}",
         ".hwb-site-state.ok{color:var(--dsw-alias-state-success-primary,#2e7d32);border-color:var(--dsw-alias-state-success-primary,#2e7d32)}",
         ".hwb-site-state.bad{color:var(--dsw-alias-state-error-primary,#93443e);border-color:var(--dsw-alias-state-error-primary,#93443e)}",
@@ -4323,11 +4202,17 @@ window.__ModuleLoader__.load({
         ".hwb-import{display:flex;flex-direction:column;gap:8px;padding:8px 0}",
         // 0.16.25 首轮提示词：按网站逐行。每行 = 网站名 + 协议下拉 + 「实际使用」标注，
         // 完整模板折进 details——十个站点各铺一份全文会把设置页淹掉。
-        ".hwb-site-prompt{border:1px solid var(--dsw-alias-border-l3,#8883);border-radius:8px;padding:8px 10px}",
-        ".hwb-site-prompt select{max-width:100%}",
-        ".hwb-site-prompt details{margin-top:2px}",
-        ".hwb-site-prompt summary{cursor:pointer;font-size:13px;color:var(--dsw-alias-label-secondary,inherit)}",
-        ".hwb-site-prompt pre{max-height:240px}",
+        // 0.19.x：站点行由「拥挤的单行」改成与官方设置卡同口径的紧凑块——站点名 +
+        // 协议标注一行，路径各占一行（长路径不再把前两者挤到折行），模板仍折叠。
+        // 圆角/边框/字号沿用 .hwb-card 的 token 档位，不引第二个视觉体系。
+        ".hwb-site-prompt{display:flex;flex-direction:column;gap:6px;border:.5px solid var(--dsw-alias-border-l4,#8884);border-radius:12px;padding:8px 10px}",
+        ".hwb-site-prompt-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}",
+        ".hwb-site-prompt-name{font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary,inherit)}",
+        ".hwb-site-prompt-variant{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary,#8a8f98)}",
+        ".hwb-site-prompt-path{flex:none;display:block;width:100%}",
+        ".hwb-site-prompt details{margin-top:0}",
+        ".hwb-site-prompt summary{cursor:pointer;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,inherit)}",
+        ".hwb-site-prompt pre{max-height:240px;margin-top:6px}",
         ".hwb-conversation{position:relative;display:flex;flex-direction:column;width:100%;height:100%;min-height:0}",
         // 0.16.34：原先这里还有一条注释，解释站点栏为什么 flex:none + z-index
         //（用户报过「有一点遮挡」，根因是旧实现里网页区在层叠上压过了标签条）。
@@ -4405,9 +4290,13 @@ window.__ModuleLoader__.load({
         ".hwb-site-title{color:var(--dsw-alias-label-primary,inherit);white-space:nowrap;text-overflow:ellipsis;font-size:15px;line-height:1.4;overflow:hidden}",
         ".hwb-site-desc{color:var(--dsw-alias-label-caption,var(--dsw-alias-label-tertiary,#8a8f98));white-space:nowrap;text-overflow:ellipsis;font-size:13px;line-height:1.4;overflow:hidden}",
         ".hwb-site-trigger{border-radius:0 24px 24px 0;flex:none;align-self:stretch;width:44px;height:auto;padding:0}",
-        // 单账户站点的登录入口（0.19.0）：与官方 ghost 按钮同族，右端圆角对齐卡片刻度，
-        // 不抢主区的视觉权重（主区仍是「进入该站点」的主动作）。
-        ".hwb-site-login{border-radius:0 24px 24px 0;flex:none;align-self:stretch;height:auto;padding:0 18px;font-size:13px;color:var(--dsw-alias-label-secondary,inherit)}",
+        // 账号下拉里的头像与回落标记（0.19.4）。尺寸取官方 Menu 的 leading icon 档
+        // （figma `.Menu_cell` gap 8、图标 16），圆框是为了让真实头像与站点标记
+        // 在**同一列宽**里对齐——两种来源混排时，列宽不齐比图标不精致更显眼。
+        ".hwb-acct-img{width:16px;height:16px;border-radius:50%;object-fit:cover;flex:none}",
+        ".hwb-acct-glyph{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex:none}",
+        // `.hwb-site-login`（0.19.0 单账号站的「登录」按钮）随本轮统一成下拉而删除：
+        // 它的落点已被下拉底部的「新账号」承担，留着就是没有挂点的死规则。
         // ---- 站点下拉菜单样式：**随 SiteMenu 一起删除**（0.16.35）------------
         //
         // 这里曾有一组 `.hwb-menu-row` / `.hwb-menu-name` / `.hwb-menu-state` /
@@ -4468,8 +4357,8 @@ window.__ModuleLoader__.load({
         ".hwb-panel-meta{font-size:12px;line-height:18px;flex:none;max-width:40%;color:var(--dsw-alias-label-tertiary,#8a8f98);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
         ".hwb-panel-state{font-size:12px;line-height:18px;flex:none;color:var(--dsw-alias-label-secondary,inherit)}",
         ".hwb-panel .hwb-hint.bad{color:var(--dsw-alias-state-error-primary,#93443e)}",
-        // 小标签（角色 / 归属 / 任务数 / 写范围告警）：与 .hwb-roster-task 同形，
-        // 但独立命名——那个类挂在设置页花名册下，跨面板复用会让两处样式耦合。
+        // 小标签（角色 / 归属 / 任务数 / 写范围告警）：任务板自己的行内小标签，
+        // 独立命名而不是跨面板复用——复用会让两处样式互相牵制。
         ".hwb-chip{font-size:12px;line-height:18px;padding:0 8px;border-radius:9px;flex:none;white-space:nowrap;color:var(--dsw-alias-label-secondary,inherit);border:.5px solid var(--dsw-alias-border-l3,#8885)}",
         ".hwb-chip.warn{color:var(--dsw-alias-state-error-primary,#93443e);border-color:var(--dsw-alias-state-error-primary,#93443e)}",
         // 空态/加载态：与官方 guide 卡片同一套措辞位置（顶部对齐、不要垂直居中——
@@ -4863,7 +4752,7 @@ window.__ModuleLoader__.load({
             guide: [{
               order: 55,
               title: () => 'Web Bridge',
-              description: () => '网站目录：选一个站点作为独立标签打开，可同时并列多个',
+              description: () => '按站点打开网页，一个站点一个标签，可并列多个',
             }],
           });
         } catch (e) { warn('sidebarRightTabs.register', e); }
@@ -4927,7 +4816,7 @@ window.__ModuleLoader__.load({
       // 护栏见 `test/team-compare.test.mjs` 与 `test/client-render.test.mjs`。
       //
       // `roster.js` 对官方 `agentTeams` 的读取**保留**：它仍是任务板 `listTasks`
-      // 的官方来源与设置页花名册的数据源，删的是「把它当成本插件的 Team」这一层呈现。
+      // 的官方来源，删的是「把它当成本插件的 Team」这一层呈现。
 
       // ---- 任务板的右栏标签页：**已删除**（0.16.18）------------------------
       //
@@ -5041,20 +4930,8 @@ window.__ModuleLoader__.load({
         } catch (e) { warn('tab menu item (window)', e); }
       });
 
-      // ---- 会话头角落按钮：展开/收起右侧栏 ------------------------------
-      own(() => {
-        try {
-          const CornerButton = () => h('button', {
-            className: 'hwb-corner-btn', type: 'button',
-            title: '打开 Web Bridge 网页会话（右侧栏）',
-            'aria-label': '打开 Web Bridge 网页会话',
-            onClick: () => { try { ctx.sidebarRight.toggleExpanded(); } catch (_) {} },
-          }, icon(16));
-          return ctx.slots.inject('conversation.session.header.corner', () => ctx.slots.register({
-            name: 'conversation.session.header.corner',
-          }, CornerButton));
-        } catch (e) { warn('header corner button', e); }
-      });
+      // 会话头角落席位让官方 dsh-client-ui-sidebar-right 持有（其 ExpandButton
+      // 与本面板同 store、同 toggleExpanded 职责，重复声明反酿席位冲突）。
 
       // ---- 中央区并列多会话 Team（0.17.3 起，0.19.0 收敛为本插件唯一的 Team 形态）----
       //

@@ -34,7 +34,7 @@ test('预算够：窗口 1000 token，本轮远低于它 → ok', () => {
 });
 
 test('预算超：折算后超过窗口 → 不 ok，且给出超出量', () => {
-  // 8000 个 ASCII 字符 ≈ 2200 token > 1000
+  // 8000 个 ASCII 字母 ≈ 2640 token（0.30 单价 + 10% 余量）> 1000
   const r = checkContextBudget({ text: 'a'.repeat(8000), contextWindow: 1000 });
   assert.equal(r.ok, false);
   assert.ok(r.tokens > r.window);
@@ -43,11 +43,18 @@ test('预算超：折算后超过窗口 → 不 ok，且给出超出量', () => 
 });
 
 test('边界：恰好等于窗口 → 放行（闸门只拦「超」，不做「接近就拦」的节流）', () => {
-  // CJK 档反解：tokens = ceil(0.7n × 1.1) = ceil(0.77n)；n=999 → 770 恰好命中
-  const window = 770;
-  const r = checkContextBudget({ text: '你'.repeat(999), contextWindow: window });
-  assert.ok(r.tokens <= window, `tokens=${r.tokens} 应 <= window=${window}`);
-  assert.equal(r.ok, true);
+  // 窗口取**估算器自己算出的数**，而不是按某个系数手算：这条用例验的是
+  // 「ratio ≤ 1 放行、ratio > 1 才拦」这个边界，单价表变了不该让它变红
+  // （单价本身由 test/token-density.test.mjs 单独钉住）。
+  // 旧写法把窗口写死成 ceil(0.7n×1.1)=770，0.19.4 换单价表时它把一个**正确**的
+  // 实现判成了红——这正是「读数的取得条件必须写进读数本身」那条纪律的同型。
+  const text = '你'.repeat(999);
+  const exact = estimateTokens(text);
+  const at = checkContextBudget({ text, contextWindow: exact });
+  assert.equal(at.tokens, exact);
+  assert.equal(at.ok, true, '恰好等于窗口必须放行');
+  const over = checkContextBudget({ text, contextWindow: exact - 1 });
+  assert.equal(over.ok, false, '少 1 token 就必须拦下——边界是「只拦超」，不是「接近就拦」');
 });
 
 test('折算口径与 estimateTokens 严格同源：同一个 text 两边相等（0.16.22 起）', () => {

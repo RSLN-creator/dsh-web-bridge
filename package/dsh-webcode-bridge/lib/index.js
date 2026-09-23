@@ -28,6 +28,18 @@ import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart,
 // `transportShapeForSite` 曾一并 import 但全文件零调用（第三轮自审发现），已移除；
 // 它仍是 tool-transport.js 的公开导出，被 tool-parser.js 与 tool-transport.test.mjs 用。
 import { teachFor } from './tool-transport.js';
+// 展示文案（自动续跑进度说明）单独一个文件：它只在「外发」这一层有约束
+// （协议安全 / 不许静默降级 / 与事实一致），而这三条都需要独立护栏——
+// `apply()` 是巨大闭包，里面的 helper 无法被测试单独 import。见 lib/notices.js。
+import { autoContinuedNotice } from './notices.js';
+// 图片请求计价：**不是可选装饰，是压缩路径的硬契约**。DSH 运行时用
+// `adapters.get(p)?.adapter.imageRequestPricing(p, m)` 取它——可选链护不住方法本身，
+// 缺了它 token meter 的每次测量都抛 `is not a function`，手动 /compact 必炸。
+// 三条占位文案的同源约束与已知边界见该文件头。
+import { webcodeImageRequestPricing } from './image-pricing.js';
+// 自动续跑的整会话累计与形态切换（0.19.3，用户指令「加整会话累计」）：
+// 判据的唯一来源是 continueFormFor；计数落盘失败静默，绝不影响回合交付。
+import { createContinueCounter, continueFormFor, DEFAULT_CONTINUE_COMPLETE_AFTER } from './continue-budget.js';
 // 注意（0.17.3）：这里**不再** import `tool-parser.js`。它是一层对 `parseAgentReply`
 // 的纯委托薄壳，本文件已经直接用 agent-preset 的解析器 + 自己的流式状态机，接上它
 // 只会多一跳而行为逐字不变。原先那行 import 是**死的**（全文件零调用），而
@@ -245,6 +257,19 @@ const DEFAULTS = {
   // 登录（有头 Edge 人工登录）的等待上限。控制面 POST login 会等到这一步结束
   // 才回结果，所以这里必须比驱动自身的浏览器启动留出余量。
   loginTimeoutMs: 300_000,
+  // ---- 并发（0.19.4，用户指令）-----------------------------------------------
+  // 原话：「已有使用账号不允许同时再使用！！一个网址可以多个账号，多个对话！但是必须
+  // 每个对于唯一账号！……不能同时发过多请求，错峰！但是不是让你只留一个协议进行转接；
+  // 还是多账户并发多会话那样需要真实多个转接！」
+  //
+  // 取值含义（执行器在 relay.js）：
+  //   · 同一 accountKey 同时只允许一个在途请求，第二个在**它自己的通道**里排队；
+  //   · 不同账号之间真并发，上限由此值控制（2 = 两个账号可以同时跑）；
+  //   · 任何两次「发出」之间至少隔 minSendIntervalMs，避免同一站点被瞬间打出一串。
+  // 默认 2 路 / 1s 是**保守起点**：网页端本就有风控，宁可先慢一点，也不要为了并发
+  // 把账号跑进「消息发送过于频繁」。
+  maxConcurrentLanes: 2,
+  minSendIntervalMs: 1000,
   // 每个站点向 DSH 声明的上下文窗口。网页 composer 的真实上限未知，声明过大
   // 会让 DSH 的压缩永不触发（transcript 只增不减）；这里给保守值，越界时由
   // PROMPT_TRUNCATED 回读校验报错而不是静默截断。
@@ -258,6 +283,27 @@ const DEFAULTS = {
   // 工具调用」救活循环的动作自动化（session cd997dd3 11:21:26 / 11:22:51 两次逐字）。
   // 0 = 关闭（回落为「提示当正文」收场）；只认会话模式轮（无状态轮由调用方自己循环）。
   autoContinueRounds: 1,
+  // 「整会话累计」的升级点 N（0.19.3，用户指令：「加"整会话累计"：超过 N 次就改为发
+  // 完整提醒」「不能停！继续后续需要 auto！！我需要真实长上下文」）。
+  //
+  // 语义边界必须读准：**这不是刹车**。累计补发次数 > N 之后，续跑照旧进行，
+  // 只是每一轮把协议段升级为**完整提醒**（该站点的完整教学：工具清单＋调用格式＋
+  // 使用准则，取会话教学正本，与 prompts/<site>.md 逐字同源）。0 = 不升级
+  // （永远短提示），不是「立即升级」——判据在 lib/continue-budget.js 的 continueFormFor。
+  autoContinueCompleteAfter: DEFAULT_CONTINUE_COMPLETE_AFTER,
+  // 「网页自己注入的那部分上下文」的固定开销（token）。用户指令：「要：每轮加一笔
+  // 固定开销」，口径是**宁可高报也不低估**（同 usageFixedOverheadTokens 的兄弟项）。
+  //
+  // 它补的是一个已知缺口：桥报给 DSH 的 inputTokens 一直是「我发出去的文本」，
+  // 而网页那一侧的上下文还包含它自己的系统提示、界面框架与站点前言——这些**永远
+  // 不会经过桥**，于是读数系统性偏低。2048 是**明确标注的上界猜值**，不是实测：
+  // 网页不公开它自己的系统提示，唯一能实测它的办法是读回网页会话做对账（见
+  // doc/research/2026-09-23-longrun-rounds-3-4.md §3.6 的对账探针 D3）。
+  //
+  // 为什么按**一次性偏移**计入而不是每轮累加：网页自己的系统提示在上下文里只有
+  // **一份**（每轮重新 prefill 不等于每轮多一份）。累加进累计值会重复计数，把压缩
+  // 压力虚推上去；用户要的是「不低估」，不是「虚高」。
+  usageFixedOverheadTokens: 2048,
   // 允许携带 Origin 的显式白名单（除「同源」之外的额外放行）。同源判定本身由
   // lib/loopback.js 的 originMatchesHost 完成，因此这里**只需列 DSH 前端自己的
   // 两个源**——右栏站点 iframe 是 <siteId>.localhost:<relay 端口>，它们与 relay
@@ -624,6 +670,27 @@ export function apply(ctx, config = {}) {
     cfg.version = version;
   }
   const sessionState = new Map();
+  // 自动续跑的**整会话累计**（0.19.3，用户指令「加整会话累计」）。落盘根与提示词
+  // 落盘同一处（`continuations/<sessionKey>.json`），因此「整会话」跨 dsh web 重启
+  // 依然成立；测试进程自动只走内存（守卫在 continue-budget.js，与 prompt-store 对称）。
+  const continueCounter = createContinueCounter({ dir: promptStoreDirFor() });
+  // 每个会话最近一次**真实发出去的站点教学全文**（buildTurn 的 fresh 分支写入）。
+  // autoContinueRound 的「完整提醒」优先读它：那一份就是首轮真实教过的正本，
+  // 与提示词落盘的 prompts/<site>.md 正文逐字同源——绝不在续跑路径上另拼一份教学。
+  const siteTeachingBySession = new Map();
+  // 「这条 DSH 会话上一次用的是哪个账号」（0.19.4）：只用于把「换账号导致的整段重建」
+  // 标成 `account-changed` 而不是含糊的 `no-cursor`。有界，与其它会话级 Map 同款。
+  const lastAccountBySession = new Map();
+  const SITE_TEACHING_CAP = 64;
+  /** 记住本会话的站点教学全文（有界：超上限丢最老，与其它会话级 Map 同款）。 */
+  function rememberSiteTeaching(sessionKey, text) {
+    if (!sessionKey || !text) return;
+    siteTeachingBySession.delete(sessionKey); // 先删后插 = 最近使用在尾部
+    siteTeachingBySession.set(sessionKey, text);
+    while (siteTeachingBySession.size > SITE_TEACHING_CAP) {
+      siteTeachingBySession.delete(siteTeachingBySession.keys().next().value);
+    }
+  }
   // 节流收场那一轮的会话键：那一轮的正文**没有发给网页**（见 executor 的
   // SESSION_SWITCHED 分支），所以适配器收尾处的 `turn.commit()` 不许让游标前进——
   // 否则下一轮会把「这一轮没发出去的消息」当成已发、只发后续增量，也就是静默丢上下文
@@ -745,6 +812,20 @@ export function apply(ctx, config = {}) {
   }
 
   /**
+   * 上报 usage 时叠加的「网页自身上下文」固定开销（token，一次性）。
+   *
+   * 单独一处取值、四个调用点共用（会话累计、无会话键单轮、OpenAI 前端两处）——
+   * 与 `contextWindowFor` 同一纪律：口径只能有一份，否则「GUI 的用量」与
+   * 「OpenAI 前端报的用量」会各说各话。
+   *
+   * @returns {number} 非负整数（非法/缺省回落 DEFAULTS 的 2048）。
+   */
+  function usageOverheadTokens() {
+    const n = Math.round(Number(cfg.usageFixedOverheadTokens));
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }
+
+  /**
    * 发送前预算闸（0.14.1，B-2）—— 超出声明的上下文窗口就在**发出之前**拒绝。
    *
    * 动机：桥声明的 contextWindow 是乐观值（glm/zai 现为实测 1M），声明偏大的代价
@@ -782,6 +863,18 @@ export function apply(ctx, config = {}) {
   const adapter = {
     providerInfo(provider) { return { id: provider, name: cfg.displayName }; },
     providerRetryPolicy() { return undefined; },
+    // 必须同步、无 I/O、绝不抛——每次 token meter 测量都会调到这里
+    //（dsh-token-meter/lib/index.js:644 → :689 → dsh-llm/lib/index.js:1964）。
+    // 旧版缺这个方法时，真实报错是
+    //   this.adapters.get(...)?.adapter.imageRequestPricing is not a function
+    // 而它出现在**手动压缩**路径上，让「压缩功能」看起来像没实现。
+    // 模型解析用 try/catch：历史会话里可能存着已下线的 model id，
+    // resolveWebModel 对未知 id 是 throw 的——计价不许把一个陈旧 id 升级成测量失败。
+    imageRequestPricing(_provider, model) {
+      let acceptsImages = false;
+      try { acceptsImages = resolveWebModel(model)?.acceptsImages === true; } catch { acceptsImages = false; }
+      return webcodeImageRequestPricing({ acceptsImages });
+    },
     async listModels(provider) {
       // 选择器下拉过滤兼容别名（deepseek-web 与 deepseek:deepseek 显示名逐字相同，
       // 照单渲染就是两行同名项）。别名本身仍可被 resolveModel 解析——历史会话与
@@ -791,11 +884,17 @@ export function apply(ctx, config = {}) {
     async resolveModel(provider, model) {
       const m = resolveWebModel(model);
       if (!m) throw new Error('[webcode-bridge] 未知模型: ' + model);
-      // 网页 composer 的真实上限未知（历史欠账），声明 1_000_000 会让 DSH 的
-      // 上下文压缩永远不触发、transcript 只增不减——「上下文不动/被撑爆」的一
-      // 部分来源。按站点给一个诚实的保守值：DeepSeek 网页实测能稳定收下十万级
-      // 字符，按 CJK≈0.7 token/字符折算留出余量取 128k；其余站点 64k
-      // （每个都有 PROMPT_TRUNCATED 回读校验兜底，越界会报错而不是静默截断）。
+      // 声明值来自 `contextWindowFor(m)`，取值链的第一段是 `DEFAULTS.contextWindowBySite`
+      // ⇒ deepseek 今天声明 **1,000,000**，其余站点 64k。
+      //
+      // 这里曾经写着「按站点给诚实的保守值……取 128k」，而代码从来没那样做过
+      //（2026-09-23 逐字对照发现，属 doc/comment-style.md §10.2 点名的「注释描述的
+      // 实现已不存在」）。按纪律只改注释、**不动行为**：把 1M 改成 128k 会让 DSH 的
+      // 自动压缩真的开始触发，那是产品决策而非笔误修正，已记入 doc/progress.md 的遗留项。
+      //
+      // 已知后果（两条都要读）：1M 之下的 DSH 压缩阈值约 80 万 token，正常使用够不着，
+      // 因此长会话目前只靠**手动**／compact；越界仍由 PROMPT_TRUNCATED 回读校验与
+      // 发送前预算闸（CONTEXT_WINDOW_EXCEEDED）双重兜底，不会静默截半截。
       const contextWindow = contextWindowFor(m);
       // inputModalities 是**护栏**，不是可选元数据：宿主只在它明确不含 'image'
       // 时调 projectImagesForTextModel() 把图片换成文字占位
@@ -1144,6 +1243,21 @@ export function apply(ctx, config = {}) {
         // 后者提示已经逐字进了网页会话，界面上只留 AUTO_CONTINUED
         //（用户指令：「TOOL_CALL_UNPARSED: 直接隐藏」）。
         if (rounds < 1 || !turn.meta?.sessionKey) return { disabled: true, calls: [], text: '' };
+        // 「整会话累计」（0.19.3）——只在**真的补发了一轮**时 +1。上面那道闸之后的
+        // 位置是刻意的：没补发的轮（续跑被关 / 无会话键）不计，否则升级点会被
+        // 从未发生的事提前触发，界面读数与事实不符。
+        // 判据（含「> N 才升级」与「0 = 不升级」两条边界）全在 continueFormFor，
+        // 续跑路径只负责取数——策略与执行分开，策略可离线断言。
+        const sessionKey = String(turn.meta.sessionKey);
+        const completeAfter = Math.max(0, Math.round(Number(cfg.autoContinueCompleteAfter ?? DEFAULT_CONTINUE_COMPLETE_AFTER) || 0));
+        // 形态判据用**本次的预期序号**（peek + 1）；真正的 +1 只在补发确认之后落账
+        //（见下面的 continueCounter.bump）。这样「整会话累计」只记真的补发了几轮：
+        // 发送抛错（RELAY/超时）不占额度，界面读数与事实一致。上面那道闸之后的
+        // 位置是刻意的——续跑被关 / 无会话键的轮次根本不计。
+        const cumulative = continueCounter.peek(sessionKey) + 1;
+        // 判据（含「> N 才升级」与「0 = 不升级」两条边界）全在 continueFormFor，
+        // 续跑路径只负责取数——策略与执行分开，策略可离线断言。
+        const form = continueFormFor({ cumulative, after: completeAfter });
         // 0.16.25：协议段按**站点**复用 transportNoteFor（与首轮教学同一函数、
         // 逐字同一份文本）。这一轮是「把再教学提示当用户消息补发」，模型看到的
         // 格式指引必须与它首轮被教的完全一致：deepseek 拿官方模板、glm 拿代码块
@@ -1153,6 +1267,18 @@ export function apply(ctx, config = {}) {
         // 补的是**完整协议段**：它带着该站点的格式立场与行为约束。）
         const siteId = turn.meta?.siteId || null;
         const transport = teachFor(siteId, tools);
+        // 完整提醒（0.19.3）：累计超过升级点后，把「协议段」换成**会话教学正本**
+        // ——它就是首轮真实发出去的那一份（buildPreset + teachFor，与
+        // prompts/<site>.md 正文逐字同源），因此带上了首轮才有的工具清单与使用准则。
+        // 会话正本缺失（桥重启后接手一个已存在的网页会话，本进程没见过 fresh）时
+        // 回落现算：用的还是同一组 builder，区别只在少了 [全局指令]/[本网站指令]
+        // 两段用户指令——不是另写一份教学。
+        const completeTeaching = form === 'complete'
+          ? (siteTeachingBySession.get(sessionKey) || (buildPreset({ tools, siteId }) + teachFor(siteId, tools)))
+          : '';
+        if (form === 'complete' && !siteTeachingBySession.has(sessionKey)) {
+          warn('complete reminder: 会话教学正本缺失（本进程未见过 fresh 轮），本轮现算——少了用户指令两段');
+        }
         // 0.16.28：框架前置。真机（session-4f236a51）里模型读到再教学提示会停下来
         // 「回应提醒」而不是「按提醒行动」——续跑轮的开头必须先声明这条消息的身份
         // （系统提示、勿回应），把模型的注意力钉回任务。协议段（transport）保留：
@@ -1162,13 +1288,32 @@ export function apply(ctx, config = {}) {
           + noticeText
           + '\n\n[自动续跑] 上一轮的工具调用没有被执行（桥没能解析）。请按上面的模板重发那条调用；'
           + '如果任务已经完成或不需要工具，直接给出结论。'
-          + (transport ? `\n\n${transport}` : '');
+          // 0.19.3：针对真机里最顽固的一种「续跑也救不回来」——模型在思考里打转
+          // （「Let me output. / OK. / Writing. / Go.」循环上百字），正文一个字符
+          // 都不落，于是下一次续跑又拿到一条 THINKING_ONLY_NO_ANSWER。真机读数：
+          // 那条提示里的「思考末尾」整段都是这类自我催促（doc/long-term-issues.md
+          // 第 22 条「只出思考、不出正文：未归因」）。旧文案只说了「要做什么」，
+          // 没说「什么时候必须落笔」——模型于是继续想，而不是继续做。
+          // 只加这一条：把「此刻就输出」写成可判定的动作，并关闭「再想一遍」这个选项。
+          + '现在就开始输出，不要再用思考复述计划、也不要反复催促自己；'
+          + '这条提示之后的第一段正文，必须直接是调用本身或最终结论。'
+          // 完整提醒自带协议段（teachFor 已包含在会话教学正本里），因此两支互斥，
+          // 不会把同一份协议文本发两遍。续跑**不停手**：升级只换形态（用户原话
+          // 「不能停！继续后续需要 auto！！我需要真实长上下文」）。
+          + (completeTeaching
+            ? `\n\n[完整提醒·本会话累计第 ${cumulative} 次补发，已超过升级点 ${completeAfter} 次]\n`
+              + '下面是本会话首轮真实发给你的完整教学（工具清单、调用格式、使用准则）。'
+              + '请照它把上一条调用以**逐字正确**的形状重发；这之后仍会继续自动续跑，不会停手。\n\n'
+              + completeTeaching
+            : (transport ? `\n\n${transport}` : ''));
         try {
           // fresh 必须钉死 false：executor 按 meta.fresh 决定开不开新网页会话，
           // 而续跑的前提恰恰是「上一轮刚在这个会话里落地」——沿用原 fresh 值会把
           // 首轮的续跑提醒发进一个零上下文的新会话（模型根本不知道自己刚才调了什么）。
           const res = await relay.submit(prompt, { signal: options.signal, meta: { ...turn.meta, fresh: false } });
           const text = String(res?.text || '');
+          // 补发**已确认送出**才落账（见上面 cumulative 的口径注释）。
+          const delivered = continueCounter.bump(sessionKey);
           const cont = parseAgentReply(text, { tools });
           // 续跑轮的原始回复同样全量落盘（0.16.17 同一纪律：没有原文就无法离线归因）。
           appendReplyLog(text, {
@@ -1179,15 +1324,27 @@ export function apply(ctx, config = {}) {
           });
           if (!text.trim() && !cont.calls.length) {
             log('auto-continue round returned empty reply — 回落为 UNPARSED 提示收场');
-            return null;
+            // 形态读数照样带出去：这一轮**确实补发过**，界面不许说成「未补发」。
+            return { disabled: false, calls: [], text: '', cumulative: delivered, form };
           }
-          log(`auto-continue round: ${text.length} chars, ${cont.calls.length} call(s) parsed`);
-          return { ...cont, text };
+          log(`auto-continue round: ${text.length} chars, ${cont.calls.length} call(s) parsed, form=${form}, cumulative=${delivered}`);
+          return { ...cont, text, cumulative: delivered, form };
         } catch (err) {
           warn(`auto-continue round failed (${String(err?.code || err?.message || err)}) — 回落为 UNPARSED 提示收场`);
+          // 发送抛错 = **未确认送出**，因此不落账（额度不占用），也不用一份
+          // 「已补发」的读数去顶替：交回 null 让调用方走既有的「补发没发生」分支，
+          // 与 0.16.29 的处置逐字同型。
           return null;
         }
       };
+      // 续跑进度说明里的三枚读数（累计次数、是否已改用完整提醒、升级点 N）。
+      // 八处出口共用这一处口径：免得某一处漏掉「已改用完整提醒」这句话，
+      // 界面于是静默少一条归因——那种漏在长会话里最难发现（每一处单看都正常）。
+      const continueNoticeFields = (cont) => ({
+        cumulative: Math.max(0, Math.round(Number(cont?.cumulative) || 0)),
+        complete: cont?.form === 'complete',
+        after: Math.max(0, Math.round(Number(cfg.autoContinueCompleteAfter ?? DEFAULT_CONTINUE_COMPLETE_AFTER) || 0)),
+      });
       // 续跑回复的散文要走与权威正文同一套协议防线（探到协议痕迹就整段扣住——
       // 续跑回复里出现畸形调用块的概率比正常轮更高，这正是它存在的理由）。
       const safeAutoProse = (raw) => {
@@ -1486,7 +1643,7 @@ export function apply(ctx, config = {}) {
           // 唯一例外：补发**根本没发生**（cont.disabled）时仍交回 notice 原文，
           // 因为那条通道不存在了，提示是唯一归因来源（见下面 emitText 兜底）。
           if (contValid.length) {
-            const text = `AUTO_CONTINUED: 已自动补发提醒，网页已重新发起 ${contValid.length} 条调用。`
+            const text = autoContinuedNotice({ calls: contValid.length, ...continueNoticeFields(cont) })
               + (contProse ? `\n\n${contProse}` : '');
             yield* emitFollowUp(text);
             yield* emitCallBlocks(contValid, 'auto-continued after TOOL_UNKNOWN round');
@@ -1494,7 +1651,7 @@ export function apply(ctx, config = {}) {
             return;
           }
           if (contProse) {
-            const text = `AUTO_CONTINUED: 已自动补发提醒，网页仍未发起可执行调用。\n\n${contProse}`;
+            const text = autoContinuedNotice({ ...continueNoticeFields(cont) }) + `\n\n${contProse}`;
             yield* emitFollowUp(text);
             yield* finishChunks(turn, text + thinkAcc, 'stop');
             return;
@@ -1732,7 +1889,7 @@ export function apply(ctx, config = {}) {
             }
             // 补发过了、模型仍然没能给出可执行调用：界面上只给一句可行动的归因，
             // 不铺再教学提示全文（0.16.29 用户指令）。
-            const fallback = 'AUTO_CONTINUED: 已自动补发提醒，但网页仍未发起可执行调用。';
+            const fallback = autoContinuedNotice({ disabled: true });
             yield* emitText(out ? `${out}\n\n${fallback}` : fallback, turn, nextIndex);
             return;
           }
@@ -1742,9 +1899,7 @@ export function apply(ctx, config = {}) {
           // 用户消息发给模型（见 autoContinueRound），**不再当正文显示在会话里**——
           // 界面只留一句 AUTO_CONTINUED 进度说明。提示全文仍逐字补发、仍落 reply-log。
           const text = (out ? `${out}\n\n` : '')
-            + (contValid.length
-              ? `AUTO_CONTINUED: 已自动补发提醒，网页已重新发起 ${contValid.length} 条调用。`
-              : 'AUTO_CONTINUED: 已自动补发提醒，网页仍未发起可执行调用——以上为其回复，按最终答复收场。')
+            + autoContinuedNotice({ calls: contValid.length, final: !contValid.length, ...continueNoticeFields(cont) })
             + (contProse ? `\n\n${contProse}` : '');
           yield* emitFollowUp(text);
           yield* emitCallBlocks(contValid, 'auto-continued after unparsed round');
@@ -1770,7 +1925,7 @@ export function apply(ctx, config = {}) {
             // 0.16.29：thinking-only 的归因提示同样只走补发通道，不再铺进正文
             // （与 UNPARSED / TOOL_UNKNOWN 三处一致）。
             if (contValid.length) {
-              const text = `AUTO_CONTINUED: 已自动补发提醒，网页已重新发起 ${contValid.length} 条调用。`
+              const text = autoContinuedNotice({ calls: contValid.length, ...continueNoticeFields(cont) })
                 + (contProse ? `\n\n${contProse}` : '');
               yield* closeThink();
               yield* emitFollowUp(text);
@@ -1779,7 +1934,7 @@ export function apply(ctx, config = {}) {
               return;
             }
             if (contProse) {
-              const text = `AUTO_CONTINUED: 已自动补发提醒，网页仍未发起可执行调用。\n\n${contProse}`;
+              const text = autoContinuedNotice({ ...continueNoticeFields(cont) }) + `\n\n${contProse}`;
               yield* closeThink();
               yield* emitFollowUp(text);
               yield* finishChunks(turn, text + thinkAcc, 'stop');
@@ -1891,7 +2046,7 @@ export function apply(ctx, config = {}) {
           const contValid = cont.calls.filter((c) => tools.some((t) => t?.name === c.name));
           const contProse = safeAutoProse(cont.text);
           if (contValid.length) {
-            const text = `AUTO_CONTINUED: 已自动补发提醒，网页已重新发起 ${contValid.length} 条调用。` + (contProse ? `\n\n${contProse}` : '');
+            const text = autoContinuedNotice({ calls: contValid.length, ...continueNoticeFields(cont) }) + (contProse ? `\n\n${contProse}` : '');
             yield* emitFollowUp(text);
             yield* emitCallBlocks(contValid, 'auto-continued after unparsed round');
             yield* finishChunks(turn, proseBlock + text + thinkAcc + cont.text, 'tool-calls');
@@ -1899,7 +2054,7 @@ export function apply(ctx, config = {}) {
           }
           if (contProse) {
             // 0.16.29：续跑轮只有散文时也只留进度说明（提示全文已发给模型）。
-            const text = `AUTO_CONTINUED: 已自动补发提醒，网页仍未发起可执行调用。\n\n${contProse}`;
+            const text = autoContinuedNotice({ ...continueNoticeFields(cont) }) + `\n\n${contProse}`;
             yield* emitFollowUp(text);
             yield* finishChunks(turn, proseBlock + text + thinkAcc, 'stop');
             return;
@@ -3197,8 +3352,15 @@ function imageMarkdown(images) {
     // 刚把 siteId 换成了别的站点，在它之前取会拿到主线那一段，注入到子代理轮里。
     const sitePrompt = sitePromptFor(siteId);
     const keyAgentId = subAgentMode === 'own' ? agentId : null;
+    // 会话键含 **accountKey**（0.19.4，用户指令「一个网址可以多个账号，多个对话！
+    // 但是必须每个对于唯一账号」）：同一条 DSH 会话切到另一个账号 ⇒ 那是**另一条网页
+    // 对话**，游标、落盘文件、发送间隔账本各自分开。这样「对话 ↔ 账号」是 1:1 的
+    // **结构性**保证，而不是靠运行期比对维持。
+    //
+    // 一处已知代价：升级后第一次发言时旧键（不含账号段）不再命中，于是每个会话都会
+    // 整段重建一次；之后稳定。`sessionKeyOf` 仍取第一段（sessionId），等待账本不受影响。
     const keyPath = options.sessionId && cfg.contextMode === 'session' && !options.purpose
-      ? [String(options.sessionId), keyAgentId ? String(keyAgentId) : ''].filter(Boolean).join('::')
+      ? [String(options.sessionId), keyAgentId ? String(keyAgentId) : '', accountKey].filter(Boolean).join('::')
       : null;
     const recordPreset = (prompt) => {
       // Record every real agent turn (no aux purpose): this is the exact
@@ -3224,7 +3386,8 @@ function imageMarkdown(images) {
       recordPreset(prompt);
       return {
         prompt,
-        inputTokens: estimateTokens(prompt),
+        // 无会话键的单轮 = 它自己就是一个完整上下文，网页自己的开销在这里也是**一份**。
+        inputTokens: estimateTokens(prompt) + usageOverheadTokens(),
         meta: {
           model: formatModelId(siteId, slot, model), siteId, slot, accountKey, thinkMode,
           // 发送间隔按**槽**取（不同登录态风控独立）；回落链见 accounts.sendGapForSlot。
@@ -3294,6 +3457,19 @@ function imageMarkdown(images) {
       freshReason = 'no-cursor';
     }
     const fresh = !st;
+    // 「换账号」这一真因要能被认出来：会话键里带了 accountKey，所以切账号必然表现为
+    // 一次 `no-cursor`（新键）。那是对的，但读日志的人会把 `no-cursor` 读成「游标丢了」，
+    // 于是一次**预期内**的重建被当成故障排查。这里按 sessionId 记住上次用的账号，
+    // 只有真换了才把真因改写成 `account-changed`。
+    if (options.sessionId) {
+      const seen = lastAccountBySession.get(String(options.sessionId));
+      if (fresh && seen && seen !== accountKey) freshReason = 'account-changed';
+      lastAccountBySession.delete(String(options.sessionId));
+      lastAccountBySession.set(String(options.sessionId), accountKey);
+      while (lastAccountBySession.size > 128) {
+        lastAccountBySession.delete(lastAccountBySession.keys().next().value);
+      }
+    }
     if (fresh && freshReason && keyPath) {
       freshReasons.set(freshReason, (freshReasons.get(freshReason) || 0) + 1);
       log(`fresh web chat (reason=${freshReason}, sessionKey=${keyPath}) — 整段重建`);
@@ -3308,12 +3484,13 @@ function imageMarkdown(images) {
       // 提示词落盘（0.16.28）：fresh 首轮 = 站点教学全文（稳定部分）+ 会话上下文
       // 全文（完整首轮）同时落盘。增量轮不写——上下文没变，落盘只会制造 IO 噪音。
       // 静默失败由 prompt-store 自己兜底，这里不接错误分支。
-      writePromptFiles({
-        siteId,
-        sessionKey: keyPath,
-        siteText: buildPreset({ ...options, extraPrompt, sitePrompt, siteId }) + teachFor(siteId, options.tools),
-        sessionText: prompt,
-      });
+      // 站点教学全文只在这里算一次：既落盘（prompts/<site>.md），又进「会话教学
+      // 正本」表供自动续跑的**完整提醒**复用（0.19.3）。两处共用同一个字符串，
+      // 于是「续跑升级后重发的教学」与「首轮真实教过的教学」不可能分叉——
+      // 这是机制保证，不是靠两处各自照着写对的约定。
+      const siteText = buildPreset({ ...options, extraPrompt, sitePrompt, siteId }) + teachFor(siteId, options.tools);
+      rememberSiteTeaching(keyPath, siteText);
+      writePromptFiles({ siteId, sessionKey: keyPath, siteText, sessionText: prompt });
     }
     else prompt = delta.text;
     // 上下文计数口径（问题③根因）：网页这一侧是「首轮全文 + 后续增量」，模型
@@ -3340,7 +3517,9 @@ function imageMarkdown(images) {
       // 好过编一个数。
       usageInput() {
         const cur = sessionState.get(keyPath);
-        return cumulativeTokens + (Number.isFinite(cur?.outTokens) ? cur.outTokens : 0);
+        // 网页自己注入的那部分上下文按**一次性偏移**计入（见 usageFixedOverheadTokens
+        // 的注释：它在上下文里只有一份，逐轮累加会把压缩压力虚假推高）。
+        return cumulativeTokens + (Number.isFinite(cur?.outTokens) ? cur.outTokens : 0) + usageOverheadTokens();
       },
       // 每轮收尾把助手输出估算累进当前会话条目（读改写 Map 里的现存引用，不重建：
       // commit() 可能先于也可能晚于本调用，两种时序下条目都必须是同一个对象）。

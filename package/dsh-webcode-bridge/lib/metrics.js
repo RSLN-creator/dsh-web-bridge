@@ -252,11 +252,11 @@ export function answerDomLength(text) {
  *
  * 为什么收 `text` 而不是 `chars`（0.16.22 修）：旧实现按 `chars × 0.7` 平铺折算，
  * 那是 CJK 档的密度。工具型会话的提示词主体是**英文/代码/JSON**（工具 schema、
- * 工具结果、官方 tool-call 模板），真实密度 ≈ 0.25 token/字符——平铺 0.7 把这类
+ * 工具结果、官方 tool-call 模板），真实密度低于中文档——平铺一个高密度会把这类
  * prompt 高估近 3 倍，长英文轮次会被**误拒**（真机 2026-09-19：整段英文工具结果
  * 远未到窗口就吃 CONTEXT_WINDOW_EXCEEDED）。字符数不构成信息，**字符构成**才
- * 构成——折算必须走与展示同源的 `estimateTokens`（CJK 0.7 / ASCII 0.25，
- * 自带 +10% 余量，这里不得再加第二道余量）。
+ * 构成——折算必须走与展示同源的 `estimateTokens`（三类单价见 `TOKEN_DENSITY`，
+ * 自带余量，这里不得再加第二道余量）。
  *
  * 三个刻意的边界：
  *   • **只拦「超预算」，不拦「接近预算」**——留白交给 DSH 的压缩策略，闸门不是
@@ -291,18 +291,57 @@ export function checkContextBudget({ text, contextWindow } = {}) {
 }
 
 const CJK_RE = /\p{Script=Han}|\p{Script=Hiragana}|\p{Script=Katakana}|\p{Script=Hangul}/u;
+
 /**
- * 估算字符串的 token 数（纯函数，供 usage/"估算 vs 实测"展示）。
- * 旧实现按 字符数/4 估算，对中文严重低估（汉字≈0.7–1 token，英文≈0.25 token/字符），
- * 导致中文对话的进度/用量显示与网页真实消费差距很大。改为 CJK 约 0.7 tok、ASCII 约 0.25 tok，
- * 末尾 +10% 安全余量。
+ * 字符→token 的单价表（三类 + 统一余量）。**唯一真相**：usage、OpenAI 前端、
+ * 右栏统计、发送前预算闸、压缩压力全部经 `estimateTokens`，不许任何一处另写系数。
+ *
+ * 系数来源见 [`doc/research/2026-09-23-token-density-calibration.md`](../../../doc/research/2026-09-23-token-density-calibration.md)：
+ * 用本机凭据对**官方端点**实测六类样本后拟合，并取「每类都 ≥ 实测」的可行解。
+ *
+ * | 类 | 旧值 | 实测 | 现值 |
+ * | --- | --- | --- | --- |
+ * | CJK | 0.7 | 0.74 tok/字 | **0.75** |
+ * | 散文 ASCII（字母/空白） | 0.25 | 0.23 tok/字符 | **0.30** |
+ * | 其余 ASCII（数字/标点/运算符） | 0.25 | 0.37–0.68 tok/字符 | **0.70** |
+ *
+ * 为什么必须拆出第三类（2026-09-23 实测）：旧实现把「代码/JSON/命令行」和「英文散文」
+ * 混成同一个 0.25，于是**源码低估 33%、数字与符号低估 63%**——而这两类正是编码 agent
+ * 的主要流量。中文那一侧旧值本来就偏高，不是问题所在（用户直觉指向中文，实测推翻）。
+ *
+ * `margin` 是明确标注的**余量**，不是校准结果：标定用的是 API 侧 `deepseek-chat`，
+ * 而桥驱动的是**网页版**模型，其分词器未公开，因此保留 10% 超额（口径：宁可高报）。
+ */
+export const TOKEN_DENSITY = Object.freeze({ cjk: 0.75, word: 0.3, other: 0.7, margin: 0.1 });
+
+/** ASCII 字母与空白（`\t\n\v\f\r` + 空格）——走 word 单价；其余一律 other。 */
+function isAsciiWordChar(code) {
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || code === 32 || (code >= 9 && code <= 13);
+}
+
+/**
+ * 估算字符串的 token 数（纯函数，供 usage / "估算 vs 实测" 展示 / 预算闸共用）。
+ *
+ * 口径纪律：**宁可高报，不可低估**（用户指令「关于真实计费，做不到就保险往高报」）。
+ * 因此系数取的是实测可行解的上界，再叠 `TOKEN_DENSITY.margin`。副作用要一起认：
+ * 同一段文本的读数比 0.19.3 之前普遍偏高（代码与 JSON 最明显），上下文压力与
+ * DSH 压缩触发点随之变早。
+ *
+ * @param {unknown} s 待估文本（空值按 0）。
+ * @returns {number} 非负整数 token 估算。
  */
 export function estimateTokens(s) {
   const str = s ? String(s) : '';
   if (str.length === 0) return 0;
   let cjk = 0;
-  for (const ch of str) if (CJK_RE.test(ch)) cjk++;
-  const ascii = str.length - cjk;
-  const base = cjk * 0.7 + ascii * 0.25;
-  return Math.max(1, Math.ceil(base + base * 0.1));
+  let word = 0;
+  let other = 0;
+  for (const ch of str) {
+    if (CJK_RE.test(ch)) { cjk += 1; continue; }
+    // 逐码点取一次 codePointAt：ascii 判定走整数比较，比再跑一条正则快得多，
+    // 而 estimateTokens 会被喂进十万级字符的整段提示词。
+    if (isAsciiWordChar(ch.codePointAt(0))) word += 1; else other += 1;
+  }
+  const base = cjk * TOKEN_DENSITY.cjk + word * TOKEN_DENSITY.word + other * TOKEN_DENSITY.other;
+  return Math.max(1, Math.ceil(base + base * TOKEN_DENSITY.margin));
 }
