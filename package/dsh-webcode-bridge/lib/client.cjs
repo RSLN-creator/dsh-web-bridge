@@ -3483,48 +3483,31 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 一级站点选择框（面板首屏 + 工具条下拉两种形态共用一个组件）。
+     * 一级站点选择框 `SitePicker`（含面板 `SitePickerSurface`）：**已随 0.19.x 边界1 删除**。
      *
-     * ## 为什么是「面板内的选择框」而不是「点开标签就先弹一层」
-     *
-     * 调研文档 §4.2① 已经把结论写下了：右侧栏的标签页是官方 `sidebarRightTabs` 契约
-     * 下的**常驻视图**，用户点开它就期待看到面板本体；每次都先弹一层会让「回到上次
-     * 那个站点」变慢。因此选择框挂在**面板内部**的座位里：
-     *   · 尚无任何站点连接时的首屏 —— 直接铺一张站点网格，省掉「先看到空面板」这一步。
-     * 0.16.35 起这是它**唯一**的用法：工具条那颗站点按钮已按用户要求删除，站点入口
-     * 只剩「Web Bridge 标签页的站点目录」与「网页区上方的横向站点胶囊」两处。
-     *
-     * ## 首屏网格的键盘与关闭
-     *
-     * 网格态（`bare`）是**文档流里的一张卡片**，不是浮层：它常驻在引导页里，没有
-     * 「打开/关闭」这回事。因此这里不再挂 `useDismissOnOutsidePointer`、也不再持有
-     * 开合 state——那个钩子只服务于浮层，网格态挂了它反而会在点网格时误关（这正是
-     * 0.16.33–0.16.34 那个「点了没反应」缺陷的同族形态：钩子在，root 没挂对）。
-     * 网格内的方向键漫游由 `SitePickerSurface` 自己的 `onMenuKey` 承担。
+     * 它曾是「尚无任何站点连接时」的首屏站点网格，唯一入口是右栏网页区顶上的
+     * 「尚未初始化 → 请先登录」引导页。边界1 取消那道登录闸（未登录也直接挂 iframe
+     * 打开对应网址，登录在站点网页内完成）后，引导页删除，这两个组件失去全部调用方。
+     * 站点选择由 `SiteCatalogBody`（Web Bridge 标签页，从上往下、不显示登录态）与
+     * 网页区顶部横向站点胶囊承担，能力没丢。
      */
-    function SitePicker({ siteId, siteStatuses, onPick, onSplit }) {
-      const rootRef = React.useRef(null);
-      const pick = (sid) => onPick(sid);
-      // 0.16.35：**工具条上的站点下拉按钮已删除**，这个组件只剩「首屏网格」一种形态。
-      //
-      // 用户原话：「然后你现在的 deepseek 上面那点击排列多个网点就不要了」——即网页区上方
-      // 工具条里那颗会弹出站点列表的按钮。站点选择现在有两处、都不在工具条上：
-      //   · Web Bridge 标签页里的竖排站点目录（SiteListBody，一级）；
-      //   · 网页区顶部那排横向站点胶囊（0.16.35 恢复，本文件 Conversation 内）。
-      // 因此这里只保留「尚无任何站点连接时」的首屏网格——那是引导态，不是站点入口。
-      //
-      // ## 顺带记下 0.16.33–0.16.34 的一个真缺陷（已随删除消失，不再复现）
-      //
-      // 被删掉的那条分支用官方 `Menu` 画站点下拉，而 `useDismissOnOutsidePointer(rootRef,
-      // open, setOpen)` 在上面被**无条件**调用（hooks 顺序纪律），rootRef 却没挂到任何
-      // 节点上 → `root.current` 恒为 null → 官方那句 `root.current?.contains(target) !== true`
-      // 在每一次 pointerdown 上都成立（含点在菜单行上）。pointerdown 先于 click，于是列表
-      // 先卸载、那一下 click 落空，`onSelect` 永远不触发——用户报的「切换不了了」正是它。
-      // 只要将来再用这条路径（自绘下拉 + 官方 dismiss 钩子），必须把 rootRef 挂到**同时
-      // 包住触发按钮与列表**的那一层元素上。
-      return h('div', { className: 'hwb-picker grid-host', ref: rootRef },
-        h(SitePickerSurface, { siteId, siteStatuses, onPick: pick, onSplit, bare: true }));
-    }
+    // ---- 一级站点选择器：0.16.33 建立 → 0.19.x 删除（不复活）--------------------
+    //
+    // `SitePicker`（含其面板 `SitePickerSurface`）是「尚无任何站点连接时」的首屏网格，
+    // 唯一入口是右栏网页区顶上的「尚未初始化 → 请先登录」引导页。0.19.x 边界1 取消
+    // 了那道登录闸（未登录也直接挂 iframe 打开对应网址，登录在站点网页内完成），引导
+    // 页随之整体删除，这两个组件失去全部调用方，只能删——留一个没有入口的组件，只会
+    // 让下一个人以为还能从某处打开它。
+    //
+    // 它承担过的能力各有新去处，没丢：
+    //   · 「上下排列的站点列表」→ 站点目录 `SiteCatalogBody`（Web Bridge 标签页；
+    //     且旧址那块引导里的 `SitePicker` 用到了 `rootRef + useDismissOnOutsidePointer`，
+    //     那条路径上的「rootRef 没挂节点 → 列表在 click 前卸载」缺陷已随删除消失）。
+    //   · 「网页区顶部横向站点胶囊」仍在 Conversation 里（0.16.35 恢复）。
+    //
+    // 历史（只删代码，逻辑记忆留档）：0.16.35 曾删掉工具条站点下拉按钮，本组件在那时
+    // 起只剩引导态一种形态；0.16.33–0.16.34 的「切换不了了」正是 `useDismissOnOutsidePointer`
+    // 被无条件调用而 rootRef 悬空所致——pointerdown 先于 click 卸载列表。
 
     // ---- **二级站点菜单**：0.16.33 建立 → 0.16.35 **删除**（不复活）------------
     //
@@ -3546,69 +3529,8 @@ window.__ModuleLoader__.load({
     // `onSelect` 永不触发。以后再写「自绘下拉 + 官方 dismiss 钩子」，rootRef 必须挂在
     // **同时包住触发按钮与列表**的那一层元素上。
 
-    /** 选择框的面板体。单独抽出来是因为「下拉」与「首屏网格」只差一层定位与开合。 */
-    function SitePickerSurface({ siteId, siteStatuses, onPick, onSplit, onMenuKey, bare }) {
-      const ids = Object.keys(SITE_NAMES);
-      const stateCls = sid => {
-        const row = siteStatuses[sid];
-        return row?.loggedIn === true ? 'ok' : row?.loggedIn === false ? 'bad' : 'idle';
-      };
-      const stateText = sid => {
-        const row = siteStatuses[sid];
-        if (!row || row.loggedIn == null) return '待检查';
-        return row.loggedIn === true ? '已登录' : '未登录';
-      };
-      const key = (e) => {
-        if (!onMenuKey) return;
-        const i = ids.indexOf(siteId);
-        let next = null;
-        if (e.key === 'ArrowDown') next = ids[(i + 1) % ids.length];
-        else if (e.key === 'ArrowUp') next = ids[(i - 1 + ids.length) % ids.length];
-        else if (e.key === 'Home') next = ids[0];
-        else if (e.key === 'End') next = ids[ids.length - 1];
-        if (next === null) return;
-        e.preventDefault();
-        onPick(next);
-      };
-      return h('div', {
-        className: 'hwb-picker-surface' + (bare ? ' bare' : ''),
-        role: 'menu', 'aria-label': '选择内容服务站点', onKeyDown: key,
-      },
-        h('p', { className: 'hwb-picker-head' },
-          bare ? '选择一个站点开始。生成任务仍由该站点网页原生执行。' : '切换站点'),
-        h('div', { className: 'hwb-picker-grid' },
-          ids.map(sid => h('div', { className: 'hwb-picker-cell', key: sid },
-            h('button', {
-              className: 'hwb-picker-item' + (sid === siteId ? ' active' : ''),
-              type: 'button', role: 'menuitemradio', 'aria-checked': sid === siteId,
-              title: siteName(sid) + ' · ' + siteIconWhy(sid),
-              onClick: () => onPick(sid),
-            },
-              h('span', { className: 'hwb-picker-ico' + (hasBrandVector(sid) ? ' official' : '') },
-                h(SiteGlyph, { sid, size: 20 })),
-              h('span', { className: 'hwb-picker-text' },
-                h('span', { className: 'hwb-picker-name' }, siteName(sid)),
-                h('span', { className: 'hwb-picker-meta' },
-                  h('span', { className: 'hwb-dot ' + stateCls(sid), 'aria-hidden': 'true' }),
-                  stateText(sid),
-                  hasBrandVector(sid) ? '' : ' · 官方矢量未找到'))),
-            // 分屏入口：多开不同网址。这里显式给一颗按钮，而不只留 Ctrl+点击
-            // （旧实现只有 Ctrl/⌘+点击与中键两个**看不见的**入口，用户无从发现）。
-            onSplit && h('button', {
-              className: 'hwb-picker-split', type: 'button',
-              title: '在新面板中打开 ' + siteName(sid) + '（可与当前面板同时看两个站点）',
-              'aria-label': '在新面板中打开 ' + siteName(sid),
-              onClick: () => onSplit(sid),
-            }, h('span', { 'aria-hidden': 'true' }, '\u25eb'))))));
-      // 0.16.36：这里原本有一行脚注——「图标：DeepSeek 为官方矢量；其余站点品牌方未发布
-      // 透明底矢量，按「官方优先」暂用文字标记。」用户明确要求去掉。
-      //
-      // 那句话在 0.16.36 之后已经不对，到 0.16.37 则**彻底**不成立：十个站点全部有
-      // 真实矢量（八个 simple-icons + GLM/Z.ai 的 lobehub + DeepSeek 官方鲸鱼）。
-      // 具体哪个站点是哪一档，逐行挂在图标挂点的 `title` 里（siteIconWhy），
-      // 比一句总述准确，也才是本仓库「状态必须可追溯到来源」的做法。
-    }
-
+    /** 选择框的面板体 `SitePickerSurface` 随 `SitePicker` 一并删除（见上方注释），
+     * 无独立调用方，不再复活。 */
     /**
      * **站点目录**（0.16.35）——右侧栏「Web Bridge」标签页里的一级页面。
      *
@@ -3961,7 +3883,12 @@ window.__ModuleLoader__.load({
         if (row.loginBasis === 'stale') return '此结论来自旧版本判定，已被忽略；点「检测」按站点特征重新核验';
         return '';
       };
-      const shouldGuide = row => row && row.initialized === false && row.loggedIn !== true;
+      // 0.19.x 边界1：登录态**不再**挡网页。右栏一打开就逐站 connect 拉起浏览器、挂
+      // iframe，网页自己呈现——未登录就停在站点登录页，用户就地完成登录（满足「未
+      // 登录也能直接打开对应网址」）。原来的「请先登录再打开」引导因此取消，只保留
+      // 两种真实失败态：站点本机不可达（下方 unreachable）与内嵌被站点拦截
+      // （frameBlocked）。返回恒 false 即「不再引导」。
+      const shouldGuide = () => false;
       // 站点探活（不可达站点不挂 iframe）：会话内缓存，点「重试」强制重探。
       // probesRef 必须先于 probeSite 声明：probeSite 的闭包捕获它，虽然实际调用
       // 发生在 render 之后的 effect 里（那时已初始化），但把声明放在后面等于埋一个
@@ -4153,14 +4080,6 @@ window.__ModuleLoader__.load({
           connectError && !frameBlocked && h('div', { className: 'hwb-error', role: 'status' },
             '浏览器视图未能连接：' + connectError + ' ',
             h('button', { className: 'hwb-retry', onClick: reloadFrame }, '重试')),
-          shouldGuide(siteStatus) && h('div', { className: 'hwb-guide', role: 'status' },
-            h('strong', null, siteName(siteId) + ' 尚未初始化'),
-            h('p', null, '请先在设置页点击“登录”或“检测”，完成一次真实网页核验后再打开右栏。网络不可达或地区受限时，请使用独立窗口确认。'),
-            h('div', { className: 'hwb-firstrun' }, h(SitePicker, {
-              siteId, siteStatuses, onSplit: openSiteInPane,
-              onPick: (sid) => { setAccountSlot(''); setSiteId(sid); },
-            })),
-            h('button', { className: 'hwb-retry', onClick: () => api('window', { siteId, action: 'open' }).then(winState).catch(e => setConnectError(e.message)) }, '打开独立窗口')),
           // 本机直连不通：**不挂 iframe**（挂上去只会是一张 502/403 裸错误页，还常驻
           // 保活占资源）。给出站点名、失败原因与两条真正可行的出路。
           !shouldGuide(siteStatus) && unreachable(siteId) && h('div', { className: 'hwb-guide', role: 'status' },
@@ -4441,10 +4360,10 @@ window.__ModuleLoader__.load({
         // 颜色一律 currentColor：官方鲸鱼是单条填充路径，随宿主主题变色——
         // 这也是「透明底」的实际含义（没有底色块需要跟着主题反转）。
         ".hwb-glyph-svg{display:block;flex:none}",
-        // 挂点共用一条：`.hwb-glyph`（工具条站点图标）、`.hwb-picker-ico`（首屏网格）、
-        // `.hwb-catalog-ico`（站点目录行）。
-        ".hwb-glyph,.hwb-picker-ico,.hwb-catalog-ico{display:inline-flex;align-items:center;justify-content:center;flex:none;color:var(--dsw-alias-label-secondary,inherit)}",
-        ".hwb-glyph.official,.hwb-picker-ico.official,.hwb-catalog-ico.official{color:var(--dsw-alias-brand-primary,#3b82f6)}",
+        // 挂点共用一条：`.hwb-glyph`（工具条站点图标）、`.hwb-catalog-ico`（站点目录行）。
+        // `hwb-picker-ico`（首屏网格）随 SitePicker 在 0.19.x 删除，不再出现在这里。
+        ".hwb-glyph,.hwb-catalog-ico{display:inline-flex;align-items:center;justify-content:center;flex:none;color:var(--dsw-alias-label-secondary,inherit)}",
+        ".hwb-glyph.official,.hwb-catalog-ico.official{color:var(--dsw-alias-brand-primary,#3b82f6)}",
         // ---- 站点目录（0.16.35 建立，0.16.37 改为官方的**胶囊**）----------------
         //
         // 尺寸与结构**逐项**取自官方 `@deepseek-ai/dsh-client-ui-sidebar-terminal`
@@ -4489,42 +4408,6 @@ window.__ModuleLoader__.load({
         // 单账户站点的登录入口（0.19.0）：与官方 ghost 按钮同族，右端圆角对齐卡片刻度，
         // 不抢主区的视觉权重（主区仍是「进入该站点」的主动作）。
         ".hwb-site-login{border-radius:0 24px 24px 0;flex:none;align-self:stretch;height:auto;padding:0 18px;font-size:13px;color:var(--dsw-alias-label-secondary,inherit)}",
-        // 0.16.35：这一组里的**浮层形态已删**——`.hwb-picker.inline` / `.hwb-picker-trigger`
-        //（含 hover/focus/name/caret）/ `.hwb-picker-surface` 的绝对定位变体，全都服务于
-        // 已被用户否掉的工具条站点下拉。留下来的只有**首屏网格**（文档流里的一张卡片）
-        // 需要的几条：.hwb-picker 作为定位锚、.hwb-picker-surface.bare 与网格内部若干。
-        ".hwb-picker{position:relative}",
-        // 首屏网格态：**文档流里的一张卡片**，不是浮层。
-        // 0.16.39：宽度改成**官方的 380px**（用户：「站点选择选择框的宽度需要和官方一致」）。
-        //
-        // 官方右侧栏的入口胶囊（`@deepseek-ai/dsh-client-ui-sidebar-right` 的
-        // `GuideBody.module.css`）逐字是：
-        //   .entry / .entryCell { width:380px; max-width:100% }
-        // 也就是「恒 380、窄了才收缩」，而不是旧值的 `min(100%,440px)`——
-        // 440 既不是官方值，又让卡片在窄 pane 上顶到左右两边（用户报的
-        //「没有和左右边界有间隔」正是它）。现在宽度交给官方口径，两侧间距由
-        // `.hwb-firstrun` 的 padding 与外层 `margin:0 auto` 提供。
-        ".hwb-picker-surface.bare{position:static;width:380px;max-width:100%;box-sizing:border-box;min-width:0;text-align:left;margin:0 auto;box-shadow:none;border:.5px solid var(--dsw-alias-border-l4,#8884);padding:12px;border-radius:12px;background:var(--dsw-specific-menu,var(--dsw-alias-bg-layer-1,#fff));color:var(--dsw-alias-label-secondary,inherit)}",
-        ".hwb-picker-head{font-size:12px;line-height:18px;margin:0 0 8px;color:var(--dsw-alias-label-tertiary,#8a8f98)}",
-        ".hwb-picker-grid{display:grid;grid-template-columns:1fr;gap:2px;max-height:min(52vh,420px);overflow:auto}",
-        ".hwb-picker-cell{display:flex;align-items:center;gap:2px}",
-        ".hwb-picker-item{flex:1;min-width:0;display:flex;align-items:center;gap:10px;padding:6px 8px;font:inherit;text-align:left;color:var(--dsw-alias-label-primary,inherit);background:0 0;border:0;border-radius:8px;cursor:pointer}",
-        ".hwb-picker-item:hover{background:var(--dsw-alias-interactive-bg-hover,#8882)}",
-        ".hwb-picker-item.active{background:var(--dsw-alias-interactive-bg-hover,#8882)}",
-        ".hwb-picker-item:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#3b82f6);outline-offset:-1px}",
-        ".hwb-picker-ico.official{color:var(--dsw-alias-brand-primary,#3b82f6)}",
-        ".hwb-picker-text{display:flex;flex-direction:column;min-width:0;gap:1px}",
-        ".hwb-picker-name{font-size:13px;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
-        ".hwb-picker-meta{display:inline-flex;align-items:center;gap:5px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#8a8f98)}",
-        ".hwb-picker-split{flex:none;width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;font-size:12px;color:var(--dsw-alias-label-tertiary,#8a8f98);background:0 0;border:.5px solid transparent;border-radius:12px;cursor:pointer}",
-        ".hwb-picker-split:hover{background:var(--dsw-alias-interactive-bg-hover,#8882);color:var(--dsw-alias-label-primary,inherit);border-color:var(--dsw-alias-border-l4,#8884)}",
-        // 首屏网格：作为引导页里的一块内容，不吸走整页宽度，也不与遮罩的居中布局打架。
-        //
-        // 0.16.38：旧值 `max-width:440px` 让整块网格在窄 pane 上顶到左右两边——
-        // 用户报的「没有和左右边界有间隔」就是这个。改为**容器满宽 + 内边距**，宽度
-        // 上限交给里面的 `.hwb-picker-surface.bare`（它自己 `margin:0 auto` 居中），
-        // 于是「不超 440px」与「两侧留空隙」两件事同时成立。
-        ".hwb-firstrun{width:100%;display:flex;justify-content:center;box-sizing:border-box;padding-inline:clamp(12px,3vw,20px)}",
         // ---- 站点下拉菜单样式：**随 SiteMenu 一起删除**（0.16.35）------------
         //
         // 这里曾有一组 `.hwb-menu-row` / `.hwb-menu-name` / `.hwb-menu-state` /

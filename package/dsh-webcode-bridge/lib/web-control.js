@@ -736,8 +736,10 @@ export function createWebControl(deps = {}) {
         executablePath: r.path,
         revision: r.revision,
         // 给面板一句可直接显示的话，避免前端再拼一遍（两处措辞迟早漂移）。
-        line: r.source === 'bundled' ? '使用插件自带 Chromium（推荐，与日常浏览器零交叉）'
-          : r.source === 'system' ? '使用本机已安装的浏览器（兜底）'
+        // 0.19.x 边界1「完全不对外暴露系统浏览器」：设置页只应看到「桥内置浏览器」，
+        // 因此 system 那条不再写「使用本机已安装的浏览器」——内部兜底存在，但不叫它出来。
+        line: r.source === 'bundled' ? '使用插件自带 Chromium（与日常浏览器零交叉）'
+          : r.source === 'system' ? '浏览器已就绪（插件内置浏览器能力）'
             : '未找到可用的浏览器 —— 需要下载',
         hint: r.path === null
           ? '点击「下载浏览器」会拉取 playwright 自带的 Chromium（约 150 MB，仅一次）'
