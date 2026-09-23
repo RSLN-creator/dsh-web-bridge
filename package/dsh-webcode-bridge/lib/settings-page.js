@@ -25,6 +25,21 @@ body {
 .header { margin-bottom: 24px; text-align: left; }
 .header h1 { font-size: 24px; font-weight: 600; margin: 0 0 6px; letter-spacing: -0.4px; }
 .header p { font-size: 14px; color: #86868b; margin: 0; }
+/* 0.19.7：项目主页链接（用户要求「设置界面加上 github 连接在顶部合适位置」）。
+   与原生面板的标题行同形：贴在标题这一行的右端，不另起一行挤掉状态区。 */
+.header-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.repo-link {
+  flex: none;
+  font-size: 12px;
+  line-height: 18px;
+  color: #6e6e73;
+  text-decoration: none;
+  padding: 2px 10px;
+  border: 0.5px solid rgba(0,0,0,0.16);
+  border-radius: 12px;
+  transition: background 0.15s, color 0.15s;
+}
+.repo-link:hover { color: #1d1d1f; background: rgba(0,0,0,0.05); }
 
 .section-title {
   font-size: 12px;
@@ -61,6 +76,11 @@ label { font-size: 14px; font-weight: 500; color: #1d1d1f; margin: 0; }
 
 textarea, select, input {
   width: 100%;
+  /* 0.19.7：box-sizing 必须显式写。缺这一句时 width:100% 是**内容盒**宽度，
+     再加上左右 padding 与边框就要撑出容器 —— 而 .section-group 是 overflow:hidden，
+     用户看到的就是「输入框超出卡片框」（真机反馈 2026-09-24）。 */
+  box-sizing: border-box;
+  max-width: 100%;
   padding: 9px 12px;
   border: 1px solid #d2d2d7;
   border-radius: 8px;
@@ -184,7 +204,10 @@ pre.preset {
 </head>
 <body>
   <div class="header">
-    <h1>⚙️ Webcode Bridge 设置</h1>
+    <div class="header-row">
+      <h1>⚙️ Webcode Bridge 设置</h1>
+      <a class="repo-link" href="https://github.com/RSLN-creator/dsh-web-bridge" target="_blank" rel="noreferrer noopener" title="在 GitHub 打开项目主页（新标签）">GitHub</a>
+    </div>
     <p>管理模型、提示词、会话节奏与子代理分配策略</p>
   </div>
 

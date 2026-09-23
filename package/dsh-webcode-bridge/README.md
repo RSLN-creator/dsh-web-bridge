@@ -1,6 +1,6 @@
 # Harness Web Bridge
 
-已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.19.6（已打包并装入 web / headless 两个 profile；重启 DSH 后生效）。
+已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.19.7（已打包并装入 web / headless 两个 profile；重启 DSH 后生效）。
 
 安装（本包**不发 npm registry**，只以 `.tgz` 交付）：
 
@@ -14,6 +14,22 @@
 > 0.14.5 起发布流程收进仓库：`scripts/verify-pack.mjs` 逐文件核对 tarball 与工作树
 > （改完代码忘了重新 pack 时直接报错），`scripts/install-profiles.mjs` 先删旧目录再解包
 > （绕开 pnpm 对同版本 tarball「Already up to date」不重解的坑）。两条都是真实踩过的坑。
+
+## 0.19.7
+
+**界面三条：输入框探出卡片、顶栏缺项目链接、控件风格不统一。**
+
+1. **输入框超出卡片框**（用户反馈）：设置页的 `.hwb-model-select` / `.hwb-prompt-input`
+   与任务板弹窗的 `.hwb-input` / `.hwb-select` 都缺 `box-sizing:border-box`，于是
+   `width:100%` / `max-width:340px` 按**内容盒**计算，加上左右 padding 与边框就比容器宽
+   二十来像素；`.hwb-card` 没有 `overflow:hidden`，看起来就是控件从卡片边框里探出来。
+   已补齐 `box-sizing:border-box` + `max-width:100%` + `min-width:0`，并加护栏
+   （`test/client-render.test.mjs` 的 0.19.7 用例，删掉任一条声明立刻变红）。
+2. **顶部 GitHub 链接**：设置界面标题行右端（原生面板 `.hwb-settings-head`，独立设置页
+   `.header-row`）各加一枚项目主页链接。
+3. **统一控件风格**：模型下拉与文本框统一为「填满可用宽度、上限 340px」（旧版没有宽度、
+   只有 `min-width:220px`，下拉比标签列还窄且一行里长短不一）；任务板弹窗控件补上盒模型
+   与圆角刻度。
 
 ## 0.19.6
 

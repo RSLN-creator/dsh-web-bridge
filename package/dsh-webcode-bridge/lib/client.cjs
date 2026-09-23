@@ -2721,7 +2721,17 @@ window.__ModuleLoader__.load({
       //「默认模型落在哪个站点」是模型管理还在全局页时的写法，已随之退役）。其余
       // 站点的 pill 契约未真机校准，不硬造开关。
       return h('section', { className: 'hwb-settings' },
-        h('h2', null, 'Harness Web Bridge'),
+        // 标题行：左边是设置名，右边是项目主页链接（用户要求「设置界面加上 github
+        // 连接在顶部合适位置」）。放在标题这一行的右端而不是另起一行——设置页顶部
+        // 的空间要留给**状态**（构建指纹 + 一句说明），多一行纯链接会把它挤下去。
+        h('div', { className: 'hwb-settings-head' },
+          h('h2', null, 'Harness Web Bridge'),
+          h('a', {
+            className: 'hwb-repo-link',
+            href: 'https://github.com/RSLN-creator/dsh-web-bridge',
+            target: '_blank', rel: 'noreferrer noopener',
+            title: '在 GitHub 打开项目主页（新标签）',
+          }, 'GitHub')),
         build?.hash && h('p', { className: 'hwb-build' }, '构建指纹：' + build.hash + (build.version ? ' · v' + build.version : '')),
         // 0.19.x：原文写的是「用已登录的 Edge 网页」，那是驱动改造前的措辞——桥用的是
         // 自带的 Chromium（系统浏览器只是兜底），写 Edge 会让用户以为要另装一个。
@@ -4020,6 +4030,12 @@ window.__ModuleLoader__.load({
       style.textContent = [
         ".hwb-settings{max-width:760px;padding:20px;color:inherit;display:flex;flex-direction:column;gap:14px}",
         ".hwb-settings h2{font-size:20px;font-weight:500;line-height:28px;letter-spacing:0;margin:0 0 2px}",
+        // 标题行：h2 在左、项目链接在右。`margin:0 0 2px` 移到 h2 上（上面那条），
+        // 这里只负责两端对齐，避免 h2 的 margin 把这一行撑高。
+        ".hwb-settings-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:4px}",
+        ".hwb-settings-head h2{margin:0}",
+        ".hwb-repo-link{flex:none;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,#6b7280);text-decoration:none;padding:2px 8px;border:.5px solid var(--dsw-alias-border-l3,#8885);border-radius:12px;transition:background .12s ease,color .12s ease}",
+        ".hwb-repo-link:hover{color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-interactive-bg-hover,#8882)}",
         ".hwb-lead{font-size:13px;line-height:22px;color:var(--dsw-alias-label-tertiary,#8a8f98);margin:0}",
         ".hwb-build{font-size:11px;line-height:16px;color:var(--dsw-alias-label-caption,#9aa0a6);margin:-6px 0 0;font-variant-numeric:tabular-nums}",
         // ---- 0.14.9 去臃肿：按调研出来的 token 表收紧 --------------------
@@ -4061,8 +4077,16 @@ window.__ModuleLoader__.load({
         ".hwb-row button,.hwb-settings button{height:32px;padding:0 14px;font:inherit;font-size:13px;line-height:30px;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border:.5px solid var(--dsw-alias-border-l3,#8885);border-radius:12px;cursor:pointer;transition:background .12s ease}",
         ".hwb-row button:hover:not(:disabled),.hwb-settings button:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,#8882)}",
         ".hwb-row button:disabled,.hwb-settings button:disabled{opacity:.45;cursor:default}",
-        ".hwb-model-select,.hwb-prompt-input{min-width:220px;max-width:340px;padding:6px 10px;font:inherit;font-size:13px;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border:.5px solid var(--dsw-alias-border-l3,#8885);border-radius:8px}",
-        ".hwb-prompt-input{width:100%;max-width:none;min-height:96px;line-height:1.5;font-family:inherit;resize:vertical}",
+        // 0.19.7：模型下拉与文本框统一成「填满可用宽度、上限 340px」——旧版是
+        // `min-width:220px;max-width:340px` 且没有宽度，于是下拉比标签列还窄、
+        // 一行里长短不一（用户：「统一UI风格」）。需要更窄的调用点写 inline
+        // `maxWidth`（发送间隔的两个数字框就是这么做的）。
+        ".hwb-model-select,.hwb-prompt-input{box-sizing:border-box;width:100%;max-width:340px;min-width:0;padding:6px 10px;font:inherit;font-size:13px;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border:.5px solid var(--dsw-alias-border-l3,#8885);border-radius:8px}",
+        // `box-sizing:border-box` 是**必须**的，不是保险。缺它时 `width:100%` 是内容盒
+        // 宽度，加上左右 padding（20px）与边框（1px）就比容器宽 22px，`max-width:340px`
+        // 同理。`.hwb-card` 没有 `overflow:hidden`，用户看到的就是输入框/下拉探出卡片
+        // 边框——真机反馈（2026-09-24）「设置界面：输入框超出卡片框！」。
+        ".hwb-prompt-input{max-width:100%;min-height:96px;line-height:1.5;font-family:inherit;resize:vertical}",
         // 提示词文件路径（0.16.38）：等宽、单行、超长靠省略号，完整路径在 title 里。
         // 它是**只读读数**，因此不进输入框样式族；点击打开走旁边那颗按钮。
         ".hwb-filepath{flex:1 1 auto;min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:18px;padding:2px 8px;border-radius:8px;background:var(--dsw-alias-interactive-bg-hover,#8881);color:var(--dsw-alias-label-secondary,inherit);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
@@ -4517,6 +4541,12 @@ window.__ModuleLoader__.load({
         ".hwb-modal-header h3{margin:0;font-size:15px;font-weight:600}",
         ".hwb-modal-form{padding:18px;display:flex;flex-direction:column;gap:14px}",
         ".hwb-form-field{display:flex;flex-direction:column;gap:6px;font-size:12px}",
+        // 0.19.7：任务板弹窗的控件此前只覆盖了底色/边框（下面那条 `.hwb-modal-form` 规则），
+        // **没有** `box-sizing` —— 弹窗内 `width:100%` 的输入框因此按内容盒计算，探出
+        // `.hwb-modal-content` 的内边距（与设置页同一类溢出）。这里把盒子模型、padding、
+        // 圆角补齐，与 `.hwb-model-select` 同一套刻度；`max-width:100%` 兜住窄面板。
+        ".hwb-input,.hwb-select,.hwb-textarea{box-sizing:border-box;max-width:100%;min-width:0;padding:6px 10px;font:inherit;font-size:13px;border-radius:8px}",
+        ".hwb-input:focus,.hwb-select:focus{outline:none;border-color:var(--dsw-alias-state-business-primary,#4f6ef7)}",
         ".hwb-field-label{font-weight:500;color:var(--dsw-alias-label-secondary,inherit)}",
         ".hwb-form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}",
         ".hwb-modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}",

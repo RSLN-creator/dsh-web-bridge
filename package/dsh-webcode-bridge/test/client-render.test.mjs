@@ -668,6 +668,48 @@ test('★ 0.19.x 设置页文案：解释性长句与开发者自用读数不得
   }
 });
 
+/**
+ * 控件不得探出卡片（0.19.7）。
+ *
+ * 用户原话（2026-09-24）：「输入框超出卡片框！」。根因是**盒子模型**：设置页的
+ * `.hwb-model-select` / `.hwb-prompt-input` 与任务板弹窗的 `.hwb-input` / `.hwb-select`
+ * 当时都没有 `box-sizing:border-box`，于是 `width:100%` / `max-width:340px` 是**内容盒**
+ * 宽度，加上左右 padding 与边框就比容器宽二十来像素；`.hwb-card` 又没有 `overflow:hidden`，
+ * 看起来就是输入框从卡片边框里探出来。
+ *
+ * 判据写成「规则文本里必须同时出现那两条声明」而不是截图比对：这是纯 CSS 事实，
+ * 可机检；且**反向验证**很直接——删掉 `box-sizing` 这条用例立刻变红。
+ */
+test('★ 0.19.7 设置页控件不得探出卡片：控件规则必须带 box-sizing:border-box', () => {
+  const src = bridgeSrcFrom('client.cjs');
+  // 逐条按**源码顺序**检查，并允许「基础规则定了盒子模型、后续规则只覆盖别的属性」
+  // 这种正常写法（级联里同一个元素两条规则是合规的）。
+  const rules = [...src.matchAll(/"(\.hwb-(?:model-select|prompt-input|input|select|textarea)[^"]*)\{([^}]*)\}"/g)];
+  assert.ok(rules.length >= 3, '控件 CSS 规则解析失败（只找到 ' + rules.length + ' 条）——先修本测试的解析');
+  let sawBoxSizing = false;
+  let sawMaxWidth = false;
+  let base = null;
+  for (const rule of rules) {
+    if (/box-sizing:border-box/.test(rule[2])) { sawBoxSizing = true; if (!base) base = rule; }
+    if (/max-width:(?:100%|\d)/.test(rule[2])) sawMaxWidth = true;
+  }
+  assert.ok(sawBoxSizing,
+    '控件的 CSS 里没有 box-sizing:border-box —— width:100%/max-width 会按内容盒算并探出卡片');
+  assert.ok(sawMaxWidth,
+    '控件的 CSS 里没有 max-width —— 窄面板下会打穿卡片边框');
+  // 每一条声明了 width:100% 的控件规则，仍必须能落在一个已声明 border-box 的规则上；
+  // 这里用「同一选择器组」判据把最常见的那种回归（有人把基础规则删掉）钉住。
+  assert.ok(base, '缺少带 box-sizing 的基础控件规则');
+  for (const sel of ['.hwb-model-select', '.hwb-prompt-input']) {
+    assert.ok(base[1].includes(sel),
+      '基础规则 ' + base[1] + ' 必须覆盖 ' + sel + '（否则该控件又按内容盒算）');
+  }
+  // 标题行的项目链接（用户要求：设置界面顶部加 GitHub 连接）。
+  assert.match(src, /className: 'hwb-settings-head'/, '设置页标题行容器不见了（GitHub 链接挂在它里面）');
+  assert.match(src, /href: 'https:\/\/github\.com\/[^']+'/, '设置页顶部缺少 GitHub 项目链接');
+  assert.match(src, /\.hwb-repo-link\{/, '缺少项目链接的样式规则');
+});
+
 test('★ 0.16.35 站点目录：从上往下列出全部站点，且不显示登录态', async () => {
   // 用户原话：「文件夹，新建终端，浏览器，这几个是怎么排列？从上往下！我希望是点击
   // web bridg 后能够实现，一样的 deepseek，智谱，等这样排列」「登录态不要看」。
