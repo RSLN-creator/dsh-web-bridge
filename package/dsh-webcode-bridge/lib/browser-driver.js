@@ -2734,18 +2734,72 @@ export function createBrowserDriver(options = {}) {
       // #send-message-button）点按钮提交——这些站点对程序化 Enter 不响应
       // （真机 2026-09-12：z.ai 轮次静默挂死正因 Enter 不触发发送）；
       // 其余站点维持 Enter。按钮点击失败回落 Enter，不发半截消息。
-      if (SEL.sendButton) {
-        const btn = page.locator(SEL.sendButton).first();
-        try {
+      //
+      // 0.19.8：**发送必须确认**。
+      //
+      // 真机取证（2026-09-24，本机 0.19.7）：带图片的那一轮，上传证据命中
+      // （`imageTransport.ok=true`、`img[src^='blob:']`），但 22 秒后**页面仍停在首页、
+      // 正文还躺在输入框里**——程序化 Enter 那一下没有提交（同一页面手工按 Enter 立刻
+      // 成功，且模型正确读出图里的字符 `7QK-42`）。整轮于是白等 240s 超时，而读数只说
+      // 「超时」，看不出「消息压根没发出去」。
+      //
+      // 这是本项目记过多次的同一形状：**把「我调用了动作」当成「动作发生了」**。
+      // 因此把「发出去了没有」变成可判定的读数，判据取两条页面事实之一：
+      //   · 输入框被清空（网页收下消息才会清空）；
+      //   · 地址栏从站点根变成 `/a/chat/s/<id>`（新会话由 SPA 在收下那一刻改写）。
+      // 第一条路未确认就换下一条（按钮 → 聚焦后回车），都试过仍没发出就**明确抛错**，
+      // 不再伪装成「已发送然后超时」。
+      const composerCleared = async () => {
+        const v = await readComposer(input).catch(() => null);
+        return typeof v === 'string' && v.trim() === '';
+      };
+      const navigatedAway = () => !/^https?:\/\/[^/]+\/?$/.test(page.url());
+      let sent = false;
+      const settle = async (rounds) => {
+        for (let i = 0; i < rounds && !sent; i += 1) {
+          await page.waitForTimeout(250);
+          sent = (await composerCleared()) || navigatedAway();
+        }
+      };
+      // 路 ①：契约既有行为（有 sendButton 就优先点它，否则回车）。
+      try {
+        if (SEL.sendButton) {
+          const btn = page.locator(SEL.sendButton).first();
           if (await btn.count()) {
-            const btnBefore = await btn.isEnabled().catch(() => true);
-            if (btnBefore) await btn.click({ timeout: 5000 }).catch(async () => { await input.press('Enter'); });
+            const enabled = await btn.isEnabled().catch(() => true);
+            if (enabled) await btn.click({ timeout: 5000 });
             else await input.press('Enter');
           } else await input.press('Enter');
-        } catch { await input.press('Enter').catch(() => {}); }
-      } else {
-        await input.press('Enter');
+        } else {
+          await input.press('Enter');
+        }
+      } catch { await input.press('Enter').catch(() => {}); }
+      await settle(8);
+      if (!sent) {
+        // 路 ②：按契约点发送按钮（DeepSeek 新统一 UI 的发送键是
+        // `div[role='button']`，不是 `<button>`；附件在场时 Enter 可能不被吃）。
+        try {
+          const b = page.locator(SEL.sendButton).first();
+          if (SEL.sendButton && await b.count()) await b.click({ timeout: 4000 });
+        } catch { /* 下一条路 */ }
+        await settle(8);
       }
+      if (!sent) {
+        // 路 ③：聚焦输入框末位再回车（textarea 失去焦点时 Enter 会被页面忽略）。
+        try {
+          await input.click({ timeout: 3000 });
+          await input.press('End').catch(() => {});
+          await input.press('Enter');
+        } catch { /* 已尽力 */ }
+        await settle(12);
+      }
+      if (!sent) {
+        const err = new Error('SEND_NOT_CONFIRMED: 正文已写入输入框，但按站点契约发出后网页没有收下'
+          + '（输入框未清空、地址栏也未切到会话）——附件在场时发送键可能变了或被禁用');
+        err.code = 'SEND_NOT_CONFIRMED';
+        throw err;
+      }
+      log('send confirmed (composer cleared / navigated) url=' + page.url());
       // 发送已发出：启动 WIP 稳态巡检器（网页不发 FINISHED 时的秒级收束）。
       startWipWatch();
       // ② 发送之后：**新会话的地址是网页收下消息那一刻才被 SPA 写进地址栏的**

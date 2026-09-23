@@ -1,6 +1,6 @@
 # Harness Web Bridge
 
-已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.19.7（已打包并装入 web / headless 两个 profile；重启 DSH 后生效）。
+已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.19.8（已打包并装入 web / headless 两个 profile；重启 DSH 后生效）。
 
 安装（本包**不发 npm registry**，只以 `.tgz` 交付）：
 
@@ -14,6 +14,22 @@
 > 0.14.5 起发布流程收进仓库：`scripts/verify-pack.mjs` 逐文件核对 tarball 与工作树
 > （改完代码忘了重新 pack 时直接报错），`scripts/install-profiles.mjs` 先删旧目录再解包
 > （绕开 pnpm 对同版本 tarball「Already up to date」不重解的坑）。两条都是真实踩过的坑。
+
+## 0.19.8
+
+**图片轮发不出去：发送只调用、不确认。**
+
+真机取证（DeepSeek 统一 UI）：不带图的一轮 1.6s 正常回答；**带图**的一轮，附件上传
+证据命中（`imageTransport.ok=true`、`img[src^='blob:']`），但整轮 240s 超时；22 秒后
+直连浏览器（CDP）探活发现**页面仍停在站点首页、正文还躺在输入框里**——程序化 Enter
+没有提交。同一页面手工按 Enter 立刻发送成功，模型正确读出图里的字符。
+
+根因是发送没有确认：**「没发出去」与「发出去了但网页不回」在读数上长得一模一样**，
+而旧实现调用完就 `startWipWatch()` 等回复。
+
+修法：发送后按**页面事实**确认——输入框被清空，或地址栏从站点根切到 `/a/chat/s/<id>`；
+未确认就换下一条路重试（契约按钮 → 聚焦输入框末位回车），三条都不成立则抛
+`SEND_NOT_CONFIRMED`，不再伪装成超时。护栏见 `test/send-confirmed.test.mjs`。
 
 ## 0.19.7
 
