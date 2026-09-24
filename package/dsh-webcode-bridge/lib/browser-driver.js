@@ -4073,10 +4073,84 @@ export function createBrowserDriver(options = {}) {
   }
   function safeUrl(url) { try { return String(new URL(url)); } catch { return null; } }
 
+  // ==== 0.20.0 工作区画面流（路线 B）：把自带 Chromium 的真实页面投给右栏 ====
+  //
+  // 页面本体跑在**本驱动自己的浏览器实例**里（真实登录、真实渲染），右栏经
+  // lib/live.js 的 hub 取 CDP 会话做 Page.startScreencast + Input.* 回传。这里
+  // 只提供页面工作区管理与会话接入，不含投屏协议（协议在 hub，可假会话单测）。
+  //
+  // 关键约束：`page`（自动化页）与「面板正在看哪页」是**两件事**——activatePage
+  // 只 bringToFront，绝不改写 `page`；自动化轮次进行中用户在面板里看到的正是
+  // 驱动的实时操作，这是特性不是干扰。关闭面板页面时拒绝关自动化页（那会让
+  // 进行中的轮次失去宿主）。CDP 会话经 ctx.newCDPSession(page) 创建，每连接
+  // 一个、互不共享 ack 状态。
+  const livePageIds = new WeakMap();
+  let livePageSeq = 0;
+  const livePageId = (p) => {
+    if (!livePageIds.has(p)) livePageIds.set(p, 'p' + (++livePageSeq));
+    return livePageIds.get(p);
+  };
+  const liveResolve = (pageId) => {
+    if (pageId == null) return page;
+    const pages = ctx?.pages?.() || [];
+    return pages.find((p) => livePageId(p) === pageId) || null;
+  };
+  const live = {
+    /** 全部页面（工作区标签条数据源）。active = 驱动自动化页（面板标「驱动」）。 */
+    async listPages() {
+      const pages = ctx?.pages?.() || [];
+      return await Promise.all(pages.map(async (p) => ({
+        id: livePageId(p),
+        title: await p.title().catch(() => ''),
+        url: safeUrl(p.url()),
+        active: p === page,
+      })));
+    },
+    async openPage(url) {
+      if (!ctx?.newPage) throw new Error('browser not launched');
+      const p = await ctx.newPage();
+      if (url) await p.goto(String(url), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+      return await this.listPages();
+    },
+    async closePage(pageId) {
+      const p = liveResolve(pageId);
+      if (!p) return { ok: false, reason: 'not-found' };
+      if (p === page) return { ok: false, reason: 'automation-page' };
+      await p.close().catch(() => {});
+      return { ok: true };
+    },
+    async activatePage(pageId) {
+      const p = liveResolve(pageId);
+      if (p) await p.bringToFront().catch(() => {});
+      return { ok: Boolean(p) };
+    },
+    /** 取某页的 CDP 会话（pageId 缺省 = 自动化页）。hub 据此 startScreencast。 */
+    async attach(pageId) {
+      if (!ctx?.newCDPSession) throw new Error('browser not launched');
+      const p = liveResolve(pageId);
+      if (!p) throw new Error('page not found: ' + pageId);
+      const cdp = await ctx.newCDPSession(p);
+      return {
+        pageId: livePageId(p),
+        send: (cmd, params) => cdp.send(cmd, params),
+        on: (ev, cb) => cdp.on(ev, cb),
+        off: (ev, cb) => cdp.off(ev, cb),
+        detach: async () => { try { await cdp.detach(); } catch {} },
+      };
+    },
+    /** 页面增删通知（面板标签条自动刷新）。返回退订函数。 */
+    onPagesChanged(cb) {
+      if (!ctx?.on) return () => {};
+      ctx.on('page', cb);
+      ctx.on('close', cb);
+      return () => { try { ctx.off('page', cb); ctx.off('close', cb); } catch {} };
+    },
+  };
+
   // sessionSlot 与 status().sessionSlot 同源（sessionSlotFor）：控制面
   //（`GET/POST /__webcode/session-slot`）与面板都要能按 key 直接问一次，
   // 而不是只能读「最近一个 key」的 status 投影。省略 key = 最近一次 sendTurn 的 key。
-  return { sendPrompt, sendTurn, resetConversation, conversationFor, sessionSlot: sessionSlotFor, connect, interact, openLogin, openWindow, closeWindow, importStorageFromProfile, status, close, diagnostics, getToken, profileCookies, writeProfileCookies, userAgent, probeAttachment, readAccountIdentity, get page() { return page; }, webApi, listSessions, fetchHistory, screenshotBase64, setImageLimitsProvider };
+  return { sendPrompt, sendTurn, resetConversation, conversationFor, sessionSlot: sessionSlotFor, connect, interact, openLogin, openWindow, closeWindow, importStorageFromProfile, status, close, diagnostics, getToken, profileCookies, writeProfileCookies, userAgent, probeAttachment, readAccountIdentity, get page() { return page; }, webApi, listSessions, fetchHistory, screenshotBase64, setImageLimitsProvider, live };
 }
 
 function abortError() {

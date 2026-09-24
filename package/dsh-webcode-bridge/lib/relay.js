@@ -388,6 +388,9 @@ export function createRelay(options = {}) {
       startError = err.message;
       warn('http server error:', err.message);
     });
+    // 0.20.0 工作区画面流：lib/live.js 的 hub 借同一条 httpServer 做 WebSocket
+    // upgrade（/webcode/live）。hub 自己做路径与回环 Origin 校验。
+    if (cfg.onUpgrade) httpServer.on('upgrade', cfg.onUpgrade);
     httpServer.listen(cfg.port, cfg.host, () => {
       started = true;
       log(`listening on http://${cfg.host}:${cfg.port} (consent ${cfg.requireConsent ? 'required' : 'not required'})`);

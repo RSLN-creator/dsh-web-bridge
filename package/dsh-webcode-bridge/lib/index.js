@@ -17,6 +17,7 @@ import {
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { createRelay } from './relay.js';
+import { createLiveHub } from './live.js';
 import { createOpenAiFront } from './openai.js';
 import { createBrowserDriver } from './browser-driver.js';
 import { zeroProgressDecision } from './zero-progress.js';
@@ -2759,8 +2760,17 @@ function imageMarkdown(images) {
   const lastSessionRebuildAt = new Map();   // sessionKey → { at, chars }（真发生过的那次整段重放）
 
   let front = null;
+  // 0.20.0 工作区画面流 hub：登录只有自带 Chromium 一份，右栏投的是这个浏览器的
+  // 实时画面（损伤帧 + 输入回传）。判据与协议见 lib/live.js，方案见
+  // doc/plans/PLAN-2026-09-25-live-workspace.md。getDriver 惰性解析——连接到达
+  // 时驱动可能还没建（driverFor 会按需懒建）。
+  const liveHub = createLiveHub({ getDriver: (accountKey) => driverFor(accountKey), log, warn });
   const relay = createRelay({
     ...cfg,
+    // 0.20.0 工作区画面流（路线 B）：hub 借中继 httpServer 的 upgrade 事件挂
+    // WebSocket（/webcode/live?account=<key>），把自带 Chromium 的真实页面投给
+    // 右栏。getDriver 在连接到达时才解析（函数声明已提升，引用安全）。
+    onUpgrade: (req, socket, head) => liveHub.handleUpgrade(req, socket, head),
     // 中继侧的**外层**总超时必须是两段内层预算之和，不能与它们同值（0.16.3 修正）。
     //
     // 三类超时串在同一条链上：中继外层 > 驱动单轮 > 适配器看门狗窗口。0.16.3 之前

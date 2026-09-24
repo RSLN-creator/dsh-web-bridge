@@ -3664,6 +3664,164 @@ window.__ModuleLoader__.load({
      */
     let pendingPaneSite = null;
 
+    // ---- 0.20.0 工作区画面流（路线 B）--------------------------------------
+    //
+    // LivePane：把**自带 Chromium 的真实页面**投到右栏（CDP 损伤帧 + 输入回传）。
+    // 登录只有自带内核 profile 一份（右栏画面 = 驱动 = 同一个浏览器），图片查看/
+    // 文件预览/下载/弹窗回归真实浏览器行为——镜像 iframe 的运行时覆盖边界
+    // （动态查看器打不开）就此绕开。协议与安全面见 lib/live.js，方案见
+    // doc/plans/PLAN-2026-09-25-live-workspace.md。
+    //
+    // P1 范围：只有 LIVE_SITES 里的站点走画面流（先 DeepSeek 跑通再铺开）；面板
+    // 上保留「改用镜像页」按钮，链路异常时一键回落到旧 iframe 路线（不删旧路）。
+    const LIVE_SITES = new Set(['deepseek']);
+    function LivePane({ sid, slot, siteName, style, onUseMirror }) {
+      const [pages, setPages] = React.useState([]);
+      const [current, setCurrent] = React.useState(null);
+      const [status, setStatus] = React.useState('connecting');
+      const [reloadTick, setReloadTick] = React.useState(0);
+      const canvasRef = React.useRef(null);
+      const frameRef = React.useRef(null);   // { img, meta, dx, dy, dw, dh } 坐标换算依据
+      const wsRef = React.useRef(null);
+      const account = slot ? sid + '#' + slot : sid;
+
+      React.useEffect(() => {
+        let alive = true;
+        const ws = new WebSocket('ws://127.0.0.1:' + RELAY_PORT + '/webcode/live?account=' + encodeURIComponent(account));
+        wsRef.current = ws;
+        ws.onopen = () => setStatus('live');
+        ws.onmessage = (ev) => {
+          let msg = null;
+          try { msg = JSON.parse(ev.data); } catch { return; }
+          if (!msg || typeof msg !== 'object') return;
+          if (msg.t === 'pages') {
+            setPages(Array.isArray(msg.pages) ? msg.pages : []);
+            setCurrent(msg.current ?? null);
+            setStatus('live');
+          } else if (msg.t === 'frame') {
+            drawFrame(msg);
+          } else if (msg.t === 'bye' || msg.t === 'error') {
+            setStatus(String(msg.reason || msg.message || 'error').slice(0, 140));
+          }
+        };
+        ws.onclose = () => { if (alive) setStatus('closed'); };
+        ws.onerror = () => { if (alive) setStatus('closed'); };
+        return () => {
+          alive = false;
+          try { ws.close(); } catch { /* 已断 */ }
+        };
+      }, [account, reloadTick]);
+
+      const send = (obj) => {
+        const ws = wsRef.current;
+        try { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); } catch { /* 已断 */ }
+      };
+
+      // 帧元数据 m.deviceWidth/Height 是页面 CSS 视口尺寸；JPEG 本体可能被
+      // maxWidth/Height 等比缩小。绘制时记录显示矩形 (dx,dy,dw,dh)，输入换算
+      // 反着用：pageX = (mx - dx) * deviceWidth / dw。
+      function drawFrame(msg) {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = canvasRef.current;
+          if (!canvas) return;
+          const box = canvas.parentElement;
+          if (!box) return;
+          const bw = Math.max(1, box.clientWidth);
+          const bh = Math.max(1, box.clientHeight);
+          if (canvas.width !== bw || canvas.height !== bh) { canvas.width = bw; canvas.height = bh; }
+          const ctx2d = canvas.getContext('2d');
+          ctx2d.fillStyle = '#111';
+          ctx2d.fillRect(0, 0, canvas.width, canvas.height);
+          const s = Math.min(bw / img.width, bh / img.height);
+          const dw = img.width * s, dh = img.height * s;
+          const dx = (bw - dw) / 2, dy = (bh - dh) / 2;
+          ctx2d.drawImage(img, dx, dy, dw, dh);
+          const meta = msg.m || {};
+          frameRef.current = { img, meta, dx, dy, dw, dh };
+        };
+        img.src = 'data:image/jpeg;base64,' + msg.d;
+      }
+
+      function toPagePoint(e) {
+        const f = frameRef.current;
+        const canvas = canvasRef.current;
+        if (!f || !canvas) return null;
+        const r = canvas.getBoundingClientRect();
+        const mx = e.clientX - r.left, my = e.clientY - r.top;
+        const meta = f.meta || {};
+        const vw = Number(meta.deviceWidth) || f.img.width;
+        const vh = Number(meta.deviceHeight) || f.img.height;
+        return {
+          x: (mx - f.dx) * vw / f.dw,
+          y: (my - f.dy) * vh / f.dh,
+        };
+      }
+
+      function onMouse(e, action) {
+        const pt = toPagePoint(e);
+        if (!pt) return;
+        if (action === 'down') e.currentTarget.focus();
+        send({ t: 'mouse', action, x: pt.x, y: pt.y, button: ['left', 'middle', 'right'][e.button] || 'none', buttons: e.buttons, clickCount: e.detail || 1 });
+      }
+      function onWheel(e) {
+        const pt = toPagePoint(e);
+        if (!pt) return;
+        e.preventDefault();
+        send({ t: 'mouse', action: 'wheel', x: pt.x, y: pt.y, deltaX: e.deltaX, deltaY: e.deltaY });
+      }
+      function onKey(e, action) {
+        // F12 / 浏览器开发者键不拦；其余按键转发给远端并拦下本地默认行为
+        //（否则方向键/空格会滚动 DSH 页面而不是远端页面）。
+        if (e.key === 'F12') return;
+        if (action === 'key' && e.key.length === 1) {
+          send({ t: 'key', action: 'key', key: e.key, code: e.code, keyCode: e.keyCode, text: e.key, alt: e.altKey, ctrl: e.ctrlKey, meta: e.metaKey, shift: e.shiftKey });
+        } else {
+          send({ t: 'key', action, key: e.key, code: e.code, keyCode: e.keyCode, alt: e.altKey, ctrl: e.ctrlKey, meta: e.metaKey, shift: e.shiftKey });
+        }
+        e.preventDefault();
+      }
+
+      const tabTitle = (p) => {
+        const t = String(p.title || '').trim();
+        return t ? (t.length > 18 ? t.slice(0, 18) + '…' : t) : (String(p.url || '').replace(/^https?:\/\//, '').slice(0, 24) || '页面');
+      };
+
+      return h('div', { className: 'hwb-live', style },
+        h('div', { className: 'hwb-live-bar' },
+          h('span', { className: 'hwb-live-dot' + (status === 'live' ? ' on' : '') }),
+          h('span', { className: 'hwb-live-status' }, siteName + ' · ' + (status === 'live' ? '实时画面' : status)),
+          h('span', { style: { flex: 1 } }),
+          pages.map((p) => h('button', {
+            key: p.id,
+            className: 'hwb-live-tab' + (p.id === current ? ' on' : ''),
+            title: p.url || '',
+            onClick: () => send({ t: 'activate', pageId: p.id }),
+          }, tabTitle(p), p.active && h('span', { className: 'hwb-live-tag', title: '驱动自动化正在使用这一页' }, '驱'),
+            p.id !== current && h('span', {
+              className: 'hwb-live-close', title: '关闭这个页面',
+              onClick: (e) => { e.stopPropagation(); send({ t: 'close', pageId: p.id }); },
+            }, '×'))),
+          h('button', { className: 'hwb-live-new', title: '打开 ' + siteName + ' 主页（新页面）', onClick: () => send({ t: 'open', url: siteBase(sid) }) }, '+')),
+        h('div', { className: 'hwb-live-view' },
+          h('canvas', {
+            ref: canvasRef,
+            className: 'hwb-live-canvas',
+            tabIndex: 0,
+            onMouseDown: (e) => onMouse(e, 'pressed'),
+            onMouseUp: (e) => onMouse(e, 'released'),
+            onMouseMove: (e) => onMouse(e, 'moved'),
+            onWheel: onWheel,
+            onContextMenu: (e) => e.preventDefault(),
+            onKeyDown: (e) => onKey(e, 'key'),
+            onKeyUp: (e) => onKey(e, 'keyup'),
+          }),
+          status !== 'live' && h('div', { className: 'hwb-live-mask' },
+            h('div', null, '画面流未接通：' + status),
+            h('button', { className: 'hwb-retry', onClick: () => setReloadTick(t => t + 1) }, '重试'),
+            onUseMirror && h('button', { className: 'hwb-retry', onClick: onUseMirror }, '改用镜像页'))));
+    }
+
     function Conversation({ browserSrc, onSplit, onFloat, siteId: controlledSite, slot: controlledSlot }) {
       const [siteId, setSiteId] = React.useState(() => {
         const handed = pendingPaneSite;
@@ -3995,14 +4153,26 @@ window.__ModuleLoader__.load({
             h('button', { className: 'hwb-retry', onClick: toggleWindow }, '改用独立窗口打开'),
             h('button', { className: 'hwb-retry', onClick: reloadFrame }, '重试')),
           // 所有已访问站点的 frame 常驻 DOM（隐藏保活），只显示当前站点的。
-          Object.entries(frames).map(([sid, f]) => h('iframe', {
-            key: sid,
-            className: 'hwb-browser-frame',
-            style: sid === siteId ? null : { display: 'none' },
-            src: f.src,
-            title: siteName(sid) + ' 网页对话',
-            referrerPolicy: 'no-referrer',
-            sandbox: 'allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads',
+          // 0.20.0 路线 B：LIVE_SITES 里的站点改走画面流 LivePane（真内核投屏），
+          // 链路异常时面板可一键「改用镜像页」回落旧 iframe（f.mirror 置位后本
+          // 会话内恒走镜像，不再自动切回——回落是用户显式选择，不许被自动覆盖）。
+          Object.entries(frames).map(([sid, f]) => (LIVE_SITES.has(sid) && !f.mirror)
+            ? h(LivePane, {
+              key: sid,
+              sid,
+              slot: accountSlot || '',
+              siteName: siteName(sid),
+              style: sid === siteId ? null : { display: 'none' },
+              onUseMirror: () => setFrames(prev => ({ ...prev, [sid]: { ...prev[sid], mirror: true } })),
+            })
+            : h('iframe', {
+              key: sid,
+              className: 'hwb-browser-frame',
+              style: sid === siteId ? null : { display: 'none' },
+              src: f.src,
+              title: siteName(sid) + ' 网页对话',
+              referrerPolicy: 'no-referrer',
+              sandbox: 'allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads',
             onLoad: (e) => {
               // 子域形态下 iframe 与面板**不同源**，读 contentWindow.location 必抛
               // 安全错误——旧实现在这里 sniff `location.status`，跨源后永远拿不到，
@@ -4338,6 +4508,21 @@ window.__ModuleLoader__.load({
         ".hwb-act-btn.on{color:var(--dsw-alias-state-success-primary,#2e7d32)}",
         ".hwb-frame-host{position:relative;flex:1;min-height:0;overflow:hidden;z-index:1}",
         ".hwb-browser-frame{display:block;width:100%;height:100%;min-height:0;border:0;background:#fff}",
+        // ---- 0.20.0 工作区画面流 LivePane ----
+        ".hwb-live{position:relative;display:flex;flex-direction:column;width:100%;height:100%;min-height:0;background:var(--dsw-alias-bg-base,#111)}",
+        ".hwb-live-bar{display:flex;align-items:center;gap:6px;padding:4px 8px;font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary,#8a8f98);border-bottom:.5px solid var(--dsw-alias-border-l3,#8882);overflow-x:auto;white-space:nowrap}",
+        ".hwb-live-dot{flex:none;width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-border-l3,#8885)}",
+        ".hwb-live-dot.on{background:#34a853}",
+        ".hwb-live-status{flex:none}",
+        ".hwb-live-tab{flex:none;max-width:150px;overflow:hidden;text-overflow:ellipsis;padding:1px 8px;border:.5px solid var(--dsw-alias-border-l3,#8883);border-radius:10px;background:transparent;color:inherit;font-size:12px;line-height:18px;cursor:pointer}",
+        ".hwb-live-tab.on{border-color:var(--dsw-alias-border-l2,#8884);background:var(--dsw-alias-interactive-bg-hover,#8882)}",
+        ".hwb-live-tag{flex:none;margin-left:4px;padding:0 4px;border-radius:6px;background:#8882;font-size:10px}",
+        ".hwb-live-close{margin-left:4px;opacity:.6}",
+        ".hwb-live-close:hover{opacity:1}",
+        ".hwb-live-new{flex:none;width:20px;height:20px;padding:0;border:.5px solid var(--dsw-alias-border-l3,#8883);border-radius:10px;background:transparent;color:inherit;font-size:13px;line-height:18px;cursor:pointer}",
+        ".hwb-live-view{position:relative;flex:1;min-height:0}",
+        ".hwb-live-canvas{position:absolute;inset:0;width:100%;height:100%;outline:none;cursor:default}",
+        ".hwb-live-mask{position:absolute;inset:0;display:flex;flex-direction:column;gap:8px;align-items:center;justify-content:center;background:rgba(17,17,17,.55);color:#fff;font-size:13px}",
         ".hwb-frame-status{position:absolute;inset:0;display:grid;place-items:center;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-tertiary,#7a8494);font-size:12px;pointer-events:none}",
         ".hwb-error,.hwb-guide{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:24px;text-align:center;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-secondary,#394150)}",
         ".hwb-error p,.hwb-guide p{font-size:12px;line-height:1.7;margin:0;color:var(--dsw-alias-label-tertiary,#8a8f98)}",
