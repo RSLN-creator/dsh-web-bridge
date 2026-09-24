@@ -191,8 +191,13 @@ test('⑪a 剩下两条早退分支也必须留痕（不许再有静默丢弃）
 
 test('⑫ 接线：index.js 的两处 parseAgentReply 都必须带上 tools', () => {
   const src = fs.readFileSync(path.join(here, '..', 'lib', 'index.js'), 'utf8');
-  assert.match(src, /parseAgentReply\(\s*finalText\s*,\s*\{\s*tools\s*\}\s*\)/, '正文解析必须传工具表');
+  // 判据是「工具表没被省掉」，不是「参数表逐字等于 `{ tools }`」：调用点允许再带
+  // 其它可选项（例如默认关闭的可选修复开关），逐字相等会让每加一个选项就假红一次。
+  assert.match(src, /parseAgentReply\(\s*finalText\s*,\s*\{\s*tools\b[^}]*\}\s*\)/, '正文解析必须传工具表');
   assert.match(src, /parseAgentReply\(\s*thinkAcc\s*,\s*\{\s*tools\s*\}\s*\)/, '思考兜底解析同样要传');
+  // 可选修复开关必须从配置面读，且默认值必须是关：写死 true 等于把红线开关偷偷打开。
+  assert.match(src, /jsonQuoteRepair:\s*cfg\.jsonQuoteRepair\s*===\s*true/, '可选修复必须从配置面读');
+  assert.match(src, /jsonQuoteRepair:\s*false,/, '默认值必须是 false');
 });
 
 // ---- 端到端：网页发无名调用时，harness 必须收到工具调用块 ---------------------

@@ -40,7 +40,9 @@ function sliceFrom(marker, length = 4_800) {
   return src.slice(at, at + length);
 }
 
-const callSite = sliceFrom('const plan = promptTransportPlan({', 4000);
+// 0.19.11：调用点前面多了一行 `const attachInlineLimit = …`（站点上限收紧），
+// 切片锚点随之前移——切片必须覆盖那一行，否则「阈值从配置面读」这条会假红。
+const callSite = sliceFrom('const attachInlineLimit = effectiveAttachInlineLimit(', 4300);
 
 // ── ① 调用点必须真的调用 uploadTextAttachment ──────────────────────────────
 
@@ -51,9 +53,14 @@ test('① runTurn 的投递计划分支必须真的调用 uploadTextAttachment�
 
 // ── ② 阈值真的从配置面读进来（否则「默认开」是假的）───────────────────────
 
-test('② 计划必须读 cfg.attachInlineLimitChars，且 attachEnabled 与阈值同源', () => {
-  assert.match(callSite, /inlineLimit: cfg\.attachInlineLimitChars/, '阈值没从配置面读');
-  assert.match(callSite, /attachEnabled: cfg\.attachInlineLimitChars > 0/,
+test('② 阈值必须从配置面读、经站点上限收紧，且 attachEnabled 与阈值同源', () => {
+  // 0.19.11：站点上限收紧（deepseek 60,000 → 8,000）后，判据不能再直接写
+  // cfg.attachInlineLimitChars——但**红线不变**：attachEnabled 必须与 inlineLimit
+  // 同源（两处各写一份判据必然漂移，「0 = 关闭」的语义会静默失效）。
+  assert.match(callSite, /const attachInlineLimit = effectiveAttachInlineLimit\(siteId, cfg\.attachInlineLimitChars\)/,
+    '阈值没从配置面读、或没经站点上限收紧');
+  assert.match(callSite, /inlineLimit: attachInlineLimit,/, 'inlineLimit 必须用同一个算出来的值');
+  assert.match(callSite, /attachEnabled: attachInlineLimit > 0,/,
     'attachEnabled 必须与阈值同源：两处各写一份判据必然漂移，'
     + '「0 = 关闭」的语义会静默失效');
 });

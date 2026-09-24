@@ -22,7 +22,7 @@ import { toPlaywrightCookie } from './cookies.js';
 import { getSite, getContract, resolveWebModel, conversationNav, conversationIdFromUrl } from './contract.js';
 import { DEFAULT_SLOT, normalizeSlot } from './accounts.js';
 import { selectWebModel, pickerUsable } from './model-picker.js';
-import { deriveLastRate, shouldSettleWip, shouldSettleStalledThinking, answerDomLength } from './metrics.js';
+import { deriveLastRate, shouldSettleWip, shouldSettleStalledThinking, answerDomLength, cleanAnswerDomText, shouldRescueStalledCapture } from './metrics.js';
 import { emptyWebResponseError } from './zero-progress.js';
 // 只用 ATTACH_PICK_SRC：判定主体注入浏览器执行（见 pageAttachEvidence）。
 // 不 import pickAttachEvidence 本身——那是给单测直接驱动用的，在这里 import 会成死导入
@@ -258,6 +258,56 @@ export function composerWritePlan({ length = 0, chunkChars = 20_000, kind = 'fie
 }
 
 /**
+ * 完成请求元数据的**可判定摘要**（0.19.11，2026-09-24）。
+ *
+ * ## 为什么必须改（这是「投递链不自证」的直接病灶）
+ *
+ * 用户报障：附件投递「送不进去／送进去不回复」，而桥**无法回答最基础的一问**——
+ * 这一轮的完成请求到底带没带文件。旧实现是：
+ *
+ *   `Object.entries(body).filter(([key]) => /model|thinking|search/.test(key)
+ *      && ['string','boolean','number'].includes(typeof value))`
+ *
+ * 两道门把证据全挡在外面：
+ *   ① 键名正则只认 model/thinking/search，**`ref_file_ids` 直接出局**——
+ *      而它正是 unified UI 时代「带图/带文件」的唯一权威字段（真机取证：
+ *      test-mock/archive/real-probe-20-newui-facts.mjs:152 就是用
+ *      `b.ref_file_ids && b.ref_file_ids.length` 判定附件在场）；
+ *   ② 类型白名单只收标量——`ref_file_ids` 是**数组**，就算键名放行也照样被丢。
+ * 于是 2026-09-18 / 2026-09-20 两次「附件轮零回复」都无法归因：既不能证明
+ * 「请求带了文件」，也不能证明「没带」。README 里 0.16.31 解禁附件后的复验
+ * 一直卡在这一步。
+ *
+ * ## 口径（只记 id 与长度，不记正文）
+ *
+ * · 标量沿用旧行为（model_type / thinking_enabled / search_enabled 一个不少）。
+ * · 文件 id 列表只留**字符串 id**（最多 12 枚）并附 `*Count` 计数——id 不是内容，
+ *   可以进 `/status`；附件正文一律不进。
+ * · `prompt` 只记**长度**（`promptChars`）：这是「这一轮到底发了多少字符」的
+ *   唯一口径，与 `attachTransport.payloadChars` 配对即可判定投递是否真的发生。
+ * · 绝不把 body 里的其它键带进来：`/status` 是外发读数，不是抓包转储。
+ *
+ * @param {unknown} body 完成请求的 JSON body
+ * @returns {Record<string, unknown>|null} 摘要；没有任何可判定字段时返回 null
+ */
+export function summarizeRequestMetadata(body) {
+  if (!body || typeof body !== 'object') return null;
+  const SCALAR_KEY = /model|thinking|search/i;
+  const ID_LIST_KEY = /file_?ids?|files|attachment/i;
+  const out = {};
+  for (const [key, value] of Object.entries(body)) {
+    const t = typeof value;
+    if (SCALAR_KEY.test(key) && (t === 'string' || t === 'boolean' || t === 'number')) { out[key] = value; continue; }
+    if (ID_LIST_KEY.test(key) && Array.isArray(value) && value.every((v) => typeof v === 'string')) {
+      out[key] = value.slice(0, 12);
+      out[key + 'Count'] = value.length;
+    }
+  }
+  if (typeof body.prompt === 'string') out.promptChars = body.prompt.length;
+  return Object.keys(out).length ? out : null;
+}
+
+/**
  * 提示词投递计划（纯函数）：超长正文走**附件**还是继续 inline（0.16.2）。
  *
  * ## 为什么需要它
@@ -400,6 +450,50 @@ export function promptTransportPlan(o = {}) {
  * 所以它必须留在附件路径上——本表只排除，不改变其它站点的既有行为。
  */
 export const ATTACH_FORBIDDEN_SITES = Object.freeze(new Set());
+
+/**
+ * 站点级「多长就走附件」的默认阈值（0.19.11）——只收紧，不开启。
+ *
+ * ## 为什么需要它（真机取证，2026-09-24）
+ *
+ * 用户报障原话：「明明在附件投递模式下，看的还是完整上下文」（同句现场读数见
+ * runTurn 里 0.19.9 那段注释：`userMsgChars=81139`）。查下来不是判据错，是**阈值错**：
+ * 全站默认 `attachInlineLimitChars = 60_000`（lib/index.js DEFAULTS），而真机
+ * navTrace 里 webcode 路由的**典型首轮**是 `messageChars: 48937` 与 `53797`
+ * —— 两个都在 60,000 以下 ⇒ 判定落在 `under-limit` ⇒ **全文逐字灌进输入框**。
+ * 也就是说：越典型的会话越走 inline，「附件投递」只在超大轮才生效。
+ *
+ * ## 阈值取 8,000 的依据（两支真机探针，不是拍脑袋）
+ *
+ * `test-mock/real-attach-adjudicate.mjs`（3,530 字符 → 完成请求
+ * `ref_file_ids:['file-c4332525-…']`、`promptChars:80`、页面用户消息只渲染 80 字符）
+ * 与 `test-mock/real-attach-ingest.mjs`（**3,554 与 62,054 两个尺寸都从附件正文里
+ * 读出了只在文件里的标记值**，分别 3.4s / 4.3s）证明：附件在 deepseek 上
+ * 既能送达也能被读，小到 3.5k 也完全正常。
+ * 8,000 的落点：**只留一句「闲聊级」的短轮走 inline**，任何真实会话（首轮含
+ * 教学 + 会话历史，实测普遍 ≥ 20k）都走附件、对话框里只留那段指针文本。
+ *
+ * ## 与「0 = 关闭」的语义关系
+ *
+ * 这里**只做上限收紧**：配置为 0（用户显式关闭附件）时一律 inline，绝不因为本表
+ * 把附件重新打开；配置为 60_000 且站点在本表内时取 `min(60_000, 8_000)`。
+ * 未列出的站点逐字维持旧行为（能力边界：本次只改 deepseek）。
+ */
+export const SITE_ATTACH_INLINE_LIMIT = Object.freeze({ deepseek: 8_000 });
+
+/**
+ * 把「调用方配置的阈值」与「站点上限」合成本次实际使用的阈值（纯函数，可断言）。
+ *
+ * @param {string} siteId 站点 id
+ * @param {number} configured 配置阈值（`>0` 才算开启附件；`0`/非法 = 关闭）
+ * @returns {number} 实际阈值；`0` 表示附件关闭（调用方据此把 attachEnabled 置假）
+ */
+export function effectiveAttachInlineLimit(siteId, configured) {
+  const c = Number(configured);
+  if (!Number.isFinite(c) || c <= 0) return 0;
+  const site = SITE_ATTACH_INLINE_LIMIT[String(siteId || '')];
+  return Number.isFinite(site) && site > 0 ? Math.min(c, site) : c;
+}
 
 /**
  * 运行期附件禁令（0.16.28）：站点级**自愈降级**记录 ——「附件投递后零回复 ⇒ 自动
@@ -555,6 +649,16 @@ export function createBrowserDriver(options = {}) {
   // **且** 页面 DOM 助手消息长度停止增长」双条件在秒级收束（判定收在
   // metrics.shouldSettleWip，有反向单测钉住安全线）。
   const WIP_IDLE_MS = Math.max(300, Number(cfg.wipIdleMs) || 2500);
+  // 0.19.12：捕获链中断兜底的静默阈值。真机事故（2026-09-24，session-12d9c3c6）：
+  // 首事件已到后捕获管道中断，页面把回复完整写完（DOM 1072 字），桥侧 120s 零事件
+  // ——WIP 稳态收束救不了它（bodyReady 要求正文先从流里来过），唯一的结局是适配器
+  // 看门狗开火、内容整轮丢失。兜底判据见 metrics.shouldRescueStalledCapture；这里
+  // 只定「流静默多久算疑似中断」。**必须 < 适配器看门狗 120s**，否则又是看门狗先
+  // 开火、兜底永远轮不到。0 = 显式关闭（想完全回到旧行为就写 0）。
+  const CAPTURE_STALL_MS = (() => {
+    const n = Number(cfg.captureStallRescueMs);
+    return Number.isFinite(n) && n >= 0 ? n : 45_000;
+  })();
   // 本轮收束原因，供 /status 与右栏显示：finished | partial-wip-settled |
   // partial-wip-settled(dom-unavailable) | timeout。null = 尚未跑过轮次。
   let lastEndReason = null;
@@ -1280,15 +1384,29 @@ export function createBrowserDriver(options = {}) {
    * 而看门狗按「最后一个增量」计时，思考增量同样刷新它，也判不出来。于是唯一
    * 兜底是 240s 总超时，报错还是通用 `web turn timed out`。
    *
-   * 两条修法都已落地，缺一不可：
-   *   ① DOM 采样改量**剥掉计时文案后**的真实回答长度（metrics.answerDomLength），
-   *      让「只剩计时器在动」重新等于「DOM 停长」；
-   *   ② 再加一条**绝对墙钟**判据 shouldSettleStalledThinking：自最后一次正文/图片
-   *      起超过 cfg.answerTimeoutMs 就收束，完全不看 DOM、不看思考。
-   *
-   * 收尾方式刻意与既有 partial 路径同形（把已有内容当本轮结果交出去），因此
-   * 上层的工具协议解析、部分流自愈、空回复判定全部照旧，不新增第二条收尾通路。
-   */
+ * 两条修法都已落地，缺一不可：
+ *   ① DOM 采样改量**剥掉计时文案后**的真实回答长度（metrics.answerDomLength），
+ *      让「只剩计时器在动」重新等于「DOM 停长」；
+ *   ② 再加一条**绝对墙钟**判据 shouldSettleStalledThinking：自最后一次正文/图片
+ *      起超过 cfg.answerTimeoutMs 就收束，完全不看 DOM、不看思考。
+ *
+ * ## 0.19.12 新增第四条：捕获链中断的 DOM 兜底回传
+ *
+ * 上面三条防线有一个共同前提：**正文要先从流里来过**（bodyReady / decoder 内容）。
+ * 真机事故（2026-09-24，session-12d9c3c6）证明这个前提本身会塌：首事件已到之后
+ * 「页面 SSE → 页内捕获 → 解码器」管道中断，页面分支照常吃流把回复写完（DOM
+ * 1072 字），桥侧 120s 零事件——WIP 稳态收束因 bodyReady 不成立而永不动作，
+ * 思考硬上限救出来的还是流里的空内容，唯一结局是适配器看门狗开火、内容整轮丢失。
+ *
+ * 兜底判据（shouldRescueStalledCapture，纯函数可离线反向验证）：流静默 ≥
+ * cfg.captureStallRescueMs（默认 45s，**必须小于适配器看门狗 120s**）+ 本轮 DOM
+ * 内容相对发送后基线变过 + DOM 有真实内容 + 页面仍在写或流从未送来过正文。
+ * 动作是把剥掉计时文案后的 DOM 文本当 partial 结果交出去——与下方稳态收束同形，
+ * runTurn 的部分流落账（recoveredTurns/lastRecovered/noteEndReason）全部复用。
+ *
+ * 收尾方式刻意与既有 partial 路径同形（把已有内容当本轮结果交出去），因此
+ * 上层的工具协议解析、部分流自愈、空回复判定全部照旧，不新增第二条收尾通路。
+ */
   function startWipWatch() {
     if (!active || active.decoderKind === 'dom') return;   // dom 站点本就不靠流收场
     const tick = async () => {
@@ -1317,11 +1435,51 @@ export function createBrowserDriver(options = {}) {
         // 现场特征，写进 settled_by 让人一眼认出，而不是笼统的 partial-wip-settled。
         a.domTimerOnly = domLen === 0 && String(domText || '').trim().length > 0;
         a.lastDomLen = domLen;
+        // 0.19.12：兜底基线（语义见 active 声明处）。每拍**重算**而不是置真后保留：
+        // 兜底交付的就是这一拍的 domText，「内容变过」必须对**当前**文本成立——
+        // 单调置真的话，节点内容理论上回落到基线时会拿着旧文本误交一轮。
+        if (a.domTextAtStart == null) a.domTextAtStart = String(domText);
+        a.domTextChanged = String(domText) !== a.domTextAtStart;
       } else {
         // 页面取不到（关窗/导航中）：退回「仅流停」判定，并如实标注收束原因。
         a.domAvailable = false;
       }
       const now = performance.now();
+      // 0.19.12 捕获停摆兜底：先于 bodyReady 早退判定——要救的恰恰是「正文没从
+      // 流里来过」的轮次。签名与动作见 metrics.shouldRescueStalledCapture 的注释；
+      // 动作与下方稳态收束刻意同形（partial 结果走同一条 runTurn 落账路径，
+      // recoveredTurns/lastRecovered/noteEndReason 全部复用，不新增第二条收尾通路）。
+      if (!a.domRescueDone && shouldRescueStalledCapture({
+        now,
+        lastProgressAt: a.lastProgressAt,
+        lastDomGrowthAt: a.lastDomGrowthAt,
+        domLen: a.lastDomLen,
+        domTextChanged: a.domTextChanged,
+        hasStreamBody: Boolean(a.text) || Boolean(a.thinking) || (Array.isArray(a.images) && a.images.length > 0),
+        domAvailable: a.domAvailable,
+        stallMs: CAPTURE_STALL_MS,
+        wipIdleMs: WIP_IDLE_MS,
+      })) {
+        a.domRescueDone = true;
+        const rescuedText = cleanAnswerDomText(String(domText || '')).trim();
+        warn(`capture stalled while page still writing — rescuing turn from page DOM `
+          + `${rescuedText.length} chars (reason=dom-rescue-capture-stall); `
+          + 'stream images are not recoverable this way');
+        const result = {
+          text: rescuedText,
+          thinking: String(a.thinking || ''),
+          images: Array.isArray(a.images) ? a.images : [],
+          complete: false,
+          partial: true,
+          reason: 'dom-rescue-capture-stall',
+        };
+        a.settled_by = 'dom-rescue-capture-stall';
+        noteEndReason('dom-rescue-capture-stall');
+        const resolve = a.resolve;
+        finishActive();
+        resolve(result);
+        return;
+      }
       const bodyReady = Boolean(a.text) || Boolean(a.thinking) || (Array.isArray(a.images) && a.images.length > 0);
       if (!bodyReady) { a.wipTimer = setTimeout(tick, WIP_IDLE_MS); return; }
       // 第三条判据优先判定：它不需要 DOM，也不被思考增量推迟。
@@ -1594,7 +1752,7 @@ export function createBrowserDriver(options = {}) {
       if (request.method() !== 'POST' || !paths.some((path) => request.url().includes(path))) return;
       try {
         const body = request.postDataJSON();
-        requestMetadata = Object.fromEntries(Object.entries(body).filter(([key, value]) => /model|thinking|search/.test(key) && ['string', 'boolean', 'number'].includes(typeof value)));
+        requestMetadata = summarizeRequestMetadata(body);
       } catch { requestMetadata = null; }
     });
     await p.exposeBinding('__webcodeChunk', (source, captureId, phase, text) => {
@@ -2605,6 +2763,13 @@ export function createBrowserDriver(options = {}) {
           //   lastAnswerAt    正文/图片            → 「到底有没有回答」（本条）
           lastAnswerAt: performance.now(),
           domAvailable: true,
+          // 0.19.12：捕获停摆兜底的基线。domTextAtStart = 发送后**首个采样点**的
+          // 助手节点原文——那一刻页面上是上一轮的回复（或空的思考占位），本轮兜底
+          // 只允许在「当前内容 ≠ 基线」时开火，否则会把上一轮留在页面上的旧回复
+          // 当成本轮的交出去。domRescueDone 保证一轮最多兜底一次。
+          domTextAtStart: null,
+          domTextChanged: false,
+          domRescueDone: false,
           wipTimer: null,
           settled_by: null,
         };
@@ -2668,14 +2833,23 @@ export function createBrowserDriver(options = {}) {
       // 判据改成「**正文是否需要附件**」而不是「有没有用过附件」：图片与文本附件是
       // 网页输入区里两件独立的东西，一个已经挂上不代表另一个不用挂。
       // `plan.mode` 在图片 + 短正文时仍是 inline（under-limit），那是既有正确行为。
+      // 站点上限先收紧（0.19.11）：deepseek 的典型首轮实测 48,937/53,797 字符，
+      // 全站默认 60,000 会让它们**全部走 inline**（真机取证见 SITE_ATTACH_INLINE_LIMIT）。
+      // 只收紧不开启：配置 0 仍然一律 inline。算一次、两处同源，判据不各写一份。
+      const attachInlineLimit = effectiveAttachInlineLimit(siteId, cfg.attachInlineLimitChars);
       const plan = promptTransportPlan({
           chars: String(message).length,
-          inlineLimit: cfg.attachInlineLimitChars,
-          attachEnabled: cfg.attachInlineLimitChars > 0,
+          inlineLimit: attachInlineLimit,
+          attachEnabled: attachInlineLimit > 0,
           attachSupported: true,
-          // 站点级禁令（0.16.7 静态表 + 0.16.28 运行期自愈）：DeepSeek 收得下附件但
-          // 读不到它（真机实测零回复），因此该站点永远走输入框，与阈值无关。
-          // 见 ATTACH_FORBIDDEN_SITES 与 DYNAMIC_ATTACH_BLOCKS。
+          // 站点级禁令（0.16.7 静态表 + 0.16.28 运行期自愈）。
+          // **0.19.11 事实更正**：静态表 `ATTACH_FORBIDDEN_SITES` 已是空集，而且
+          // 2026-09-18「DeepSeek 收得下附件但读不到它」这条结论**已被真机推翻**——
+          // test-mock/real-attach-ingest.mjs（2026-09-24）用「标记只写进附件正文」的
+          // 内容级判据实测：3,554 与 62,054 字符两个尺寸都从附件里读出了标记值
+          // （3.4s / 4.3s，零超时），62k 正是当年被记成「240s 零回复」的那个尺寸。
+          // 因此这里**不能**把 deepseek 写回静态禁令；运行期自愈照旧保留（它是
+          // 读数驱动的兜底，不是对站点能力的断言）。
           attachForbidden: attachForbiddenFor(siteId),
           // 设置面的「投递形态」开关（0.16.3）：'inline' = 用户显式要求纯文本，
           // 逐字回到旧行为；其余一律 'attach'（是否真的走附件仍由上面的阈值决定）。

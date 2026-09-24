@@ -201,8 +201,19 @@ const OFFICIAL_SEP_SRC = '[' + String.fromCharCode(0x2581) + '\\s]';
  * ① `</?` 容忍 XML 斜杠形 `</｜tool▁call▁end｜>`；② `call(s)` 与 `end` 之间只允许
  * 一枚连接符（旧写法自由 `[\s\S]*?` 会让 begin 类 token 当端锚起点，把**下一条
  * 调用整块吃掉**——run-10：pwsh×2 只执行 1 条、全程零诊断）。
+ *
+ * 0.19.4（2026-09-24）**放宽词形，不放宽结构**：真机 22,375 枚协议 token 的形状普查
+ * （`.tmp/token-shapes.mjs`，全量 reply-log）里，除官方 5 个标准形状外出现 36 种漂移，
+ * 其中前两名是**闭 token 的词形错误**，旧端锚一条都不认：
+ *   · `<｜tool▁call▁calls▁end｜>`  108 处（`call` 与 `calls` 叠写）
+ *   · `<｜tool▁cend｜>` / `<｜tool▁call▁cend｜>` / `<｜tool▁calls▁calls▁cend｜>`  113 处（`end` 写成 `cend`）
+ * 真机后果不是「少解析一点」而是**整条调用归零**：端锚认不出 ⇒ 可选端锚不生效 ⇒
+ * 体一路吃到文末 ⇒ 不配平 ⇒ 调用被丢（fixture zero-00/02/04/05/06 逐条复核）。
+ * 修法用 `(?:calls?SEP?){0,2}` + `c?end` 覆盖四类叠写/错拼，**仍然禁止** begin 类
+ * token 当端锚（`c?end` 匹配不上 `begin`），所以 0.16.20 那条「begin 当端锚会吞下一条
+ * 调用」的护栏逐字成立（regression.test.mjs / official-*.test.mjs 全绿即证）。
  */
-const END_ANCHOR_SRC = '</?\\s*' + OFFICIAL_BAR_CLS + '\\s*tool(?:' + OFFICIAL_SEP_SRC + ')?calls?(?:' + OFFICIAL_SEP_SRC + ')?end(?:' + OFFICIAL_SEP_SRC + ')?' + OFFICIAL_BAR_CLS + '>';
+const END_ANCHOR_SRC = '</?\\s*' + OFFICIAL_BAR_CLS + '\\s*tool(?:' + OFFICIAL_SEP_SRC + ')?(?:calls?(?:' + OFFICIAL_SEP_SRC + ')?){0,2}(?:c?end)(?:' + OFFICIAL_SEP_SRC + ')?' + OFFICIAL_BAR_CLS + '>';
 /**
  * 参数体在**闭 token 缺位**时的右边界（0.16.32）。
  *
@@ -532,10 +543,121 @@ export function buildPreset(options = {}) {
   return parts.join('\n\n');
 }
 
+/**
+ * 会话技能目录的**桥侧收敛**（0.19.4）——只作用于 deepseek 的首轮。
+ *
+ * ## 为什么是桥来做，而不是删技能
+ *
+ * DSH 官方（`@deepseek-ai/dsh-tool-skill`）把每个 model-invocable skill 的
+ * 「名字 + 截断描述」作为一条**持久 user 角色消息**在首个请求前发下来，正文按需加载。
+ * 桥把这条消息原样摊进首轮，因此**目录规模 = 本机装了多少个技能**，与桥无关也无可回避。
+ *
+ * ## 真实读数（本机，2026-09-24）
+ *
+ * · 全量会话扫描（303 份、多帧 zstd 全解，`.tmp/skill-usage-scan2.mjs`）：
+ *   291 份会话带目录，每条 82–91 项；`skill` 工具全库只被调 **23 次**、加载过
+ *   **6 个**技能（diagnose 11 / cordis-plugin-development 7 / miyo-parse 2 /
+ *   gsd-code-review 1 / sciverse 1 / loopx 1），`/名字` 手势 6 次。
+ *   目录里出现过的名字共 92 个 ⇒ **85 个（92%）从未被加载**。
+ * · 落盘首轮（55 份，`.tmp/catalog-cost.mjs`，用本文件同一套 estimateTokens）：
+ *   目录块 11,950–12,487 字符 ≈ **4,340–4,520 token**；典型短会话首轮 19,155 token
+ *   里占 **22.6%**（中位 19.6%）。
+ * · 构成（`.tmp/catalog-verdict.mjs`）：83 项中 67 项是 `gsd-*`，占 **2,300/4,335 =
+ *   53.1%**，其中只有 `gsd-code-review` 被加载过 1 次 ⇒ 默认保留它、其余按前缀丢弃。
+ *
+ * ## 边界（这是「减少不必要技能」而不是「砍能力」）
+ *
+ *   · **只改桥发出去的文本**，不动 `~/.agents/skills` 里任何文件——用户明确要求
+ *     「只修复 deepseek 的 webcode」，全局 frontmatter 会连带影响别的 harness。
+ *   · 被省略的技能**仍然可用**：`disable-model-invocation` 语义的反面在这里成立了——
+ *     我们保留 `/名字` 手势入口（手势由 `dsh-tool-skill` 独立按用户消息扫描，不经目录），
+ *     只是不再把它们的名字塞进首轮。省略事实**写在目录里**（绝不静默丢内容，本仓库纪律）。
+ *   · 非 deepseek 站点与不传 `skillCatalog` 时**逐字不动**（`mode:'auto'` ⇒ 只有
+ *     siteId==='deepseek' 走 slim），因此既有 `ZERO_DRIFT_BASELINE` 与全部官方站点
+ *     变体不受影响。
+ */
+const SKILL_CATALOG_RE = /<system-reminder>\s*\n?A skill is a reusable set of task-specific instructions[\s\S]*?<\/system-reminder>/;
+
+/** 默认丢弃的前缀：gsd 集群（67 项 / 目录 53.1% / 303 份会话 0–1 次命中）。 */
+const DEFAULT_SKILL_DROP_PREFIXES = Object.freeze(['gsd-']);
+/** 默认强制保留：唯一有过真实加载记录的 gsd 项。 */
+const DEFAULT_SKILL_KEEP = Object.freeze(['gsd-code-review']);
+/** 默认描述上限：目录块里平均 52 tok/项，长尾（miyo-* 516 字符）超此线即截。 */
+const DEFAULT_SKILL_DESC_CHARS = 120;
+
+/**
+ * 把 `options.skillCatalog` 归一成执行计划。
+ * 取值：`'auto'`（默认；deepseek ⇒ slim，其余 ⇒ full）| `'slim'` | `'off'` | `'full'`，
+ * 或对象 `{ mode, dropPrefixes, keep, maxDescChars }`。
+ */
+export function skillCatalogPlan(options = {}) {
+  const raw = options.skillCatalog;
+  const obj = raw && typeof raw === 'object' ? raw : {};
+  const literal = typeof raw === 'string' ? raw : obj.mode;
+  const mode = literal === 'off' || literal === 'slim' || literal === 'full' ? literal : 'auto';
+  const resolved = mode === 'auto' ? (options.siteId === 'deepseek' ? 'slim' : 'full') : mode;
+  const dropPrefixes = Array.isArray(obj.dropPrefixes) ? obj.dropPrefixes.map(String) : DEFAULT_SKILL_DROP_PREFIXES;
+  const keep = new Set(Array.isArray(obj.keep) ? obj.keep.map(String) : DEFAULT_SKILL_KEEP);
+  const maxDescChars = Number.isFinite(obj.maxDescChars) && obj.maxDescChars > 0
+    ? Math.floor(obj.maxDescChars) : DEFAULT_SKILL_DESC_CHARS;
+  return { mode: resolved, dropPrefixes, keep, maxDescChars };
+}
+
+/**
+ * 收敛一条消息文本里的 `<available_skills>` 目录块。
+ *
+ * 只替换目录块自身；`<system-reminder>` 的其余交代（怎么加载、防双重加载那句）
+ * 逐字保留。非目录文本原样返回——这个函数对普通用户消息是**恒等变换**。
+ *
+ * @param {string} text 已序列化的单条消息文本
+ * @param {{mode:string,dropPrefixes:string[],keep:Set<string>,maxDescChars:number}} plan
+ * @returns {string}
+ */
+export function compactSkillCatalog(text, plan) {
+  const src = String(text ?? '');
+  if (!plan || plan.mode === 'full' || !src.includes('<available_skills>')) return src;
+  const m = SKILL_CATALOG_RE.exec(src);
+  if (!m) return src;
+  const block = m[0];
+  if (plan.mode === 'off') {
+    return src.slice(0, m.index)
+      + '<system-reminder>\n本会话未投放技能目录（deepseek 站点配置）：需要某个技能时请由用户用 /名字 显式调用。\n</system-reminder>'
+      + src.slice(m.index + block.length);
+  }
+  const lines = block.split('\n');
+  const firstEntry = lines.findIndex((l) => /^- `/.test(l));
+  const lastEntry = lines.findLastIndex((l) => /^- `/.test(l));
+  if (firstEntry < 0) return src;
+  const kept = [];
+  let dropped = 0; let capped = 0;
+  for (const line of lines.slice(firstEntry, lastEntry + 1)) {
+    const e = /^- `([^`]+)`: (.*)$/.exec(line);
+    if (!e) continue;
+    const name = e[1];
+    let desc = e[2];
+    if (!plan.keep.has(name) && plan.dropPrefixes.some((p) => p && name.startsWith(p))) { dropped += 1; continue; }
+    if (desc.length > plan.maxDescChars) { desc = desc.slice(0, plan.maxDescChars).trimEnd() + '…'; capped += 1; }
+    kept.push('- `' + name + '`: ' + desc);
+  }
+  if (!kept.length) return src;
+  // 省略事实必须写在目录里：模型据此知道「没列出来的不是不存在，是没投放」。
+  const note = dropped
+    ? `（本会话按站点配置省略了 ${dropped} 个长期未被加载的技能；它们仍可用 /名字 直接调用。另有 ${capped} 条描述按上限截断。）`
+    : '';
+  const rebuilt = [
+    ...lines.slice(0, firstEntry),
+    ...kept,
+    ...lines.slice(lastEntry + 1),
+  ].join('\n');
+  const withNote = note ? rebuilt.replace('</available_skills>', note + '\n</available_skills>') : rebuilt;
+  return src.slice(0, m.index) + withNote + src.slice(m.index + block.length);
+}
+
 /** First turn text: preset + the conversation's opening user message. */
 export function serializeFirstTurn(options = {}) {
   const messages = Array.isArray(options.messages) ? options.messages : [];
   const names = toolNames(messages);
+  const skillCatalog = skillCatalogPlan(options);
   // 每条消息先序列化成独立段：默认路径 join 结果与旧实现逐字节相同；
   // 预算路径按「保留最新后缀」从中挑段，绝不改写任何一段的内容。
   const segments = messages.filter(Boolean).map(m => {
@@ -544,9 +666,10 @@ export function serializeFirstTurn(options = {}) {
     if (m.role === 'user') {
       const raw = textOfBlocks(m.content);
       const directive = normalizeHarnessDirective(raw);
-      return directive || serializeDelta([m], 0, 0, names, trainNoteFor(options.siteId, '', options.tools)).text;
+      // 技能目录收敛只作用在**目录那一条消息**上（见 compactSkillCatalog 的真实读数）。
+      return compactSkillCatalog(directive || serializeDelta([m], 0, 0, names, trainNoteFor(options.siteId, '', options.tools)).text, skillCatalog);
     }
-    return serializeDelta([m], 0, 0, names, trainNoteFor(options.siteId, '', options.tools)).text;
+    return compactSkillCatalog(serializeDelta([m], 0, 0, names, trainNoteFor(options.siteId, '', options.tools)).text, skillCatalog);
   });
   const text = segments.join('\n\n');
   const preset = buildPreset(options);
@@ -901,6 +1024,138 @@ export function inferToolNameFromArgs(args, tools) {
   return null;
 }
 
+/**
+ * 修复「长字符串里的裸控制字符」这一族（2026-09-24，真机取证）。
+ *
+ * ## 为什么需要（这是「长文本解析不出来」的主因，不是闭 token）
+ *
+ * 真机 reply-log 逐条复解析（`.tmp/replylog-split.mjs` + `.tmp/fixture-probe.mjs`）：
+ * 2,472 条回复里 calls=0 的 1,158 条中，1,051 条是 **thinking 流**（思考流本就不含调用，
+ * 不计）；真正可疑的是 `raw reply` 流：1,363 条里 103 条 calls=0，其中 **≥4,000 字符的
+ * 长回复只有 7 条，而这 7 条里有 4 条带完整协议标记却解析出 0 个调用**。
+ * 逐条看它们的诊断，4 条全是同一句：
+ *
+ *   「invoke body is not a single balanced JSON object (unbalanced or truncated)」
+ *   「invoke body has trailing content after the first JSON object」
+ *
+ * 打开原文一看，体是 `{"file_path":"doc/review-0.17.x.md","content":"# 审查报告…"}`
+ * ——内容字段是**一整篇 markdown 报告**，模型把里面的换行**原样写成了 U+000A 真换行**，
+ * 而不是 JSON 要求的 `\n` 转义。JSON.parse 必然失败，整条 write/edit 调用归零。
+ *
+ * 这就解释了用户报的「长文本的桥接受而不被解析」：**越长的调用越容易带长 content，
+ * 越容易踩到裸换行**；短调用的参数是一行命令/一行路径，从来不会踩到。
+ *
+ * ## 修的边界（只做无歧义的修复）
+ *
+ * 只在**字符串字面量内部**把裸控制字符改写回它们的转义形式：`\n` `\r` `\t`。
+ * 不改字符串外的任何字符、不补引号、不补逗号、不做「猜参数」（那会越过参数不代拼的红线）。
+ * 字符串外的真换行是 JSON 的合法空白，原样保留。
+ *
+ * @param {unknown} text 可能是模型产出的、带裸控制字符的 JSON 文本
+ * @returns {string} 同一份文本，字符串内的裸控制字符已转义
+ */
+function repairJsonControlCharsInStrings(text) {
+  const src = String(text ?? '');
+  let out = '';
+  let inStr = false; let esc = false;
+  for (let i = 0; i < src.length; i += 1) {
+    const c = src[i];
+    if (inStr) {
+      if (esc) { esc = false; out += c; continue; }
+      if (c === '\\') { esc = true; out += c; continue; }
+      if (c === '"') { inStr = false; out += c; continue; }
+      if (c === '\n') { out += '\\n'; continue; }
+      if (c === '\r') { out += '\\r'; continue; }
+      if (c === '\t') { out += '\\t'; continue; }
+      out += c; continue;
+    }
+    if (c === '"') inStr = true;
+    out += c;
+  }
+  return out;
+}
+
+/** 先按原样 parse，失败再按「修复裸控制字符」重试——两条路都只认对象。 */
+function parseJsonObjectLoose(slice, quoteRepair = false) {
+  try {
+    const obj = JSON.parse(slice);
+    if (obj && typeof obj === 'object' && !Array.isArray(obj)) return obj;
+  } catch { /* 走修复路径 */ }
+  try {
+    const obj = JSON.parse(repairJsonControlCharsInStrings(slice));
+    if (obj && typeof obj === 'object' && !Array.isArray(obj)) return obj;
+  } catch { /* 控制字符修复不够 */ }
+  // 0.19.11：**默认关闭**的可选修复（用户拍板「加严格模式、默认关闭」）。
+  // 开启后只在「修完能完整 parse」时才接受——修不出合法对象就照旧拒收，绝不半接受。
+  if (quoteRepair) {
+    try {
+      const obj = JSON.parse(repairUnescapedQuotesInJsonStrings(slice));
+      if (obj && typeof obj === 'object' && !Array.isArray(obj)) return obj;
+    } catch { /* 修不出合法对象 */ }
+  }
+  return null;
+}
+
+/**
+ * 修复「长字符串里的**未转义引号**」（0.19.11，默认关闭的可选严格模式）。
+ *
+ * ## 为什么默认关闭（这是与 0.16.25 红线的边界约定）
+ *
+ * 真机剩下的 10 条长文本哑火与已修的「裸换行」不是同一族：它们的 `content` 里
+ * 除了真换行，还夹着**裸的 `"`**（markdown 报告里引用 JSON 片段时最常见）。
+ * 修它必须**猜**「这一枚引号是字符串结束还是内容里的字面引号」——而 0.16.25
+ * 那条红线写着「宁可拒收 + 续跑，也不静默代拼参数」。因此：
+ *   · 默认 `false`：行为与 0.19.10 逐字相同，这 10 条照旧拒收 + 诊断 + 续跑；
+ *   · 显式开启（`jsonQuoteRepair: true`）才走这条启发式，**且只在结果能完整
+ *     JSON.parse 成一个对象时才接受**（修不出合法对象 = 没修，照旧拒收）。
+ *
+ * ## 判据（只在字符串**内部**做，且只对"看起来不是结束"的引号动手）
+ *
+ * 一枚引号是「真结束」当且仅当它后面第一个非空白字符属于 `: , } ]` 或已到文末；
+ * 否则按内容里的字面引号转义成 `\"`。同时把裸控制字符一并转义（等价于
+ * repairJsonControlCharsInStrings 的超集），因此开启后不需要再叠一层。
+ *
+ * @param {unknown} text 可能是模型产出的、带裸引号的 JSON 文本
+ * @returns {string} 同一份文本，字符串内的裸引号与裸控制字符已转义
+ *
+ * ⚠ **真机负结果（2026-09-24 实测，必须如实记）**：对 reply-log 里那 100 条
+ * 「0 调用」样本开启本修复，**恢复 0 条**。原因经逐条取证（`.tmp/dbg-quote3.mjs`）：
+ * 这些长 `content` 的病根**不是**一枚简单的未转义引号，而是**markdown 里的 ```json
+ * 片段 + 该片段自身的引号转义前后不一致**（模型把每行行首那枚写成 `\"`、行内其余
+ * 保留裸 `"`）。这种形状在**字符串层面无法无歧义判定**——哪一种转义才是作者的意图，
+ * 只看文本答不出来。因此本函数保持**默认关闭**，并在此记明「真机 0 恢复」：
+ * 任何人在启用它之前，都应先证明它真的修好了样本，而不是因为「开关存在」就以为
+ * 问题已解。简单的未转义引号（单层对象、无嵌套 markdown）仍能被它正确修好，
+ * 对应断言见 test/quote-repair.test.mjs。
+ */
+export function repairUnescapedQuotesInJsonStrings(text) {
+  const src = String(text ?? '');
+  let out = '';
+  let inStr = false; let esc = false;
+  for (let i = 0; i < src.length; i += 1) {
+    const c = src[i];
+    if (!inStr) {
+      if (c === '"') inStr = true;
+      out += c; continue;
+    }
+    if (esc) { esc = false; out += c; continue; }
+    if (c === '\\') { esc = true; out += c; continue; }
+    if (c === '\n') { out += '\\n'; continue; }
+    if (c === '\r') { out += '\\r'; continue; }
+    if (c === '\t') { out += '\\t'; continue; }
+    if (c === '"') {
+      let j = i + 1;
+      while (j < src.length && /\s/.test(src[j])) j += 1;
+      const next = src[j];
+      const closesString = next === undefined || next === ':' || next === ',' || next === '}' || next === ']';
+      if (closesString) { inStr = false; out += c; } else { out += '\\"'; }
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
 /** 从 text[start]（应为 '{'）做花括号配对（跳过字符串内的括号），配平即试解析。 */
 function jsonObjectAt(text, start) {
   const src = String(text ?? '');
@@ -918,28 +1173,31 @@ function jsonObjectAt(text, start) {
     if (c === '{') depth++;
     else if (c === '}') {
       depth--;
-      if (depth === 0) {
-        try {
-          const obj = JSON.parse(src.slice(start, i + 1));
-          return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : null;
-        } catch { return null; }
-      }
+      if (depth === 0) return parseJsonObjectLoose(src.slice(start, i + 1));
     }
   }
   return null;
 }
 
-/** 从一段可能夹带标签/散文的文本里取第一个完整 JSON 对象（首个 { 到末个 }）。
- *  混合形状的 <invoke> 体里既有裸 JSON 又有游离 </parameter>，直接切首尾即可。 */
-function jsonObjectIn(text) {
+/**
+ * 从一段可能夹带标签/散文的文本里取第一个完整 JSON 对象（首个 { 到末个 }）。
+ *  混合形状的 <invoke> 体里既有裸 JSON 又有游离 </parameter>，直接切首尾即可。
+ *
+ * ⚠ **宽容度不变（这是红线，不是保守）**：2026-09-24 曾把这里改成「取第一个配平
+ * 对象、忽略尾部残余」，当场打红 `test/auto-continue.test.mjs` 的两条端到端用例——
+ * 该文件的红线逐字写着「解析宽容度不变（第二对象照旧拒收），只续跑、不代拼」。
+ * 真机形状是模型在合法主对象后**多挂** `,{"replace_all":false}`（session cd997dd3
+ * 连续三轮）：若这里收下第一个对象，那个多余的第二对象就被**静默吞掉**——参数
+ * 少一半却照常执行，比解析失败危险得多。正确出口是「拒收 + 诊断留痕 +
+ * UNPARSED 自动续跑让模型重发」，不是悄悄接受。故本函数只做一件事：
+ * **裸控制字符修复**（见 repairJsonControlCharsInStrings），不改接纳范围。
+ */
+function jsonObjectIn(text, quoteRepair = false) {
   const body = String(text ?? '');
   const a = body.indexOf('{');
   const b = body.lastIndexOf('}');
   if (a < 0 || b <= a) return null;
-  try {
-    const parsed = JSON.parse(body.slice(a, b + 1));
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
-  } catch { return null; }
+  return parseJsonObjectLoose(body.slice(a, b + 1), quoteRepair);
 }
 
 /**
@@ -1849,6 +2107,8 @@ const RECOVERABLE_TOOLS = new Set(['read', 'glob', 'grep']);
 export function parseAgentReply(text, options = {}) {
   if (!text) return { calls: [], text: '', diagnostics: [] };
   const tools = Array.isArray(options?.tools) ? options.tools : [];
+  // 0.19.11：可选严格模式（默认关）。关着时本函数与 0.19.10 逐字同行为。
+  const jsonQuoteRepair = options?.jsonQuoteRepair === true;
   let s = String(text);
   // 网页端流式噪声：DeepSeek 网页版偶发把协议标记输出成 <…> 的变形——
   // 竖线全角化成对出现（<tool_calls>，U+FF5C）、丢开头 <。归一化与流式
@@ -2083,9 +2343,20 @@ export function parseAgentReply(text, options = {}) {
   while ((m = invokeOpenRe.exec(s)) !== null) {
     if (inFence(m.index)) continue; // 围栏内的 invoke 是示例（run-9 实证），不执行
     const bodyStart = m.index + m[0].length;
-    const bodyEnd = invokeBodyEnd(s, bodyStart);
+    // 0.19.11：**体的配平也必须能吃到可选修复**。修法不生效时最隐蔽的一格就在这：
+    // `content` 里的裸引号会让 invokeBodyEnd 的字符串感知扫描脱相 ⇒ 体判成不配平
+    // ⇒ `continue` 在**到达 jsonObjectIn 之前**就把这条调用丢了。于是「明明加了
+    // 引号修复却一条都没恢复」（真机实测 0/100）：修复代码在场，但根本没被执行到。
+    // 修复只会在字符串内部**插入反斜杠**，因此 bodyStart 之前的偏移不受影响，
+    // 修复后仍可用同一个 bodyStart 定位体。
+    let bodySrc = s;
+    let bodyEnd = invokeBodyEnd(s, bodyStart);
+    if (bodyEnd < 0 && jsonQuoteRepair) {
+      bodySrc = repairUnescapedQuotesInJsonStrings(s);
+      bodyEnd = invokeBodyEnd(bodySrc, bodyStart);
+    }
     if (bodyEnd < 0) continue; // 体未配平（流式半成品）：不算可执行调用
-    m[2] = s.slice(bodyStart, bodyEnd);
+    m[2] = bodySrc.slice(bodyStart, bodyEnd);
     // **必须重建 m[0] 为「开标签 + 体 + 闭标签」整段**。
     // 下游的畸形抢救分支会扫 m[0]（含属性区）找 `"name":"x","arguments":{…}`
     // 片段——真机 2026-09-10 第 5 跑那种「JSON 漏进标签名」的形状，
@@ -2103,7 +2374,7 @@ export function parseAgentReply(text, options = {}) {
     let pm;
     while ((pm = paramRe.exec(m[2])) !== null) { args[pm[1]] = pm[2].trim(); n++; }
     if (n === 0) {
-      const raw = jsonObjectIn(m[2]);
+      const raw = jsonObjectIn(m[2], jsonQuoteRepair);
       // 0.16.25：体里有 JSON 形状、整体却解析不出时**不再静默**。真机 cd997dd3
       // （2026-09-19）三连灭的形状：主对象完全合法、闭合后多挂 `,{"replace_all":false}`
       // 第二对象——jsonObjectIn 按「首个 { 到末个 }」切段，整段 parse 必败，旧代码
@@ -2205,5 +2476,79 @@ export function parseAgentReply(text, options = {}) {
       if (obj && typeof obj.tool === 'string') return { calls: [{ name: obj.tool, arguments: normArgs(obj.arguments ?? obj.args ?? {}) }], text: s, diagnostics };
     } catch { /* fallthrough */ }
   }
+  // 0.19.11：**协议在场、0 调用、却没有任何诊断**这一格必须补上（真机 25 条哑火）。
+  // 见 describeUnparsedProtocolShape 的证据与形状表。
+  if (!diagnostics.length) {
+    const shape = describeUnparsedProtocolShape(s);
+    if (shape) diagnostics.push(shape);
+  }
   return { calls: [], text: s, diagnostics };
+}
+
+/**
+ * 「协议标记在场、却一个调用都没解析出来」时，给这次失败**起个名字**（0.19.11）。
+ *
+ * ## 为什么需要（真机取证：25 条哑火，全都没有诊断）
+ *
+ * 逐条复解析 1,363 条真机 `raw reply`（`.tmp/classify27.mjs`）后剩下的 25 条
+ * 「有协议锚、0 调用」里，**23 条 `diagnostics` 是空的**。后果不是少一条日志：
+ * `TOOL_CALL_UNPARSED` 提示里那句「解析诊断 …」是**唯一把病灶点给模型看的地方**
+ * （lib/index.js:2182），它空着，模型就只能看到一句泛泛的「name 别省 /
+ * JSON 要配平」，于是照着原样再发一遍坏形状 —— 这正是 doc/progress.md 里
+ * 「教学没打到病灶、模型连抄三轮坏形状」那条同型病。
+ *
+ * 真机形状表（本函数逐条覆盖，数量取自上表）：
+ *   · **工具名被并进 call▁begin**（`<｜tool▁call▁job_output` 少了结束竖线，
+ *     后面直接跟 sep token）—— 最常见的残骸形态；
+ *   · **sep 标记残缺**（`<｜tool▁call▁begin｜>read<｜tool▁limit":28,…`：sep token
+ *     被写成 `<｜tool▁` 就把参数体的开头吞了）；
+ *   · **DSML 词形残留**（`<｜｜DSML｜｜ invoke …>`，该协议 0.16.23 已退役，
+ *     桥只扣留不改写）；
+ *   · **包裹竖线写成两枚以上**（`<｜｜tool▁…`）；
+ *   · 其余（含 `<tool_call>...(cljs)...` 这类占位符原样回吐）归到兜底一句。
+ *
+ * ## 为什么只加诊断、不动宽容度
+ *
+ * 诊断是**外发给人/模型看的一句话**，不改变任何接纳判据；而给这些形状加宽容
+ * 等于把「工具名和分隔符都写错」的残骸当调用执行——参数可能全是错的（0.16.25
+ * 红线：宁可拒收 + 续跑，也不静默代拼）。所以这里只回答「它是什么形状」。
+ *
+ * @param {string} text 已归一化、且 0 调用的回复文本
+ * @returns {string|null} 形状判语；协议不在场时返回 null（普通散文不该有诊断）
+ */
+export function describeUnparsedProtocolShape(text) {
+  const src = String(text ?? '');
+  if (!src) return null;
+  const BAR = OFFICIAL_BAR;
+  const SEQ = String.fromCharCode(0x2581);
+  // 锚点判定必须**同时认归一化产物**（`<calls>` / `<invoke ` 只可能由官方 token 改写而来）：
+  // 只看 `<｜…tool` 会漏掉整整一族——normalizeOfficialToolCalls 已经把
+  // `<｜tool▁calls▁begin｜>` 改写成 `<calls>`，`tool` 这个词在文本里已经不存在了。
+  // 真机取证：25 条哑火里有 6 条正是这样漏掉的（`.tmp/check25.mjs`）。
+  //
+  // **刻意不认纯退役词形**（`<｜｜DSML｜｜ …` / `<｜｜DSH …`）：那一族由 index 层
+  // 的 `withheld > 0` 触发 UNPARSED（`test/marker-typo.test.mjs` ④ 明文钉着
+  // 「退役轮的 diagnostics 为空是预期」）。在这里再补一句属于重复留痕，而且会
+  // 把那条约定的读法改掉；混形轮（`<calls>` + DSML 残骸）仍会被 `<calls>` 这一支接住。
+  const anchored = src.includes('<tool_call>') || src.includes('"mcp_action"')
+    || src.includes('<calls>') || src.includes('<invoke ')
+    || new RegExp('<' + BAR + '{1,3}\\s*tool').test(src);
+  if (!anchored) return null;
+  const bits = [];
+  // ① 工具名被并进 call▁begin（结束竖线丢失）
+  if (new RegExp(BAR + '\\s*tool[' + SEQ + '\\s]*calls?[' + SEQ + '\\s]*[A-Za-z_][A-Za-z0-9_]*').test(src)) {
+    bits.push('工具名被并进了 call begin 标记（标记少了结束竖线）');
+  }
+  // ② sep 标记残缺：begin 之后有工具名，再跟一个不是 sep 的 tool 标记
+  if (new RegExp(BAR + '\\s*tool[' + SEQ + '\\s]*calls?[' + SEQ + '\\s]*begin[' + BAR + ']{0,3}>\\s*[A-Za-z_][A-Za-z0-9_]*\\s*<' + BAR + '\\s*tool(?![' + SEQ + '\\s]*sep)').test(src)) {
+    bits.push('sep 分隔标记残缺（参数体的开头被吞进标记里）');
+  }
+  // ③ DSML 词形残留（已退役协议）
+  if (/DSML/i.test(src)) bits.push('用了已退役的 DSML 词形（桥只扣留、不再改写与执行）');
+  // ④ 包裹竖线写成两枚以上
+  if (new RegExp(BAR + '{2,}').test(src)) bits.push('包裹竖线写成了两枚以上');
+  // ⑤ 占位符原样回吐 / 其它
+  if (!bits.length) bits.push('协议标记在场，但没有一段能配平成调用（name 或参数体形态不对）');
+  return 'protocol anchors present but no parseable call — ' + bits.join('；')
+    + '。原文头：' + src.trim().slice(0, 120);
 }

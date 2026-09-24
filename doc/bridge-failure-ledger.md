@@ -35,7 +35,7 @@ turn/end reason = {"kind":"error","error":{"message":"locator.fill: Timeout 3000
 | 错误码 | 已做的适配 | 当前状态 | 残留风险 |
 | --- | --- | --- | --- |
 | `PROMPT_WRITE_STALLED` | 0.14.5：`composerWritePlan`（single/chunked，clamp `[1000,200000]`）+ `stallStep`（连续两块回读长度不增才判死）；错误码带**已写/总长度**与元素现场 | **已修，已装，已验证**（v0.14.6，重启生效） | 残留：仅网页端本身卡死（非写入量）时仍会走看门狗。**重启后实测**：`lastEndReason=finished`、`lastRate.responseMs=952`、`--recent 3` 无 `locator.fill` 超时 |
-| `WEB_NO_PROGRESS` | 0.14.0：适配器无进展看门狗 `nextWithIdle`（默认 120s，`webcode.idleTimeoutMs`），把「无限挂起」变成带驱动现场（`captureAlive`/`replyChars`）的报错 | 已装 | 必须 > WIP 窗口，否则看门狗先开火 |
+| `WEB_NO_PROGRESS` | 0.14.0：适配器无进展看门狗 `nextWithIdle`（默认 120s，`webcode.idleTimeoutMs`），把「无限挂起」变成带驱动现场（`captureAlive`/`replyChars`）的报错。**0.16.3：报错带相位/收束时刻/两段现场**（`idleTimeoutError`，判据见 `lib/idle-window.js`）。**0.19.12：驱动侧 DOM 兜底回传**——真机（2026-09-24，`session-12d9c3c6`）首事件已到后捕获管道中断，页面把回复写完（DOM 1072 字）而桥侧 120s 零事件；WIP 稳态收束因 bodyReady 不成立救不了。新增 `shouldRescueStalledCapture`（流静默 ≥ `captureStallRescueMs` 默认 45s + 本轮 DOM 相对基线变过 + 有真实内容 + 仍在写或流从未送来过正文 ⇒ 把剥掉计时文案的 DOM 文本当 partial 结果交回，收束原因 `dom-rescue-capture-stall`），接线在 `startWipWatch`，护栏 `test/capture-stall-rescue.test.mjs` | 已装（0.19.12 待重启生效） | 阈值必须 < 适配器看门狗 120s，否则看门狗先开火；兜底救不回流里的**图片**（DOM 文本无像素） |
 | WIP 稳态收束 | 0.14.0：`startWipWatch` **双条件**——流停 ≥ `wipIdleMs` **且** DOM 助手消息长度停止增长；任一在动就不收束 | 已装 | 只看流停会把长回复腰斩（已有反向单测钉住） |
 | `WEB_SESSION_LOST` | 0.14.2：按站点声明地址形状（三态 `fresh`/`resume`/`unsupported`），`unsupported` **必须报错**不再静默新开 | 已装 | `zai` 故意不声明形状，落 `unsupported` 并如实透出 |
 | `CONTEXT_WINDOW_EXCEEDED` | 0.14.2：纯函数 `metrics.checkContextBudget`，在 `buildTurn` 之后、`attach` **之前**拦下——越界时网页端完全未被写入 | 已装 | 窗口是「本桥愿意让 transcript 长到多大」，**不是**模型规格 |

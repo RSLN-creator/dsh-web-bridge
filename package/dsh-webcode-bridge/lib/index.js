@@ -174,6 +174,18 @@ const DEFAULTS = {
   // 任何人想调这个值都会发现自己改的东西没有任何效果。这正是「静默不生效」那一类
   // 缺陷，所以两处都要有，且注释写明原因。
   answerTimeoutMs: 180_000,
+  // 捕获链中断兜底的静默阈值（0.19.12）。真机事故（2026-09-24，session-12d9c3c6）：
+  // 首事件已到后「页面 SSE → 页内捕获 → 解码器」中断，页面把回复写完（DOM 1072 字）
+  // 而桥侧 120s 零事件，WIP 稳态收束因 bodyReady 不成立救不了，最后看门狗开火、
+  // 内容整轮丢失。驱动现在会在流静默这么久且页面仍在写/写过了本轮内容时，把页面
+  // DOM 文本当 partial 结果兜底交回（判据见 metrics.shouldRescueStalledCapture，
+  // 接线在 browser-driver startWipWatch，护栏 test/capture-stall-rescue.test.mjs）。
+  //
+  // 上限约束：**必须 < idleTimeoutMs（默认 120s）**，否则适配器看门狗先开火、
+  // 兜底永远轮不到——判据层不强制这条（纯函数不读别家配置），调大的人自己承担。
+  // 0 = 显式关闭。同 answerTimeoutMs 的教训：必须在此声明并显式传入 driver，
+  // 否则「可配置」只对了一半，用户改了没有任何效果。
+  captureStallRescueMs: 45_000,
   // 「网页还没开口」相位的窗口倍数（0.16.3，真机事故的修法）。
   //
   // 起因：2026-09-17 真机，DSH 会话把 **127,888 字符**纯文本发进 DeepSeek 网页
@@ -226,7 +238,24 @@ const DEFAULTS = {
   //     且**下一轮会把新的增量照常 inline 发出**，不会长期断上下文；
   //   · 实际走了哪条路 → 落进 driver status 的 `attachTransport`（/status 可核对）。
   // **0 = 关闭**的语义保留：想完全回到旧行为就显式写 0。判据见 promptTransportPlan。
+  //
+  // 0.19.11：**这个 60,000 只是「全站默认」，站点可以更严**（只收紧、不开启）。
+  // 真机病因（用户原话「明明在附件投递模式下，看的还是完整上下文」）：deepseek 的
+  // 典型首轮实测 48,937 / 53,797 字符，**都在这条默认线以下** ⇒ under-limit ⇒
+  // 全文逐字灌进输入框 —— 越典型的会话越走 inline。现在 deepseek 走
+  // browser-driver 的 SITE_ATTACH_INLINE_LIMIT（8,000），已真机复验：50,219 字符
+  // 首轮落到附件、完成请求 ref_file_ids 非空、对话框只渲染 82 字符。
+  // 配置成 0 仍然一律 inline（站点表绝不把附件重新打开）。
   attachInlineLimitChars: 60_000,
+  // 长字符串里**未转义引号**的可选修复（0.19.11，**默认关**）。
+  //
+  // 为什么默认关：修它必须猜「这枚 `"` 是字符串结束还是内容里的字面引号」，而 0.16.25
+  // 的红线写着「宁可拒收 + 续跑，也不静默代拼参数」。默认关时行为与 0.19.10 逐字相同，
+  // 真机那 10 条长文本哑火照旧走「拒收 + 诊断 + UNPARSED 续跑」。
+  //
+  // 开启后也只接受**能完整 parse 成一个对象**的结果（修不出合法对象 = 没修，照旧拒收），
+  // 判据见 agent-preset 的 repairUnescapedQuotesInJsonStrings。
+  jsonQuoteRepair: false,
   // 提示词**投递形态**（0.16.3）：'attach'（默认）| 'inline'。
   //
   // 为什么需要这个开关（用户原话：「没有做到能够把提示词放入文本（设置界面也改为
@@ -1314,7 +1343,7 @@ export function apply(ctx, config = {}) {
           const text = String(res?.text || '');
           // 补发**已确认送出**才落账（见上面 cumulative 的口径注释）。
           const delivered = continueCounter.bump(sessionKey);
-          const cont = parseAgentReply(text, { tools });
+          const cont = parseAgentReply(text, { tools, jsonQuoteRepair: cfg.jsonQuoteRepair === true });
           // 续跑轮的原始回复同样全量落盘（0.16.17 同一纪律：没有原文就无法离线归因）。
           appendReplyLog(text, {
             sessionId: options?.sessionId ?? null,
@@ -1554,7 +1583,7 @@ export function apply(ctx, config = {}) {
       const endImages = Array.isArray(end?.images) && end.images.length ? end.images : genImages;
       assertNonEmpty(finalText, thinkAcc, endImages);
 
-      const { calls, diagnostics } = parseAgentReply(finalText, { tools });
+      const { calls, diagnostics } = parseAgentReply(finalText, { tools, jsonQuoteRepair: cfg.jsonQuoteRepair === true });
       // 0.16.17：每轮原始回复全文落盘（lib/reply-log.js）。0.16.13 的「扣留全文进
       // 日志」走 console.warn，只到 DSH 进程 stderr、运行时不持久化——run-8 扣留
       // 1474 字符后磁盘上只剩提示里的 200 字符头，归因第三次断链（用户明确要求
@@ -2282,6 +2311,8 @@ function imageMarkdown(images) {
     // 只出思维链的绝对上限（0.15.2）。必须显式传：不传的话 driver 会用它自己的
     // 默认值，行为看起来一样，但 cfg.answerTimeoutMs 这个配置项就成了摆设。
     answerTimeoutMs: cfg.answerTimeoutMs,
+    // 捕获停摆兜底阈值（0.19.12）。同上：不显式传，配置层就是摆设。
+    captureStallRescueMs: cfg.captureStallRescueMs,
     loginTimeoutMs: cfg.loginTimeoutMs,
     composerChunkChars: cfg.composerChunkChars,
     attachInlineLimitChars: cfg.attachInlineLimitChars,
@@ -2338,6 +2369,8 @@ function imageMarkdown(images) {
         // 同默认 driver：非默认槽的驱动也要拿到这个上限，否则「账户2 卡住」
         // 与「默认槽卡住」的行为会不一致——而两个槽走的是同一份代码。
         answerTimeoutMs: cfg.answerTimeoutMs,
+        // 同默认 driver：捕获停摆兜底（0.19.12）也必须两槽一致。
+        captureStallRescueMs: cfg.captureStallRescueMs,
         loginTimeoutMs: cfg.loginTimeoutMs,
         composerChunkChars: cfg.composerChunkChars,
         // 同默认 driver：非默认槽也必须拿到附件阈值，否则「账户2 发长提示词」与

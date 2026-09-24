@@ -220,18 +220,90 @@ export function shouldSettleStalledThinking({ now, lastAnswerAt, hardCapMs } = {
  * @returns {number} 剥掉计时行后的字符数
  */
 export function answerDomLength(text) {
+  return cleanAnswerDomText(text).trim().length;
+}
+
+/**
+ * 页面助手节点 innerText 的「真实回答」文本 —— 与 answerDomLength 同一把计时文案
+ * 剥除规则，但返回**文本本身**而不是长度（0.19.12）。
+ *
+ * 为什么必须共享同一个正则而不是各写一份：捕获停摆兜底（browser-driver 的
+ * dom-rescue）要拿剥掉计时文案后的文本当本轮结果交出去；如果它在自己的模块里
+ * 重抄一遍 TIMER_LINE，两份规则迟早漂移——「量长度用的规则」与「交文本用的规则」
+ * 不一致时，domReplyChars 说有 1000 字而兜底交出去的是另一段，读数自相矛盾。
+ *
+ * @param {string} text 助手节点 innerText
+ * @returns {string} 剥掉计时行后的文本（不 trim；调用方按需 trim）
+ */
+export function cleanAnswerDomText(text) {
   const raw = String(text ?? '');
-  if (!raw) return 0;
+  if (!raw) return '';
   // 计时文案的形态（中英双语，秒数可变）：
   //   中文：思考中 / 深度思考中 / 已思考 12 秒 / 思考了 12 秒
   //   英文：Thought for 12s / Thinking / Thinking...
   // 统一要求「整行只由该形态构成」，避免吃掉正文里的普通句子。
   const TIMER_LINE = /^\s*(?:(?:深度思考中|思考中|已思考\s*\d+\s*秒|思考了\s*\d+\s*秒|Thought\s+for\s+\d+\s*s(?:ec(?:onds?)?)?|Thinking)[.…]{0,3})\s*$/i;
-  const kept = raw
+  return raw
     .split(/\r?\n/)
     .filter((line) => !TIMER_LINE.test(line))
     .join('\n');
-  return kept.trim().length;
+}
+
+/**
+ * 「捕获链中断」的 DOM 兜底回传判定（0.19.12）。
+ *
+ * ## 它针对哪一次真机事故
+ *
+ * 2026-09-24 22:11-22:13（会话 `session-12d9c3c6`）：本轮首事件已到（判定相位
+ * =已开流后的静默），此后 120s 适配器零事件，看门狗开火报 `WEB_NO_PROGRESS`；
+ * 而现场读数是「最近驱动活动 2s 前（WIP 巡检还在采到页面）+ 页面已有 1072 字
+ * 回复未回传」。重试轮的原始回复 1081 字与未回传的 1072 字几乎同长——网页侧
+ * 把回复完整生成完了，是「页面 SSE → 页内捕获 → 解码器」这一段在前几个事件后
+ * 中断了。已有的两条防线都救不了这一类：shouldSettleWip 要求 bodyReady（正文
+ * 得先从流里来过），shouldSettleStalledThinking 要等 180s 且救出来的仍是流里
+ * 的内容——页面 DOM 里躺着的那份全文，两条防线都够不着。
+ *
+ * ## 判据（全部要同时成立）
+ *
+ *   · 流静默 ≥ stallMs（捕获疑似中断；默认 45s，必须小于适配器看门狗 120s，
+ *     否则又是看门狗先开火、兜底永远轮不到）；
+ *   · 页面可读（domAvailable）且本轮 DOM 内容**变过**（domTextChanged，相对
+ *     发送后首个采样点的基线——没有这条，会把上一轮留在页面上的旧回复当成
+ *     本轮的兜底交出去）；
+ *   · DOM 里有本轮真实内容（domLen > 0，剥掉计时文案后的长度）；
+ *   · 且二者其一：页面**仍在写**（lastDomGrowthAt 在 2×wipIdleMs 内刷新过，
+ *     窗口取 2 倍是因为巡检 2.5s 一拍，「这拍刚长过」距刷新点天然有半拍到一拍
+ *     的抖动，取 1 倍窗口会在节拍边界上抖），或流里**从未出现过正文/思考**
+ *     （hasStreamBody=false：捕获从一开始就没送来过东西——0.12.1「页面早有
+ *     全文、捕获从未建立」那类事故的形状）。
+ *
+ * ## 反向安全线（宁可漏救，不可误救）
+ *
+ *   · 流还在动（增量在到）→ 永不命中：兜底绝不允许和活流赛跑；
+ *   · DOM 没变过（页面还没开始写本轮回复）→ 永不命中：prefill 阶段「最后一名
+ *     助手节点 = 上一轮回复」是常态，没有基线对比必然张冠李戴；
+ *   · stallMs ≤ 0 → 永不命中（0 = 显式关闭，配置写错回落到关而不是默认开）。
+ *
+ * @param {{now:number, lastProgressAt:number, lastDomGrowthAt:number,
+ *          domLen:number|null, domTextChanged:boolean, hasStreamBody:boolean,
+ *          domAvailable?:boolean, stallMs?:number, wipIdleMs?:number}} v 现场读数
+ * @returns {boolean} 是否应当用页面 DOM 文本兜底收束本轮
+ */
+export function shouldRescueStalledCapture(v = {}) {
+  const stall = Math.max(0, Math.round(Number(v.stallMs) || 0));
+  if (stall <= 0) return false;
+  if (v.domAvailable === false) return false;
+  if (v.domTextChanged !== true) return false;
+  const len = Number(v.domLen);
+  if (!Number.isFinite(len) || len <= 0) return false;
+  const lastProgressAt = Number(v.lastProgressAt);
+  const lastDomGrowthAt = Number(v.lastDomGrowthAt);
+  const now = Number(v.now);
+  if (!Number.isFinite(lastProgressAt) || !Number.isFinite(lastDomGrowthAt) || !Number.isFinite(now)) return false;
+  if (!(now - lastProgressAt >= stall)) return false;
+  const idle = Math.max(0, Math.round(Number(v.wipIdleMs) || 2500));
+  const growing = now - lastDomGrowthAt < idle * 2;
+  return growing || v.hasStreamBody !== true;
 }
 
 /**
