@@ -123,6 +123,21 @@ export function viewportForPanel(w, h) {
 }
 const sameViewport = (a, b) => !!a && !!b && a.width === b.width && a.height === b.height;
 
+// ---- 运动自适应画质（0.20.5：滚动仍不够顺的最后一张无头牌）--------------------
+//
+// 远程浏览器的另一个标准做法（noVNC/商业方案的「静帧高质、动帧提速」同型）：
+// JPEG 编码耗时随质量陡增——920×1720@q90 一帧几十毫秒，滚动时帧率被编码卡死；
+// 降到 q55 帧率立刻上来，而运动中的模糊根本注意不到。静止后回满质量，
+// 文字锐度不受影响。无头 CDP 路线里这是 WebRTC 之前唯一的顺滑化手段。
+const ADAPTIVE = {
+  motionFrames: 3,     // 500ms 内 ≥3 帧 ⇒ 运动态（降质提速）
+  motionWindowMs: 500,
+  idleMs: 450,         // 450ms 无帧 ⇒ 静止态（回满质量）
+  dwellMs: 700,        // 两次切换的最小间隔（防止编码耗时抖动引发振荡）
+  hiQuality: 90,
+  loQuality: 55,
+};
+
 /**
  * 画面流 hub。`getDriver(accountKey)` 返回带 `live` API 的驱动实例（index.js
  * 接 driverFor）；驱动尚未启动/槽不存在时可以抛错，hub 会向面板回 bye 并关闭。
@@ -154,6 +169,24 @@ export function createLiveHub({ getDriver, log = () => {}, warn = () => {} } = {
 
     let current = null;   // { pageId, cdp, viewport }
     let panel = null;     // 面板报来的 CSS 尺寸 { w, h }（resize 前为 null，用默认视口）
+    // 运动自适应状态：帧到达节奏 → hi/lo 模式（判据见 ADAPTIVE）。
+    const frameTimes = [];
+    let streamMode = 'hi';
+    let modeAt = Date.now();
+    const noteFrame = () => { frameTimes.push(Date.now()); if (frameTimes.length > 32) frameTimes.shift(); };
+    const adaptTimer = setInterval(() => {
+      if (!current) return;
+      const now = Date.now();
+      while (frameTimes.length && now - frameTimes[0] > ADAPTIVE.motionWindowMs) frameTimes.shift();
+      const motion = frameTimes.length >= ADAPTIVE.motionFrames;
+      const idle = frameTimes.length === 0 || (now - frameTimes[frameTimes.length - 1] > ADAPTIVE.idleMs);
+      const want = motion ? 'lo' : (idle ? 'hi' : streamMode);
+      if (want !== streamMode && now - modeAt > ADAPTIVE.dwellMs) {
+        streamMode = want;
+        modeAt = now;
+        void startStream(current.cdp, current.viewport, want).catch(() => {});
+      }
+    }, 250);
     /** 摘掉当前 CDP 会话（停投屏 + detach）。清理一律吞错：对端可能已随浏览器
      *  退出而失效，把清理错误抛成 unhandled rejection 只会污染日志。 */
     const detach = async () => {
@@ -172,7 +205,7 @@ export function createLiveHub({ getDriver, log = () => {}, warn = () => {} } = {
     };
     const unPages = live.onPagesChanged?.(() => { void pushPages(); });
 
-    const startStream = async (sess, viewport) => {
+    const startStream = async (sess, viewport, mode = 'hi') => {
       // 先停后起：同会话上直接重发 startScreencast 不保证新上限生效（0.20.2 真机
       // resize 疑似因此不跟随）；stop 的报错吞掉（首次 attach 时本就没有投屏）。
       try { await sess.send('Page.stopScreencast'); } catch {}
@@ -181,7 +214,9 @@ export function createLiveHub({ getDriver, log = () => {}, warn = () => {} } = {
         width: viewport.width, height: viewport.height, deviceScaleFactor: 1, mobile: false,
       });
       await sess.send('Page.startScreencast', {
-        format: 'jpeg', quality: 90, maxWidth: viewport.width, maxHeight: viewport.height, everyNthFrame: 1,
+        format: 'jpeg',
+        quality: mode === 'lo' ? ADAPTIVE.loQuality : ADAPTIVE.hiQuality,
+        maxWidth: viewport.width, maxHeight: viewport.height, everyNthFrame: 1,
       });
     };
 
@@ -191,7 +226,7 @@ export function createLiveHub({ getDriver, log = () => {}, warn = () => {} } = {
       const viewport = viewportForPanel(panel?.w, panel?.h);
       current = { pageId: sess.pageId, cdp: sess, viewport };
       sess.on('Page.screencastFrame', (ev) => {
-        // 损伤帧：页面静止时 Chromium 一帧都不发，这里零转发零 CPU。
+        noteFrame();   // 损伤帧：页面静止时 Chromium 一帧都不发，自适应据此判动静
         // 0.20.4：二进制帧协议（browserless/steel live view 同款做法）——
         // raw JPEG + 小头元数据，替代 base64+JSON（省 33% 体积与两次编解码）。
         // 包格式：[metaLen u16be][metaJSON utf8][jpeg 字节]；控制消息仍是文本 JSON，
@@ -269,6 +304,7 @@ export function createLiveHub({ getDriver, log = () => {}, warn = () => {} } = {
     });
 
     ws.on('close', () => {
+      clearInterval(adaptTimer);
       try { unPages?.(); } catch {}
       void detach();
       conns.delete(ws);

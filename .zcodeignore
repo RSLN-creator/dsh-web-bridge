@@ -1,0 +1,143 @@
+node_modules/
+.pnpm-store/
+.edge-real-profile/
+.edge-real-profile2/
+.tmp-plugins.json
+*.log
+
+# reference: 新增逆向参考仓库为纯 git clone（带 .git），不入库；README 内列出清单与来源
+reference/*/
+!reference/local-refs/
+# reference 根下散放的 PDF 蓝图等资料同样不入库（gitignore 对已被目录规则排除的路径，否定规则需逐层重开）
+!reference/
+reference/*.pdf
+
+# 测试用浏览器 profile（Edge/Chromium 缓存与登录态，可再生，且会把仓库撑到 GB 级）。
+# 覆盖 .driver-profile* / .edge-profile* / .mirror-profile-* / .harness-ui-profile 与 .test-build。
+package/dsh-webcode-bridge/test-mock/.*-profile*/
+package/dsh-webcode-bridge/test-mock/.test-build/
+
+# 打包/探针输出（tgz、真机探针日志），不入库。
+#
+# ⚠ 2026-09-16 修正：本行原先写作 `package/output/`，**从未匹配到任何东西**——
+#   实测 `git check-ignore -v package/output/x.tgz` 命中，但那是因为 `package/output`
+#   这个目录**根本不存在**（check-ignore 对不存在的路径只做文本匹配，不做存在性判断，
+#   所以它「命中」了却什么也没挡住）。真实路径是 `package/dsh-webcode-bridge/output/`
+#   （见 `test-mock/inspect-harness.mjs:42,57` 的 `fs.mkdir('output/playwright')`，
+#   它是**相对包目录**解析的）。结果是该目录从未被忽略，8 个探针产物一直被 git 看得见。
+#   这是「引用点都在、链路的另一端不存在」那一族的第 4 次出现（前三次见 0.15.3 三缺陷）。
+#   `test-mock/artifacts-check.mjs` 现已把这条路径登记为必须被忽略，防复发。
+package/dsh-webcode-bridge/output/
+# 发布 tarball：**一律不入库**。它看起来像交付物，所以最容易被顺手 git add。
+# tgz 是 `pnpm pack` 的**产物**，每次打包字节都可能不同（时间戳、规范化），
+# 继续入库等于把「同名不同内容」的混淆搬进历史——而本项目已经因为「同版本号换内容」
+# 踩过坑（见 scripts/verify-pack.mjs 的文件头）。
+# 要分发的 tarball 走 GitHub Release（.github/workflows/release.yml），不进仓库。
+#
+# ✅ 2026-09-16 **历史欠账已清**：此前库里躺着 56 个历史 tgz（共 5.55 MB），
+#   当时「刻意不删」的理由是 doc/ci-cd.md §6.2 的回滚步骤依赖它们
+#   （「装回上一个版本的 tgz」）。用户于 2026-09-16 决定不再囤积，
+#   两件事**已按那份注释自己写下的要求一起做**：
+#     ① `git rm`（连磁盘一起删，非仅 --cached）；
+#     ② 同步改写 doc/ci-cd.md §6.2 的回滚一节，改为基于 **git 历史 / GitHub Release**。
+#   因此现在 `git ls-files -i -c --exclude-standard` 里**不再有 tgz**。
+#   教训：**回滚应当基于 git 历史（可复现），而不是碰巧留在磁盘上的二进制。**
+*.tgz
+# 真机矩阵的每次运行证据（JSON + 截图，可再生；截图在 .tmp/shots 已被 .tmp/ 覆盖）
+package/dsh-webcode-bridge/test-mock/out/
+# 提示词基准 harness 的每次运行产物（report.md/report.json/records.csv）。
+# 必须单独列一条：规则是**按路径**匹配的，`test-mock/out/` 不覆盖
+# `test-mock/prompt-bench/out/`。2026-09-15 实测：漏了这条时 git status 会列出
+# 三个「每次跑都变」的生成物（records.csv 含时间戳），极易被顺手 git add -A
+# 提进库里——这正是「临时产物混进提交」这类漂移的典型形态。
+package/dsh-webcode-bridge/test-mock/prompt-bench/out/
+# 基准 OOM 事故的原始留痕（0.14.8 那次堆耗尽）。**它是「每次跑都可能变」的产物，
+# 不是证据本体**——真正的证据（约 4GB 堆耗尽、669849ms）已经逐字写进 lib/bench.js
+# 的注释里，读者不需要这个文件也能看懂那次事故。2026-09-15 裁决：不入库，并把它
+# 从 bench.js 的注释引用里摘掉（注释指向一个读者手上没有的文件，比没有引用更坏）。
+package/dsh-webcode-bridge/bench-out.txt
+
+# 本地暂存（排查脚本、npm 缓存、tgz 解包验证），历史上从未入库
+.tmp/
+
+# AgentTeams 团队运行时状态（team.json / inbox/*.jsonl）。
+# 它引用**会话 id 与用户原话**，与 PLAN*.md、REPORT.md 同一条口径：本地私有留痕，不入库。
+# 2026-09-16 之前它没有规则，`git status` 直接列着 `.agent-teams/`，一次 `git add -A`
+# 就会把一个**别的会话的**团队状态连同收件箱提进历史。
+.agent-teams/
+
+# 桥任务台账的运行时落盘（`.webcode-tasks/ledger.json`）。
+# 与 `.agent-teams/` 同一条口径：它是**运行期状态**，不是源码——每个工作区各有一份，
+# 由 `task-ledger.js` 现写现读，内容随用户增删任务而变（含本地任务标题与批注原文）。
+# 2026-09-22 真机验证时暴露：不传 `workspaceRoot` 的 task-* 调用会把台账写到**宿主 cwd**
+# （实测落到工作区根），于是 `git status` 里直接出现 `.webcode-tasks/`；一次 `git add -A`
+# 就会把探针任务的留痕提进库。按 `.agent-teams/` 的先例加规则。
+.webcode-tasks/
+
+# 本地私有留痕与计划文件，不入库不同步（2026-09-13 要求远端清除）
+.claude/
+.Codex/
+.codex/
+PLAN*.md
+
+# 计划与私有报告的**归档目录**（2026-09-17）：根目录那几份 `PLAN*.md` 与
+# `REPORT.md` 是「当前这一轮怎么走」的工作底稿，堆在仓库根会让 git status 长期
+# 挂着它们的未跟踪记录、也让人误以为它们是入库文档（doc/README.md 第 6-7 行
+# 明确写了它们是本地私有留痕）。移到本目录后**必须**给目录本身一条规则：
+# gitignore 是按路径匹配的，根目录那两条 `PLAN*.md` / `REPORT.md` 不覆盖
+# `.local-plans/` 下的同名文件——不写这条的话，移动当下 `git status` 会立刻
+# 多出 6 个未跟踪条目（本项目已因「同名不同路径不覆盖」踩过一次，见上方
+# `test-mock/out/` 那一段注释）。
+.local-plans/
+
+# 会话抓取报告（2026-09-15）：对最近若干次本地 DSH 会话的取证记录。
+# 它引用了会话 id、真实路径与用户原话，属于**本地私有留痕**，与 PLAN*.md
+# 同一条口径。要对外发布的结论一律回写进 doc/ 下的入库文档。
+REPORT.md
+
+# 并行验证/审计的临时工作目录（2026-09-19）：一轮修复里会同时有几个验证者各自
+# 建 Scratch（回退对照、端口探针、隔离实验）。它们**必须**有一条规则，否则
+# `git status` 会挂着一串 `.tmp-*` 未跟踪条目，一次 `git add -A` 就把验证残骸
+# 提进历史。注意 `.tmp/` 那条**不覆盖**这些名字（gitignore 按路径匹配，
+# `.tmp/` 只匹配名为 `.tmp` 的目录），所以这里单列一条通配。
+# 注意：`.tmp-verify*/` 这类目录在**包目录内**（`package/dsh-webcode-bridge/` 下），
+# 通配 `**/` 才能同时覆盖仓库根与包目录两处。
+**/.tmp-*/
+.tmp-install-audit/
+.tmp-redteam/
+
+# Trae 会话的本地工作底稿（2026-09-23）：`.trae/documents/*.md` 是本轮对账与边界
+# 澄清的草稿，性质与 `.local-plans/` 相同（本地私有留痕，结论一律回写 doc/ 入库文档）。
+# 不给规则的话 `git status` 会长期挂着它，一次 `git add -A` 就把它提进历史。
+.trae/
+
+# ===== ↑ 以上同步自 .gitignore（「从 .gitignore 同步」只重写以上部分）=====
+.git/
+.hg/
+.svn/
+bower_components/
+jspm_packages/
+__pycache__/
+site-packages/
+venv/
+coverage/
+htmlcov/
+lcov-report/
+cmakefiles/
+cmake-build-*/
+bazel-*/
+pods/
+deriveddata/
+storybook-static/
+playwright-report/
+test-results/
+allure-results/
+allure-report/
+cdk.out/
+*.egg-info/
+*.dist-info/
+eggs/
+pip-wheel-metadata/
+wheels/
+# ----- ↑ 以上为 ZCode 默认排除规则（自定义规则请写在本行下方，不会被同步/恢复改动）-----
+# 自定义规则写在下方（本行提示可删除）

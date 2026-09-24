@@ -231,6 +231,34 @@ test('hub 行为：建连即下发视口仿真；resize 变尺寸同会话重设
   await close();
 });
 
+test('自适应画质：密集帧切 lo（q55），静止后回 hi（q90）；单帧不触发切换', async () => {
+  const { driver, cdp } = fakeDriver();
+  const { port, close } = await startHub(() => driver);
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/webcode/live?account=deepseek`);
+  ws.binaryType = 'arraybuffer';
+  ws.onmessage = () => {};
+  await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
+  await new Promise((r) => setTimeout(r, 150));
+  const startsWithQ = () => [...cdp.sent].reverse().find(([cmd]) => cmd === 'Page.startScreencast')?.[1].quality;
+
+  cdp.emit('Page.screencastFrame', { data: 'ZkBSQU1F', metadata: {}, sessionId: 1 });
+  await new Promise((r) => setTimeout(r, 450));
+  assert.notEqual(startsWithQ(), 55, '单帧不得触发降质');
+
+  for (let i = 0; i < 5; i++) {
+    cdp.emit('Page.screencastFrame', { data: 'ZkBSQU1F', metadata: {}, sessionId: 10 + i });
+    await new Promise((r) => setTimeout(r, 60));
+  }
+  await new Promise((r) => setTimeout(r, 500));
+  assert.equal(startsWithQ(), 55, '运动态必须降到 q55 提帧率');
+  await new Promise((r) => setTimeout(r, 1400));
+  assert.equal(startsWithQ(), 90, '静止后必须回 q90 保文字锐度');
+
+  ws.close();
+  await new Promise((r) => setTimeout(r, 100));
+  await close();
+});
+
 // ---- ③ 接线结构（无浏览器无法实例化 driver/client 的部分按仓库惯例源码断言）---
 
 const driverSrc = readFileSync(join(pkg, 'lib', 'browser-driver.js'), 'utf8');
