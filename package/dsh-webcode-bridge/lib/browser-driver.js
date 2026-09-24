@@ -1980,15 +1980,24 @@ export function createBrowserDriver(options = {}) {
    *
    * `name` 是**本轮真正上传的文件名**：传了它才会启用文件名证据（见 filenameEvidence）。
    * 不传（图片轮）时行为与 0.16.2 逐字相同——只认类名清单，不动图片轮已确认过的路径。 */
-  async function waitForAttachment(timeoutMs = 15_000, { name = null } = {}) {
+  async function waitForAttachment(timeoutMs = 15_000, { name = null, allowCandidates = true } = {}) {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       // 一次取样同时回答两件事：类名候选命中（作用域内计数）与文件名证据。
       // 不再分成「Playwright locator 逐个试」+「evaluate 扫全页」两条路径——
       // 那两条用的判据不同（一个看可见性、一个扫全页文本），正是假阳性的温床。
+      //
+      // 0.19.9：`allowCandidates:false` 给**文本附件**用。类名候选只看「输入区里有
+      // 可见附件节点」，**分不出是谁的**：带图轮里图片的 `img[src^='blob:']` 会立刻
+      // 命中，于是刚 setInputFiles 的 .md 即便没落地也会被判「已确认」——
+      // 一个真实的假阳性陷阱。文本附件的证据因此必须是**文件名本身**
+      // （`text:<name>`）：名字是我们传给 setInputFiles 的，出现在 composer 作用域里
+      // 只有一种解释。图片那条仍保留候选兜底（`uploadImages` 的既有行为）。
       const e = await pageAttachEvidence(name);
-      const cand = (e.candidates || []).find((c) => c.visible > 0);
-      if (cand) return cand.sel;
+      if (allowCandidates) {
+        const cand = (e.candidates || []).find((c) => c.visible > 0);
+        if (cand) return cand.sel;
+      }
       if (name && e.nameHit) return 'text:' + name;
       if (Date.now() >= deadline) return null;
       await page.waitForTimeout(250);
@@ -2103,7 +2112,9 @@ export function createBrowserDriver(options = {}) {
     }
     const body = String(text ?? '');
     await fi.setInputFiles([{ name, mimeType: 'text/markdown', buffer: Buffer.from(body, 'utf8') }]);
-    const hit = await waitForAttachment(timeoutMs, { name });
+    // 0.19.9：文本附件的证据只认**文件名**，不认类名候选——带图轮里图片的 blob 节点
+    // 会让候选判据立刻命中，把「.md 没落地」误判成成功（见 waitForAttachment 注释）。
+    const hit = await waitForAttachment(timeoutMs, { name, allowCandidates: false });
     if (!hit) {
       // 失败必须带现场：真机 0.16.3 的那次失败只留下 `ATTACH_NOT_CONFIRMED` 一个码，
       // 事后既看不出「网页压根没收」还是「收了而选择器没认出来」，也就无法判断该
@@ -2625,8 +2636,19 @@ export function createBrowserDriver(options = {}) {
       // 发进网页的是 127,888 字符纯文本），失败原因与现场一律落进 attachTransport
       // （进 status()），因此「有没有真的走附件」在 /__webcode/status 上可核对；
       // 设置面的「投递形态」开关（inline = 永远纯文本）由 promptTransportNow 现读。
-      if (!attachEvidence) {
-        const plan = promptTransportPlan({
+      //
+      // 0.19.9：这里原先的条件是 `if (!attachEvidence)`，而 `attachEvidence` 在
+      // **带图轮**已经被上面的 `uploadImages` 置位 —— 于是「既有图、正文又超长」的
+      // 轮次**整块跳过**了正文投递判定：81,004 字符正文与图片一起被灌进输入框。
+      // 真机复现（2026-09-24，用户原话「明明在附件投递模式下，看的还是完整上下文」）：
+      // 页面上的用户消息 `userMsgChars=81139`、`mentionsFullHistory=true`，
+      // 而 `attachTransport` 停在上一轮的读数（读数是**上一轮**的，于是面板还显示
+      // 「当前生效：附件投递」，用户看到的是全文 —— 这正是最坏的那种不一致）。
+      //
+      // 判据改成「**正文是否需要附件**」而不是「有没有用过附件」：图片与文本附件是
+      // 网页输入区里两件独立的东西，一个已经挂上不代表另一个不用挂。
+      // `plan.mode` 在图片 + 短正文时仍是 inline（under-limit），那是既有正确行为。
+      const plan = promptTransportPlan({
           chars: String(message).length,
           inlineLimit: cfg.attachInlineLimitChars,
           attachEnabled: cfg.attachInlineLimitChars > 0,
@@ -2707,7 +2729,6 @@ export function createBrowserDriver(options = {}) {
           log('prompt transport forced inline by site policy (ATTACH_FORBIDDEN_SITES), site=' + siteId
             + ' chars=' + plan.total);
         }
-      }
       const input = page.locator(SEL.input).first();
       // 2026-09-13：doubao（tiptap/ProseMirror）与 kimi（div.chat-input-editor）
       // 的输入框是 contenteditable，**不是**表单控件。Playwright 的 fill() 只认

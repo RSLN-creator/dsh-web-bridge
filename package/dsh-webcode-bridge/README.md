@@ -1,6 +1,6 @@
 # Harness Web Bridge
 
-已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.19.8（已打包并装入 web / headless 两个 profile；重启 DSH 后生效）。
+已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.19.9（已打包并装入 web / headless 两个 profile；重启 DSH 后生效）。
 
 安装（本包**不发 npm registry**，只以 `.tgz` 交付）：
 
@@ -14,6 +14,30 @@
 > 0.14.5 起发布流程收进仓库：`scripts/verify-pack.mjs` 逐文件核对 tarball 与工作树
 > （改完代码忘了重新 pack 时直接报错），`scripts/install-profiles.mjs` 先删旧目录再解包
 > （绕开 pnpm 对同版本 tarball「Already up to date」不重解的坑）。两条都是真实踩过的坑。
+
+## 0.19.9
+
+**有图又超长的轮次：正文没走附件，整段灌进了输入框。**
+
+用户原话：「deepseek 明明在附件投递模式下，看的还是完整上下文」。
+
+真机复现（一轮里同时有一张图和 81,004 字符正文）：页面上的用户消息
+`userMsgChars=81139`、`mentionsFullHistory=true` —— 正文整段进了输入框，而
+`attachTransport` 还停在**上一轮**的读数（于是面板显示「当前生效：附件投递」，
+用户看到的是全文 —— 最坏的那种不一致）。
+
+根因是调用点的一个守卫：`if (!attachEvidence)`。`attachEvidence` 在**带图轮**已被
+`uploadImages` 置位，于是「既有图、正文又超长」的轮次**整块跳过**了投递判定。图片与
+文本附件是网页输入区里两件独立的事，一个已经挂上不代表另一个不用挂。改法：判据换成
+`plan.mode`（正文是否需要附件），不再看「有没有用过附件」。
+
+顺带修掉一个**假阳性陷阱**：`waitForAttachment` 的类名候选判据（`img[src^='blob:']`）
+分不出附件是谁的——带图轮里它会被图片命中，把「.md 没落地」误判成「已确认」。文本
+附件的证据现在只认文件名（`text:<name>`，`allowCandidates:false`）；图片那条保留候选
+兜底（既有行为，不动）。
+
+> 后端 `lib/browser-driver.js` 是随 `dsh web` 进程加载的。**这两处都要重启才生效**，
+> 上一轮已经踩过一次：0.19.8 交付时用户当时没重启，我复跑真机时读到的仍是旧行为。
 
 ## 0.19.8
 

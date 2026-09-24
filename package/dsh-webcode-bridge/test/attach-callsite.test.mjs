@@ -40,7 +40,7 @@ function sliceFrom(marker, length = 4_800) {
   return src.slice(at, at + length);
 }
 
-const callSite = sliceFrom('if (!attachEvidence) {');
+const callSite = sliceFrom('const plan = promptTransportPlan({', 4000);
 
 // ── ① 调用点必须真的调用 uploadTextAttachment ──────────────────────────────
 
@@ -88,12 +88,38 @@ test('⑤ attachTransport 必须记录成功与回落两种结果（不能只留
   assert.match(src, /^\s*attachTransport,$/m, 'attachTransport 必须进 status() 投影，否则 /status 读不到');
 });
 
-// ── ⑥ 反向安全线：图片轮不得被附件逻辑二次覆盖 ────────────────────────────
+// ── ⑥ 带图轮**也必须**走文本附件判定（0.19.9 修，原判据说反了）────────────
+//
+// 这里原先钉的是 `if (!attachEvidence)` 守卫，理由是「图片轮会再塞一个 .md 附件，
+// 而两者的确认证据共用同一套探针，冲突时判不出是谁的」。**后半句被真机证伪**：
+// `uploadTextAttachment` 的证据只认文件名（`text:<name>`），`uploadImages` 才用类名
+// 候选兜底，两者本来就不共用判据。而前半句造成的后果是**真故障**：
+//
+//   用户原话「deepseek 明明在附件投递模式下，看的还是完整上下文」。
+//   真机复现（2026-09-24，0.19.8）：一轮里同时有图片与 81,004 字符正文，
+//   页面上的用户消息 `userMsgChars=81139`、`mentionsFullHistory=true` ——
+//   正文整段灌进输入框，`attachTransport` 还停在上一轮的读数（面板因此显示
+//   「当前生效：附件投递」，用户看到的是全文）。
+//
+// 根因就是这个守卫：`attachEvidence` 被图片置位后，整块投递判定被跳过。
+// 现在判据与调用点分家：本用例钉「投递判定不再以 attachEvidence 为条件」。
 
-test('⑥ 已有图片附件时不得再走文本附件（`!attachEvidence` 守卫）', () => {
-  assert.match(callSite, /^if \(!attachEvidence\) \{/,
-    '缺少 `!attachEvidence` 守卫：带图轮会再塞一个 .md 附件，'
-    + '而图片轮的附件确认证据与文本附件共用同一套探针，冲突时判不出是谁的');
+test('⑥ 带图轮也必须走文本附件判定（不得再用 !attachEvidence 跳过）', () => {
+  assert.ok(!/if \(!attachEvidence\) \{/.test(src),
+    '`!attachEvidence` 守卫又回来了：带图 + 超长正文的轮次会整块跳过投递判定，'
+    + '把完整上下文灌进输入框（真机故障，用户报「附件投递模式下还是完整上下文」）');
+  // 正判据：投递判定必须仍然在调用点里按 plan 分派
+  assert.match(callSite, /const plan = promptTransportPlan\(\{/,
+    '调用点缺少 promptTransportPlan 判定');
+  assert.match(callSite, /if \(plan\.mode === 'attach'\) \{/,
+    '调用点必须按 plan.mode 决定走不走附件（而不是看有没有用过附件）');
+});
+
+test('⑥b 文本附件的证据只认文件名（不得用类名候选兜底）', () => {
+  // 类名候选（`img[src^='blob:']`）分不出附件是谁的：带图轮里它会被图片命中，
+  // 于是「.md 没落地」会被判成「已确认」。文本附件必须走 allowCandidates:false。
+  assert.match(src, /const hit = await waitForAttachment\(timeoutMs, \{ name, allowCandidates: false \}\)/,
+    '文本附件又用了类名候选兜底 —— 带图轮会产生假阳性（图片的 blob 顶替 .md 的证据）');
 });
 
 // ── ⑦ inline 分支必须归零截断字段（口径与事实一致）────────────────────────
