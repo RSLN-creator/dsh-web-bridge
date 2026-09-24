@@ -70,22 +70,32 @@ try {
   const port = server.address().port;
 
   const ws = new WebSocket(`ws://127.0.0.1:${port}/webcode/live?account=deepseek`);
+  ws.binaryType = 'arraybuffer';
   const frames = [];
   let pagesSnap = null;
   const otherMsgs = [];
   ws.onmessage = (ev) => {
-    let m; try { m = JSON.parse(ev.data); } catch { return; }
-    if (m.t === 'frame') frames.push(m);
-    else if (m.t === 'pages') pagesSnap = m;
-    else otherMsgs.push(m);
+    if (typeof ev.data === 'string') {
+      let m; try { m = JSON.parse(ev.data); } catch { return; }
+      if (m.t === 'pages') pagesSnap = m;
+      else otherMsgs.push(m);
+      return;
+    }
+    // 二进制帧（与客户端同一套解码）：[metaLen u16be][metaJSON][jpeg]
+    try {
+      const view = new DataView(ev.data);
+      const metaLen = view.getUint16(0);
+      const meta = JSON.parse(new TextDecoder().decode(new Uint8Array(ev.data, 2, metaLen)));
+      frames.push({ meta, bytes: new Uint8Array(ev.data, 2 + metaLen).length });
+    } catch { /* 坏帧 */ }
   };
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = (e) => rej(new Error('ws error')); });
   await new Promise((r) => setTimeout(r, 1200));   // 等 hello/pages/首帧
 
   check('hello+pages 到达', Array.isArray(pagesSnap?.pages) && pagesSnap.pages.length >= 1, JSON.stringify(pagesSnap?.pages?.map((p) => p.title)));
   check('真实损伤帧到达', frames.length >= 1, frames.length + ' 帧');
-  const meta = frames[frames.length - 1]?.m;
-  check('帧带视口元数据', !!(meta && meta.deviceWidth > 0 && meta.deviceHeight > 0), JSON.stringify({ w: meta?.deviceWidth, h: meta?.deviceHeight }));
+  const meta = frames[frames.length - 1]?.meta;
+  check("帧带视口元数据", !!(meta && meta.deviceWidth > 0 && meta.deviceHeight > 0), JSON.stringify({ w: meta?.deviceWidth, h: meta?.deviceHeight, bytes: frames[frames.length - 1]?.bytes }));
 
   // 坐标换算（与 LivePane 同一公式）：帧内按钮中心 → 页面 CSS 坐标 → 点击。
   const box = await page.locator('#go').boundingBox();

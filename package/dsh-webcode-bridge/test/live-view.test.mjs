@@ -111,12 +111,21 @@ async function startHub(getDriver) {
   return { hub, port, close: () => new Promise((res) => server.close(res)) };
 }
 
-test('hub 全行为：握手 → 页面列表 → 帧下发+ack → 鼠标派发 → 关闭清场', async () => {
+test('hub 全行为：握手 → 页面列表 → 二进制帧+ack → 鼠标派发 → 关闭清场', async () => {
   const { driver, cdp } = fakeDriver();
   const { port, close } = await startHub(() => driver);
   const ws = new WebSocket(`ws://127.0.0.1:${port}/webcode/live?account=deepseek`);
+  ws.binaryType = 'arraybuffer';
   const received = [];
-  ws.onmessage = (ev) => received.push(JSON.parse(ev.data));
+  const frames = [];
+  ws.onmessage = (ev) => {
+    if (typeof ev.data === 'string') { received.push(JSON.parse(ev.data)); return; }
+    // 与客户端同一套二进制解码：[metaLen u16be][metaJSON][jpeg]
+    const view = new DataView(ev.data);
+    const metaLen = view.getUint16(0);
+    const meta = JSON.parse(new TextDecoder().decode(new Uint8Array(ev.data, 2, metaLen)));
+    frames.push({ meta, jpeg: new Uint8Array(ev.data, 2 + metaLen) });
+  };
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
 
   // 握手 + 页面列表（hub 建连即推，且默认附到驱动当前页 → startScreencast 已发）
@@ -127,12 +136,12 @@ test('hub 全行为：握手 → 页面列表 → 帧下发+ack → 鼠标派发
   assert.equal(pagesMsg.pages[0].id, 'p1');
   assert.ok(cdp.sent.some(([cmd]) => cmd === 'Page.startScreencast'), '建连必须启动投屏');
 
-  // 模拟一帧损伤：下发 frame + ack
+  // 模拟一帧损伤：二进制下发 + ack（jpeg 字节必须与 base64 解码后逐字一致）
   cdp.emit('Page.screencastFrame', { data: 'ZkBSQU1F', metadata: { deviceWidth: 1280, deviceHeight: 800 }, sessionId: 7 });
   await new Promise((r) => setTimeout(r, 100));
-  const frameMsg = received.find((m) => m.t === 'frame');
-  assert.equal(frameMsg.d, 'ZkBSQU1F');
-  assert.equal(frameMsg.m.deviceWidth, 1280);
+  assert.equal(frames.length, 1, '帧必须以二进制包到达');
+  assert.equal(frames[0].meta.deviceWidth, 1280);
+  assert.equal(Buffer.from(frames[0].jpeg).toString('utf8'), 'f@RAME', 'jpeg 字节逐字保真（无 base64 二次转换）');
   const ack = cdp.sent.find(([cmd, p]) => cmd === 'Page.screencastFrameAck');
   assert.deepEqual(ack[1], { sessionId: 7 }, '每帧必须 ack，否则 Chromium 停发');
 

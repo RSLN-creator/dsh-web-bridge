@@ -192,7 +192,21 @@ export function createLiveHub({ getDriver, log = () => {}, warn = () => {} } = {
       current = { pageId: sess.pageId, cdp: sess, viewport };
       sess.on('Page.screencastFrame', (ev) => {
         // 损伤帧：页面静止时 Chromium 一帧都不发，这里零转发零 CPU。
-        send(ws, { t: 'frame', d: ev.data, m: ev.metadata ?? null });
+        // 0.20.4：二进制帧协议（browserless/steel live view 同款做法）——
+        // raw JPEG + 小头元数据，替代 base64+JSON（省 33% 体积与两次编解码）。
+        // 包格式：[metaLen u16be][metaJSON utf8][jpeg 字节]；控制消息仍是文本 JSON，
+        // 客户端按 typeof ev.data 区分。
+        const jpeg = Buffer.from(ev.data || '', 'base64');
+        if (jpeg.length > 0) {
+          const metaBuf = Buffer.from(JSON.stringify(ev.metadata ?? {}), 'utf8');
+          if (metaBuf.length <= 65535) {
+            const packet = Buffer.allocUnsafe(2 + metaBuf.length + jpeg.length);
+            packet.writeUInt16BE(metaBuf.length, 0);
+            metaBuf.copy(packet, 2);
+            jpeg.copy(packet, 2 + metaBuf.length);
+            try { if (ws.readyState === ws.OPEN) ws.send(packet); } catch { /* 连接竞态：无害 */ }
+          }
+        }
         sess.send('Page.screencastFrameAck', { sessionId: ev.sessionId }).catch(() => {});
       });
       await startStream(sess, viewport);

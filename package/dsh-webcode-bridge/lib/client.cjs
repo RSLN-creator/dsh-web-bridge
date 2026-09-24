@@ -3689,6 +3689,7 @@ window.__ModuleLoader__.load({
         let alive = true;
         const ws = new WebSocket('ws://127.0.0.1:' + RELAY_PORT + '/webcode/live?account=' + encodeURIComponent(account));
         wsRef.current = ws;
+        ws.binaryType = 'arraybuffer';
         ws.onopen = () => {
           setStatus('live');
           // 建连即报一次面板尺寸（hub 建连默认视口在 resize 到达前可能比例不合）。
@@ -3698,18 +3699,27 @@ window.__ModuleLoader__.load({
           }
         };
         ws.onmessage = (ev) => {
-          let msg = null;
-          try { msg = JSON.parse(ev.data); } catch { return; }
-          if (!msg || typeof msg !== 'object') return;
-          if (msg.t === 'pages') {
-            setPages(Array.isArray(msg.pages) ? msg.pages : []);
-            setCurrent(msg.current ?? null);
-            setStatus('live');
-          } else if (msg.t === 'frame') {
-            drawFrame(msg);
-          } else if (msg.t === 'bye' || msg.t === 'error') {
-            setStatus(String(msg.reason || msg.message || 'error').slice(0, 140));
+          // 0.20.4：帧走二进制包（[metaLen u16be][metaJSON][jpeg]），控制消息仍是
+          // 文本 JSON——按 typeof ev.data 区分。
+          if (typeof ev.data === 'string') {
+            let msg = null;
+            try { msg = JSON.parse(ev.data); } catch { return; }
+            if (!msg || typeof msg !== 'object') return;
+            if (msg.t === 'pages') {
+              setPages(Array.isArray(msg.pages) ? msg.pages : []);
+              setCurrent(msg.current ?? null);
+              setStatus('live');
+            } else if (msg.t === 'bye' || msg.t === 'error') {
+              setStatus(String(msg.reason || msg.message || 'error').slice(0, 140));
+            }
+            return;
           }
+          try {
+            const view = new DataView(ev.data);
+            const metaLen = view.getUint16(0);
+            const meta = JSON.parse(new TextDecoder().decode(new Uint8Array(ev.data, 2, metaLen)));
+            onFramePacket(meta, new Uint8Array(ev.data, 2 + metaLen));
+          } catch { /* 坏帧丢弃 */ }
         };
         ws.onclose = () => { if (alive) setStatus('closed'); };
         ws.onerror = () => { if (alive) setStatus('closed'); };
@@ -3718,6 +3728,34 @@ window.__ModuleLoader__.load({
           try { ws.close(); } catch { /* 已断 */ }
         };
       }, [account, reloadTick]);
+
+      // ---- 0.20.4 帧管线：最新帧制胜 + Blob 原生解码 -------------------------
+      //
+      // 学习远程浏览器产品（browserless / steel live view）的标准做法：
+      //   · 二进制 + Blob URL：省掉 base64 双重编解码，JPEG 解码走浏览器原生路径；
+      //   · 最新帧制胜：滚动时帧到达快于绘制，旧实现逐帧排队 → 越拖越 lag；
+      //     现在绘制中的帧完成时只补画「最新的一帧」，中间帧直接丢弃——
+      //     端到端延迟不再随拖动时长累积。
+      let decoding = false;
+      let pendingFrame = null;
+      let lastBlobUrl = null;
+      function onFramePacket(meta, jpeg) {
+        if (decoding) { pendingFrame = { meta, jpeg }; return; }
+        decoding = true;
+        const blobUrl = URL.createObjectURL(new Blob([jpeg], { type: 'image/jpeg' }));
+        const img = new Image();
+        img.onload = () => { drawImage(img, meta); cleanup(blobUrl); };
+        img.onerror = () => cleanup(blobUrl);
+        function cleanup(url) {
+          if (lastBlobUrl) URL.revokeObjectURL(lastBlobUrl);
+          lastBlobUrl = url;
+          decoding = false;
+          const p = pendingFrame;
+          pendingFrame = null;
+          if (p) onFramePacket(p.meta, p.jpeg);
+        }
+        img.src = blobUrl;
+      }
 
       const send = (obj) => {
         const ws = wsRef.current;
@@ -3737,39 +3775,34 @@ window.__ModuleLoader__.load({
         };
         const ro = new ResizeObserver(() => {
           if (timer) clearTimeout(timer);
-          timer = setTimeout(report, 250);
+          timer = setTimeout(report, 120);
         });
         ro.observe(box);
         return () => { if (timer) clearTimeout(timer); ro.disconnect(); };
       }, []);
 
-      // 帧元数据 m.deviceWidth/Height 是页面 CSS 视口尺寸；JPEG 本体可能被
-      // maxWidth/Height 等比缩小。绘制时记录显示矩形 (dx,dy,dw,dh)，输入换算
-      // 反着用：pageX = (mx - dx) * deviceWidth / dw。
-      // 0.20.2：canvas 按 devicePixelRatio 放大画布——源帧是面板 ×2 超采样，
-      // 1:1 或降采样绘制，文字锐利（旧实现 1x 画布把超采样白白扔掉）。
-      function drawFrame(msg) {
-        const img = new Image();
-        img.onload = () => {
-          const canvas = canvasRef.current;
-          if (!canvas) return;
-          const box = canvas.parentElement;
-          if (!box) return;
-          const dpr = Math.min(window.devicePixelRatio || 1, 2);
-          const bw = Math.max(1, Math.round(box.clientWidth * dpr));
-          const bh = Math.max(1, Math.round(box.clientHeight * dpr));
-          if (canvas.width !== bw || canvas.height !== bh) { canvas.width = bw; canvas.height = bh; }
-          const ctx2d = canvas.getContext('2d');
-          ctx2d.fillStyle = '#111';
-          ctx2d.fillRect(0, 0, canvas.width, canvas.height);
-          const s = Math.min(bw / img.width, bh / img.height);
-          const dw = img.width * s, dh = img.height * s;
-          const dx = (bw - dw) / 2, dy = (bh - dh) / 2;
-          ctx2d.drawImage(img, dx, dy, dw, dh);
-          const meta = msg.m || {};
-          frameRef.current = { img, meta, dx, dy, dw, dh, dpr };
-        };
-        img.src = 'data:image/jpeg;base64,' + msg.d;
+      // 绘制：canvas 按 devicePixelRatio 放大（超采样 1:1 落笔），高质量重采样
+      //（imageSmoothingQuality='high' 是缩小的多步滤波，默认档会把 ×2 超采样
+      // 的锐度在最后一步丢掉）。
+      function drawImage(img, meta) {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const box = canvas.parentElement;
+        if (!box) return;
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const bw = Math.max(1, Math.round(box.clientWidth * dpr));
+        const bh = Math.max(1, Math.round(box.clientHeight * dpr));
+        if (canvas.width !== bw || canvas.height !== bh) { canvas.width = bw; canvas.height = bh; }
+        const ctx2d = canvas.getContext('2d');
+        ctx2d.imageSmoothingEnabled = true;
+        ctx2d.imageSmoothingQuality = 'high';
+        ctx2d.fillStyle = '#111';
+        ctx2d.fillRect(0, 0, canvas.width, canvas.height);
+        const s = Math.min(bw / img.width, bh / img.height);
+        const dw = img.width * s, dh = img.height * s;
+        const dx = (bw - dw) / 2, dy = (bh - dh) / 2;
+        ctx2d.drawImage(img, dx, dy, dw, dh);
+        frameRef.current = { img, meta, dx, dy, dw, dh, dpr };
       }
 
       function toPagePoint(e) {
@@ -3794,7 +3827,23 @@ window.__ModuleLoader__.load({
         const pt = toPagePoint(e);
         if (!pt) return;
         if (action === 'down') e.currentTarget.focus();
-        send({ t: 'mouse', action, x: pt.x, y: pt.y, button: ['left', 'middle', 'right'][e.button] || 'none', buttons: e.buttons, clickCount: e.detail || 1 });
+        // 0.20.4：mousemove 按 rAF 合并（拖动时每条都发 = WS 洪泛 + 乱序排队）；
+        // 按下/抬起是状态事件，先冲刷挂起的 move 再即时发送，保住顺序。
+        const msg = { t: 'mouse', action, x: pt.x, y: pt.y, button: ['left', 'middle', 'right'][e.button] || 'none', buttons: e.buttons, clickCount: e.detail || 1 };
+        if (action === 'moved') queueMove(msg);
+        else { flushMove(); send(msg); }
+      }
+      // rAF 合并：一帧之内多次 mousemove 只发最新位置。
+      let pendingMove = null, moveRaf = 0;
+      function queueMove(msg) {
+        pendingMove = msg;
+        if (!moveRaf) moveRaf = requestAnimationFrame(() => { moveRaf = 0; const m = pendingMove; pendingMove = null; if (m) send(m); });
+      }
+      function flushMove() {
+        if (moveRaf) { cancelAnimationFrame(moveRaf); moveRaf = 0; }
+        const m = pendingMove;
+        pendingMove = null;
+        if (m) send(m);
       }
       function onWheel(e) {
         const pt = toPagePoint(e);
