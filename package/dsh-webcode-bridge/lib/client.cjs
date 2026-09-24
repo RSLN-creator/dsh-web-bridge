@@ -4186,7 +4186,13 @@ window.__ModuleLoader__.load({
             },
             onError: () => setConnectError('网页代理加载失败，请确认中继服务已启动'),
           })),
-          active && !active.ready && !connectError && h('div', { className: 'hwb-frame-status' }, '正在加载 ' + siteName(siteId) + ' 网页…')));
+          // 「正在加载」遮罩只属于 iframe 路线：ready 由 iframe onLoad 置位。
+          // 0.20.0 真机事故（会话 session-fdda64fe，用户原话「为什么右侧一直
+          // 『正在加载 DeepSeek 网页..』」）：LivePane 分支没有 iframe，ready
+          // 永远不会置位，而这层遮罩是不透光的——把已经连上、正在收帧的画面
+          // 整个盖死。画面流分支自带状态遮罩（LivePane 的 mask），这里必须让路。
+          active && !active.ready && !connectError && !(LIVE_SITES.has(siteId) && !active.mirror)
+            && h('div', { className: 'hwb-frame-status' }, '正在加载 ' + siteName(siteId) + ' 网页…')));
     }
 
     function apply(ctx) {
