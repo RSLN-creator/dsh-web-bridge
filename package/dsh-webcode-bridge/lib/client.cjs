@@ -3689,7 +3689,14 @@ window.__ModuleLoader__.load({
         let alive = true;
         const ws = new WebSocket('ws://127.0.0.1:' + RELAY_PORT + '/webcode/live?account=' + encodeURIComponent(account));
         wsRef.current = ws;
-        ws.onopen = () => setStatus('live');
+        ws.onopen = () => {
+          setStatus('live');
+          // 建连即报一次面板尺寸（hub 建连默认视口在 resize 到达前可能比例不合）。
+          const box = canvasRef.current?.parentElement;
+          if (box && box.clientWidth > 40 && box.clientHeight > 40) {
+            send({ t: 'resize', w: Math.round(box.clientWidth), h: Math.round(box.clientHeight) });
+          }
+        };
         ws.onmessage = (ev) => {
           let msg = null;
           try { msg = JSON.parse(ev.data); } catch { return; }
@@ -3717,9 +3724,30 @@ window.__ModuleLoader__.load({
         try { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); } catch { /* 已断 */ }
       };
 
+      // 0.20.2 视口自适应：把面板 CSS 尺寸报给 hub（它据此把被投页面按 ×2
+      // 超采样仿真），连接建立与容器尺寸变化（拖分栏/开合侧栏）都上报。
+      // 250ms 防抖：拖拽时 ResizeObserver 连发，服务端按「同尺寸跳过」兜底。
+      React.useEffect(() => {
+        const box = canvasRef.current?.parentElement;
+        if (!box || typeof ResizeObserver === 'undefined') return;
+        let timer = null;
+        const report = () => {
+          const w = Math.round(box.clientWidth), h = Math.round(box.clientHeight);
+          if (w > 40 && h > 40) send({ t: 'resize', w, h });
+        };
+        const ro = new ResizeObserver(() => {
+          if (timer) clearTimeout(timer);
+          timer = setTimeout(report, 250);
+        });
+        ro.observe(box);
+        return () => { if (timer) clearTimeout(timer); ro.disconnect(); };
+      }, []);
+
       // 帧元数据 m.deviceWidth/Height 是页面 CSS 视口尺寸；JPEG 本体可能被
       // maxWidth/Height 等比缩小。绘制时记录显示矩形 (dx,dy,dw,dh)，输入换算
       // 反着用：pageX = (mx - dx) * deviceWidth / dw。
+      // 0.20.2：canvas 按 devicePixelRatio 放大画布——源帧是面板 ×2 超采样，
+      // 1:1 或降采样绘制，文字锐利（旧实现 1x 画布把超采样白白扔掉）。
       function drawFrame(msg) {
         const img = new Image();
         img.onload = () => {
@@ -3727,8 +3755,9 @@ window.__ModuleLoader__.load({
           if (!canvas) return;
           const box = canvas.parentElement;
           if (!box) return;
-          const bw = Math.max(1, box.clientWidth);
-          const bh = Math.max(1, box.clientHeight);
+          const dpr = Math.min(window.devicePixelRatio || 1, 2);
+          const bw = Math.max(1, Math.round(box.clientWidth * dpr));
+          const bh = Math.max(1, Math.round(box.clientHeight * dpr));
           if (canvas.width !== bw || canvas.height !== bh) { canvas.width = bw; canvas.height = bh; }
           const ctx2d = canvas.getContext('2d');
           ctx2d.fillStyle = '#111';

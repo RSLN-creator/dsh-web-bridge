@@ -15,7 +15,7 @@ import http from 'node:http';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { mapMouseInput, mapKeyInput, parseClientMessage, createLiveHub } from '../lib/live.js';
+import { mapMouseInput, mapKeyInput, parseClientMessage, createLiveHub, viewportForPanel } from '../lib/live.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pkg = dirname(here);
@@ -178,6 +178,46 @@ test('安全面：驱动缺 live API（如旧版驱动/未知槽抛错）→ 回
   await close();
 });
 
+// ---- 视口自适应（0.20.2：真机反馈「不适配大小 + 画质低」）-------------------
+
+test('viewportForPanel：面板 CSS 尺寸 ×2 超采样，宽高双钳制（720–1280 / 900–2000）', () => {
+  assert.deepEqual(viewportForPanel(460, 860), { width: 920, height: 1720 });   // 典型侧栏
+  assert.deepEqual(viewportForPanel(300, 300), { width: 720, height: 900 });    // 窄面板：宽度顶到下限
+  assert.deepEqual(viewportForPanel(900, 1600), { width: 1280, height: 2000 }); // 大面板：双上限
+  assert.deepEqual(viewportForPanel(), { width: 1024, height: 1440 });          // 缺省（resize 未到）
+  assert.deepEqual(viewportForPanel(-5, 0), { width: 1024, height: 1440 });     // 非法回落默认
+});
+
+test('hub 行为：建连即下发视口仿真；resize 变尺寸同会话重设（不重建会话）', async () => {
+  const { driver, cdp } = fakeDriver();
+  const { port, close } = await startHub(() => driver);
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/webcode/live?account=deepseek`);
+  const received = [];
+  ws.onmessage = (ev) => received.push(JSON.parse(ev.data));
+  await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
+  await new Promise((r) => setTimeout(r, 150));
+  assert.ok(cdp.sent.some(([cmd, p]) => cmd === 'Emulation.setDeviceMetricsOverride' && p.width === 1024 && p.height === 1440),
+    '建连默认视口必须有 Emulation 仿真（超采样分辨率）');
+  const startBefore = cdp.sent.filter(([cmd]) => cmd === 'Page.startScreencast').length;
+
+  ws.send(JSON.stringify({ t: 'resize', w: 460, h: 860 }));
+  await new Promise((r) => setTimeout(r, 120));
+  const emu = [...cdp.sent].reverse().find(([cmd]) => cmd === 'Emulation.setDeviceMetricsOverride');
+  assert.deepEqual([emu[1].width, emu[1].height], [920, 1720], 'resize 必须按面板 ×2 重设视口');
+  assert.equal(cdp.sent.filter(([cmd]) => cmd === 'Page.startScreencast').length, startBefore + 1,
+    'resize 重启投屏但不重建 CDP 会话');
+
+  // 同尺寸重复 resize：跳过（拖拽连发的防抖兜底）
+  const before = cdp.sent.length;
+  ws.send(JSON.stringify({ t: 'resize', w: 460, h: 860 }));
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(cdp.sent.length, before, '同尺寸 resize 不得重发任何 CDP 命令');
+
+  ws.close();
+  await new Promise((r) => setTimeout(r, 100));
+  await close();
+});
+
 // ---- ③ 接线结构（无浏览器无法实例化 driver/client 的部分按仓库惯例源码断言）---
 
 const driverSrc = readFileSync(join(pkg, 'lib', 'browser-driver.js'), 'utf8');
@@ -205,4 +245,10 @@ test('接线：客户端有 LivePane、LIVE_SITES（先 DeepSeek）与镜像回�
   assert.ok(clientSrc.includes("new Set(['deepseek'])"), 'P1 先 DeepSeek');
   assert.ok(clientSrc.includes('改用镜像页'), '必须保留镜像回落入口');
   assert.ok(clientSrc.includes('/webcode/live?account='));
+});
+
+test('接线：客户端上报 resize（建连一次 + ResizeObserver 防抖）且 canvas 按 DPR 绘制', () => {
+  assert.ok(clientSrc.includes("send({ t: 'resize', w: Math.round(box.clientWidth), h: Math.round(box.clientHeight) })"));
+  assert.ok(clientSrc.includes('new ResizeObserver'), '容器尺寸变化必须上报');
+  assert.ok(clientSrc.includes("Math.round(box.clientWidth * dpr)"), 'canvas 必须按 devicePixelRatio 放大，否则超采样白费');
 });

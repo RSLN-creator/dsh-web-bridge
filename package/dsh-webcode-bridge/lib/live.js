@@ -104,6 +104,25 @@ export function parseClientMessage(raw) {
 
 const LOOPBACK_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
 
+// ---- 视口自适应（0.20.2：真机反馈「不适配界面大小 + 画质很低」）----------------
+//
+// 病根：0.20.0 投的是驱动窗口的默认视口（640×900 竖条），被面板拉伸放大 ⇒ 模糊
+// 且四周黑边。修法：**按面板 CSS 尺寸 ×2 超采样**——CDP Emulation 把页面视口设成
+// 面板的两倍大（宽 720–1280、高 900–2000 钳制），投屏上限同步，canvas 缩回面板
+// = 文字锐利、铺满无黑边。宽度下限 720 的依据：驱动自动化在 640 宽下本来就工作
+// 正常（composer 选择器实测可用），720 只会更宽松；上限防全屏工作区把 JPEG 撑爆。
+//
+// 仿真挂在**投屏连接自己的 CDP 会话**上：会话 detach（面板关闭/切换）时该会话的
+// 仿真随之失效，自动化页面恢复原状——不留下持久副作用。拆分会话期间面板切换
+// 页面/重连也各用新会话，互不残留。
+export function viewportForPanel(w, h) {
+  const pw = Number(w), ph = Number(h);
+  const width = Number.isFinite(pw) && pw > 0 ? Math.round(pw * 2) : 1024;
+  const height = Number.isFinite(ph) && ph > 0 ? Math.round(ph * 2) : 1440;
+  return { width: Math.max(720, Math.min(1280, width)), height: Math.max(900, Math.min(2000, height)) };
+}
+const sameViewport = (a, b) => !!a && !!b && a.width === b.width && a.height === b.height;
+
 /**
  * 画面流 hub。`getDriver(accountKey)` 返回带 `live` API 的驱动实例（index.js
  * 接 driverFor）；驱动尚未启动/槽不存在时可以抛错，hub 会向面板回 bye 并关闭。
@@ -133,7 +152,8 @@ export function createLiveHub({ getDriver, log = () => {}, warn = () => {} } = {
     }
     send(ws, { t: 'hello', account: accountKey });
 
-    let current = null;   // { pageId, cdp }
+    let current = null;   // { pageId, cdp, viewport }
+    let panel = null;     // 面板报来的 CSS 尺寸 { w, h }（resize 前为 null，用默认视口）
     /** 摘掉当前 CDP 会话（停投屏 + detach）。清理一律吞错：对端可能已随浏览器
      *  退出而失效，把清理错误抛成 unhandled rejection 只会污染日志。 */
     const detach = async () => {
@@ -152,18 +172,27 @@ export function createLiveHub({ getDriver, log = () => {}, warn = () => {} } = {
     };
     const unPages = live.onPagesChanged?.(() => { void pushPages(); });
 
+    const startStream = async (sess, viewport) => {
+      // 视口仿真（超采样分辨率）先行，投屏上限随后——帧尺寸与面板精确同比例。
+      await sess.send('Emulation.setDeviceMetricsOverride', {
+        width: viewport.width, height: viewport.height, deviceScaleFactor: 1, mobile: false,
+      });
+      await sess.send('Page.startScreencast', {
+        format: 'jpeg', quality: 90, maxWidth: viewport.width, maxHeight: viewport.height, everyNthFrame: 1,
+      });
+    };
+
     const attach = async (pageId) => {
       await detach();
       const sess = await live.attach(pageId ?? null);
-      current = { pageId: sess.pageId, cdp: sess };
+      const viewport = viewportForPanel(panel?.w, panel?.h);
+      current = { pageId: sess.pageId, cdp: sess, viewport };
       sess.on('Page.screencastFrame', (ev) => {
         // 损伤帧：页面静止时 Chromium 一帧都不发，这里零转发零 CPU。
         send(ws, { t: 'frame', d: ev.data, m: ev.metadata ?? null });
         sess.send('Page.screencastFrameAck', { sessionId: ev.sessionId }).catch(() => {});
       });
-      // maxWidth/Height 是画面上限（超过会等比缩到 fit）；quality 85 在
-      // 「文字清晰」与「帧体积」之间的起点值，P2 按真机调参。
-      await sess.send('Page.startScreencast', { format: 'jpeg', quality: 85, maxWidth: 1680, maxHeight: 1050, everyNthFrame: 1 });
+      await startStream(sess, viewport);
     };
 
     ws.on('message', async (data) => {
@@ -200,6 +229,17 @@ export function createLiveHub({ getDriver, log = () => {}, warn = () => {} } = {
           case 'pages':
             void pushPages();
             break;
+          case 'resize': {
+            // 面板尺寸变化（首次连接也会发一次）：同一 CDP 会话上重设仿真+投屏
+            // 参数，**不**重建会话——拖拽分栏会连发 resize，重建会话是自找事故。
+            panel = { w: Number(msg.w) || 0, h: Number(msg.h) || 0 };
+            const viewport = viewportForPanel(panel.w, panel.h);
+            if (current && !sameViewport(current.viewport, viewport)) {
+              current.viewport = viewport;
+              await startStream(current.cdp, viewport);
+            }
+            break;
+          }
           case 'ping':
             send(ws, { t: 'pong' });
             break;
