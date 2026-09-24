@@ -122,6 +122,28 @@ test('⑥b 文本附件的证据只认文件名（不得用类名候选兜底）
     '文本附件又用了类名候选兜底 —— 带图轮会产生假阳性（图片的 blob 顶替 .md 的证据）');
 });
 
+// ── ⑥c 附件证据窗口必须够长（0.19.10）───────────────────────────────────────
+//
+// 真机取证（2026-09-24）：用户那张 1086×1425 / 942,941 字节的图，同一条路径一次
+// `imageTransport.ok=true` 端到端 **37 秒**，而用户自己那次得到
+// `⚠ 图片未能附加到网页（ATTACH_NOT_CONFIRMED）`（webcode-bridge-replies.log）。
+// 原窗口 15s 把「网页还在做自己的上传/压缩」读成了「上传失败」，于是该轮静默退化成
+// 纯文本 —— 用户看到的就是「有图但加载不出来」。这类窗口一旦被调回十几秒，
+// 这条用例必须立刻变红。
+test('⑥c 图片/文本附件的证据窗口不得短于 60s（15s 会把慢上传误判成失败）', () => {
+  const pick = (fn) => {
+    const m = src.match(new RegExp('async function ' + fn + '\\([^)]*\\{ timeoutMs = ([0-9_]+)'));
+    assert.ok(m, fn + ' 的签名叫解析不到 —— 本测试的锚点失效，先修解析');
+    return Number(m[1].replace(/_/g, ''));
+  };
+  const imgMs = pick('uploadImages');
+  const txtMs = pick('uploadTextAttachment');
+  assert.ok(imgMs >= 60_000, 'uploadImages 的证据窗口只有 ' + imgMs + 'ms —— 大图会被误判成 ATTACH_NOT_CONFIRMED');
+  assert.ok(txtMs >= 60_000, 'uploadTextAttachment 的证据窗口只有 ' + txtMs + 'ms —— 长正文附件会被误判成失败');
+  // 反向面：不许长到把一轮拖死（整轮预算是 240s）。
+  assert.ok(imgMs <= 120_000 && txtMs <= 120_000, '附件窗口超过 120s 会与整轮 240s 预算打架');
+});
+
 // ── ⑦ inline 分支必须归零截断字段（口径与事实一致）────────────────────────
 //
 // 实测发现的歧义（0.16.3 修）：`attachSupported:false`（页面没有上传入口）且 chars

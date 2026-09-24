@@ -2028,7 +2028,24 @@ export function createBrowserDriver(options = {}) {
     };
   }
 
-  async function uploadImages(files, { timeoutMs = 15_000 } = {}) {
+  /**
+   * 把图片作为附件上传，**等页面给出可见证据**才放行。
+   *
+   * 0.19.10：证据等待窗口从 15s 提到 **90s**。真机取证（2026-09-24，用户那张
+   * 1086×1425 / 942,941 字节的图）：同一张图、同一条路径，一次 `imageTransport.ok=true`
+   * 端到端 **37 秒**，而用户自己那次跑出了
+   * `⚠ 图片未能附加到网页（ATTACH_NOT_CONFIRMED）`（见 webcode-bridge-replies.log）。
+   *
+   * 判据被读错了：15s 不是「上传失败」，是**「还没渲染出缩略图」**。DeepSeek 的
+   * 客户端缩略图（`img[src^='blob:']`）要等它的上传/压缩流程走完才出现，而图片越大
+   * 越久——942KB 那张在真机上就是几十秒量级。窗口一到就报 ATTACH_NOT_CONFIRMED，
+   * 于是**该轮静默退化成纯文本**（用户看到的正是「有图片但加载不出来 / 图没上去」）。
+   *
+   * 为什么加长不会让正常轮次变慢：证据一出现就 return，等待窗口只决定**失败**时
+   * 等多久。而上传入口本身在 setInputFiles 前就查过（缺入口立刻抛 ATTACH_UNAVAILABLE），
+   * 所以这里等的是「网页自己的上传完成」，不是网络重试。
+   */
+  async function uploadImages(files, { timeoutMs = 90_000 } = {}) {
     const fi = page.locator(contract.attachSelector || "input[type='file']").first();
     if (!await fi.count()) {
       const err = new Error('ATTACH_UNAVAILABLE: 页面没有可用的文件上传入口');
@@ -2103,7 +2120,10 @@ export function createBrowserDriver(options = {}) {
    *
    * `chars` 是**上传内容**的字符数（可能已被 runTurn 尾部截断），不是原始提示词长度。
    */
-  async function uploadTextAttachment(text, { timeoutMs = 20_000, name = 'webcode-context.md' } = {}) {
+  // 0.19.10：与 uploadImages 同一口径 —— 20s 也把「网页还在处理」读成了「失败」。
+  // 文本附件更小、通常更快，但 85k 字符的真实投递在真机上也是几十秒量级
+  // （2026-09-24 实测 53s 端到端），因此同样给足窗口。
+  async function uploadTextAttachment(text, { timeoutMs = 90_000, name = 'webcode-context.md' } = {}) {
     const fi = page.locator(contract.attachSelector || "input[type='file']").first();
     if (!await fi.count()) {
       const err = new Error('ATTACH_UNAVAILABLE: 页面没有可用的文件上传入口');

@@ -1,6 +1,6 @@
 # Harness Web Bridge
 
-已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.19.9（已打包并装入 web / headless 两个 profile；重启 DSH 后生效）。
+已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.19.10（已打包并装入 web / headless 两个 profile；重启 DSH 后生效）。
 
 安装（本包**不发 npm registry**，只以 `.tgz` 交付）：
 
@@ -14,6 +14,29 @@
 > 0.14.5 起发布流程收进仓库：`scripts/verify-pack.mjs` 逐文件核对 tarball 与工作树
 > （改完代码忘了重新 pack 时直接报错），`scripts/install-profiles.mjs` 先删旧目录再解包
 > （绕开 pnpm 对同版本 tarball「Already up to date」不重解的坑）。两条都是真实踩过的坑。
+
+## 0.19.10
+
+**图片「有，但加载不出来」的真因：附件证据窗口太短，把慢上传读成了失败。**
+
+用户会话 `62f74e98`（附图 1086×1425 / 942,941 字节）里，桥自己的回复日志留下了这句：
+
+```
+⚠ 图片未能附加到网页（ATTACH_NOT_CONFIRMED），本轮将以纯文本发送
+```
+
+于是那一轮静默退化成纯文本 —— 用户看到的是「网页端有图片但加载不出来」，而模型
+只能去翻 `read_image` 的元数据，最后如实回答「我看不到像素内容」。
+
+真机复现（同一张图、同一条路径）：一次 `imageTransport.ok=true`、端到端 **37 秒**，
+模型正确描述出画面。也就是说 **15s 的等待窗口不是「上传失败」，是「缩略图还没渲染」**：
+DeepSeek 客户端要等它自己的上传/压缩流程走完才给出 `img[src^='blob:']` 证据，图越大越久。
+
+修法：`uploadImages` 的证据窗口 15s → **90s**，`uploadTextAttachment` 20s → **90s**
+（同一口径；85k 字符真实投递实测 53s）。证据一出现就返回，所以这只影响失败时的等待，
+不让正常轮次变慢；上传入口缺失仍在 `setInputFiles` 之前立刻抛 `ATTACH_UNAVAILABLE`。
+
+护栏 `attach-callsite` ⑥c：两个窗口都不得短于 60s、也不得超过 120s（与整轮 240s 预算打架）。
 
 ## 0.19.9
 
