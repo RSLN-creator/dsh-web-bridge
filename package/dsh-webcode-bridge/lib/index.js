@@ -187,6 +187,11 @@ const DEFAULTS = {
   // 0 = 显式关闭。同 answerTimeoutMs 的教训：必须在此声明并显式传入 driver，
   // 否则「可配置」只对了一半，用户改了没有任何效果。
   captureStallRescueMs: 45_000,
+  // 0.21.0 工作区画面流 WebRTC：驱动强制有头（离屏 + 任务栏隐藏三件套）。
+  // getDisplayMedia 在无头构建不可用，这是页面自采 WebRTC 的前提；代价已向
+  // 用户交底并被接受（任务栏/桌面零可见痕迹）。false = 回到无头（画面流自动
+  // 回落自适应投屏）。
+  liveHeaded: true,
   // 「网页还没开口」相位的窗口倍数（0.16.3，真机事故的修法）。
   //
   // 起因：2026-09-17 真机，DSH 会话把 **127,888 字符**纯文本发进 DeepSeek 网页
@@ -2314,6 +2319,7 @@ function imageMarkdown(images) {
     answerTimeoutMs: cfg.answerTimeoutMs,
     // 捕获停摆兜底阈值（0.19.12）。同上：不显式传，配置层就是摆设。
     captureStallRescueMs: cfg.captureStallRescueMs,
+    liveHeaded: cfg.liveHeaded,
     loginTimeoutMs: cfg.loginTimeoutMs,
     composerChunkChars: cfg.composerChunkChars,
     attachInlineLimitChars: cfg.attachInlineLimitChars,
@@ -2372,6 +2378,7 @@ function imageMarkdown(images) {
         answerTimeoutMs: cfg.answerTimeoutMs,
         // 同默认 driver：捕获停摆兜底（0.19.12）也必须两槽一致。
         captureStallRescueMs: cfg.captureStallRescueMs,
+        liveHeaded: cfg.liveHeaded,
         loginTimeoutMs: cfg.loginTimeoutMs,
         composerChunkChars: cfg.composerChunkChars,
         // 同默认 driver：非默认槽也必须拿到附件阈值，否则「账户2 发长提示词」与

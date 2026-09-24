@@ -3698,7 +3698,7 @@ window.__ModuleLoader__.load({
             send({ t: 'resize', w: Math.round(box.clientWidth), h: Math.round(box.clientHeight) });
           }
         };
-        ws.onmessage = (ev) => {
+        ws.onmessage = async (ev) => {
           // 0.20.4：帧走二进制包（[metaLen u16be][metaJSON][jpeg]），控制消息仍是
           // 文本 JSON——按 typeof ev.data 区分。
           if (typeof ev.data === 'string') {
@@ -3708,6 +3708,23 @@ window.__ModuleLoader__.load({
             if (msg.t === 'pages') {
               setPages(Array.isArray(msg.pages) ? msg.pages : []);
               setCurrent(msg.current ?? null);
+              setStatus('live');
+            } else if (msg.t === 'rtc-answer') {
+              // WebRTC 建联成功：视频接管画面（投屏已由服务端停掉）
+              try {
+                const pc = rtcRef.current;
+                if (pc) {
+                  awaitingAnswer.current = false;
+                  await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
+                  for (const c of (msg.candidates || [])) { try { await pc.addIceCandidate(c); } catch {} }
+                  setStatus('rtc');
+                }
+              } catch { setStatus('rtc-failed'); send({ t: 'rtc-failed' }); }
+            } else if (msg.t === 'rtc-failed') {
+              // 降级：hub 已重启自适应投屏，回画布路线
+              try { rtcRef.current?.close(); } catch {}
+              rtcRef.current = null;
+              offerSent.current = false;
               setStatus('live');
             } else if (msg.t === 'bye' || msg.t === 'error') {
               setStatus(String(msg.reason || msg.message || 'error').slice(0, 140));
@@ -3762,12 +3779,67 @@ window.__ModuleLoader__.load({
         try { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); } catch { /* 已断 */ }
       };
 
-      // 0.20.2 视口自适应：把面板 CSS 尺寸报给 hub（它据此把被投页面按 ×2
-      // 超采样仿真），连接建立与容器尺寸变化（拖分栏/开合侧栏）都上报。
-      // 250ms 防抖：拖拽时 ResizeObserver 连发，服务端按「同尺寸跳过」兜底。
+      // 0.21.0 WebRTC：面板为接收端（recvonly），offer/answer 各带完整候选
+      //（非 trickle，免第二条信令通道）；失败自动回落自适应投屏画布。
+      const videoRef = React.useRef(null);
+      const rtcRef = React.useRef(null);
+      const offerSent = React.useRef(false);
+      const awaitingAnswer = React.useRef(false);
+      const statusRef = React.useRef('connecting');
+      React.useEffect(() => { statusRef.current = status; }, [status]);
+
+      function toPagePointLive(e) {
+        // RTC 路径：video 内在尺寸即页面视口，object-fit contain 换算与画布同型
+        const v = videoRef.current;
+        if (!v || !v.videoWidth) return null;
+        const r = v.getBoundingClientRect();
+        const s = Math.min(r.width / v.videoWidth, r.height / v.videoHeight);
+        const dw = v.videoWidth * s, dh = v.videoHeight * s;
+        const dx = (r.width - dw) / 2, dy = (r.height - dh) / 2;
+        return {
+          x: (e.clientX - r.left - dx) * v.videoWidth / dw,
+          y: (e.clientY - r.top - dy) * v.videoHeight / dh,
+        };
+      }
+
+      function startRTC() {
+        if (rtcRef.current || typeof RTCPeerConnection === 'undefined') return;
+        try {
+          const pc = new RTCPeerConnection();
+          rtcRef.current = pc;
+          offerSent.current = false;
+          awaitingAnswer.current = true;
+          pc.addTransceiver('video', { direction: 'recvonly' });
+          pc.ontrack = (e) => {
+            const v = videoRef.current;
+            if (v) { v.srcObject = e.streams[0]; v.play?.().catch(() => {}); }
+          };
+          pc.addEventListener('icegatheringstatechange', () => {
+            if (pc.iceGatheringState === 'complete' && !offerSent.current) {
+              offerSent.current = true;
+              send({ t: 'rtc-offer', sdp: pc.localDescription.sdp, candidates: [] });
+            }
+          });
+          pc.createOffer().then((o) => pc.setLocalDescription(o)).catch(() => { send({ t: 'rtc-failed' }); });
+          // 无候选超时兜底（loopback host 候选通常立刻齐）
+          setTimeout(() => { if (!offerSent.current && pc.iceGatheringState === 'complete') { offerSent.current = true; send({ t: 'rtc-offer', sdp: pc.localDescription.sdp, candidates: [] }); } }, 1500);
+        } catch { /* 无 WebRTC：留在投屏路线 */ }
+      }
+
+      // 状态到 live 且视频空 → 起一次 WebRTC（失败自动回落，不重试轰炸）
+      React.useEffect(() => {
+        if (status === 'live' && !rtcRef.current) startRTC();
+        if (status !== 'rtc' && status !== 'live' && rtcRef.current) {
+          try { rtcRef.current.close(); } catch {}
+          rtcRef.current = null;
+          offerSent.current = false;
+        }
+      }, [status]);
       React.useEffect(() => {
         const box = canvasRef.current?.parentElement;
         if (!box || typeof ResizeObserver === 'undefined') return;
+        // 0.20.2 视口自适应注释：面板尺寸变化（拖分栏/开合侧栏）上报 hub，
+        // 120ms 防抖，服务端按「同尺寸跳过」兜底。
         let timer = null;
         const report = () => {
           const w = Math.round(box.clientWidth), h = Math.round(box.clientHeight);
@@ -3806,6 +3878,7 @@ window.__ModuleLoader__.load({
       }
 
       function toPagePoint(e) {
+        if (statusRef.current === 'rtc') return toPagePointLive(e);
         const f = frameRef.current;
         const canvas = canvasRef.current;
         if (!f || !canvas) return null;
@@ -3889,6 +3962,7 @@ window.__ModuleLoader__.load({
             ref: canvasRef,
             className: 'hwb-live-canvas',
             tabIndex: 0,
+            style: status === 'rtc' ? { visibility: 'hidden' } : null,
             onMouseDown: (e) => onMouse(e, 'pressed'),
             onMouseUp: (e) => onMouse(e, 'released'),
             onMouseMove: (e) => onMouse(e, 'moved'),
@@ -3897,7 +3971,21 @@ window.__ModuleLoader__.load({
             onKeyDown: (e) => onKey(e, 'key'),
             onKeyUp: (e) => onKey(e, 'keyup'),
           }),
-          status !== 'live' && h('div', { className: 'hwb-live-mask' },
+          h('video', {
+            ref: videoRef,
+            className: 'hwb-live-video',
+            autoPlay: true, muted: true, playsInline: true,
+            style: status === 'rtc' ? null : { display: 'none' },
+            onMouseDown: (e) => onMouse(e, 'pressed'),
+            onMouseUp: (e) => onMouse(e, 'released'),
+            onMouseMove: (e) => onMouse(e, 'moved'),
+            onWheel: onWheel,
+            onContextMenu: (e) => e.preventDefault(),
+            tabIndex: 0,
+            onKeyDown: (e) => onKey(e, 'key'),
+            onKeyUp: (e) => onKey(e, 'keyup'),
+          }),
+          status !== 'rtc' && status !== 'live' && h('div', { className: 'hwb-live-mask' },
             h('div', null, '画面流未接通：' + status),
             h('button', { className: 'hwb-retry', onClick: () => setReloadTick(t => t + 1) }, '重试'),
             onUseMirror && h('button', { className: 'hwb-retry', onClick: onUseMirror }, '改用镜像页'))));
@@ -4609,6 +4697,7 @@ window.__ModuleLoader__.load({
         ".hwb-live-new{flex:none;width:20px;height:20px;padding:0;border:.5px solid var(--dsw-alias-border-l3,#8883);border-radius:10px;background:transparent;color:inherit;font-size:13px;line-height:18px;cursor:pointer}",
         ".hwb-live-view{position:relative;flex:1;min-height:0}",
         ".hwb-live-canvas{position:absolute;inset:0;width:100%;height:100%;outline:none;cursor:default}",
+        ".hwb-live-video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#111;outline:none}",
         ".hwb-live-mask{position:absolute;inset:0;display:flex;flex-direction:column;gap:8px;align-items:center;justify-content:center;background:rgba(17,17,17,.55);color:#fff;font-size:13px}",
         ".hwb-frame-status{position:absolute;inset:0;display:grid;place-items:center;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-tertiary,#7a8494);font-size:12px;pointer-events:none}",
         ".hwb-error,.hwb-guide{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:24px;text-align:center;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-secondary,#394150)}",

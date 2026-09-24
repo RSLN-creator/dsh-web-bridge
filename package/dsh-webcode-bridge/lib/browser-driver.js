@@ -1663,7 +1663,11 @@ export function createBrowserDriver(options = {}) {
     clearStaleProfileLocks();
     const launchOnce = () => chromium.launchPersistentContext(cfg.profileDir, {
       executablePath: cfg.executablePath,
-      headless: headless ?? cfg.headless,
+      // 0.21.0 工作区画面流 WebRTC：liveHeaded 开启时强制**有头**——getDisplayMedia
+      // （页面自采的简单 WebRTC 路线，browserless TV/puppeteer-stream 同款）在无头
+      // 构建不可用。有头窗口三件套隐藏：离屏定位 + WS_EX_TOOLWINDOW（不进任务栏
+      // 与 Alt-Tab）+ WS_EX_NOACTIVATE（永不抢焦点），用户桌面零可见痕迹。
+      headless: (headless ?? cfg.headless) && cfg.liveHeaded !== true,
       args: [
       '--no-first-run', '--no-default-browser-check', '--disable-blink-features=AutomationControlled',
       // 记录调试端口到 profile 的 DevToolsActivePort：本进程意外退出后，下一次
@@ -1673,8 +1677,14 @@ export function createBrowserDriver(options = {}) {
       // 绑定，被当成 driver 页后整条流捕获都是死的（2026-09-12 DeepSeek 240s
       // 超时的根因）。抑制恢复气泡，下面再把恢复页一律关掉。
       '--hide-crash-restore-bubble',
+      ...(cfg.liveHeaded === true ? [
+        '--window-position=-2400,-2400',
+        '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding',
+        '--use-fake-ui-for-media-stream',
+        '--disable-features=WebRtcHideLocalIpsWithMdns',
+      ] : []),
     ],
-      viewport: { width: 640, height: 900 },
+      viewport: cfg.liveHeaded === true ? { width: 1280, height: 1440 } : { width: 640, height: 900 },
       ...(cfg.storageState ? { storageState: cfg.storageState } : {}),
     });
     try {
@@ -1698,6 +1708,9 @@ export function createBrowserDriver(options = {}) {
     // 「发得出去收不回」。永远开干净新页，现成页一律关掉。
     const stalePages = ctx.pages();
     page = await ctx.newPage();
+    if (cfg.liveHeaded === true) {
+      try { hideWindowFromTaskbar(ctx.browser?.()?.process?.()?.pid); } catch { /* 隐藏失败只影响观感 */ }
+    }
     for (const stale of stalePages) { try { await stale.close(); } catch {} }
     ctx.on('close', () => {
       ctx = null; page = null;
@@ -4157,4 +4170,24 @@ function abortError() {
   const err = new Error('webcode driver: aborted');
   err.name = 'AbortError';
   return err;
+}
+
+/** 0.21.0：有头窗口三件套之一——从任务栏与 Alt-Tab 隐藏（WS_EX_TOOLWINDOW
+ *  0x80 + WS_EX_NOACTIVATE 0x08000000）。PowerShell(user32) 一次调用，零 npm
+ *  依赖；任何失败静默——最坏情况只是任务栏多一个条目，不影响功能。 */
+function hideWindowFromTaskbar(pid) {
+  if (process.platform !== 'win32' || !Number(pid)) return;
+  const script = [
+    "$p = Get-Process -Id " + Number(pid) + " -ErrorAction SilentlyContinue",
+    "if ($p -and $p.MainWindowHandle -ne 0) {",
+    "Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public class WQ{[DllImport(\"user32.dll\")]public static extern IntPtr GetWindowLongPtr(IntPtr h,int i);[DllImport(\"user32.dll\")]public static extern IntPtr SetWindowLongPtr(IntPtr h,int i,IntPtr v);}' -ErrorAction SilentlyContinue",
+    "$s = [WQ]::GetWindowLongPtr($p.MainWindowHandle, -20).ToInt64() -bor 0x80 -bor 0x08000000",
+    "[WQ]::SetWindowLongPtr($p.MainWindowHandle, -20, [IntPtr]$s) | Out-Null",
+    "}",
+  ].join('; ');
+  try {
+    const child = child_process.spawn('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand',
+      Buffer.from(script, 'utf16le').toString('base64')], { windowsHide: true, stdio: 'ignore' });
+    child.on('error', () => {});
+  } catch { /* 平台/权限问题：放弃隐藏，不影响功能 */ }
 }

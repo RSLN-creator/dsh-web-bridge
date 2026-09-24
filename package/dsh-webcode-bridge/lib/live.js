@@ -123,6 +123,36 @@ export function viewportForPanel(w, h) {
 }
 const sameViewport = (a, b) => !!a && !!b && a.width === b.width && a.height === b.height;
 
+// ---- WebRTC 页面自采（0.21.0，browserless TV / puppeteer-stream 同款手法）------
+//
+// 目标页面自己 getDisplayMedia（preferCurrentTab 自采本页）→ RTCPeerConnection
+// 硬件编码 30–60fps 发往面板 <video>；信令非 trickle（offer/answer 各带候选，
+// 免第二条通道），经既有 live WS + CDP Runtime.evaluate 注入完成。启动旗标
+// --use-fake-ui-for-media-stream 免授权弹窗（browser-driver 有头分支已带）。
+// 无头/失败一律回 {ok:false} → 面板自动回落自适应投屏画布。
+const RTC_INJECT = `(async () => {
+  try {
+    if (window.__wcRTC) { try { window.__wcRTC.pc.close(); window.__wcRTC.stream.getTracks().forEach(t => t.stop()); } catch {} window.__wcRTC = null; }
+    const offer = __WC_OFFER__;
+    const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: false, preferCurrentTab: true, selfBrowserSurface: 'include' });
+    const pc = new RTCPeerConnection();
+    const candidates = [];
+    pc.addEventListener('icecandidate', (e) => { if (e.candidate) candidates.push(e.candidate.toJSON()); });
+    stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+    await pc.setRemoteDescription({ type: 'offer', sdp: offer.sdp });
+    for (const c of (offer.candidates || [])) { try { await pc.addIceCandidate(c); } catch {} }
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    await new Promise((res) => {
+      if (pc.iceGatheringState === 'complete') return res();
+      const t = setTimeout(res, 2500);
+      pc.addEventListener('icegatheringstatechange', () => { if (pc.iceGatheringState === 'complete') { clearTimeout(t); res(); } });
+    });
+    window.__wcRTC = { pc, stream };
+    return JSON.stringify({ ok: true, sdp: pc.localDescription.sdp, candidates });
+  } catch (err) { return JSON.stringify({ ok: false, error: String((err && err.message) || err).slice(0, 200) }); }
+})()`;
+
 // ---- 运动自适应画质（0.20.5：滚动仍不够顺的最后一张无头牌）--------------------
 //
 // 远程浏览器的另一个标准做法（noVNC/商业方案的「静帧高质、动帧提速」同型）：
@@ -292,6 +322,31 @@ export function createLiveHub({ getDriver, log = () => {}, warn = () => {} } = {
             }
             break;
           }
+          case 'rtc-offer': {
+            // 面板发起 WebRTC：注入目标页自采脚本，answer 原样回传；成功即停投屏
+            //（视频接管），失败回 rtc-failed（面板留在自适应投屏画布）。
+            if (!current) break;
+            const expr = RTC_INJECT.replace('__WC_OFFER__', JSON.stringify({
+              sdp: String(msg.sdp || '').slice(0, 100_000),
+              candidates: Array.isArray(msg.candidates) ? msg.candidates.slice(0, 32) : [],
+            }));
+            const res = await current.cdp.send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true });
+            let out = {};
+            try { out = JSON.parse(res?.result?.value || '{}'); } catch { out = { ok: false, error: 'bad inject result' }; }
+            if (out.ok) {
+              current.rtcActive = true;
+              try { await current.cdp.send('Page.stopScreencast'); } catch {}
+              send(ws, { t: 'rtc-answer', sdp: out.sdp, candidates: out.candidates || [] });
+            } else {
+              send(ws, { t: 'rtc-failed', error: String(out.error || 'rtc unavailable') });
+            }
+            break;
+          }
+          case 'rtc-failed': {
+            // 面板侧 WebRTC 断了 → 回落自适应投屏
+            if (current && current.rtcActive) { current.rtcActive = false; await startStream(current.cdp, current.viewport, streamMode); }
+            break;
+          }
           case 'ping':
             send(ws, { t: 'pong' });
             break;
@@ -305,6 +360,14 @@ export function createLiveHub({ getDriver, log = () => {}, warn = () => {} } = {
 
     ws.on('close', () => {
       clearInterval(adaptTimer);
+      // 连接关闭：若 RTC 还活着，关掉页面里的采集流（摄像头/屏幕指示灯消失）
+      const cur = current;
+      if (cur?.rtcActive) {
+        cur.rtcActive = false;
+        void cur.cdp.send('Runtime.evaluate', {
+          expression: 'try { window.__wcRTC && (window.__wcRTC.pc.close(), window.__wcRTC.stream.getTracks().forEach(t => t.stop())); window.__wcRTC = null; } catch {}',
+        }).catch(() => {});
+      }
       try { unPages?.(); } catch {}
       void detach();
       conns.delete(ws);

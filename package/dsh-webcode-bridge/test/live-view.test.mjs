@@ -259,11 +259,53 @@ test('自适应画质：密集帧切 lo（q55），静止后回 hi（q90）；�
   await close();
 });
 
+test('WebRTC：rtc-offer 注入目标页、answer 回传、成功停投屏；rtc-failed 回落投屏', async () => {
+  const { driver, cdp } = fakeDriver();
+  // 假 CDP 对 Runtime.evaluate 回一个成功 answer
+  cdp.send = async (cmd, params) => {
+    cdp.sent.push([cmd, params]);
+    if (cmd === 'Runtime.evaluate') {
+      assert.ok(params.expression.includes('getDisplayMedia'), '注入脚本必须走页面自采');
+      assert.ok(params.awaitPromise === true, '注入必须 await');
+      return { result: { value: JSON.stringify({ ok: true, sdp: 'ANSWER-SDP', candidates: [{ candidate: 'c1' }] }) } };
+    }
+    return {};
+  };
+  const { port, close } = await startHub(() => driver);
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/webcode/live?account=deepseek`);
+  ws.binaryType = 'arraybuffer';
+  const msgs = [];
+  ws.onmessage = (ev) => { if (typeof ev.data === 'string') msgs.push(JSON.parse(ev.data)); };
+  await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
+  await new Promise((r) => setTimeout(r, 150));
+  ws.send(JSON.stringify({ t: 'rtc-offer', sdp: 'OFFER-SDP', candidates: [] }));
+  await new Promise((r) => setTimeout(r, 150));
+  const answer = msgs.find((m) => m.t === 'rtc-answer');
+  assert.ok(answer, '必须回 rtc-answer');
+  assert.equal(answer.sdp, 'ANSWER-SDP');
+  assert.ok(cdp.sent.some(([cmd]) => cmd === 'Page.stopScreencast'), 'RTC 接管后必须停投屏');
+  ws.send(JSON.stringify({ t: 'rtc-failed' }));
+  await new Promise((r) => setTimeout(r, 120));
+  const lastStart = [...cdp.sent].reverse().find(([cmd, p]) => cmd === 'Page.startScreencast');
+  assert.ok(lastStart, 'rtc-failed 后必须重启投屏（自动降级）');
+  ws.close();
+  await new Promise((r) => setTimeout(r, 100));
+  await close();
+});
+
 // ---- ③ 接线结构（无浏览器无法实例化 driver/client 的部分按仓库惯例源码断言）---
 
 const driverSrc = readFileSync(join(pkg, 'lib', 'browser-driver.js'), 'utf8');
 const indexSrc = readFileSync(join(pkg, 'lib', 'index.js'), 'utf8');
 const clientSrc = readFileSync(join(pkg, 'lib', 'client.cjs'), 'utf8');
+
+test('接线：liveHeaded 有头三件套（旗标+隐藏）与客户端 video/降级结构', () => {
+  assert.ok(driverSrc.includes('cfg.liveHeaded === true ? [') && driverSrc.includes('--use-fake-ui-for-media-stream'), '有头分支必须有 RTC 相关旗标');
+  assert.ok(driverSrc.includes('function hideWindowFromTaskbar(') && driverSrc.includes('WS_EX_TOOLWINDOW'.slice(0,0) + 'SetWindowLongPtr'), '必须有任务栏隐藏 helper');
+  assert.ok(indexSrc.includes('liveHeaded: true,') && (indexSrc.match(/liveHeaded: cfg.liveHeaded/g)||[]).length >= 2, 'liveHeaded 必须声明并双槽传入');
+  assert.ok(clientSrc.includes('new RTCPeerConnection()') && clientSrc.includes('rtc-failed'), '客户端必须有 WebRTC 与自动降级');
+  assert.ok(clientSrc.includes('hwb-live-video'), '必须有 video 元素');
+});
 
 test('接线：driver 返回对象带 live；activatePage 绝不改写自动化页；拒绝关自动化页', () => {
   assert.ok(/setImageLimitsProvider, live \}/.test(driverSrc), 'driver 返回对象必须含 live');
