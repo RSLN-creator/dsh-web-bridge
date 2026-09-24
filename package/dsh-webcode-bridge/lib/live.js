@@ -173,6 +173,9 @@ export function createLiveHub({ getDriver, log = () => {}, warn = () => {} } = {
     const unPages = live.onPagesChanged?.(() => { void pushPages(); });
 
     const startStream = async (sess, viewport) => {
+      // 先停后起：同会话上直接重发 startScreencast 不保证新上限生效（0.20.2 真机
+      // resize 疑似因此不跟随）；stop 的报错吞掉（首次 attach 时本就没有投屏）。
+      try { await sess.send('Page.stopScreencast'); } catch {}
       // 视口仿真（超采样分辨率）先行，投屏上限随后——帧尺寸与面板精确同比例。
       await sess.send('Emulation.setDeviceMetricsOverride', {
         width: viewport.width, height: viewport.height, deviceScaleFactor: 1, mobile: false,

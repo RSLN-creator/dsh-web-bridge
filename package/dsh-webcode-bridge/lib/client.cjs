@@ -3767,7 +3767,7 @@ window.__ModuleLoader__.load({
           const dx = (bw - dw) / 2, dy = (bh - dh) / 2;
           ctx2d.drawImage(img, dx, dy, dw, dh);
           const meta = msg.m || {};
-          frameRef.current = { img, meta, dx, dy, dw, dh };
+          frameRef.current = { img, meta, dx, dy, dw, dh, dpr };
         };
         img.src = 'data:image/jpeg;base64,' + msg.d;
       }
@@ -3777,7 +3777,10 @@ window.__ModuleLoader__.load({
         const canvas = canvasRef.current;
         if (!f || !canvas) return null;
         const r = canvas.getBoundingClientRect();
-        const mx = e.clientX - r.left, my = e.clientY - r.top;
+        // 0.20.3 真机事故修复：dx/dy/dw/dh 是**画布 backing-store 像素**（0.20.2
+        // 起按 dpr 放大），而 clientX 是 CSS 像素——两个坐标空间必须先对齐再换算，
+        // 否则屏幕缩放 125%/150% 的机器上所有点击整体偏移（表现即「点了没反应」）。
+        const mx = (e.clientX - r.left) * f.dpr, my = (e.clientY - r.top) * f.dpr;
         const meta = f.meta || {};
         const vw = Number(meta.deviceWidth) || f.img.width;
         const vh = Number(meta.deviceHeight) || f.img.height;

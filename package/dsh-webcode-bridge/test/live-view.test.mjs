@@ -206,6 +206,10 @@ test('hub 行为：建连即下发视口仿真；resize 变尺寸同会话重设
   assert.deepEqual([emu[1].width, emu[1].height], [920, 1720], 'resize 必须按面板 ×2 重设视口');
   assert.equal(cdp.sent.filter(([cmd]) => cmd === 'Page.startScreencast').length, startBefore + 1,
     'resize 重启投屏但不重建 CDP 会话');
+  // 重启必须先 stop 再 start（否则新上限不保证生效）
+  const lastStop = cdp.sent.map(([cmd]) => cmd).lastIndexOf('Page.stopScreencast');
+  const lastStart = cdp.sent.map(([cmd]) => cmd).lastIndexOf('Page.startScreencast');
+  assert.ok(lastStop > -1 && lastStop < lastStart, '投屏重启顺序必须 stop → start');
 
   // 同尺寸重复 resize：跳过（拖拽连发的防抖兜底）
   const before = cdp.sent.length;
@@ -251,4 +255,8 @@ test('接线：客户端上报 resize（建连一次 + ResizeObserver 防抖）�
   assert.ok(clientSrc.includes("send({ t: 'resize', w: Math.round(box.clientWidth), h: Math.round(box.clientHeight) })"));
   assert.ok(clientSrc.includes('new ResizeObserver'), '容器尺寸变化必须上报');
   assert.ok(clientSrc.includes("Math.round(box.clientWidth * dpr)"), 'canvas 必须按 devicePixelRatio 放大，否则超采样白费');
+});
+
+test('反向线：点击换算必须对齐 dpr 坐标空间（0.20.2 真机「点击没反应」的首因）', () => {
+  assert.ok(clientSrc.includes('(e.clientX - r.left) * f.dpr'), '鼠标 CSS 像素必须乘 dpr 对齐 backing-store 空间');
 });
