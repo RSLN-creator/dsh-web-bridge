@@ -80,6 +80,24 @@ export function createMirror(options = {}) {
   const STATIC_SEG = '/__static/';
   // /wr/ 前缀：运行时未知域绝对 URL 的带 cookie 转发（0.19.14，见 handle 内注释）。
   const WRAP_SEG = '/wr/';
+
+  // ---- 站点 JS 的环境判定兜底（0.19.15） --------------------------------
+  //
+  // 真机取证（2026-09-26，test-mock/real-sidebar-headed.mjs）：站点前端有严格的
+  // 环境判定，`location.hostname` 只认 localhost / chat.deepseek.com / chat-dev /
+  // chat-test.*，**镜像主机名（deepseek.localhost 等）直接 throw**——模块图里挂着
+  // HTTP 客户端的整片初始化随之死掉，页面只剩壳：左侧会话历史全是「加载失败」，
+  // 页内 fetch 除 wasm 外零调用（0.19.13 与 0.19.14 A/B 完全一致 ⇒ 站点改版所致，
+  // 非桥回归）。修法：对站点 JS 响应做一次外科手术，把 default 分支的 throw 换成
+  // production 兜底。键串逐字取自 bundle（main.7d19d7e901.js）；站点改版若改写
+  // 该形状，replace 自然失配、行为退回坏态——warn 会留下线索。
+  const ENV_FALLBACK_FROM = 'throw Error("Unknown hostname: ".concat(e))';
+  const ENV_FALLBACK_TO = 'return"production"';
+  function patchSiteJs(text) {
+    if (!text.includes(ENV_FALLBACK_FROM)) return text;
+    log('patched site env fallback (Unknown hostname → production)');
+    return text.split(ENV_FALLBACK_FROM).join(ENV_FALLBACK_TO);
+  }
   const PRIVATE_HOST = /^(localhost$|127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|\[::1\]$|.*\.local$)/i;
 
   // ---- 驱动 cookie 的短缓存（0.14.4） ------------------------------------
@@ -231,6 +249,13 @@ export function createMirror(options = {}) {
       out['content-length'] = String(Buffer.byteLength(css));
       res.writeHead(upstream.status, out);
       res.end(css);
+      return true;
+    }
+    if (/javascript|ecmascript/i.test(contentType)) {
+      const js = patchSiteJs(Buffer.from(await upstream.arrayBuffer()).toString('utf8'));
+      out['content-length'] = String(Buffer.byteLength(js));
+      res.writeHead(upstream.status, out);
+      res.end(js);
       return true;
     }
 
@@ -583,8 +608,10 @@ export function createMirror(options = {}) {
 	}catch(e){}
 	// window.open：新标签打开图片/文件时把绝对地址收进镜像命名空间（新标签加载的
 	// 仍是镜像页 → 全套改写与 cookie 合并照常生效），不再落到未登录的真实站点。
-	var open0=window.open;
-	if(open0)window.open=function(u,n,f){try{if(typeof u==='string'){var m=toLocal(u);if(m!==null)u=m;}}catch(e){}return open0.call(this,u,n,f);};
+	// 注意变量名必须是 wopen0：本 IIFE 里 XHR 钩子已占用 open0（0.19.14 曾因重名
+	// 覆盖它，xhr.open 全部静默变成 window.open → 会话列表「加载失败」，真机实锤）。
+	var wopen0=window.open;
+	if(wopen0)window.open=function(u,n,f){try{if(typeof u==='string'){var m=toLocal(u);if(m!==null)u=m;}}catch(e){}return wopen0.call(this,u,n,f);};
 })();</script>
 <style data-webcode-singlecol>
 /* 侧栏单栏化：站点自带的双栏布局在窄面板里很挤——隐藏左侧导航列，
@@ -906,6 +933,13 @@ export function createMirror(options = {}) {
       out['content-length'] = String(Buffer.byteLength(patched));
       res.writeHead(upstream.status, out);
       res.end(patched);
+      return true;
+    }
+    if (/javascript|ecmascript/i.test(contentType)) {
+      const js = patchSiteJs(Buffer.from(await upstream.arrayBuffer()).toString('utf8'));
+      out['content-length'] = String(Buffer.byteLength(js));
+      res.writeHead(upstream.status, out);
+      res.end(js);
       return true;
     }
 
