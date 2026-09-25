@@ -1676,11 +1676,7 @@ export function createBrowserDriver(options = {}) {
     clearStaleProfileLocks();
     const launchOnce = () => chromium.launchPersistentContext(cfg.profileDir, {
       executablePath: cfg.executablePath,
-      // 0.21.0 工作区画面流 WebRTC：liveHeaded 开启时强制**有头**——getDisplayMedia
-      // （页面自采的简单 WebRTC 路线，browserless TV/puppeteer-stream 同款）在无头
-      // 构建不可用。有头窗口三件套隐藏：离屏定位 + WS_EX_TOOLWINDOW（不进任务栏
-      // 与 Alt-Tab）+ WS_EX_NOACTIVATE（永不抢焦点），用户桌面零可见痕迹。
-      headless: (headless ?? cfg.headless) && cfg.liveHeaded !== true,
+      headless: headless ?? cfg.headless,
       args: [
       '--no-first-run', '--no-default-browser-check', '--disable-blink-features=AutomationControlled',
       // 记录调试端口到 profile 的 DevToolsActivePort：本进程意外退出后，下一次
@@ -1690,14 +1686,8 @@ export function createBrowserDriver(options = {}) {
       // 绑定，被当成 driver 页后整条流捕获都是死的（2026-09-12 DeepSeek 240s
       // 超时的根因）。抑制恢复气泡，下面再把恢复页一律关掉。
       '--hide-crash-restore-bubble',
-      ...(cfg.liveHeaded === true ? [
-        '--window-position=-2400,-2400',
-        '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding',
-        '--use-fake-ui-for-media-stream',
-        '--disable-features=WebRtcHideLocalIpsWithMdns',
-      ] : []),
     ],
-      viewport: cfg.liveHeaded === true ? { width: 1280, height: 1440 } : { width: 640, height: 900 },
+      viewport: { width: 640, height: 900 },
       ...(cfg.storageState ? { storageState: cfg.storageState } : {}),
     });
     try {
@@ -1721,9 +1711,6 @@ export function createBrowserDriver(options = {}) {
     // 「发得出去收不回」。永远开干净新页，现成页一律关掉。
     const stalePages = ctx.pages();
     page = await ctx.newPage();
-    if (cfg.liveHeaded === true) {
-      try { hideWindowFromTaskbar(ctx.browser?.()?.process?.()?.pid); } catch { /* 隐藏失败只影响观感 */ }
-    }
     for (const stale of stalePages) { try { await stale.close(); } catch {} }
     ctx.on('close', () => {
       ctx = null; page = null;
@@ -4099,114 +4086,14 @@ export function createBrowserDriver(options = {}) {
   }
   function safeUrl(url) { try { return String(new URL(url)); } catch { return null; } }
 
-  // ==== 0.20.0 工作区画面流（路线 B）：把自带 Chromium 的真实页面投给右栏 ====
-  //
-  // 页面本体跑在**本驱动自己的浏览器实例**里（真实登录、真实渲染），右栏经
-  // lib/live.js 的 hub 取 CDP 会话做 Page.startScreencast + Input.* 回传。这里
-  // 只提供页面工作区管理与会话接入，不含投屏协议（协议在 hub，可假会话单测）。
-  //
-  // 关键约束：`page`（自动化页）与「面板正在看哪页」是**两件事**——activatePage
-  // 只 bringToFront，绝不改写 `page`；自动化轮次进行中用户在面板里看到的正是
-  // 驱动的实时操作，这是特性不是干扰。关闭面板页面时拒绝关自动化页（那会让
-  // 进行中的轮次失去宿主）。CDP 会话经 ctx.newCDPSession(page) 创建，每连接
-  // 一个、互不共享 ack 状态。
-  const livePageIds = new WeakMap();
-  let livePageSeq = 0;
-  const livePageId = (p) => {
-    if (!livePageIds.has(p)) livePageIds.set(p, 'p' + (++livePageSeq));
-    return livePageIds.get(p);
-  };
-  const liveResolve = (pageId) => {
-    if (pageId == null) return page;
-    const pages = ctx?.pages?.() || [];
-    return pages.find((p) => livePageId(p) === pageId) || null;
-  };
-  const live = {
-    /** 全部页面（工作区标签条数据源）。active = 驱动自动化页（面板标「驱动」）。 */
-    async listPages() {
-      const pages = ctx?.pages?.() || [];
-      return await Promise.all(pages.map(async (p) => ({
-        id: livePageId(p),
-        title: await p.title().catch(() => ''),
-        url: safeUrl(p.url()),
-        active: p === page,
-      })));
-    },
-    async openPage(url) {
-      if (!ctx) await ensure();   // 可能已被空闲回收（见 index.js 的 onAllClosed）
-      if (!ctx?.newPage) throw new Error('browser not launched');
-      const p = await ctx.newPage();
-      if (url) await p.goto(String(url), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
-      // 返回**新页的 id**（0.21.2）。旧实现返回整份列表，调用方无从知道哪一页是刚开的，
-      // 于是「+」开了新页却仍把画面停在旧页上——用户报的「你直接新开了页面干嘛不用」。
-      return { ok: true, pageId: livePageId(p) };
-    },
-    async closePage(pageId) {
-      const p = liveResolve(pageId);
-      if (!p) return { ok: false, reason: 'not-found' };
-      if (p === page) return { ok: false, reason: 'automation-page' };
-      await p.close().catch(() => {});
-      return { ok: true };
-    },
-    async activatePage(pageId) {
-      const p = liveResolve(pageId);
-      if (p) await p.bringToFront().catch(() => {});
-      return { ok: Boolean(p) };
-    },
-    /** 取某页的 CDP 会话（pageId 缺省 = 自动化页）。hub 据此 startScreencast。 */
-    async attach(pageId) {
-      // 浏览器可能已被空闲回收（右栏关掉后，见 index.js 的 onAllClosed）：
-      // 先按需拉起，否则面板在回收后第一次连接会直接报「page not found」。
-      if (!ctx) await ensure();
-      if (!ctx?.newCDPSession) throw new Error('browser not launched');
-      const p = liveResolve(pageId);
-      if (!p) throw new Error('page not found: ' + pageId);
-      const cdp = await ctx.newCDPSession(p);
-      return {
-        pageId: livePageId(p),
-        send: (cmd, params) => cdp.send(cmd, params),
-        on: (ev, cb) => cdp.on(ev, cb),
-        off: (ev, cb) => cdp.off(ev, cb),
-        detach: async () => { try { await cdp.detach(); } catch {} },
-      };
-    },
-    /** 页面增删通知（面板标签条自动刷新）。返回退订函数。 */
-    onPagesChanged(cb) {
-      if (!ctx?.on) return () => {};
-      ctx.on('page', cb);
-      ctx.on('close', cb);
-      return () => { try { ctx.off('page', cb); ctx.off('close', cb); } catch {} };
-    },
-  };
-
   // sessionSlot 与 status().sessionSlot 同源（sessionSlotFor）：控制面
   //（`GET/POST /__webcode/session-slot`）与面板都要能按 key 直接问一次，
   // 而不是只能读「最近一个 key」的 status 投影。省略 key = 最近一次 sendTurn 的 key。
-  return { sendPrompt, conversationForSession, sendTurn, resetConversation, conversationFor, sessionSlot: sessionSlotFor, connect, interact, openLogin, openWindow, closeWindow, importStorageFromProfile, status, close, diagnostics, getToken, profileCookies, writeProfileCookies, userAgent, probeAttachment, readAccountIdentity, get page() { return page; }, webApi, listSessions, fetchHistory, screenshotBase64, setImageLimitsProvider, live };
+  return { sendPrompt, conversationForSession, sendTurn, resetConversation, conversationFor, sessionSlot: sessionSlotFor, connect, interact, openLogin, openWindow, closeWindow, importStorageFromProfile, status, close, diagnostics, getToken, profileCookies, writeProfileCookies, userAgent, probeAttachment, readAccountIdentity, get page() { return page; }, webApi, listSessions, fetchHistory, screenshotBase64, setImageLimitsProvider };
 }
 
 function abortError() {
   const err = new Error('webcode driver: aborted');
   err.name = 'AbortError';
   return err;
-}
-
-/** 0.21.0：有头窗口三件套之一——从任务栏与 Alt-Tab 隐藏（WS_EX_TOOLWINDOW
- *  0x80 + WS_EX_NOACTIVATE 0x08000000）。PowerShell(user32) 一次调用，零 npm
- *  依赖；任何失败静默——最坏情况只是任务栏多一个条目，不影响功能。 */
-function hideWindowFromTaskbar(pid) {
-  if (process.platform !== 'win32' || !Number(pid)) return;
-  const script = [
-    "$p = Get-Process -Id " + Number(pid) + " -ErrorAction SilentlyContinue",
-    "if ($p -and $p.MainWindowHandle -ne 0) {",
-    "Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public class WQ{[DllImport(\"user32.dll\")]public static extern IntPtr GetWindowLongPtr(IntPtr h,int i);[DllImport(\"user32.dll\")]public static extern IntPtr SetWindowLongPtr(IntPtr h,int i,IntPtr v);}' -ErrorAction SilentlyContinue",
-    "$s = [WQ]::GetWindowLongPtr($p.MainWindowHandle, -20).ToInt64() -bor 0x80 -bor 0x08000000",
-    "[WQ]::SetWindowLongPtr($p.MainWindowHandle, -20, [IntPtr]$s) | Out-Null",
-    "}",
-  ].join('; ');
-  try {
-    const child = child_process.spawn('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand',
-      Buffer.from(script, 'utf16le').toString('base64')], { windowsHide: true, stdio: 'ignore' });
-    child.on('error', () => {});
-  } catch { /* 平台/权限问题：放弃隐藏，不影响功能 */ }
 }

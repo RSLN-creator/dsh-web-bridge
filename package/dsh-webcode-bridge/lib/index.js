@@ -17,7 +17,6 @@ import {
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { createRelay } from './relay.js';
-import { createLiveHub } from './live.js';
 import { createOpenAiFront } from './openai.js';
 import { createBrowserDriver } from './browser-driver.js';
 import { zeroProgressDecision } from './zero-progress.js';
@@ -187,11 +186,6 @@ const DEFAULTS = {
   // 0 = 显式关闭。同 answerTimeoutMs 的教训：必须在此声明并显式传入 driver，
   // 否则「可配置」只对了一半，用户改了没有任何效果。
   captureStallRescueMs: 45_000,
-  // 0.21.0 工作区画面流 WebRTC：驱动强制有头（离屏 + 任务栏隐藏三件套）。
-  // getDisplayMedia 在无头构建不可用，这是页面自采 WebRTC 的前提；代价已向
-  // 用户交底并被接受（任务栏/桌面零可见痕迹）。false = 回到无头（画面流自动
-  // 回落自适应投屏）。
-  liveHeaded: true,
   // 「网页还没开口」相位的窗口倍数（0.16.3，真机事故的修法）。
   //
   // 起因：2026-09-17 真机，DSH 会话把 **127,888 字符**纯文本发进 DeepSeek 网页
@@ -705,15 +699,12 @@ export function apply(ctx, config = {}) {
     cfg.version = version;
   }
   const sessionState = new Map();
-  // 0.21.1：会话游标持久化（long-term-issues #2 的落地）。真机症状（用户原话
-  // 「dsh 重启后不同会话」）：sessionState 是纯内存 Map，dsh web 重启即清零 →
-  // no-cursor → fresh → 整段重发；而网页会话身份早已落盘（webcode-sessions-*.json），
-  // 丢的只是「发到第几条」。修法：commit/invalidate 时把条目原子落盘到 profile 目录，
-  // 启动时回灌。**陈旧条目是安全的**：契约指纹 + 内容锚点（0.16.28）会自愈——
-  // 工具/系统提示变了走 contract-changed，transcript 漂了走 anchor-lost，都会
-  // 如实 fresh，持久化不会把旧游标错当新游标。注入驱动（测试替身）与缺失
-  // profileDir 的形态一律跳过（持久化只在**显式传入 profileDir** 时启用——生产必传，
-  // 不传的裸测试形态回落 DEFAULTS 的真实 profile，绝不能被测试污染）。
+  // 0.21.1：会话游标持久化（long-term-issues #2 的落地）。dsh web 重启清零内存
+  // Map → no-cursor → fresh → 整段重发；网页会话身份早已落盘，丢的只是「发到第
+  // 几条」。commit/invalidate 原子落盘到 profile 目录，启动回灌（上限 512 不变）。
+  // **陈旧条目安全**：契约指纹 + 内容锚点自愈（contract-changed / anchor-lost），
+  // 持久化不会把旧游标错当新游标。只在显式传入 profileDir 时启用（生产必传；
+  // 不传的裸测试形态回落 DEFAULTS 真实 profile，绝不能被测试污染）。
   const cursorStatePath = () => path.join(cfg.profileDir, 'webcode-cursor-state.json');
   const cursorPersistenceUsable = () => Boolean(config && config.profileDir);
   if (cursorPersistenceUsable()) {
@@ -2356,7 +2347,6 @@ function imageMarkdown(images) {
     answerTimeoutMs: cfg.answerTimeoutMs,
     // 捕获停摆兜底阈值（0.19.12）。同上：不显式传，配置层就是摆设。
     captureStallRescueMs: cfg.captureStallRescueMs,
-    liveHeaded: cfg.liveHeaded,
     loginTimeoutMs: cfg.loginTimeoutMs,
     composerChunkChars: cfg.composerChunkChars,
     attachInlineLimitChars: cfg.attachInlineLimitChars,
@@ -2415,7 +2405,6 @@ function imageMarkdown(images) {
         answerTimeoutMs: cfg.answerTimeoutMs,
         // 同默认 driver：捕获停摆兜底（0.19.12）也必须两槽一致。
         captureStallRescueMs: cfg.captureStallRescueMs,
-        liveHeaded: cfg.liveHeaded,
         loginTimeoutMs: cfg.loginTimeoutMs,
         composerChunkChars: cfg.composerChunkChars,
         // 同默认 driver：非默认槽也必须拿到附件阈值，否则「账户2 发长提示词」与
@@ -2456,7 +2445,7 @@ function imageMarkdown(images) {
     const d = siteId === 'deepseek' ? driver : drivers.get(formatAccountKey(siteId, DEFAULT_SLOT));
     if (!d || typeof d.listSessions !== 'function' || typeof d.conversationFor !== 'function') return null;
     const key = String(sessionId);
-        // 0.21.1：键形修复。写入形状是 `<sessionId>::<accountKey>`（0.19.4 起带账号段），
+        // 0.21.1：键形修复。写入形状是 sessionId::accountKey（0.19.4 起带账号段），
         // 裸 id 直查必然 miss ⇒ 命名永远回落「首句截 16 字」。先裸 id（兼容旧落盘），
         // 再按会话前缀扫（conversationForSession 在驱动侧做前缀匹配）。
         const conv = d.conversationFor(key)
@@ -2809,47 +2798,8 @@ function imageMarkdown(images) {
   const lastSessionRebuildAt = new Map();   // sessionKey → { at, chars }（真发生过的那次整段重放）
 
   let front = null;
-  // 0.20.0 工作区画面流 hub：登录只有自带 Chromium 一份，右栏投的是这个浏览器的
-  // 实时画面（损伤帧 + 输入回传）。判据与协议见 lib/live.js，方案见
-  // doc/plans/PLAN-2026-09-25-live-workspace.md。getDriver 惰性解析——连接到达
-  // 时驱动可能还没建（driverFor 会按需懒建）。
-  const liveHub = createLiveHub({
-    getDriver: (accountKey) => driverFor(accountKey),
-    // 右栏全部面板关闭 ⇒ 回收这个账户的浏览器（0.21.2）。
-    //
-    // 用户要求：「没有使用的就把后台一并关了」「原网页只有使用时候关闭不影响」。
-    // 也就是「右栏在用时浏览器才该活着」——右栏关掉后那个 Edge 进程只是白占内存。
-    //
-    // **两条安全线，缺一不可**：
-    //   ① 正在跑一轮时绝不关。关掉 = 掐断正在生成的回复（driver 的 ctx.close()
-    //      会让进行中的捕获链一起死）。这种情况下不关，等下一轮结束后自然回收
-    //      ——driver 已有「轮次结束把窗口收回无头」的路径，这里不重复实现。
-    //   ② 关的是**浏览器**，不是驱动对象。驱动仍留在 drivers 表里，下一轮或下次
-    //      打开右栏时 ensure() 会重新拉起（attach/openPage 已加 ensure 兜底）。
-    //      这样「关」是可逆的，不会把某个账户的连接状态弄丢。
-    onAllClosed: (accountKey) => {
-      let d = null;
-      try { d = driverFor(accountKey); } catch { return; }
-      if (!d) return;
-      let st = null;
-      try { st = d.status?.() || null; } catch { return; }
-      // 跑着轮次：不动。等它自己结束（不排队，避免「关一次被拒就永远不关」）。
-      if (st?.busy === true) {
-        log('live: browser kept (web turn in progress) for ' + accountKey);
-        return;
-      }
-      Promise.resolve(d.close?.())
-        .then(() => log('live: browser reclaimed after last panel closed (' + accountKey + ')'))
-        .catch((err) => warn('live: browser reclaim failed (' + accountKey + '): ' + String(err?.message || err)));
-    },
-    log, warn,
-  });
   const relay = createRelay({
     ...cfg,
-    // 0.20.0 工作区画面流（路线 B）：hub 借中继 httpServer 的 upgrade 事件挂
-    // WebSocket（/webcode/live?account=<key>），把自带 Chromium 的真实页面投给
-    // 右栏。getDriver 在连接到达时才解析（函数声明已提升，引用安全）。
-    onUpgrade: (req, socket, head) => liveHub.handleUpgrade(req, socket, head),
     // 中继侧的**外层**总超时必须是两段内层预算之和，不能与它们同值（0.16.3 修正）。
     //
     // 三类超时串在同一条链上：中继外层 > 驱动单轮 > 适配器看门狗窗口。0.16.3 之前
