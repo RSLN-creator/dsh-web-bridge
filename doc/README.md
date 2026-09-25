@@ -84,6 +84,8 @@
 - `task-board-vs-agentteams-graph.md` — **Graph Engineering 对照分析**：`dsh-task-board`（cron 驱动的执行台账，无依赖边）与官方 AgentTeams 任务图（`blockedBy` DAG + 全图环检测，但**无调度器**）的逻辑拆解，以及落地一张可自动推进的任务图还需要考虑什么
 - `prompt-engineering-evidence-2026-09-14.md` — **提示词工程实测证据与差评**（NeurIPS/ACL/arXiv 五篇；含「不能宣称最优」「必须披露 harness」两条立场）
 - `agent-ui-design-references.md` — **UI 设计语言**（Apple HIG 可执行约束、Fluent 4px 间距全表、Harness 官方 token 实测清单、teammate 面板信息架构）
+- `2026-09-25-compact-aux-delta.md` — **手动 /compact 失效的取证与修复（0.19.14）**：压缩调用的真实形状、无键整包重放撞 1M 预算闸的病因链、真机 A/B/阶梯探针读数（网页输入框上限已 ≥320k）、游标命中只发增量的修法与「辅助轮不碰主游标」的边界
+- `2026-09-25-mirror-real-viewer-research.md` — **镜像路线「真实查看器」方案研究**：图片/文件查看失效的机理（陌生域 + referer 403 真机二分实锤）、/wr/ 带 cookie 转发 + bootstrap 补钩的 0.19.14 交付记录、SW 拦截层暂缓的裁量理由
 - `2026-09-23-longrun-two-rounds-thinking.md` — **长跑健全性两轮思考**（纯文档，零代码）：第一轮从「什么会杀死长会话」落到「压缩路径从未被行使」；第二轮换起点从「桥凭什么相信网页」落到「防护全是单轮闭环」；两轮独立成立并给出共同结构与可检验的下一步
 - `2026-09-23-dsh-longrun-and-compaction.md` — **DSH 长跑健全性与压缩机制真机取证报告**：`threshold = floor(min(W×0.8, W−O−headroom))` 的完整推导、`W` 来自 adapter 的 `resolveModel`、304 份会话里 `compaction/*` **零命中**的取证、最高压力只到 **59.4%**（阈值 80%）→「web 端不能自动压缩」的更正、四个可调旋钮与长跑姿势；含六条未证实项
 - `2026-09-23-longrun-rounds-3-4.md` — **长上下文第三、四轮思考**（纯文档）：第三轮从「压力读数量的是谁」落到**两个上下文账本从未对账**（分子分母都是桥的自述；`index.js:844` 注释承诺 128k、代码给出 1M）；第四轮从「auto_continue 是不是免费的」落到**每次救活都在给下一次加长**（完整提醒 = 26,264 字符常驻），给出两条可检验的解决方向（对账探针 / 恢复预算 + 重建而不是加长）与 10 条文献引证

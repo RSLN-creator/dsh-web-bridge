@@ -364,3 +364,49 @@ test('mirror rootPathForSpa：z.ai 需要把 pathname 改写成根，其他站�
   assert.doesNotMatch(off, /data-webcode-rootpath/, '默认站点不得注入根路径修正（会破坏 SPA 深链）');
 });
 
+
+test('mirror /wr/：运行时未知域绝对 URL 的带 cookie 转发（0.19.14 查看器适配）', async (t) => {
+  const upstream = http.createServer((req, res) => {
+    if (req.url === '/') {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      res.end('<!doctype html><html><head></head><body><textarea>chat</textarea></body></html>');
+      return;
+    }
+    res.writeHead(404); res.end();
+  });
+  const upstreamPort = await listen(upstream);
+  const mirror = createMirror({
+    siteOrigin: `http://127.0.0.1:${upstreamPort}`,
+    getToken: async () => null,
+    logger: { log() {}, warn() {} },
+  });
+  const relay = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://loopback');
+    mirror.handle(req, res, url.pathname, url.search)
+      .then((handled) => { if (!handled) { res.writeHead(404); res.end(); } })
+      .catch(() => { try { res.writeHead(500); res.end(); } catch {} });
+  });
+  const relayPort = await listen(relay);
+  t.after(() => { upstream.close(); relay.close(); });
+
+  // ① bootstrap 兜底：toLocal 必须把未知域绝对地址收进 /wr/（文本级断言——
+  //    改写发生在运行时，静态 HTML 里不会出现 /wr/）。
+  const html = await (await fetch(`http://127.0.0.1:${relayPort}/`)).text();
+  assert.match(html, /'\/wr\/'\+encodeURIComponent\(u\)/, 'toLocal 必须有 /wr/ 兜底');
+  assert.match(html, /\\2\/gi,function\(_m,a,q,u\)/, 'innerHTML 改写正则必须带反引用（反斜杠在模板层幸存）');
+  assert.match(html, /window\.open/, 'window.open 必须被钩住（新标签打开图片/文件留在镜像）');
+  assert.match(html, /isLocalPath\(p\)\{[^}]*\/wr\//, 'isLocalPath 必须认识 /wr/（防二次加前缀）');
+
+  // ② SSRF 面与 /__static/ 同一口径：内网/回环/非 http(s) 目标一律 404。
+  for (const target of ['http://127.0.0.1:1/x', 'http://192.168.1.2/x', 'http://10.0.0.3/x', 'ftp://files.example/x', 'http://box.local/x']) {
+    const r = await fetch(`http://127.0.0.1:${relayPort}/wr/` + encodeURIComponent(target));
+    assert.equal(r.status, 404, `必须拒绝内网/非法目标: ${target}`);
+  }
+
+  // ③ 公网目标：路由放行并尝试转发（目标不可达 → 502 JSON，错误可自解释）。
+  //    成功路径（真实文件服务 + cookie 合并）由真机探针覆盖（test-mock/real-mirror-viewer.mjs）。
+  const bad = await fetch(`http://127.0.0.1:${relayPort}/wr/` + encodeURIComponent('http://unreachable-wr-test.example/x'));
+  assert.equal(bad.status, 502, '公网目标放行到转发层，不可达时报 502');
+  const errBody = await bad.json();
+  assert.match(errBody.error.message, /wrapped upstream unreachable/);
+});

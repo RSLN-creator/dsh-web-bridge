@@ -41,6 +41,32 @@ src、innerHTML 注入、以及从 API 数据拼出的**绝对真实域 URL**—
 复杂度预估：bootstrap 三处 hook + sw.js（~150 行）+ 路由 `/wr/`（中继已有
 代理路径复用）≈ 一轮交付；引 wombat.js 是更彻底但更重的选项。
 
+## 三之二、0.19.14 交付（hooks + /wr/ 双件，SW 暂缓）
+
+按「尽可能不复杂」裁量，先落 hooks + `/wr/`，SW 暂缓（它只能拦截本源请求，
+而客户端改写本来就是前提；hooks 覆盖不到的残余场景留给真机反馈再升级）：
+
+1. **`/wr/<encodeURIComponent(绝对URL)>` 路由**（mirror.js `proxyWrapped`）：
+   任意公网 http(s) 目标的带 cookie 转发——cookie 合并、指纹头、响应净化与主镜像
+   同一套；**cookie 按「目标域」取**（`cachedProfileCookies(targetOrigin)`）。
+   **referer 必须是上游页面**（真机二分实锤：files.deepseeksvc.com 的签名 URL 对
+   referer=目标域直接 403、referer=chat.deepseek.com 200——镜像页里裂图的机理
+   正是浏览器把镜像 origin 当 referer 发给了 CDN）。SSRF 面与 `/__static/`
+   同一口径：内网/回环/非 http(s) 一律拒绝。HTML 响应走同序「改写 + 注入」，
+   让被包裹页面的后续请求也留在本源；Location 重定向同口径收进镜像命名空间。
+2. **bootstrap toLocal 兜底**：上游主机与 ASSETS 清单之外的**一切** http(s) 绝对
+   地址 → `ROOT + '/wr/' + encodeURIComponent(u)`；`isLocalPath` 认识 `/wr/` 防
+   二次加前缀。文件/图片服务的运行时请求从此落进 `/wr/` 带驱动 cookie。
+3. **补钩三处**：`setAttribute('srcset')`（逐段改写）+ createElement 的
+   img/source `srcset` 属性 setter；`innerHTML`（字符串级属性语境改写，快路径：
+   不含 `http`/`//` 原样返回）；`window.open`（新标签打开图片/文件留在镜像）。
+4. 静态标签的改写**维持** `/__static/`（公共资产，无 cookie 需求，已有测试钉住）；
+   `/wr/` 只接管运行时未知域——两类语境各走各路，互不重写。
+
+护栏：`test/mirror.test.mjs` 新增 /wr/ 用例（bootstrap 兜底文本断言、内网/非
+http 拒绝、公网目标不可达 502）。真机验收：`test-mock/real-mirror-viewer.mjs`
+（真实登录态 + 独立 mirror 实例 + 无登录浏览器打开含图会话）。
+
 ## 四、本轮（0.21.2）已做
 
 路线还原：镜像恢复默认（原生帧率），画面流收进工具栏「真实模式」按钮

@@ -78,6 +78,8 @@ export function createMirror(options = {}) {
   // 运行时 fetch/XHR 仍由 bootstrap 按 ASSETS 清单（providers.js staticOrigins）
   // 改写。内网/回环主机拒绝代理，防本机 SSRF。
   const STATIC_SEG = '/__static/';
+  // /wr/ 前缀：运行时未知域绝对 URL 的带 cookie 转发（0.19.14，见 handle 内注释）。
+  const WRAP_SEG = '/wr/';
   const PRIVATE_HOST = /^(localhost$|127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|\[::1\]$|.*\.local$)/i;
 
   // ---- 驱动 cookie 的短缓存（0.14.4） ------------------------------------
@@ -246,7 +248,151 @@ export function createMirror(options = {}) {
     return true;
   }
 
+  /** /wr/ 路径（含挂载前缀）：客户端 toLocal 用 ROOT+'/wr/'，服务端发出的
+   *  /wr/ 引用（包裹页改写、重定向改写）也必须带同一前缀，否则 prefixed 挂载
+   *  下会被解析到回环根（= 默认站点镜像）而串站。 */
+  function wrapPath(absUrl) {
+    return mountPrefix + WRAP_SEG + encodeURIComponent(absUrl);
+  }
 
+  /** /wr/ 的 Location 改写：目标自己 → 继续 /wr/；上游主机 → 主镜像命名空间；
+   *  其它外部 → /wr/。与主镜像的 rewriteLocation 同一立场（重定向不许把用户
+   *  带出镜像命名空间、落到未登录的真实站点上）。 */
+  function rewriteWrappedLocation(origin, value) {
+    try {
+      const url = new URL(value, origin);
+      if (url.protocol !== 'https:' && url.protocol !== 'http:') return value;
+      const self = new URL(origin).host;
+      if (url.host === self) return wrapPath(url.origin + url.pathname + url.search);
+      if (url.host === upstreamHost) {
+        const path = url.pathname + url.search;
+        return isLocal(url.pathname) ? path : mountPrefix + path;
+      }
+      if (url.protocol === 'https:' || url.protocol === 'http:') return wrapPath(url.origin + url.pathname + url.search);
+      return value;
+    } catch { return value; }
+  }
+
+  /** 被 /wr/ 包裹的 HTML：指向**包裹目标自身**的属性 URL 继续走 /wr/（带目标域
+   *  cookie）；其余绝对地址交给通用 rewriteAssetUrls（__static，公共资产）。 */
+  function rewriteWrappedHtmlAttrs(html, origin) {
+    let out = String(html);
+    try {
+      const esc = origin.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
+      const re = new RegExp('(\\s(?:src|href|poster)\\s*=\\s*)(["\'])' + esc + '(/[^"\']*)\\2', 'gi');
+      out = out.replace(re, (_m, attr, q, p) => attr + q + wrapPath(origin + p) + q);
+    } catch { /* 正则构造失败就退回通用改写 */ }
+    return out;
+  }
+
+  /** /wr/ 转发：与主镜像同一套 cookie 合并 / 指纹头 / 响应净化，但目标不固定。
+   *  「同源中继」语义的受控延伸：目标 URL 由 bootstrap 的 toLocal 生成，只来自
+   *  用户正在看的站点页面；内网/回环/非 http(s) 已在路由处拒绝。HTML 响应走
+   *  与主镜像相同的「改写 + 注入」，让被包裹页面的后续请求也留在本源。 */
+  async function proxyWrapped(req, res, origin, pathWithSearch) {
+    const headers = {};
+    for (const [key, value] of Object.entries(req.headers)) {
+      const lower = key.toLowerCase();
+      if (HOP_BY_HOP.has(lower) || lower === 'origin' || lower.startsWith('access-control-')) continue;
+      headers[key] = value;
+    }
+    // 驱动 cookie：**目标域**的登录态（文件/图片服务多与主站共用 SSO cookie）。
+    // 缓存与主镜像共用同一份（cachedProfileCookies 按 origin 区分）。
+    try {
+      const profileCookies = await cachedProfileCookies(origin);
+      const merged = mergeCookieHeaders(profileCookies, req.headers.cookie);
+      if (merged) headers.cookie = merged;
+    } catch { /* 读不到就按无 cookie 转发（公共资源不受影响） */ }
+    if (typeof getUserAgent === 'function') {
+      try { const ua = await getUserAgent(); if (ua) headers['user-agent'] = String(ua); } catch {}
+    }
+    browserFingerprintHeaders(headers, origin);
+    // referer 必须是**上游页面**（chat.deepseek.com/…）而不是目标域自身：
+    // 真机二分（2026-09-25，files.deepseeksvc.com 签名 URL）——referer=目标域
+    // 被其 CDN 直接 403，referer=上游站点 200。镜像页里直连陌生域之所以裂图，
+    // 正是浏览器把镜像 origin 当 referer 发了过去；这里由中继统一改成上游页面。
+    headers.referer = upstreamOrigin + '/';
+
+    let body;
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      const result = await readRequestBody(req);
+      if (result.tooLarge) {
+        res.writeHead(413, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+        res.end(JSON.stringify({ error: { message: 'mirror: request body too large' } }));
+        return true;
+      }
+      body = result.body;
+      if (body.length) headers['content-length'] = String(body.length);
+    }
+
+    let upstream;
+    try {
+      upstream = await httpFetch(origin + pathWithSearch, {
+        method: req.method,
+        headers,
+        body: body?.length ? body : undefined,
+        redirect: 'manual',
+        timeoutMs: 60_000,
+      });
+    } catch (error) {
+      warn('wrapped upstream failed:', origin + pathWithSearch, error?.message);
+      res.writeHead(502, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      res.end(JSON.stringify({ error: { message: 'mirror: wrapped upstream unreachable' } }));
+      return true;
+    }
+
+    const out = {};
+    for (const [key, value] of upstream.headers) {
+      const lower = key.toLowerCase();
+      if (HOP_BY_HOP.has(lower) || STRIP_RESPONSE.has(lower) || lower === 'set-cookie') continue;
+      out[key] = lower === 'location' ? rewriteWrappedLocation(origin, value) : value;
+    }
+    const cookies = upstream.headers.getSetCookie?.() || [];
+    if (cookies.length) out['set-cookie'] = cookies.map(rewriteCookie);
+    if (cookies.length && typeof setCookies === 'function') {
+      try { await setCookies(cookies, origin); invalidateCookieCache(); } catch { /* best effort */ }
+    }
+    out['x-webcode-mirror'] = '1';
+
+    const contentType = String(out['content-type'] || '');
+    if (contentType.includes('text/html')) {
+      // 与主镜像同序：先改写、再注入 bootstrap（顺序反了会改掉 bootstrap 自身常量）。
+      // token 不注入——那是主站点的登录态，不属于被包裹页。
+      const html = Buffer.from(await upstream.arrayBuffer()).toString('utf8');
+      let patched = rewriteWrappedHtmlAttrs(html, origin);
+      patched = rewriteAssetUrls(patched)
+        .replace(/\s+integrity="[^"]*"/gi, '')
+        .replace(/\s+crossorigin(?:="[^"]*")?/gi, '');
+      const injected = bootstrap(null);
+      patched = patched.includes('</head>')
+        ? patched.replace('</head>', injected + '</head>')
+        : injected + patched;
+      out['content-length'] = String(Buffer.byteLength(patched));
+      res.writeHead(upstream.status, out);
+      res.end(patched);
+      return true;
+    }
+    if (contentType.includes('text/css')) {
+      const css = rewriteAssetUrls(Buffer.from(await upstream.arrayBuffer()).toString('utf8'));
+      out['content-length'] = String(Buffer.byteLength(css));
+      res.writeHead(upstream.status, out);
+      res.end(css);
+      return true;
+    }
+
+    res.writeHead(upstream.status, out);
+    if (req.method === 'HEAD' || !upstream.body) { res.end(); return true; }
+    const reader = upstream.body.getReader();
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        res.write(Buffer.from(value));
+      }
+    } catch { /* client disconnected */ }
+    try { res.end(); } catch {}
+    return true;
+  }
   // 回环主机白名单：127.0.0.1 / [::1] / localhost，以及 **<site>.localhost 子域**。
   // 子域方案是本插件多站点挂载的正式形态：每个站点挂在
   // http://<siteId>.localhost:<port>/ 上，站点看到的 pathname 与它自己的真实
@@ -339,6 +485,7 @@ export function createMirror(options = {}) {
 	function isLocalPath(p){
 	  if(ROOT&&p.indexOf(ROOT+'/')===0)return true;
 	  if(p.indexOf('/__static/')===0)return true;
+	  if(p.indexOf('/wr/')===0)return true;
 	  return p.indexOf('/v1/')===0||p.indexOf('/bridge/')===0||p.indexOf('/webcode/')===0||p.indexOf('/__webcode/')===0;
 	}
 	function toLocal(u){
@@ -358,12 +505,19 @@ export function createMirror(options = {}) {
 	  for(var i=0;i<ASSETS.length;i++){
 	    if(ASSETS[i]===host)return MP+host+(cut<0?'/':rest.slice(cut));
 	  }
-	  return null;
+	  // 0.19.14：本源绝对地址（站点从 API 数据拼出完整地址的罕见形态）→ 去掉
+	  // 协议+主机留路径，落回镜像自己的命名空间。
+	  if(u.indexOf('http://'+location.host+'/')===0)return u.slice(('http://'+location.host).length);
+	  // 其余一切 http(s) 绝对地址（文件/图片服务等未知域）收进 /wr/ 同源转发：
+	  // 中继合并**目标域**的驱动 cookie，查看器/预览的请求不再直打真实站点——
+	  // 用户浏览器在那些域上没有登录态，直打必 401/403（镜像查看器失效的根因）。
+	  return ROOT+'/wr/'+encodeURIComponent(u);
 	}
 	var fetch0=window.fetch;
 	if(fetch0)window.fetch=function(input,init){try{
 	if(typeof input==='string'){var m0=toLocal(input);if(m0!==null)input=m0;}
 	else if(input&&typeof input.url==='string'){var m1=toLocal(input.url);if(m1!==null)input=new Request(m1,input);}
+	else if(input&&typeof input.href==='string'){var m3=toLocal(input.href);if(m3!==null)input=m3;}
 	}catch(e){}return fetch0.call(this,input,init);};
 	var open0=XMLHttpRequest.prototype.open;
 	XMLHttpRequest.prototype.open=function(method,url){try{var m2=toLocal(url);if(m2!==null)url=m2;}catch(e){}return open0.apply(this,arguments);};
@@ -384,7 +538,7 @@ export function createMirror(options = {}) {
 	  var el=ce0(tag,opt);
 	  try{
 	    var t=String(tag||'').toLowerCase();
-	    if(t==='script'||t==='img'||t==='iframe'||t==='source')fixProp(el,'src');
+	    if(t==='script'||t==='img'||t==='iframe'||t==='source'){fixProp(el,'src');if(t==='img'||t==='source')fixProp(el,'srcset');}
 	    else if(t==='link'||t==='a')fixProp(el,'href');
 	  }catch(e){}
 	  return el;
@@ -394,9 +548,43 @@ export function createMirror(options = {}) {
 	  try{
 	    var n=String(name||'').toLowerCase();
 	    if(n==='src'||n==='href'||n==='poster'){var m=toLocal(value);if(m!==null)value=m;}
+	    else if(n==='srcset'){value=String(value).split(',').map(function(p){
+	      var t=p.trim();if(!t)return p;
+	      var sp=t.indexOf(' ');var u=sp<0?t:t.slice(0,sp);
+	      var m2=toLocal(u);if(m2===null)return p;
+	      return sp<0?m2:m2+t.slice(sp);
+	    }).join(', ');}
 	  }catch(e){}
 	  return sa0.call(this,name,value);
 	};
+	// 0.19.14：innerHTML 注入的标签（富文本/预览渲染）不经过 setAttribute /
+	// createElement —— 对**字符串**做属性语境改写。快路径：不含 'http' 与 '//' 的
+	// 字符串原样返回（绝大多数调用零开销）。
+	function rewriteHtmlStr(s){
+	  if(typeof s!=='string')return s;
+	  if(s.indexOf('http')<0&&s.indexOf('//')<0)return s;
+	  // 注意：本脚本整体住在 mirror.js 的模板字符串里，正则里的反斜杠必须双写
+	  //（\\s / \\/ / \\2），否则模板层先把它们吃掉/判八进制非法。
+	  var out=s.replace(/(\\s(?:src|href|poster)\\s*=\\s*)(["'])((?:https?:)?\\/\\/[^"']*)\\2/gi,function(_m,a,q,u){
+	    var m=toLocal(u);return m===null?_m:a+q+m+q;
+	  });
+	  if(ROOT){
+	    out=out.replace(/(\\s(?:src|href|poster)\\s*=\\s*)(["'])(\\/(?!\\/)[^"']*)\\2/gi,function(_m,a,q,p){
+	      return a+q+(isLocalPath(p)?p:ROOT+p)+q;
+	    });
+	  }
+	  return out;
+	}
+	try{
+	  var ih0=Object.getOwnPropertyDescriptor(Element.prototype,'innerHTML');
+	  if(ih0&&ih0.set&&ih0.get)Object.defineProperty(Element.prototype,'innerHTML',{configurable:true,enumerable:true,
+	    get:function(){return ih0.get.call(this);},
+	    set:function(v){var o=v;try{o=rewriteHtmlStr(v);}catch(e){o=v;}return ih0.set.call(this,o);}});
+	}catch(e){}
+	// window.open：新标签打开图片/文件时把绝对地址收进镜像命名空间（新标签加载的
+	// 仍是镜像页 → 全套改写与 cookie 合并照常生效），不再落到未登录的真实站点。
+	var open0=window.open;
+	if(open0)window.open=function(u,n,f){try{if(typeof u==='string'){var m=toLocal(u);if(m!==null)u=m;}}catch(e){}return open0.call(this,u,n,f);};
 })();</script>
 <style data-webcode-singlecol>
 /* 侧栏单栏化：站点自带的双栏布局在窄面板里很挤——隐藏左侧导航列，
@@ -576,6 +764,25 @@ export function createMirror(options = {}) {
         return true;
       }
       return proxyAsset(req, res, 'https://' + host, assetPath, search);
+    }
+
+    // 0.19.14：/wr/<encodeURIComponent(绝对URL)> —— 带驱动 cookie 的任意公网
+    // URL 转发。图片查看器/文件预览的请求是运行时从 API 数据拼出来的**未知域**
+    // 绝对地址（bootstrap 此前只认识上游主机 + 静态资产清单），直打真实站点时
+    // 用户浏览器在那些域上没有登录态 → 401/403。这些请求现在被 toLocal 收进
+    // 本源 /wr/，由这里带着**目标域**的驱动 cookie 转发——「账号一处」性质不变。
+    // SSRF 面与 /__static/ 同一口径：仅公网 http(s)，内网/回环一律拒绝。
+    if (pathname.startsWith(WRAP_SEG)) {
+      let target = '';
+      try { target = decodeURIComponent(pathname.slice(WRAP_SEG.length)) + search; } catch { target = ''; }
+      let t = null;
+      try { t = new URL(target); } catch { t = null; }
+      if (!t || (t.protocol !== 'https:' && t.protocol !== 'http:') || PRIVATE_HOST.test(t.hostname)) {
+        res.writeHead(404, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+        res.end(JSON.stringify({ error: { message: 'mirror: wrap target not allowed' } }));
+        return true;
+      }
+      return proxyWrapped(req, res, t.origin, t.pathname + t.search);
     }
 
     const headers = {};

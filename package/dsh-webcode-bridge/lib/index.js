@@ -2930,7 +2930,10 @@ function imageMarkdown(images) {
               // 真实发出去的正本，这里优先读回它——于是「发出去什么」与「重建时用什么」
               // 恒为同一份字节。读不到（首次运行 / 曾写入失败 / 配了 'off'）才回落
               // 内存序列化：两条路都保住上下文，绝不静默丢弃。
-              const rebuildText = readSessionPrompt(m.sessionKey) ?? m.rebuild();
+              // 0.19.14：落盘正本只对**真实轮**成立。辅助轮（purpose 非空，如压缩）
+              // 的增量正文 = 本轮末尾那条指令，落盘的主会话首轮里没有它——读回来
+              // 重放会丢掉指令本身（摘要对着错误上文产出），必须走本轮自己的 rebuild()。
+              const rebuildText = (m?.purpose ? null : readSessionPrompt(m.sessionKey)) ?? m.rebuild();
               lastSessionRebuildAt.set(m.sessionKey, { at: Date.now(), chars: rebuildText.length });
               while (lastSessionRebuildAt.size > 512) lastSessionRebuildAt.delete(lastSessionRebuildAt.keys().next().value);
               // 整段重建全文同步落盘（0.16.28）：这份文本就是「新开会话时把上下文
@@ -3454,6 +3457,69 @@ function imageMarkdown(images) {
       };
     };
     if (!keyPath) {
+      // ---- 辅助调用（purpose 非空，如 DSH 手动压缩 /compact）----------------
+      //
+      // 真机取证（2026-09-25 探针 + 会话扫描）：压缩调用的 messages = 整段历史
+      // 回放 + 末尾一条 user 压缩指令。旧实现把它当「无会话键的独立首轮」整包
+      // 重发进临时网页会话；真实长会话（本项目 ≈190 万字符历史 ≈110 万 token）
+      // 上必然被 assertContextBudget 的 100 万预算闸拦死（CONTEXT_WINDOW_EXCEEDED）
+      // ——**压缩恰恰只在需要压缩的会话上做不了**，这就是用户报的「compact 不行」。
+      //
+      // 修法（真机 A 相已验证）：历史本来就在主会话的网页对话里，指令只需作为
+      // **增量**发进同一会话，模型对着既有上下文直接产出摘要（探针实测 3 秒、
+      // 结构化摘要逐字复现历史事实标记）。判定复用真实轮的同一套游标机制：
+      // 契约指纹一致 + 内容锚把已发游标重定位到「只多最后一条」才走增量；
+      // 任一不满足（无游标/换账号/历史被改写）回落整段独立首轮。
+      // 两条路都**不碰主游标**：压缩成功后宿主替换 surface，下一真实轮锚点失配
+      // 自然整段重建（摘要即新起点）；压缩失败则游标原样有效，会话照常续跑。
+      const auxKey = options.sessionId && cfg.contextMode === 'session'
+        ? [String(options.sessionId), keyAgentId ? String(keyAgentId) : '', accountKey].filter(Boolean).join('::')
+        : null;
+      const auxSt = auxKey ? sessionState.get(auxKey) : null;
+      const lastMsg = messages.length ? messages[messages.length - 1] : null;
+      if (auxKey && auxSt && lastMsg?.role === 'user' && messages.length >= 2) {
+        const auxToolKey = Array.isArray(options.tools)
+          ? options.tools.map((t) => String(t?.name || '')).filter(Boolean).sort().join(',')
+          : '';
+        const auxContract = contractFingerprintOf({ model, system: options.system, toolNameKey: auxToolKey, extraPrompt, sitePrompt });
+        const re = auxSt.contract === auxContract ? reanchorSent(messages, auxSt.tailHashes) : null;
+        if (re && re.sent === messages.length - 1) {
+          const delta = serializeDelta([lastMsg], 0, auxSt.toolResults || 0, undefined, trainNoteFor(siteId, '', options.tools));
+          const auxTokens = (auxSt.tokens || 0) + estimateTokens(delta.text);
+          log(`aux purpose=${options.purpose} — 主会话游标命中，只发增量 ${delta.text.length} 字符进既有网页会话（key=${auxKey}）`);
+          return {
+            prompt: delta.text,
+            inputTokens: auxTokens + usageOverheadTokens(),
+            usageInput() {
+              // 真实上下文规模 = 主会话已发累计 + 本条指令（网页侧上下文本就含有历史）。
+              const cur = sessionState.get(auxKey);
+              return auxTokens + (Number.isFinite(cur?.outTokens) ? cur.outTokens : 0) + usageOverheadTokens();
+            },
+            meta: {
+              sessionKey: auxKey, fresh: false,
+              model: formatModelId(siteId, slot, model), siteId, slot, accountKey, thinkMode,
+              sendGapMs: clampSendGapMs(sendGapForSlot(settings, accountKey, siteId)),
+              sendGapBasis,
+              // 网页会话槽丢失（桥重启后槽空且页面不在原会话）时按既有语义整段
+              // 重放——临时新会话同样能产出摘要，优于直接失败。
+              rebuild: (hint) => serializeFirstTurn({
+                ...options, extraPrompt, sitePrompt, siteId,
+                ...(hint && Number.isFinite(hint?.maxPromptChars) ? { maxPromptChars: hint.maxPromptChars } : {}),
+              }),
+            },
+            async attach() {
+              const imgs = imagesOfMessages([lastMsg]);
+              if (!imgs.length) return [];
+              const { images, skipped } = await resolveImages(imgs, attachments, options.signal);
+              if (skipped.length) warn('image blocks skipped (unreadable):', JSON.stringify(skipped));
+              return images;
+            },
+            // 辅助轮不动主游标（理由见上方「两条路都不碰主游标」）。
+            commit() {},
+            noteOutput() {},
+          };
+        }
+      }
       const prompt = serializeFirstTurn({ ...options, extraPrompt, sitePrompt, siteId });
       recordPreset(prompt);
       return {
@@ -3461,11 +3527,27 @@ function imageMarkdown(images) {
         // 无会话键的单轮 = 它自己就是一个完整上下文，网页自己的开销在这里也是**一份**。
         inputTokens: estimateTokens(prompt) + usageOverheadTokens(),
         meta: {
+          // 0.19.14：**仅 purpose 辅助轮**（压缩等）显式用自己的会话槽（旧实现无
+          // sessionKey → 驱动落到 'main' 槽，可能被「URL 自愈」接到用户当前正看着的
+          // 那条网页对话上，把整包辅助提示灌进错误会话）。fresh=true 保证每次辅助
+          // 调用都开**新**会话——上一条压缩指令残留在同一临时会话里，会让下一条
+          // 指令对着错误的上文产出摘要。
+          // 无 purpose 的无状态轮（OpenAI 前端裸调用）保持原形态：无 sessionKey，
+          // 走驱动的 sendPrompt 通道，不占会话槽、不参与续跑语义。
+          ...(options.purpose ? {
+            sessionKey: 'aux::' + String(options.purpose) + '::' + String(options.sessionId || 'adhoc'),
+            fresh: true,
+          } : {}),
           model: formatModelId(siteId, slot, model), siteId, slot, accountKey, thinkMode,
           // 发送间隔按**槽**取（不同登录态风控独立）；回落链见 accounts.sendGapForSlot。
           sendGapMs: clampSendGapMs(sendGapForSlot(settings, accountKey, siteId)),
           // 间隔口径（0.16.31）随 meta 一起下发到 executor，与 sendGapMs 同一层。
           sendGapBasis,
+          // fresh=true + rebuild 让 PROMPT_TRUNCATED 的一次性压缩重试也覆盖辅助轮。
+          rebuild: (hint) => serializeFirstTurn({
+            ...options, extraPrompt, sitePrompt, siteId,
+            ...(hint && Number.isFinite(hint?.maxPromptChars) ? { maxPromptChars: hint.maxPromptChars } : {}),
+          }),
         },
         async attach() {
           const imgs = imagesOfMessages(messages);
