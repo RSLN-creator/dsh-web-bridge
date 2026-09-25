@@ -4300,6 +4300,12 @@ window.__ModuleLoader__.load({
               'aria-label': '在桥自带的浏览器窗口打开并登录',
               onClick: toggleWindow,
             }, h(IconGlobe, { size: 15 })),
+            h('button', {
+              className: 'hwb-act-btn' + (frames[siteId]?.live ? ' on' : ''), title:
+                '真实模式：切换到自带内核的画面流（真浏览器行为：图片/文件查看器、下载、弹窗都真实可用；日常浏览用镜像更顺滑）',
+              'aria-label': '切换真实模式', 'aria-pressed': Boolean(frames[siteId]?.live),
+              onClick: () => setFrames(prev => ({ ...prev, [siteId]: { ...(prev[siteId] || { src: siteBase(siteId) }), live: !prev[siteId]?.live } })),
+            }, h(IconBrowse, { size: 15 })),
             onSplit && h('button', {
               className: 'hwb-act-btn', title: '在新面板中打开（可同时看两个不同站点）',
               'aria-label': '在新面板中打开', onClick: onSplit,
@@ -4349,17 +4355,18 @@ window.__ModuleLoader__.load({
             h('button', { className: 'hwb-retry', onClick: toggleWindow }, '改用独立窗口打开'),
             h('button', { className: 'hwb-retry', onClick: reloadFrame }, '重试')),
           // 所有已访问站点的 frame 常驻 DOM（隐藏保活），只显示当前站点的。
-          // 0.20.0 路线 B：LIVE_SITES 里的站点改走画面流 LivePane（真内核投屏），
-          // 链路异常时面板可一键「改用镜像页」回落旧 iframe（f.mirror 置位后本
-          // 会话内恒走镜像，不再自动切回——回落是用户显式选择，不许被自动覆盖）。
-          Object.entries(frames).map(([sid, f]) => (LIVE_SITES.has(sid) && !f.mirror)
+          // 0.21.2 路线还原（用户拍板：日常要 iframe 的原生帧率，镜像做默认）：
+          // 画面流 LivePane 只在 f.live 显式置位时进入（工具栏「真实模式」按钮），
+          // LivePane 内可一键退回镜像。镜像路线的运行时查看器边界与修复方案见
+          // doc/research/2026-09-25-mirror-real-viewer-research.md（SW 拦截层）。
+          Object.entries(frames).map(([sid, f]) => f.live
             ? h(LivePane, {
               key: sid,
               sid,
               slot: accountSlot || '',
               siteName: siteName(sid),
               style: sid === siteId ? null : { display: 'none' },
-              onUseMirror: () => setFrames(prev => ({ ...prev, [sid]: { ...prev[sid], mirror: true } })),
+              onUseMirror: () => setFrames(prev => ({ ...prev, [sid]: { ...prev[sid], live: false } })),
             })
             : h('iframe', {
               key: sid,
@@ -4387,7 +4394,7 @@ window.__ModuleLoader__.load({
           // 『正在加载 DeepSeek 网页..』」）：LivePane 分支没有 iframe，ready
           // 永远不会置位，而这层遮罩是不透光的——把已经连上、正在收帧的画面
           // 整个盖死。画面流分支自带状态遮罩（LivePane 的 mask），这里必须让路。
-          active && !active.ready && !connectError && !(LIVE_SITES.has(siteId) && !active.mirror)
+          active && !active.ready && !connectError && !active.live
             && h('div', { className: 'hwb-frame-status' }, '正在加载 ' + siteName(siteId) + ' 网页…')));
     }
 

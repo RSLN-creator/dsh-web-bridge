@@ -536,8 +536,8 @@ test('接线：右栏全关回收浏览器——busy 期间不关（不能掐断
 
 test('接线：客户端有 LivePane、LIVE_SITES（先 DeepSeek）与镜像回落按钮', () => {
   assert.ok(clientSrc.includes('function LivePane('));
-  assert.ok(clientSrc.includes("new Set(['deepseek'])"), 'P1 先 DeepSeek');
-  assert.ok(clientSrc.includes('改用镜像页'), '必须保留镜像回落入口');
+  assert.ok(clientSrc.includes('f.live') && clientSrc.includes('Object.entries(frames).map(([sid, f]) => f.live'), '画面流必须是显式 opt-in（默认镜像，0.21.2 路线还原）');
+  assert.ok(clientSrc.includes('真实模式'), '镜像路线必须有进入真实模式的入口');
   assert.ok(clientSrc.includes('/webcode/live?account='));
 });
 
