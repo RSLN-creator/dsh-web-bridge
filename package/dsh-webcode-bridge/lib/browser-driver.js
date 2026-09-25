@@ -1004,6 +1004,19 @@ export function createBrowserDriver(options = {}) {
     } catch (e) { warn('session store save failed:', e?.message); }
   }
   function conversationFor(key) { loadStore(); return conversations.get(String(key || 'main')) || null; }
+  /** 0.21.1：按 DSH 会话 id 前缀查（写入形状是 sessionId::accountKey，0.19.4 起带账号段）。
+   *  命名链路只拿得到裸 sessionId；精确 miss 后在这里做前缀匹配，优先本槽自己的
+   *  accountKey（避免多账户槽之间串标题）。找不到返回 null，调用方回落启发式。 */
+  function conversationForSession(sessionId) {
+    loadStore();
+    const id = String(sessionId || '');
+    if (!id || id.includes('::')) return conversations.get(id) || null;
+    const own = conversations.get(id + '::' + (slot === 'default' ? siteId : siteId + '#' + slot));
+    if (own) return own;
+    const prefix = id + '::';
+    for (const [k, v] of conversations) { if (k.startsWith(prefix)) return v; }
+    return null;
+  }
   /**
    * 写下「这个 DSH 会话 ⇄ 哪个网页会话」这条映射（落盘，跨轮次/跨进程存活）。
    *
@@ -4120,10 +4133,13 @@ export function createBrowserDriver(options = {}) {
       })));
     },
     async openPage(url) {
+      if (!ctx) await ensure();   // 可能已被空闲回收（见 index.js 的 onAllClosed）
       if (!ctx?.newPage) throw new Error('browser not launched');
       const p = await ctx.newPage();
       if (url) await p.goto(String(url), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
-      return await this.listPages();
+      // 返回**新页的 id**（0.21.2）。旧实现返回整份列表，调用方无从知道哪一页是刚开的，
+      // 于是「+」开了新页却仍把画面停在旧页上——用户报的「你直接新开了页面干嘛不用」。
+      return { ok: true, pageId: livePageId(p) };
     },
     async closePage(pageId) {
       const p = liveResolve(pageId);
@@ -4139,6 +4155,9 @@ export function createBrowserDriver(options = {}) {
     },
     /** 取某页的 CDP 会话（pageId 缺省 = 自动化页）。hub 据此 startScreencast。 */
     async attach(pageId) {
+      // 浏览器可能已被空闲回收（右栏关掉后，见 index.js 的 onAllClosed）：
+      // 先按需拉起，否则面板在回收后第一次连接会直接报「page not found」。
+      if (!ctx) await ensure();
       if (!ctx?.newCDPSession) throw new Error('browser not launched');
       const p = liveResolve(pageId);
       if (!p) throw new Error('page not found: ' + pageId);
@@ -4163,7 +4182,7 @@ export function createBrowserDriver(options = {}) {
   // sessionSlot 与 status().sessionSlot 同源（sessionSlotFor）：控制面
   //（`GET/POST /__webcode/session-slot`）与面板都要能按 key 直接问一次，
   // 而不是只能读「最近一个 key」的 status 投影。省略 key = 最近一次 sendTurn 的 key。
-  return { sendPrompt, sendTurn, resetConversation, conversationFor, sessionSlot: sessionSlotFor, connect, interact, openLogin, openWindow, closeWindow, importStorageFromProfile, status, close, diagnostics, getToken, profileCookies, writeProfileCookies, userAgent, probeAttachment, readAccountIdentity, get page() { return page; }, webApi, listSessions, fetchHistory, screenshotBase64, setImageLimitsProvider, live };
+  return { sendPrompt, conversationForSession, sendTurn, resetConversation, conversationFor, sessionSlot: sessionSlotFor, connect, interact, openLogin, openWindow, closeWindow, importStorageFromProfile, status, close, diagnostics, getToken, profileCookies, writeProfileCookies, userAgent, probeAttachment, readAccountIdentity, get page() { return page; }, webApi, listSessions, fetchHistory, screenshotBase64, setImageLimitsProvider, live };
 }
 
 function abortError() {

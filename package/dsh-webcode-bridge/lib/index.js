@@ -705,6 +705,43 @@ export function apply(ctx, config = {}) {
     cfg.version = version;
   }
   const sessionState = new Map();
+  // 0.21.1：会话游标持久化（long-term-issues #2 的落地）。真机症状（用户原话
+  // 「dsh 重启后不同会话」）：sessionState 是纯内存 Map，dsh web 重启即清零 →
+  // no-cursor → fresh → 整段重发；而网页会话身份早已落盘（webcode-sessions-*.json），
+  // 丢的只是「发到第几条」。修法：commit/invalidate 时把条目原子落盘到 profile 目录，
+  // 启动时回灌。**陈旧条目是安全的**：契约指纹 + 内容锚点（0.16.28）会自愈——
+  // 工具/系统提示变了走 contract-changed，transcript 漂了走 anchor-lost，都会
+  // 如实 fresh，持久化不会把旧游标错当新游标。注入驱动（测试替身）与缺失
+  // profileDir 的形态一律跳过（持久化只在**显式传入 profileDir** 时启用——生产必传，
+  // 不传的裸测试形态回落 DEFAULTS 的真实 profile，绝不能被测试污染）。
+  const cursorStatePath = () => path.join(cfg.profileDir, 'webcode-cursor-state.json');
+  const cursorPersistenceUsable = () => Boolean(config && config.profileDir);
+  if (cursorPersistenceUsable()) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(cursorStatePath(), 'utf8'));
+      if (raw && raw.version === 1 && raw.entries && typeof raw.entries === 'object') {
+        for (const [k, v] of Object.entries(raw.entries)) {
+          if (sessionState.size >= 512) break;
+          if (v && Number.isFinite(v.sent) && typeof v.fingerprint === 'string' && Array.isArray(v.tailHashes)) {
+            sessionState.set(k, v);
+          }
+        }
+        if (sessionState.size) log('cursor state restored:', sessionState.size, 'entries');
+      }
+    } catch { /* 首跑或文件损坏：从零开始，安全（契约 + 锚点自愈） */ }
+  }
+  let cursorPersistFailures = 0;
+  function persistCursorState() {
+    if (!cursorPersistenceUsable()) return;
+    try {
+      fs.mkdirSync(cfg.profileDir, { recursive: true });
+      const tmp = cursorStatePath() + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify({ version: 1, savedAt: Date.now(), entries: Object.fromEntries(sessionState) }));
+      fs.renameSync(tmp, cursorStatePath());
+    } catch (e) {
+      if (++cursorPersistFailures <= 3) warn('cursor state save failed:', e?.message);
+    }
+  }
   // 自动续跑的**整会话累计**（0.19.3，用户指令「加整会话累计」）。落盘根与提示词
   // 落盘同一处（`continuations/<sessionKey>.json`），因此「整会话」跨 dsh web 重启
   // 依然成立；测试进程自动只走内存（守卫在 continue-budget.js，与 prompt-store 对称）。
@@ -2418,8 +2455,13 @@ function imageMarkdown(images) {
     // 只读**已经存在**的驱动实例，绝不懒创建（见上）。默认槽的键就是 siteId。
     const d = siteId === 'deepseek' ? driver : drivers.get(formatAccountKey(siteId, DEFAULT_SLOT));
     if (!d || typeof d.listSessions !== 'function' || typeof d.conversationFor !== 'function') return null;
-    const conv = d.conversationFor(String(sessionId));
-    const webSessionId = conv?.webSessionId;
+    const key = String(sessionId);
+        // 0.21.1：键形修复。写入形状是 `<sessionId>::<accountKey>`（0.19.4 起带账号段），
+        // 裸 id 直查必然 miss ⇒ 命名永远回落「首句截 16 字」。先裸 id（兼容旧落盘），
+        // 再按会话前缀扫（conversationForSession 在驱动侧做前缀匹配）。
+        const conv = d.conversationFor(key)
+          || (typeof d.conversationForSession === 'function' ? d.conversationForSession(key) : null);
+        const webSessionId = conv?.webSessionId;
     if (!webSessionId) return null;
     const dir = await d.listSessions(100);
     const hit = (dir?.sessions || []).find((s) => s.id === webSessionId);
@@ -2771,7 +2813,37 @@ function imageMarkdown(images) {
   // 实时画面（损伤帧 + 输入回传）。判据与协议见 lib/live.js，方案见
   // doc/plans/PLAN-2026-09-25-live-workspace.md。getDriver 惰性解析——连接到达
   // 时驱动可能还没建（driverFor 会按需懒建）。
-  const liveHub = createLiveHub({ getDriver: (accountKey) => driverFor(accountKey), log, warn });
+  const liveHub = createLiveHub({
+    getDriver: (accountKey) => driverFor(accountKey),
+    // 右栏全部面板关闭 ⇒ 回收这个账户的浏览器（0.21.2）。
+    //
+    // 用户要求：「没有使用的就把后台一并关了」「原网页只有使用时候关闭不影响」。
+    // 也就是「右栏在用时浏览器才该活着」——右栏关掉后那个 Edge 进程只是白占内存。
+    //
+    // **两条安全线，缺一不可**：
+    //   ① 正在跑一轮时绝不关。关掉 = 掐断正在生成的回复（driver 的 ctx.close()
+    //      会让进行中的捕获链一起死）。这种情况下不关，等下一轮结束后自然回收
+    //      ——driver 已有「轮次结束把窗口收回无头」的路径，这里不重复实现。
+    //   ② 关的是**浏览器**，不是驱动对象。驱动仍留在 drivers 表里，下一轮或下次
+    //      打开右栏时 ensure() 会重新拉起（attach/openPage 已加 ensure 兜底）。
+    //      这样「关」是可逆的，不会把某个账户的连接状态弄丢。
+    onAllClosed: (accountKey) => {
+      let d = null;
+      try { d = driverFor(accountKey); } catch { return; }
+      if (!d) return;
+      let st = null;
+      try { st = d.status?.() || null; } catch { return; }
+      // 跑着轮次：不动。等它自己结束（不排队，避免「关一次被拒就永远不关」）。
+      if (st?.busy === true) {
+        log('live: browser kept (web turn in progress) for ' + accountKey);
+        return;
+      }
+      Promise.resolve(d.close?.())
+        .then(() => log('live: browser reclaimed after last panel closed (' + accountKey + ')'))
+        .catch((err) => warn('live: browser reclaim failed (' + accountKey + '): ' + String(err?.message || err)));
+    },
+    log, warn,
+  });
   const relay = createRelay({
     ...cfg,
     // 0.20.0 工作区画面流（路线 B）：hub 借中继 httpServer 的 upgrade 事件挂
@@ -3599,6 +3671,7 @@ function imageMarkdown(images) {
         // 表现成「明明发出去了，下一轮还是从头重发」——与它要防的那个洞正好相反。
         cededCursorKeys.delete(keyPath);
         sessionState.delete(keyPath);
+        persistCursorState();
       },
       async attach() {
         // a fresh turn replays the whole transcript → attach every image in it;
@@ -3634,6 +3707,7 @@ function imageMarkdown(images) {
           outTokens: st.outTokens || 0,
         });
         if (sessionState.size > 512) sessionState.delete(sessionState.keys().next().value);
+        persistCursorState();
       },
     };
   };

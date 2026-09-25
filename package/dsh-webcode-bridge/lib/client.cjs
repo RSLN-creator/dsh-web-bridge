@@ -3675,6 +3675,16 @@ window.__ModuleLoader__.load({
     // P1 范围：只有 LIVE_SITES 里的站点走画面流（先 DeepSeek 跑通再铺开）；面板
     // 上保留「改用镜像页」按钮，链路异常时一键回落到旧 iframe 路线（不删旧路）。
     const LIVE_SITES = new Set(['deepseek']);
+    /**
+     * 本面板的有效 dpr（0.21.2）。
+     *
+     * ⚠️ **必须与 `lib/live.js` 的 `VP_MAX_DPR` 逐字一致**。服务端用它把页面渲染成
+     * 「面板 CSS × dpr」，客户端用它把画布 backing 设成同一个值——两端算出同一个数
+     * 才是 1:1（源图 = 画布，drawImage 不做任何重采样）；任一端改口径就会重新引入
+     * 上采样模糊，这是本次修复最容易回归的一点。
+     * 上限 2 是因为更高 dpr 的画面面积增长快于观感收益，且编码耗时随面积线性涨。
+     */
+    const panelDpr = () => Math.max(1, Math.min(2, window.devicePixelRatio || 1));
     function LivePane({ sid, slot, siteName, style, onUseMirror }) {
       const [pages, setPages] = React.useState([]);
       const [current, setCurrent] = React.useState(null);
@@ -3695,7 +3705,7 @@ window.__ModuleLoader__.load({
           // 建连即报一次面板尺寸（hub 建连默认视口在 resize 到达前可能比例不合）。
           const box = canvasRef.current?.parentElement;
           if (box && box.clientWidth > 40 && box.clientHeight > 40) {
-            send({ t: 'resize', w: Math.round(box.clientWidth), h: Math.round(box.clientHeight) });
+            send({ t: 'resize', w: Math.round(box.clientWidth), h: Math.round(box.clientHeight), dpr: panelDpr() });
           }
         };
         ws.onmessage = async (ev) => {
@@ -3843,7 +3853,10 @@ window.__ModuleLoader__.load({
         let timer = null;
         const report = () => {
           const w = Math.round(box.clientWidth), h = Math.round(box.clientHeight);
-          if (w > 40 && h > 40) send({ t: 'resize', w, h });
+          // dpr 一并上报（0.21.2）：服务端据此把页面渲染成「面板 CSS × dpr」，
+          // 与下面 drawImage 的 backing 尺寸（box.clientWidth × dpr）相等 ⇒ 1:1 落笔。
+          // 拖到不同缩放比的显示器上时 dpr 会变，所以每次 resize 都重报，不能只报一次。
+          if (w > 40 && h > 40) send({ t: 'resize', w, h, dpr: panelDpr() });
         };
         const ro = new ResizeObserver(() => {
           if (timer) clearTimeout(timer);
@@ -3851,6 +3864,24 @@ window.__ModuleLoader__.load({
         });
         ro.observe(box);
         return () => { if (timer) clearTimeout(timer); ro.disconnect(); };
+      }, []);
+
+      // 0.21.2 主题同步：把宿主的昼夜状态报给 hub，hub 用 prefers-color-scheme 仿真
+      // 推给页面——站点自己的深浅色逻辑（CSS 媒体查询、JS matchMedia）因此跟着 DSH 走，
+      // 不用注入任何 CSS，也不用猜站点的主题实现方式。
+      //
+      // 判据取自 DSH 自己的主题引导脚本：它把深色标记在 document.body 的
+      // `data-ds-dark-theme` 属性上（见 @deepseek-ai/dsh-client-ui-theme 的
+      // bootThemeBodyScript）。因此观察 body 属性即可，不依赖任何内部 API；
+      // 宿主若改换实现，只需跟着改这一条判据。
+      React.useEffect(() => {
+        const readDark = () => document.body.hasAttribute('data-ds-dark-theme');
+        const push = () => send({ t: 'theme', dark: readDark() });
+        push();   // 建连即报一次，页面不用等下一次切换
+        if (typeof MutationObserver === 'undefined') return;
+        const mo = new MutationObserver(push);
+        mo.observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] });
+        return () => mo.disconnect();
       }, []);
 
       // 绘制：canvas 按 devicePixelRatio 放大（超采样 1:1 落笔），高质量重采样
@@ -3936,27 +3967,23 @@ window.__ModuleLoader__.load({
         e.preventDefault();
       }
 
-      const tabTitle = (p) => {
-        const t = String(p.title || '').trim();
-        return t ? (t.length > 18 ? t.slice(0, 18) + '…' : t) : (String(p.url || '').replace(/^https?:\/\//, '').slice(0, 24) || '页面');
-      };
-
+      // 0.21.2：**删掉面板内那条自建状态行**（原先的 .hwb-live-bar：
+      // 「● DeepSeek · 实时画面」+ 页面标签 + 「+」）。
+      //
+      // 用户原话（2026-09-25）：「1.顶部那个保留，应该是原来 iframe 路线那个是吧
+      // 2.多的这一行删除」。判据成立：上面 `.hwb-toolbar`（站点图标 + 站点名 +
+      // 状态点 + 状态词）已经把这行的全部信息说了一遍——站点名重复、
+      // 「实时画面」是内部状态词（用户不需要知道画面走 RTC 还是投屏）。
+      //
+      // 用户还指出这一行**在骗人**：「你直接新开了页面干嘛不用」——点「+」开了新页，
+      // 行里的标签换成了新页标题，画面却仍停在旧页。两个修法都做了：
+      //   · 画面跟随（hub 的 `open` 分支现在会 attach 到新页，见 lib/live.js）；
+      //   · 整行删除，不再用「标题已变」暗示一件没发生的事。
+      //
+      // `pages` / `current` 两个 state 保留：hub 仍按 `pages` 消息推送页面列表，
+      // 是「同一账户开了几个页」的唯一读数来源（`/__webcode/status` 之外）；
+      // 页面切换/关闭的协议分支也仍在，只是当前没有 UI 触发它们。
       return h('div', { className: 'hwb-live', style },
-        h('div', { className: 'hwb-live-bar' },
-          h('span', { className: 'hwb-live-dot' + (status === 'live' ? ' on' : '') }),
-          h('span', { className: 'hwb-live-status' }, siteName + ' · ' + (status === 'live' ? '实时画面' : status)),
-          h('span', { style: { flex: 1 } }),
-          pages.map((p) => h('button', {
-            key: p.id,
-            className: 'hwb-live-tab' + (p.id === current ? ' on' : ''),
-            title: p.url || '',
-            onClick: () => send({ t: 'activate', pageId: p.id }),
-          }, tabTitle(p), p.active && h('span', { className: 'hwb-live-tag', title: '驱动自动化正在使用这一页' }, '驱'),
-            p.id !== current && h('span', {
-              className: 'hwb-live-close', title: '关闭这个页面',
-              onClick: (e) => { e.stopPropagation(); send({ t: 'close', pageId: p.id }); },
-            }, '×'))),
-          h('button', { className: 'hwb-live-new', title: '打开 ' + siteName + ' 主页（新页面）', onClick: () => send({ t: 'open', url: siteBase(sid) }) }, '+')),
         h('div', { className: 'hwb-live-view' },
           h('canvas', {
             ref: canvasRef,
@@ -4685,16 +4712,10 @@ window.__ModuleLoader__.load({
         ".hwb-browser-frame{display:block;width:100%;height:100%;min-height:0;border:0;background:#fff}",
         // ---- 0.20.0 工作区画面流 LivePane ----
         ".hwb-live{position:relative;display:flex;flex-direction:column;width:100%;height:100%;min-height:0;background:var(--dsw-alias-bg-base,#111)}",
-        ".hwb-live-bar{display:flex;align-items:center;gap:6px;padding:4px 8px;font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary,#8a8f98);border-bottom:.5px solid var(--dsw-alias-border-l3,#8882);overflow-x:auto;white-space:nowrap}",
-        ".hwb-live-dot{flex:none;width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-border-l3,#8885)}",
-        ".hwb-live-dot.on{background:#34a853}",
-        ".hwb-live-status{flex:none}",
-        ".hwb-live-tab{flex:none;max-width:150px;overflow:hidden;text-overflow:ellipsis;padding:1px 8px;border:.5px solid var(--dsw-alias-border-l3,#8883);border-radius:10px;background:transparent;color:inherit;font-size:12px;line-height:18px;cursor:pointer}",
-        ".hwb-live-tab.on{border-color:var(--dsw-alias-border-l2,#8884);background:var(--dsw-alias-interactive-bg-hover,#8882)}",
-        ".hwb-live-tag{flex:none;margin-left:4px;padding:0 4px;border-radius:6px;background:#8882;font-size:10px}",
-        ".hwb-live-close{margin-left:4px;opacity:.6}",
-        ".hwb-live-close:hover{opacity:1}",
-        ".hwb-live-new{flex:none;width:20px;height:20px;padding:0;border:.5px solid var(--dsw-alias-border-l3,#8883);border-radius:10px;background:transparent;color:inherit;font-size:13px;line-height:18px;cursor:pointer}",
+        // 0.21.2 删除：原先这里还有 .hwb-live-bar / -dot / -status / -tab / -tag /
+        // -close / -new 七条样式，服务于面板内那条自建状态行。该行已按用户要求
+        // 删除（上面 LivePane 的注释记录理由），样式一并删掉——留着会是七条
+        // 永远匹配不到元素的死规则。
         ".hwb-live-view{position:relative;flex:1;min-height:0}",
         ".hwb-live-canvas{position:absolute;inset:0;width:100%;height:100%;outline:none;cursor:default}",
         ".hwb-live-video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#111;outline:none}",

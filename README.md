@@ -134,6 +134,49 @@
 - **`pnpm test` 恢复可跑**（0.16.9）：lockfile 曾把可选 peerDep 记为 `specifier:'*'` 对
   `version:0.1.5-alpha.1`，pnpm 的前置检查必然失败，且在 CI 下**会先删 `node_modules` 再报错**——
   全量测试连启动都做不到。已把 specifier 收紧为 `^0.1.5-alpha.1`。
+- **右栏画面清晰度**（0.21.2）：0.21.1 修好了**比例**，但**分辨率上限 1280×2000 没动**——
+  客户端画布 backing 是「面板 CSS × dpr」，服务端却把页面渲染成「面板 CSS × k，
+  k ≤ min(2, 1280/宽, 2000/高)」。只要面板宽 × dpr > 1280（临界点 **640 CSS px**），
+  源图就小于画布，`drawImage` 上采样 ⇒ 糊。实算最坏 2.19×（1400×900 @dpr2）；
+  **RTC 路线同样中招**（`rtc-offer` 只停 screencast、不撤 Emulation，页面仍被压在 1280 宽）。
+  现在视口 = **面板 CSS × dpr**（= 画布 backing），两端 1:1、零重采样；上限抬到 2560×3200
+  覆盖「1280×1600 面板 @dpr2」，超出时按比例收缩（误差 <0.5%）。dpr 由面板经 `resize` 上报，
+  上限与客户端 `panelDpr()` 同口径（2）。
+- **三档画质：静止无损 PNG / 运动中半分辨率**（0.21.2）：用户要「高精度 + 低占用」，
+  一个折中参数做不到，改为按内容状态换编码——`idle` 用 **PNG 全分辨率**（损伤帧在静止时
+  本就稀疏，无损几乎不增开销，**文字零 JPEG 伪影**）、`stream` 用 JPEG q88 全分辨率、
+  `motion` 用 JPEG q55 **0.55× 出帧**（滚动时降分辨率换帧率）。判据从「500ms 内 ≥3 帧」
+  换成**帧间隔 EWMA**（纯函数 `pickStreamMode`）：损伤帧在静止时一帧不发，用计数会把
+  「静止但编码慢」误判成静止并回满质量，形成正反馈。
+- **RTC 锐度四件套**（0.21.2）：`contentHint='detail'`（W3C 映射到 maintain-resolution）、
+  `degradationPreference='maintain-resolution'`、**显式 `maxBitrate` 20 Mbps**、帧率随档位
+  （运动 60 / 其余 30）。缺 `contentHint` 时编码器按「摄像头」假设工作，**为保帧率主动降分辨率**；
+  不给 `maxBitrate` 则走 BWE 慢爬——实测 VP9 在 3 Mbps 上要 **12 秒**才收敛，收敛前持续降分辨率，
+  这正是「刚滚起来是糊的、过十几秒才清楚」。本机是回环、带宽无穷，没有理由让它慢慢猜。
+- **右栏 UI 与生命周期**（0.21.2）：删掉面板内那条自建状态行（`.hwb-live-bar`，
+  「● DeepSeek · 实时画面」+ 页签 + 「+」）——上面 `.hwb-toolbar` 已含站点名与状态，
+  那行是重复信息且**在骗人**（点「+」开了新页，行里标题变了、画面却没跟着换）。
+  新页现在**立刻成为画面**（`openPage` 返回新页 id，hub 收到即 attach）。
+  右栏**全部面板关闭 ⇒ 回收该账户浏览器**（省内存；正在跑轮次时不关，避免掐断回复；
+  驱动对象保留在表中，下一轮 `ensure()` 重新拉起，回收可逆）。
+  新增**昼夜同步**：客户端观察 DSH 的 `data-ds-dark-theme`，经 `Emulation.setEmulatedMedia`
+  把 `prefers-color-scheme` 推给页面，站点深浅色跟着宿主走。
+- **右栏画面流比例适配**（0.21.1）：`viewportForPanel` 的宽、高曾**各自独立**做
+  `max(下限, min(上限))`，任一维触边就改写视口比例；客户端按 `contain` 居中绘制
+  ⇒ 比例不等的部分全变黑边，观感即「不适配窗口大小」。实算最坏 −68%（全屏工作区
+  2400×1200 → 视口 0.640 vs 面板 2.000），且**RTC 路线同样受影响**（`rtc-offer` 只停
+  screencast、不停 Emulation，getDisplayMedia 采到的仍是失配比例）。现改为**一次按比例
+  缩放**：先求唯一标量 `k = clamp(min(1280/w, 2000/h), 0.25, 2)` 再同时缩放宽高，
+  比例严格等于面板（10/10 组误差 0.0%，原来就正确的两组数值逐字不变），k 上限仍为 2
+  ⇒ 0.20.2 的 ×2 超采样画质手段完整保留。护栏 `test/live-view.test.mjs` 从「宽高双钳制」
+  改判「比例误差 < 0.5% 且双上限同时成立」。
+- **RTC 状态机两处漏判**（0.21.1）：`rtcActive` 此前只被**写**、没有任何产帧路径读它，
+  于是 RTC 接管后仍有两条路把 JPEG 投屏**重新拉起**——`adaptTimer`（250ms 轮询判定切画质）
+  与 `resize` 分支（拖分栏每 120ms 一次）。后果是 RTC 视频与 JPEG 编码同时跑、CPU 翻倍，
+  而客户端 canvas 此时 `visibility:hidden`，帧根本没人看。现两处各加 `rtcActive` 守卫，
+  且守卫只挡 RTC 活跃期（`rtc-failed` 回落投屏后 resize 照常生效）。
+  护栏：`test/live-view.test.mjs` 的 RTC 守卫 A/B 与反向线三条用例（缺守卫时 A/B 必失败，
+  已用变异测试确认）。
 
 [进度台账](doc/progress.md)记录当前走到哪与下一步；[长期问题](doc/long-term-issues.md)记录已知缺陷与「为什么不现在修」；[全局诊断](doc/diagnosis-2026-09-16.md)给出一次完整的进度/缺陷/质量/框架评估；[安全审查](doc/security-review.md)记录实际防护及剩余限制；[审查入口](doc/review-guide.md)给出代码地图与探针清单。
 

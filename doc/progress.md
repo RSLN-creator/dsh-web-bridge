@@ -3528,3 +3528,109 @@ node --test test/upload-attachment-structure.test.mjs   → 4/4 pass
   **一个字符都不截**——字段名说的是「会发多少」，读数却是「假如走附件会上传多少」。
   现在 inline 一律 `truncate:false`、`payloadChars = total`、`kept:null`；「若走附件会上传
   多少」只在 `mode:'attach'` 时表达。护栏：`test/attach-callsite.test.mjs` ⑦。
+
+## 0.21.1 —— 右栏画面流比例适配 + RTC 状态机守卫（2026-09-25）
+
+来源：用户三问（①参考项目优化空间 ②数学可优化算法 ③为什么右栏预览不适配所有窗口比例、是否启动写死）。
+取证报告：[doc/research/2026-09-25-live-preview-adaptation-analysis.md](research/2026-09-25-live-preview-adaptation-analysis.md)
+
+### 一、问题③ 根因：写死了三层，且没有一层保比例
+
+- 第一层 lib/browser-driver.js:1687：启动视口写死 1280×1440（liveHeaded）/ 640×900；lib/index.js:194 默认 liveHeaded: true。
+- 第二层 **病根** lib/live.js viewportForPanel：宽、高各自独立 max(下限, min(上限))，任一维触边即改写比例。
+- 第三层：缺省回落固定 1024×1440。
+- 客户端 contain 居中 + 黑底（lib/client.cjs drawImage）⇒ 比例不等部分全变黑边。
+- **RTC 路线没绕开**：rtc-offer 只停 screencast、不停 Emulation，getDisplayMedia 采到的仍是失配比例。
+- 右侧 tab 救不了：面板宽度由官方组件 width prop 决定，桥只能读不能写。
+- 旧测试把失配钉成规格：live-view.test.mjs 原断言「宽高双钳制」。
+
+### 二、修复（P0 两项，共 ~15 行）
+
+1. iewportForPanel 改保比例：k = clamp(min(1280/w, 2000/h), 0.25, 2)，再 (round(w*k), round(h*k))。
+   实算 10/10 组误差 0.0%；原来正确的两组（460×860→920×1720、500×1000→1000×2000）数值逐字不变。
+2. RTC 守卫：adaptTimer 开头 if (!current || current.rtcActive) return;；resize 分支 if (!current.rtcActive) await startStream(...)。
+
+### 三、验证
+
+- 
+ode test/live-view.test.mjs → **23/23 pass**（新增 3 条 viewportForPanel + 3 条 RTC 守卫）。
+- **变异测试**：临时移除两处守卫 → 守卫 A/B 立即失败、反向线仍通过 ⇒ 护栏真实承载。
+- 全量：test/*.test.mjs 逐文件 in-process 跑 → **92 文件全通过**。
+  注：沙箱下 
+ode --test spawn 子进程报 EPERM，改为逐文件直跑；eply-log.test.mjs 的
+  「测试进程守卫」用例要求 NODE_TEST_CONTEXT（仅 node --test 设置），直跑会假失败，
+  显式设该变量后 4/4 pass —— 是调用方式产物，非回归。
+
+### 四、未做（P1–P3，已在报告登记）
+
+- P1 缺省视口由面板推导；P2 ack 端到端背压、画质控制器换帧间隔 EWMA；
+  P3 有头启动视口不再写死（影响离屏定位与任务栏隐藏三件套，需真机验证）。
+
+## 0.21.2 —— 清晰度（视口对齐画布 + 三档画质 + RTC 四件套）+ 右栏 UI/生命周期（2026-09-25）
+
+来源：用户四问——①「除了静止，动起来也需要画面内」②「高精度以及低占用」③「打开浏览器逻辑」
+④「关闭后的逻辑」「没同步白天黑夜模式」。取证报告：
+[doc/research/2026-09-25-live-sharpness-framerate-research.md](research/2026-09-25-live-sharpness-framerate-research.md)。
+
+### 一、糊的真因：1280×2000 上限把「对齐」破坏了（0.21.1 漏掉的）
+
+- 客户端画布 backing = `面板CSS × min(dpr,2)`；服务端渲染成 `面板CSS × k`，`k ≤ min(2, 1280/w, 2000/h)`。
+- **临界点 640 CSS px**（1280÷2）——「典型侧栏」宽度附近，所以小侧栏看着还行，全屏最糊。
+- 实算：1000×1200@dpr2 → 源 1280×1536 vs 画布 2000×2400 = **1.56× 上采样**；1400×900@dpr2 → **2.19×**。
+- **RTC 同样中招**：`rtc-offer` 只 `Page.stopScreencast`，**不撤 Emulation**，页面仍被压在 1280 宽、dsf=1。
+- 修法：视口 = **面板 CSS × dpr**（= 画布 backing），两端 1:1；上限抬到 2560×3200。
+  面板经 `resize` 上报 dpr；`VP_MAX_DPR=2` 与 client 的 `panelDpr()` 同口径（**最易回归点**）。
+
+### 二、三档画质（高精度 + 低占用的落点）
+
+| 档 | 触发 | 编码 | 理由 |
+| --- | --- | --- | --- |
+| idle | 距上帧 ≥450ms | **PNG 全分辨率** | 损伤帧静止时稀疏，无损几乎不增开销，**文字零 DCT 伪影** |
+| stream | 帧间隔中等 | JPEG q88 全分辨率 | 模型流式吐字，够清晰 |
+| motion | 帧间隔 EWMA <90ms | JPEG q55 **0.55×** | 滚动降分辨率换帧率，运动中看不出细节 |
+
+判据从「500ms 内 ≥3 帧」换成**帧间隔 EWMA**（纯函数 `pickStreamMode`）：损伤帧静止时一帧不发，
+用计数会把「静止但编码慢」误判成静止并回满质量 ⇒ 正反馈。4 个魔数收敛成 3 个。
+
+### 三、RTC 锐度四件套
+
+1. `contentHint='detail'` → W3C 映射 `maintain-resolution`（缺省按「摄像头」假设，**为保帧率主动降分辨率**）
+2. `degradationPreference='maintain-resolution'`（sender 参数层，已建连接更可靠）
+3. **显式 `maxBitrate` 20 Mbps**：不给则走 BWE 慢爬，实测 VP9 在 3 Mbps 要 **12 秒**收敛，
+   收敛前持续降分辨率——即「刚滚起来糊、十几秒后清楚」。回环带宽无穷，没理由让它猜。
+4. 帧率随档位：motion 60 / 其余 30。
+
+### 四、右栏 UI 与生命周期（用户③④）
+
+- **删面板内自建状态行**（`.hwb-live-bar` + 7 条样式）：上面 `.hwb-toolbar` 已含站点名与状态；
+  且那行**在骗人**——点「+」开新页后标签标题变了、画面没换。
+- **新页立刻成为画面**：`openPage` 返回 `{ ok, pageId }`，hub 的 `open` 分支收到即 `attach(pageId)`。
+- **右栏全关 ⇒ 回收浏览器**：`onAllClosed` 钩子 → index.js 判 `busy`（跑轮次不关，避免掐断回复），
+  否则 `driver.close()`；**驱动留在 drivers 表**，下一轮 `ensure()` 重新拉起（回收可逆）。
+  `openPage`/`attach` 各加 `if (!ctx) await ensure()` 兜底。
+- **昼夜同步**：客户端 `MutationObserver` 观察 `document.body[data-ds-dark-theme]`
+  （DSH 自己的主题引导属性），经 `{t:'theme',dark}` 上报；hub 用 `Emulation.setEmulatedMedia`
+  推 `prefers-color-scheme`，站点深浅色跟着宿主走。
+
+### 五、参考项目与文献
+
+- `reference/steel-browser` `casting.handler.ts:382-399`：**它设了 `deviceScaleFactor`**（本桥恒 1）。
+- `reference/puppeteer-stream` `extension/options.ts`：**显式 `videoBitsPerSecond`**（本桥 RTC 全没设）。
+- sciverse 检索（本地 CLI，已登录）：JPEG 8×8 块假设对文字**不成立**（PatchSVD 2024）；
+  高压缩比显著丧失文字可读性（2023）；屏幕内容需专门编码工具（IEEE PCS 2012）。
+- 社区清单（awesome-deepseek-harness）：`dsh-remote-desktop`（移动端外壳）、`dsh-click`（截图）、
+  `dsh-web-workbench`（iframe 预览）——无更优架构。**差距在参数，不在架构。**
+
+### 六、验证
+
+- `node test/live-view.test.mjs` → **30/30 pass**（新增 12 条：视口不变量/dpr 同口径/超上限保比例/
+  三档画质/EWMA 判据/RTC 四件套/回收 busy 守卫/主题同步/状态行已删/新页跟随）。
+- 全量 `test/*.test.mjs` → **91/92**；唯一失败 `reply-log.test.mjs` 要求 `NODE_TEST_CONTEXT`
+  （仅 `node --test` 设置），显式设该变量后 **4/4 pass** ⇒ 调用方式产物，非回归。
+- RTC 模板探针：三个占位符替换后**无残留**、语法有效、四个旋钮全部在位。
+
+### 七、未做
+
+- P2 ack 端到端背压（`screencastFrameAck` 仍在转发后立刻发，服务端满速编码）。
+- P2 画质控制器接「编码耗时」反馈（当前只看帧节奏）。
+- 多站点接入画面流（`LIVE_SITES` 仍只有 deepseek）。
