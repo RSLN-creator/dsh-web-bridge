@@ -18,6 +18,7 @@ import http from 'node:http';
 import https from 'node:https';
 import zlib from 'node:zlib';
 import { Readable } from 'node:stream';
+import { isPrivateHost } from './loopback.js';
 
 const MAX_HEADER_BYTES = Number(process.env.WEBCODE_MAX_HEADER_BYTES) || 1 << 20; // 1MB
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
@@ -96,6 +97,23 @@ function pairsOf(rawHeaders) {
 }
 
 /**
+ * 重定向落到内网/回环时的专用错误（见 `httpFetch` 里的重定向复查）。
+ *
+ * 为什么要一个**具名错误码**而不是普通的 `Error`：这条拒绝会被调用方当成网络失败
+ * 捕获并降级成说明页，若与「连不上」混在一起，排查时无法区分「站点挂了」与
+ * 「站点试图把我们重定向进内网」——后者是需要人看一眼的安全事件。
+ *
+ * @param {URL} parsed 被拒绝的那一跳的 URL
+ */
+function ssrfError(parsed) {
+  const err = new Error('upstream redirect refused: redirect target is a private/loopback host ('
+    + parsed.hostname + ')');
+  err.code = 'SSRF_REDIRECT_BLOCKED';
+  err.host = parsed.hostname;
+  return err;
+}
+
+/**
  * 发一个 HTTP(S) 请求。参数与 fetch 的关键子集对齐：
  *   method / headers / body(Buffer|Uint8Array|string) / signal / redirect('follow'|'manual') / timeoutMs
  * 返回对象见 makeResponse（headers.getSetCookie() 保留全部 Set-Cookie）。
@@ -111,9 +129,31 @@ export function httpFetch(url, options = {}) {
     maxHeaderSize = MAX_HEADER_BYTES,
   } = options;
 
+  // 起始目标是否**本来就在**内网/回环。它由最外层调用一次性决定，并沿重定向链传下去。
+  // 抽到 attempt 之外算，是因为判定依据必须是「用户最初要访问哪儿」，不是「现在这一跳在哪」。
+  let startedPrivate = false;
+  try { startedPrivate = isPrivateHost(new URL(String(url)).hostname); } catch { startedPrivate = false; }
+
   const attempt = (target, redirectsLeft) => new Promise((resolve, reject) => {
     let parsed;
     try { parsed = new URL(target); } catch (err) { return reject(err); }
+
+    // ---- 重定向不得把公网请求「升级」进内网（2026-09-26，CodeQL js/request-forgery）----
+    //
+    // 事实：本函数是通用 HTTP 客户端，URL 由调用方给出。调用方（mirror.js / web-control.js）
+    // 的**入口**都已用 `isPrivateHost` 拦掉内网目标，但旧实现只在入口拦，重定向这里直接
+    // `attempt(next, …)`——**没有复查**。于是「一个已配置的公网站点返回 302 → 169.254.169.254」
+    // 这条链路上，入口的检查被绕过去了。这正是静态分析报「URL 依赖用户可控值」的真实一面。
+    //
+    // 修法刻意**只收窄升级方向**，不放宽也不误伤：
+    //   · 起始目标本身就在内网/回环（本机开发、测试桩、`*.localhost` 镜像）⇒ 不额外拦。
+    //     这类调用是**测试与本地调试的既有用法**：`test/mirror.test.mjs` 全部以
+    //     `127.0.0.1` 起上游桩，拦掉会让它整片变红，而它不引入新的攻击面
+    //     （起点本来就是本机，能访问的本就是本机能访问的）。
+    //   · 起始目标是公网 ⇒ 任何一跳落到内网/回环，**拒绝**（抛错，不跟随）。
+    //     这才是 SSRF 的真实形状：从「我能访问的公网」跳到「只有本机能访问的内网」。
+    // 判定放在**每一跳**（本函数开头），因此 302→公网→302→内网 也会被拦住。
+    if (!startedPrivate && isPrivateHost(parsed.hostname)) return reject(ssrfError(parsed));
     const mod = parsed.protocol === 'https:' ? https : http;
 
     const outHeaders = { ...headers };

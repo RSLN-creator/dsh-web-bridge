@@ -3,7 +3,7 @@
 // open proxy. The page token is injected only into the relay origin's storage.
 
 import { httpFetch } from './upstream.js';
-import { isLoopbackHost } from './loopback.js';
+import { isLoopbackHost, isPrivateHost } from './loopback.js';
 import { rewriteSetCookieForMirror, mergeCookieHeaders } from './cookies.js';
 
 /**
@@ -98,7 +98,10 @@ export function createMirror(options = {}) {
     log('patched site env fallback (Unknown hostname → production)');
     return text.split(ENV_FALLBACK_FROM).join(ENV_FALLBACK_TO);
   }
-  const PRIVATE_HOST = /^(localhost$|127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|\[::1\]$|.*\.local$)/i;
+  // 内网/回环判定在 0.19.26 上移到 `lib/loopback.js`（`isPrivateHost`），本文件
+  // 三处入口与 `upstream.js` 的重定向复查**共用同一份实现**。上移的理由与 loopback.js
+  // 头部记的那次事故同型：同一条正则写两份，就会有一处先被改、另一处留下旧边界。
+  // 这次的具体形态正是「入口拦住了、重定向没拦住」（见 upstream.js 的重定向分支）。
 
   // ---- 驱动 cookie 的短缓存（0.14.4） ------------------------------------
   // 合并 cookie（见 handle 里的 Cookie 合并块）之后，每个代理请求都要读一次驱动
@@ -128,7 +131,7 @@ export function createMirror(options = {}) {
       if (url.protocol !== 'https:' && url.protocol !== 'http:') return u;
       const tail = url.pathname + url.search + url.hash;
       if (url.host === upstreamHost) return mountPrefix + tail;
-      if (PRIVATE_HOST.test(url.hostname)) return u;
+      if (isPrivateHost(url.hostname)) return u;
       return mountPrefix + STATIC_SEG + url.host + tail;
     } catch { return u; }
   }
@@ -785,7 +788,7 @@ export function createMirror(options = {}) {
       const cut = rest.indexOf('/');
       const host = cut < 0 ? rest : rest.slice(0, cut);
       const assetPath = cut < 0 ? '/' : rest.slice(cut);
-      if (!/^[a-z0-9.-]+$/i.test(host) || PRIVATE_HOST.test(host)) {
+      if (!/^[a-z0-9.-]+$/i.test(host) || isPrivateHost(host)) {
         res.writeHead(404, { 'content-type': 'application/json', 'cache-control': 'no-store' });
         res.end(JSON.stringify({ error: { message: 'mirror: host not allowed' } }));
         return true;
@@ -804,7 +807,7 @@ export function createMirror(options = {}) {
       try { target = decodeURIComponent(pathname.slice(WRAP_SEG.length)) + search; } catch { target = ''; }
       let t = null;
       try { t = new URL(target); } catch { t = null; }
-      if (!t || (t.protocol !== 'https:' && t.protocol !== 'http:') || PRIVATE_HOST.test(t.hostname)) {
+      if (!t || (t.protocol !== 'https:' && t.protocol !== 'http:') || isPrivateHost(t.hostname)) {
         res.writeHead(404, { 'content-type': 'application/json', 'cache-control': 'no-store' });
         res.end(JSON.stringify({ error: { message: 'mirror: wrap target not allowed' } }));
         return true;

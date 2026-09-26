@@ -271,7 +271,12 @@ function renderReport({ caseFile, variants, records, summary, mode }) {
   lines.push('| --- | --- | --- | --- |');
   for (const r of records) {
     const verdict = r.pass ? 'PASS' : 'FAIL';
-    const why = r.pass ? '' : r.failures.join(' ;; ').replace(/\|/g, '\\|');
+    // Markdown 表格单元格转义：**先反斜杠再竖线**。
+    // 顺序不能反：CodeQL js/incomplete-sanitization 报的正是这个形状（0.19.26 前只转 `|`）。
+    // 若先转竖线再转反斜杠，新插入的 `\|` 里那个反斜杠会被第二步再转一次，
+    // 变成 `\\|` —— 竖线又回到「未被转义」的状态，整张表在该行塌掉。
+    // 这类「看着像转义了、其实漏了一种元字符」是本仓库记过的同型缺陷。
+    const why = r.pass ? '' : r.failures.join(' ;; ').replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
     lines.push(`| ${r.variant} | ${r.caseId} | ${verdict} | ${why} |`);
   }
   lines.push('');
