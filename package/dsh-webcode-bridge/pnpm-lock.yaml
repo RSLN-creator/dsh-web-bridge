@@ -14,6 +14,7 @@ importers:
       playwright-core:
         specifier: ^1.63.0
         version: 1.63.0
+    devDependencies:
       ws:
         specifier: ^8.21.3
         version: 8.21.3

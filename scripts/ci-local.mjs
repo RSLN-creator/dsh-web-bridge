@@ -3,7 +3,7 @@
 //
 // ## 为什么需要这个文件
 //
-// `.github/workflows/ci.yml` 跑在 ubuntu/windows 两平台 × Node 20/22 上，反馈要等几分钟；
+// `.github/workflows/ci.yml` 跑在 ubuntu/windows 两平台 × Node 22/24 上，反馈要等几分钟；
 // 而本仓库最贵的一类事故是「本地绿、CI 红」和反过来——`doc/review-guide.md` 已经记下过一次
 // 环境差异造成的假失败（`npm test` 在本会话沙箱下 `spawn EPERM`），`doc/comment-style.md` §6.6
 // 把它上升为纪律：「跑测试的方式也写进注释/文档……会话之间传递这类环境事实，比传递
@@ -21,13 +21,14 @@
 //   1. `scripts/lint-comments.mjs`           注释纪律（§10 的机检部分）
 //   2. `scripts/check-ledger.mjs`            台账与事实一致（版本号 / 测试文件数）
 //   3. `scripts/check-repo-hygiene.mjs`      文件编码无 BOM + 索引无死链 + CI/engines Node 版本相容
-//   4. `scripts/check-commit-msg.mjs`        提交信息判据自检（--self-test）
-//   5. `scripts/gen-reference-index.mjs`     reference/README.md 的来源表与磁盘一致
-//   6. `test-mock/artifacts-check.mjs`       生成物卫生（跑一次就会变的文件不许被 git 看见）
-//   7. `test-mock/prompt-bench.mjs --offline` 基准 harness 离线回放（不联网、不碰真机）
-//   8. `pnpm test`                           全量单测（`--fast` 跳过）
+//   4. `scripts/check-plugin-contract.mjs`   DSH 插件契约（仓库指向 / 许可证三处一致 / 运行依赖无死声明 / 边界声明被索引）
+//   5. `scripts/check-commit-msg.mjs`        提交信息判据自检（--self-test）
+//   6. `scripts/gen-reference-index.mjs`     reference/README.md 的来源表与磁盘一致
+//   7. `test-mock/artifacts-check.mjs`       生成物卫生（跑一次就会变的文件不许被 git 看见）
+//   8. `test-mock/prompt-bench.mjs --offline` 基准 harness 离线回放（不联网、不碰真机）
+//   9. `pnpm test`                           全量单测（`--fast` 跳过）
 //
-// 前六步是秒级的，第七步十余秒，第八步约 10 分钟。因此 `--fast` 只砍第八步——**砍掉的必须是
+// 前七步是秒级的，第八步十余秒，第九步约 10 分钟。因此 `--fast` 只砍第九步——**砍掉的必须是
 // 慢的那一步**，而不是「顺手也砍掉检查」的那一步。
 //
 // **第 3~5 步是纯 `fs`、不用 `spawnSync`**，因此它们在开发者本机（含沙箱）也能真正跑起来；
@@ -110,6 +111,14 @@ const STEPS = [
     cwd: repoRoot,
     hint: '去 BOM 用「去掉前 3 字节 EF BB BF」；索引死链要么补文件、要么删掉索引那一行；'
       + 'Node 版本不一致时改 ci.yml 的 matrix.node 去覆盖 package.json 的 engines.node。',
+  },
+  {
+    id: 'plugin-contract',
+    title: 'DSH 插件契约（仓库指向 / 许可证三处一致 / 运行依赖无死声明 / 边界声明被索引）',
+    cmd: process.execPath,
+    args: [path.join('scripts', 'check-plugin-contract.mjs')],
+    cwd: repoRoot,
+    hint: '改 manifest / LICENSE / 依赖声明让它与事实一致（DSH STORE 的收录契约不会因为「声明写了」而放行）。',
   },
   {
     id: 'commit-msg',

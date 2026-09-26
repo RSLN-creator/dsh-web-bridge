@@ -1,6 +1,6 @@
 {
   "name": "dsh-webcode-bridge",
-  "version": "0.19.23",
+  "version": "0.19.24",
   "description": "Harness Web Bridge: DeepSeek web models, native Harness tool loops, DSH native right-sidebar tab and native settings; multi-account slots per site; left-column task-board panel (sidebar.panellist + main); session-slot continuity with persisted send cursors, marker-typo tolerant protocol parsing, attach/inline transport switch, content-anchored session cursor, capture-stall DOM rescue.",
   "type": "module",
   "main": "./lib/index.js",
@@ -12,6 +12,7 @@
     "test": "node --test test/*.test.mjs && node test/parse.test.mjs && node test/run-m1.js && node test-mock/bench-ci.mjs && node test-mock/artifacts-check.mjs",
     "lint:comments": "node ../../scripts/lint-comments.mjs",
     "lint:ledger": "node ../../scripts/check-ledger.mjs",
+    "lint:contract": "node ../../scripts/check-plugin-contract.mjs",
     "ci:local": "node ../../scripts/ci-local.mjs",
     "bench": "node test-mock/prompt-bench.mjs",
     "bench:experiments": "node test-mock/prompt-bench.mjs --experiments --json",
@@ -20,6 +21,15 @@
     "pack:release": "pnpm pack"
   },
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RSLN-creator/dsh-web-bridge.git",
+    "directory": "package/dsh-webcode-bridge"
+  },
+  "homepage": "https://github.com/RSLN-creator/dsh-web-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/RSLN-creator/dsh-web-bridge/issues"
+  },
   "engines": {
     "node": ">=22.13",
     "dsh": ">=0.1.0-rc.6"
@@ -56,7 +66,9 @@
     "deepseek-web"
   ],
   "dependencies": {
-    "playwright-core": "^1.63.0",
+    "playwright-core": "^1.63.0"
+  },
+  "devDependencies": {
     "ws": "^8.21.3"
   },
   "packageManager": "pnpm@11.25.0+sha512.5cde925b4f075f725eb71fbae18a42ffe784524789f19b61c731cb8721ec28aaee160e01a8d5af4fedb2a42cdbf300efe23db356b0d4a17b4d63e11f8ab7c956",

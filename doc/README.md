@@ -40,6 +40,7 @@
 | [official-contract-audit.md](official-contract-audit.md) | **官方契约审计**：`dsh.client` 声明、懒 CJS bundle 形状、六个插槽契约（实读结果）、主题 token、可访问性、primitives 回退、本地闸门；含「renderer-v2」这个名字在本机的查证结论 | 对齐官方写法、评审「这算不算偏离官方」时 |
 | [diagnosis-2026-09-23-dsh-0.1.7-alpha.2.md](diagnosis-2026-09-23-dsh-0.1.7-alpha.2.md) | **DSH 升到 0.1.7-alpha.2 后的诊断（0.19.2）**：① `settingsScope` → `configForms` 改名（阻断级：Cordis `inject` 永不就绪 → 客户端半侧整块不挂载）；② primitives 图标导出改名（`IconXxxOutline14` → `…Regular`，致底部等待药丸渲染期抛错消失）；③ 官方 compaction 新增 `headroomTokens` 把 deepseek 压缩阈值从 800k 压到 678k 的口径解释；含装机不一致与三条自证方法 | 排查「升级后插件不见 / 药丸不见 / 上下文变小」时 |
 | [compliance-audit-0.19.1.md](compliance-audit-0.19.1.md) | **项目合规审计（对标 DSH 0.1.7-alpha.2）**：发布标签口径（`latest` 比实装更旧）、插件声明层、客户端 bundle 契约、**审批的官方落点**（本插件零自造）、能力差逐条理由、本轮发现的不合规项与修法、闸门读数 | 对齐最新官方版本、回答「审批在哪」时 |
+| [permissions-and-boundaries.md](permissions-and-boundaries.md) | **依赖、权限、外部服务与失败边界**（DSH STORE 收录契约的声明面）：运行依赖实测面（含 `ws` 死声明的更正）、四类权限逐条、十个外部站点域、七个响亮失败的边界码，以及「声明本身不保证自动批准」的口径 | 回答「装这个插件会碰我机器上的什么」时；DSH STORE 复检前 |
 
 ## 与账户槽（0.14.7）相关的代码位置
 
@@ -86,6 +87,7 @@
 - `agent-ui-design-references.md` — **UI 设计语言**（Apple HIG 可执行约束、Fluent 4px 间距全表、Harness 官方 token 实测清单、teammate 面板信息架构）
 - `2026-09-26-dwb-site-modularity-audit.md` — **按站点分模块架构审计**：`lib/` 站点字符串分布实测（`providers.js` 157 行 vs `browser-driver.js` 95 行欠账）、四个耦合点 C1–C5 逐条判定、`git log -S` 跨站点影响取证、以及「不要为隔离而复制，要收成 `lib/sites/<siteId>.js`」的正面回答
 - `2026-09-26-glm-native-and-deepseek-no-progress.md` — **0.19.23 三件事**：① **`json` 正文泄漏根因**（`closingFenceAfter` 把**开启**围栏当**闭合**围栏消费，只吃三个反引号、漏出语言标签 `json`；决定性读数：去掉修复 **24 种切分粒度里 15 种泄漏**、带上 **24/24 干净**；并记下「既有护栏只跑 `sliceChars=1` 因而对边界敏感缺陷**天然失明**」这一课）② **GLM 原生 `code` part 补齐**（`content[].type === 'code'` 此前被静默丢弃 ⇒ 真机形态下整条调用会消失；参考 `glm-free-api:994-1013`）③ **deepseek `WEB_NO_PROGRESS` 取证与分层结论**（5/14 会话复发、8% 上下文压力排除超限、报错相位标签假陈述的加法修法）
+- `2026-09-26-headless-call-tail-fragment.md` — **0.19.24 GLM 无头调用残片泄漏的修复取证**：真机 `session-c20f43e9` 的 364 字符残片（`name":"pwsh"…` 缺 JSON 头）如何穿过围栏/标签/裸 JSON 三道锚点、`headlessCallTailAt` 的语法判据与流式键前缀扣留、1341 个真实正文块的误伤扫描（3 处命中全为真残片）、逐字符模式的诚实边界
 - `2026-09-26-glm-goal-round1-investigation.md` — **GLM 六问第一轮（调查，零改动）**：① 真实消耗来源（无任何智谱 API key，走网页桥）② 引用会话内容「已有一半缺另一半」③ `mcp_action` 原文三源 ④ GLM 真机适配现状（正文 + 工具循环双 PASS）⑤ 并列多会话方案 ⑥ 其余问题全景 8 条
 - `2026-09-26-glm-goal-round2-implementation.md` — **GLM 六问第二轮（实施 + 验证）**：**移除「同时发送」+ 三个独立底部对话框 + 主审/探索分工 + 跨列引用**（Q2+Q5）、`answerSelector` 契约补齐（审计 C1）、全量 **1064/1064**；含**列级沙箱的诚实边界**与 `ref-index` 既有红的如实说明
 - `2026-09-25-compact-aux-delta.md` — **手动 /compact 失效的取证与修复（0.19.14）**：压缩调用的真实形状、无键整包重放撞 1M 预算闸的病因链、真机 A/B/阶梯探针读数（网页输入框上限已 ≥320k）、游标命中只发增量的修法与「辅助轮不碰主游标」的边界

@@ -1783,6 +1783,103 @@ export function closingFenceAfter(text, from) {
   return i;
 }
 
+// 无头残片的「JSON 对象尾巴」语法（headlessCallTailAt ③ 用）：
+//   完整键 `"?name" | "purpose" | "arguments"`（开引号可被吃）+ 值 + 逗号链，
+//   链尾允许「逗号 + 半成品键 + 可选冒号 + 可选半成品值」——覆盖流式逐字符的
+//   每个中间态（`,"`、`,"pur`、`,"purpose":`）。值 = 字符串（可未闭合）或对象
+//   （`{…}` 可未闭合）。语法里没有 mcp_action：真调用/散文引用完整形状时失配放行。
+const HEADLESS_TAIL_RE = (() => {
+  const K = '(?:"?name"|"purpose"|"arguments")';
+  const V = '(?:"(?:[^"\\\\]|\\\\.)*"?|\\{[^}]*\\}*)';
+  const Kp = '"?\\s*(?:n(?:a(?:m(?:e"?)?)?)?|p(?:u(?:r(?:p(?:o(?:s(?:e"?)?)?)?)?)?)?|a(?:r(?:g(?:u(?:m(?:e(?:n(?:t(?:s"?)?)?)?)?)?)?)?)?)?';
+  return new RegExp(
+    '^[ \\t\\r\\n]*' + K + '\\s*:\\s*' + V
+    + '(?:\\s*,\\s*' + K + '\\s*:\\s*' + V + ')*'
+    + '(?:\\s*,\\s*' + Kp + '(?:\\s*:\\s*' + V + ')?)?'
+    + '\\s*,?\\s*:?\\s*$',
+  );
+})();
+
+/**
+ * 找一个「被吃掉 JSON 头（`{"mcp_action": "call", `）的调用残片」起点。
+ *
+ * ## 为什么需要它（真机 2026-09-26 session-c20f43e9，reply-log 逐字）
+ *
+ * GLM 网页流会把「模型发起的调用」重传/续传，重传时 JSON 头被吃掉，流里出现
+ * 一段**无头残片**，夹在两条完整调用之间（2026-09-26T06:27:40Z 原文）：
+ *
+ *     ```json
+ *     {"mcp_action":"call","name":"read",…}
+ *     ```
+ *
+ *     name":"pwsh","purpose":"…","arguments":{"command":"…","workdir":"D:\…```json
+ *
+ * 残片没有围栏、没有 `{` 开头、没有标签——`findProtocolStart` 对它返回 -1，
+ * 于是被当正文逐字发进会话（真机会话里正是 364 字符的 `name":"pwsh",…` 文本块）。
+ * 完整的 pwsh 调用随后在重传快照里照常到达并执行，所以残片只是垃圾，不是调用。
+ *
+ * ## 判据（全部收窄在「残片」上；散文讨论协议形状不命中）
+ *
+ * 两道判据，③ 是主判据、② 是流式逐字符时的前置扣留：
+ *
+ * ③ **JSON 对象尾巴语法**（`HEADLESS_TAIL_RE`）：区域开头（可带空白）是
+ *    `"?name"` / `"purpose"` / `"arguments"` 键（「键的开引号被吃掉」是无头残片的
+ *    独有指纹：`name":` 或 `"name":`），后面是值（字符串或对象，均可未闭合）+
+ *    逗号键值链，链尾允许逗号/冒号/半成品键。语法里**没有** `mcp_action`——
+ *    讨论完整调用形状的散文（带 `{"mcp_action"…`）到第一个键就失配放行；任何
+ *    散文字符（值引号之外的汉字/字母）也让语法失配。
+ * ② **键半成品前缀扣留**：`n` → `na` → `name` → `name":` 的每个中间态；前缀之后
+ *    必须只跟引号/空白/冒号（键语法还没写完）——散文 `name it …` 在 `i` 到达时
+ *    放行。两道判据的放行都有界：被扣住的文字在失配后随下一次增量原样发出，不会被吞。
+ *
+ * 只做「更保守」的收窄：调用方只把它用于**扣住/剔除**文本，绝不会因此多外发。
+ * 对真实语料的误伤面由 `.tmp/scan-headless-false-positive.mjs` 全量扫描钉住
+ * （对全部历史会话正文跑本函数，命中项逐条人工核验）。
+ *
+ * @param {string} text 累积文本
+ * @param {number} [from] 已消化协议区间的终点（默认 0）
+ * @param {number} [limit] 扫描上限（不含）；默认到文本结尾
+ * @returns {number} 残片起点下标；-1 表示没有
+ */
+export function headlessCallTailAt(text, from = 0, limit = -1) {
+  const src = String(text ?? '');
+  const base = Math.max(0, Number(from) || 0);
+  let end = Math.min(src.length, limit < 0 ? src.length : Math.max(0, Number(limit) || 0));
+  // 残片就是一条调用 JSON 的尾巴，千余字符已是病理长度：封顶扫描区，把最坏回溯
+  // 代价钉死（长回复的散文在锚定首字符处即失配，封顶只影响「真长残片」这一种输入）。
+  end = Math.min(end, base + 2048);
+  if (end <= base) return -1;
+  const region = src.slice(base, end);
+  // ③ 进行中/已确认的残片：一段「JSON 对象尾巴」语法——键值对（键的开引号可被吃、
+  // 值可以是未闭合的字符串或未闭合的对象），尾部允许逗号/冒号/半成品键。语法里
+  // **没有 mcp_action**，所以讨论完整调用形状的散文（含 `{"mcp_action"...`）到第一个
+  // 键就放行；任何散文字符（值引号之外的汉字/字母）也会让语法失配 → 放行。放行
+  // 有界：被扣住的文字在语法失配后随下一次增量原样发出，不会被吞。
+  const m = HEADLESS_TAIL_RE.exec(region);
+  if (m) return base + m.index;
+  // ② 键**半成品前缀**扣留（流式逐字符到达时使用）：`n` → `na` → `name` → `name":`。
+  // 前缀集 = 三个键字面量的严格前缀（长度 ≥ 2）+ `name"` 残片字面量的前缀（长度 ≥ 1，
+  // 覆盖「开引号被吃」的 `n`/`na`/…）。前缀之后必须**只跟着引号/空白/冒号**
+  // （= 键语法还没写完）：散文 `name it …` 在 `i` 到达的那一刻放行（i 不在允许集里），
+  // 只被瞬时扣住一两个增量；真残片在 ③ 能确认之前由这里接力。
+  const ws = /^[ \t\r\n]*/.exec(region)[0].length;
+  const body = region.slice(ws);
+  const literals = ['"?name"', '"purpose"', '"arguments"'];
+  for (const lit of literals) {
+    for (let len = 2; len < lit.length; len += 1) {
+      if (body.startsWith(lit.slice(0, len)) && /^["\s:]*$/.test(body.slice(len))) {
+        return base + ws;
+      }
+    }
+  }
+  for (let len = 1; len < 'name"'.length; len += 1) {
+    if (body.startsWith('name"'.slice(0, len)) && /^["\s:]*$/.test(body.slice(len))) {
+      return base + ws;
+    }
+  }
+  return -1;
+}
+
 /**
  * 正文尾部出现「协议标记写到一半」的位置。
  *
@@ -1976,8 +2073,15 @@ export function stripProtocolRegions(text) {
   // 收集的部分（同样退化成旧行为，绝不因此外发协议原文）。
   for (let guard = 0; guard < 64; guard += 1) {
     const { index } = findProtocolStart(s, cursor);
-    if (index < 0) return out + s.slice(cursor);
-    out += s.slice(cursor, index);
+    if (index < 0) {
+      // 无头调用残片（真机 session-c20f43e9）不是散文：剔掉残片及之后，
+      // 两侧散文只在残片**之前**留下。
+      const tailAt = headlessCallTailAt(s, cursor);
+      return out + (tailAt >= 0 ? s.slice(cursor, tailAt) : s.slice(cursor));
+    }
+    // 两个协议区间之间也可能夹着无头残片：只保留残片之前的散文。
+    const tailAt = headlessCallTailAt(s, cursor, index);
+    out += s.slice(cursor, tailAt >= 0 ? tailAt : index);
     const end = protocolRegionEnd(s, index);
     if (end < 0) return out;
     cursor = Math.max(end, index + 1);
@@ -2043,6 +2147,10 @@ export function proseSafeEnd(text, from = 0) {
   // 重复的闭合标签噪声」）。半成品一样不是正文，按同一个判据扣住。
   const markerAt = partialProtocolAt(raw);
   if (markerAt >= base) return markerAt;
+  // 无头调用残片（真机 session-c20f43e9）同样不是正文：边界探测认不出它（没有
+  // 围栏/标签/裸 `{`），它只能靠这条形状判据收窄——只让外发变少。
+  const tailAt = headlessCallTailAt(raw, base);
+  if (tailAt >= base) return tailAt;
   return raw.length;
 }
 

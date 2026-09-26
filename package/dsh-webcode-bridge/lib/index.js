@@ -22,7 +22,7 @@ import { createBrowserDriver } from './browser-driver.js';
 import { zeroProgressDecision } from './zero-progress.js';
 import { idleWindowDecision } from './idle-window.js';
 import { createWebControl, buildSessionEvents, mainLineOf } from './web-control.js';
-import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, stripProtocolRegions, proseSafeEnd, readCallAt, partialProtocolAt, unresolvedCallFenceAt, closingFenceAfter, coerceArguments, fillMissingRequired, trainNoteFor, normalizeOfficialToolCalls, normCallArgs, inferToolNameFromArgs, recoverUnparsedCalls, officialToolCallSpecimen, officialCallExampleFor, buildPreset } from './agent-preset.js';
+import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, stripProtocolRegions, proseSafeEnd, readCallAt, partialProtocolAt, unresolvedCallFenceAt, closingFenceAfter, headlessCallTailAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeOfficialToolCalls, normCallArgs, inferToolNameFromArgs, recoverUnparsedCalls, officialToolCallSpecimen, officialCallExampleFor, buildPreset } from './agent-preset.js';
 // 只用 `teachFor`（1146 的续跑重申、3290 的首轮落盘）——那两处是**真调用**，
 // 即计划 Task 1.4 所说的「教学提示按 teachShape 选支」。
 // `transportShapeForSite` 曾一并 import 但全文件零调用（第三轮自审发现），已移除；
@@ -1570,6 +1570,15 @@ export function apply(ctx, config = {}) {
             : (markerAt >= 0 ? markerAt : Math.max(0, acc.length - PROSE_TAIL_CHARS));
           // 取**更小**者：这一条只会让外发变少，永远不会把原本扣住的内容放出去。
           if (fenceTailAt >= 0 && fenceTailAt < proseLimit) proseLimit = fenceTailAt;
+          // 无头调用残片（真机 session-c20f43e9，reply-log 逐字）：GLM 流重传调用时
+          // 吃掉 JSON 头，留下 `name":"pwsh","purpose":…,"arguments":{…` 夹在两条完整
+          // 调用之间。它没有围栏/标签/裸 `{`，边界探测认不出；但它是垃圾不是正文——
+          // 扣住不发，等下一个围栏/调用到达后该区间被 protocolFrom 越过、自然消化。
+          // 判据见 agent-preset.headlessCallTailAt（只收窄、绝不放宽）。
+          // 扫描上界 = 下一个协议边界（若已有）：再往后是完整调用，含 mcp_action，
+          // 会让「无 mcp_action」这条判据误判；没有边界时扫到全文结尾。
+          const headlessAt = headlessCallTailAt(acc, from, boundary >= 0 ? boundary : acc.length);
+          if (headlessAt >= 0) proseLimit = Math.min(proseLimit, headlessAt);
           const safeEnd = Math.max(from, proseLimit);
           const proseChunk = safeEnd > from ? acc.slice(from, safeEnd) : '';
           // 调用标签的残尸（真机 2026-09-14 会话 c7c7a03c step69：两个调用之间流出
