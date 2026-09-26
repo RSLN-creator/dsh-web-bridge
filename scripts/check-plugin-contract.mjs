@@ -17,7 +17,9 @@
 //   1. **仓库指向**：manifest 的 `repository.url` == 本仓库 `origin` 的 URL，且
 //      `repository.directory` == 该 manifest 相对仓库根的**实际**目录。
 //   2. **许可证三处一致**：根 `LICENSE` 与包内 `LICENSE` **字节相同**；`license`
-//      字段与许可文本自称的许可一致；`files` 白名单**真的把它装进分发产物**。
+//      字段与许可文本自称的许可一致；**正文与标准 MIT 模板逐字一致**（多插一段说明会让
+//      GitHub 的许可识别把 `spdx_id` 打成 `NOASSERTION`，反而与 manifest 不一致）；
+//      `files` 白名单**真的把它装进分发产物**。
 //   3. **运行依赖无死声明**：`dependencies` 里每个名字都必须被**随包发布的源码**
 //      （`lib/`、`bin/`）导入；反过来 `devDependencies` 里的名字不得被它导入。
 //   4. **边界声明存在且被索引**：`doc/permissions-and-boundaries.md` 存在、含四节
@@ -78,6 +80,58 @@ const REQUIRED_DOC_SECTIONS = [
   /^##\s*3\.\s*外部服务\s*$/m,
   /^##\s*4\.\s*失败边界\s*$/m,
 ];
+
+/**
+ * 标准 MIT 正文（不含标题行与版权行——那两行本来就该逐项目不同）。
+ *
+ * ## 为什么要把正文**逐字**钉住，而不是只看向量里的 `license` 字段
+ *
+ * 2026-09-26 真事故：根 `LICENSE` 曾经在标准 MIT 全文中间插了一段第三方来源说明，
+ * `package.json` 写着 `"license": "MIT"`、文件也在，看起来三处都「有」许可——但 GitHub 的
+ * 许可识别（Licensee）是拿 MIT 模板做**相似度**匹配，多出的段落把它压到阈值之下，于是它
+ * 对外报的是 `license.key='other'`、`spdx_id='NOASSERTION'`（本机实读 GitHub API）。
+ * 那正是 DSH STORE 收录阻断「manifest 与 GitHub 的许可证元数据不一致」——只补文件不够，
+ * **正文的形状**才是被判的东西。
+ *
+ * 这条判据离线可判、且直接对应上面那个后果：正文里多出一段、少一段、改一个词都会红。
+ * 额外说明（第三方来源、商标、免责补充）应当放进 `README.md` 或独立的 NOTICE 文件，
+ * **不要塞进许可正文**——塞进去就会把 `spdx_id` 从 `MIT` 变成 `NOASSERTION`。
+ */
+const MIT_BODY = [
+  'Permission is hereby granted, free of charge, to any person obtaining a copy',
+  'of this software and associated documentation files (the "Software"), to deal',
+  'in the Software without restriction, including without limitation the rights',
+  'to use, copy, modify, merge, publish, distribute, sublicense, and/or sell',
+  'copies of the Software, and to permit persons to whom the Software is',
+  'furnished to do so, subject to the following conditions:',
+  '',
+  'The above copyright notice and this permission notice shall be included in all',
+  'copies or substantial portions of the Software.',
+  '',
+  'THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR',
+  'IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,',
+  'FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE',
+  'AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER',
+  'LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,',
+  'OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE',
+  'SOFTWARE.',
+].join('\n');
+
+/**
+ * 把一份许可文本归一成「只比较正文」的形状：去掉标题行与版权行、统一空白。
+ *
+ * 去掉的两行是**本来就该逐项目不同**的部分（`MIT License` 标题、`Copyright (c) …`），
+ * 其余逐字保留——正是这样才判得出「多插了一段」。
+ */
+function normalizeLicenseBody(text) {
+  return String(text)
+    .replace(/^\uFEFF/, '')
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*MIT License\s*$/i.test(line) && !/^\s*Copyright\b/i.test(line))
+    .join('\n')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
 /** 把 git URL 归一成可以逐字比较的形状：去 `git+`、去末尾 `.git`、去末尾 `/`。 */
 function normalizeGitUrl(url) {
@@ -190,12 +244,22 @@ function main() {
   if (rootHas && pkgHas) {
     identical = sha256(ROOT_LICENSE) === sha256(PKG_LICENSE);
     licChecks.push({ what: '两份 LICENSE 字节相同（分发产物与 GitHub 一致）', ok: identical });
-    const firstLine = fs.readFileSync(ROOT_LICENSE, 'utf8').split(/\r?\n/)[0];
+    const licText = fs.readFileSync(ROOT_LICENSE, 'utf8');
+    const firstLine = licText.split(/\r?\n/)[0];
     licChecks.push({
       what: '许可文本自称 ' + pkg.license + '（首行：' + firstLine.trim() + '）',
       ok: new RegExp('^' + String(pkg.license) + '\\b', 'i').test(firstLine.trim())
         || /MIT License/i.test(firstLine) && pkg.license === 'MIT',
     });
+    // 正文必须与标准 MIT 模板逐字一致：多插一段就会让 GitHub 把 spdx_id 判成
+    // NOASSERTION（见 MIT_BODY 的注释）。这一段是该判据里**唯一能提前发现**那类事故的检查。
+    licChecks.push({
+      what: '许可正文与标准 MIT 模板逐字一致（多插段落会让 GitHub 判成 NOASSERTION）',
+      ok: normalizeLicenseBody(licText) === normalizeLicenseBody(MIT_BODY),
+    });
+    if (!fs.readFileSync(ROOT_LICENSE, 'utf8').includes('MIT License')) {
+      problems.push('许可证：正文里没有 `MIT License` 标题行——GitHub 的识别依赖它。');
+    }
   }
   licChecks.push({
     what: 'package.json 的 files 白名单含 LICENSE',
