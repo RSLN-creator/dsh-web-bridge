@@ -1,6 +1,8 @@
 # Harness Web Bridge
 
-将已登录的网页 AI 接入 DeepSeek Harness：网页模型产生工具调用，由 Harness 原生权限系统执行本地工具，结果回传同一网页会话。包名 `dsh-webcode-bridge` 与 provider `webcode` 保留兼容。
+Use your logged-in web AI (DeepSeek, GLM, Kimi, Qwen, Doubao…) as model providers in DeepSeek Harness. Web models emit tool calls; DSH executes them with its native permission and approval system, and returns the results to the same web session. No API keys — it reuses your existing browser login.
+
+The package name `dsh-webcode-bridge` and the provider id `webcode` are kept for compatibility.
 
 ## 安装
 
@@ -93,27 +95,26 @@ dsh plugin --profile web add dsh-webcode-bridge
 权限与审批仍是 DSH 那一套，不会被桥绕过。**装完不重启 = 等于没装**，这是本项目
 反复踩到的一条。
 
-## 站点可用性现状（2026-09-26）
+## Site status
 
-一句话：**DeepSeek 是主力、能长期跑；GLM 可用但不稳定。** 两条都有真机读数支撑，不是印象。
+**DeepSeek is the primary target and holds up over long sessions. GLM works, but it is unstable.**
 
-| 站点 | 现状 | 依据（本仓库实测） |
-| --- | --- | --- |
-| **DeepSeek** `deepseek:deepseek` | **主力，可长期跑** | 长期真实调用验证 `test-mock/run-real-longrun.mjs`（真实 Edge + 真实网页会话，多轮工具闭环）；自动续跑、会话游标持久化、重启后从 Harness 历史恢复均已落地；手动 `/compact` 于 0.19.14 修通；0.19.26 新增思维链退化重复的通用检测（命中即打断并重发）。 |
-| **GLM** `glm:glm-5.3` / `glm-5.3-flash` | **可用，但不稳定** | 真机 PASS：`real-glm-e2e.mjs` 6.1s 拿到正文（思考 150 字 + 正文）；`real-glm-tool-loop.mjs` **工具循环端到端 48.1s、四判据全过**——随机 secret `ZQ913` 只存在于工具结果里，模型第二轮逐字复述 ⇒ 回注链路是**活的**，不是猜出来的。不稳定面见下。 |
-| kimi / qwen / doubao / z.ai | 已接站点，**未做长期验证** | 镜像与静态域见「多站点与跨域资源」；可用性以各自登录态为准。 |
-| claude | 地区受限（网页自身提示） | — |
-| chatgpt / grok / gemini | 本机网络不可达（502 + 说明页） | — |
+| Site | Status |
+| --- | --- |
+| DeepSeek `deepseek:deepseek` | Primary. Validated over long multi-turn tool loops on a real browser session, with auto-continue, session-cursor persistence, and recovery from Harness history after a restart. |
+| GLM `glm:glm-5.3` / `glm-5.3-flash` | Usable but unstable. The end-to-end tool loop passes on a real session: a random secret present only in the tool result is echoed back verbatim by the model, so the round-trip is genuinely live. |
+| Kimi / Qwen / Doubao / Z.ai | Wired up, not validated over long runs. Availability depends on your login state. |
+| Claude | Region-restricted; the site says so itself. |
+| ChatGPT / Grok / Gemini | Not reachable from our network (502 plus an explanatory page). |
 
-**GLM 的「不稳定」具体指什么**（逐条有据，不写成含糊的「偶尔抽风」）：
+What "unstable" means for GLM, concretely:
 
-1. **思考不可关、思考流占比高** —— 2472 条回复里 1051 条是纯思考。教学提示已适配，token 口径含思考（0.15.9+）。
-2. **站点用自己的原生工具层拦截正文里的调用标签**（只认其内置 search/open/click/find，报 unknown tool call）⇒ 对 GLM 只教 ```json 代码块形状，并支持从思考流兜底解析调用。
-3. **深链导航会被阿里云滑块拦住**（`real-probe-30/31` 实测落到「滑动验证页面」），故探针改走驱动路径。
-4. **历史失败形态已修，但值得知道**：0.19.16 修「思维链流一半 → 捕获链死亡 → 空回复」（真因是解码器 `finish()` 在流未收尾时**丢内容**）；0.19.17 修「正文有空白还有乱码」（真因是调用围栏尾部被当正文流出）。
+- **Thinking cannot be turned off**, and it dominates the stream (1051 of 2472 replies were thinking-only).
+- **The site intercepts tool-call tags in prose** through its own native tool layer, so GLM is taught only the ```json code-block shape, with fallback parsing from the thinking stream.
+- **Deep-link navigation is stopped by an Aliyun slider captcha**, so probes go through the driver path instead.
+- Two failure modes have been fixed and are worth knowing: a stream that died mid-thinking produced an empty reply, and call-fence tails leaked into the reply body as garbage.
 
-> 读法：**DeepSeek 可当日常主力长期用**；**GLM 适合当第二意见/对照**，遇到失败先重试——
-> 桥把可归因的失败都换成了带错误码的提示，而不是静默降级。
+Read it as: **DeepSeek is the one to run all day; GLM is a good second opinion.** When GLM fails, retry — attributable failures surface as coded messages rather than silent degradation.
 
 ## 当前能力
 

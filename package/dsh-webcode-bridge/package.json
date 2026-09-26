@@ -1,7 +1,7 @@
 {
   "name": "dsh-webcode-bridge",
   "version": "0.19.26",
-  "description": "Harness Web Bridge: DeepSeek web models, native Harness tool loops, DSH native right-sidebar tab and native settings; multi-account slots per site; left-column task-board panel (sidebar.panellist + main); session-slot continuity with persisted send cursors, marker-typo tolerant protocol parsing, attach/inline transport switch, content-anchored session cursor, capture-stall DOM rescue.",
+  "description": "Use your logged-in web AI (DeepSeek, GLM, Kimi, Qwen, Doubao...) as model providers in DeepSeek Harness. Web models emit tool calls, DSH runs them under its native permission system, and results return to the same web session. No API keys.",
   "type": "module",
   "main": "./lib/index.js",
   "bin": {
