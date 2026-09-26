@@ -16,6 +16,27 @@
 
 ---
 
+## npm 首发与发布通道（2026-09-26）
+
+**用户原话**：「我已经登录npm，你查查看本机readme这个项目发布最新版本，以及同步github」。
+
+| 项 | 内容 |
+| --- | --- |
+| **首发版本** | `dsh-webcode-bridge@0.19.26` —— 本包**首个** npm registry 版本（发布前 `npm view` 实测 **E404**，包名未被占用）。`dist.shasum` = `921ce6a033de3729453c397db444c8b26516954f`。 |
+| **发布前把关（README「方式 C」）** | `pnpm pack` → `node scripts/verify-pack.mjs` **逐字相同 49/49** + 接线完好；`npm pack` 自建的那份同样 49/49。**发布的是校验过的 tarball 本体**（`npm publish <tgz>`），因此上架字节 = 校验字节，shasum 与 `dist.shasum` 一致。包里 49 个文件，`test/` `doc/` `scripts/` `test-mock/` **零泄漏**。 |
+| **第一次 E403 的真因（别记成「OTP 失败」）** | 当时生效的是 `~/.npmrc` 里的 `npm_CoQ…`，它**不具备 bypass 2FA**；registry 原文即点明 *"Two-factor authentication or granular access token with bypass 2fa enabled is required"*。换一枚带 **Bypass 2FA** 的 granular token 后**一次通过**。附带事实：当时给的验证码是 **8 位**，而 npm 的 TOTP 只认 6 位。 |
+| **一处虚惊（已实拆核对）** | `npm publish --dry-run` 打印 `"bin[webcode-bridge-standalone]" script name … was invalid and removed`，措辞像**删掉了 bin**。拆开 npm 自建 tarball 确认：`bin` 条目**完好**，只是 `./bin/x` 被规范化成 `bin/x`，且 npm 把该规范化**写回** `package.json`（已随本轮提交入库，使仓库内容与 registry 产物一致）。 |
+| **⚠️ token 到期日（本条是写进台账的主要目的）** | 本机 `~/.npmrc` 的 `//registry.npmjs.org/:_authToken` 现为 **60 天 granular token（bypass 2FA）**，签发日 **2026-09-26** ⇒ **到期约 2026-11-25**。届时 `npm publish` 会**再次报 E403**（原文同上）。续法：npmjs.com → Access Tokens → Generate New Token → Granular，权限 **Read and write**、Packages **All packages**、**勾选 Bypass 2FA**。旧 `.npmrc` 已备份 `C:\Users\rsyhn\.npmrc.bak-20260926-210136`。 |
+| **CI 仍然不 publish（刻意保持）** | `release.yml` 的守卫**未拆**。npm 发布是**纯手工**动作，tag 只负责产出 GitHub Release 的 tarball。要改成 CI 自动发布＝改发布策略，不是顺手动作。 |
+| **GitHub 同步** | `main` → `0682fa3`，注解 tag `v0.19.26`；Release / CI / CodeQL **三条工作流全绿**，Release 资产 `dsh-webcode-bridge-0.19.26.tgz`（669,085 B，sha256 `e10d3853…`）。 |
+| **`origin` 已改 SSH** | 本机 HTTPS 到 `github.com` 连续 timeout / connection reset（`api.github.com`、`codeload`、`raw` 均 200，唯独 `github.com` 不通），SSH 通路正常 ⇒ 远端改为 `git@github.com:RSLN-creator/dsh-web-bridge.git`。 |
+
+> **本行与下方 §0.19.26「当前状态」那一行的关系**：那一行记录的是**该轮当时的读数**
+> （`npm whoami` = ENEEDAUTH / registry 指向只读镜像），按本文件「不改写历史行」的约定**保留原文**；
+> 现状以本节为准 —— 已发布、registry 已是官方源、发布通道仍是手工。
+
+---
+
 ## 0.19.26 文档台账闸门（2026-09-26，无产品代码改动）
 
 用户原话：「请你继续完成，然后优先本插件完成度，收录 stor 如果会影响能力就先不进行和我说」。

@@ -133,11 +133,25 @@ function normalizeLicenseBody(text) {
     .trim();
 }
 
-/** 把 git URL 归一成可以逐字比较的形状：去 `git+`、去末尾 `.git`、去末尾 `/`。 */
+/**
+ * 把 git URL 归一成可以逐字比较的形状：**与协议/传输方式无关**的 `host/owner/repo`。
+ *
+ * 处理：去 `git+`、去 `ssh://[user@]`、把 SCP 形 `git@host:owner/repo` 的 `:` 换成 `/`、
+ * 去 `https://`、去末尾 `.git` 与 `/`。
+ *
+ * **为什么要认 SSH 两种形态**：`origin` 配成 `git@github.com:owner/repo.git` 而 manifest 的
+ * `repository.url` 按 npm 惯例写 `git+https://github.com/owner/repo.git` 时，两者指向
+ * **同一个仓库**（本机 HTTPS 到 github.com 不通、只能用 SSH 时就是这种组合）。只按字面比较
+ * 会把这种**合法**配置判成「仓库指向不一致」——那是**假红**，不是发现问题。
+ * 归一**不降低判据强度**：host 与 owner/repo 路径仍必须逐字相同（见本文件自带的用例）。
+ */
 function normalizeGitUrl(url) {
   return String(url || '')
     .trim()
     .replace(/^git\+/, '')
+    .replace(/^ssh:\/\/(?:[^@/]+@)?/i, '')
+    .replace(/^[^@/]+@([^:/]+):/, '$1/')
+    .replace(/^https?:\/\//i, '')
     .replace(/\.git$/, '')
     .replace(/\/+$/, '');
 }
