@@ -1948,6 +1948,13 @@ const OFFICIAL_DSW_TOKENS = new Set([
   'dsw-elevation-prominent', 'dsw-specific-menu',
   // 输入底与聚焦色：来自参考实现 `.input` / `.input:focus`。
   'dsw-specific-input-major',
+  // 0.19.22（并列多会话照抄官方 composer）：官方 composer 卡片的柔和投影。
+  // 取证：`dsh-client-ui-theme/lib/client.js:1154` 有定义，
+  // `dsh-web-frontend/dist/assets/index-*.css` 与
+  // `dsh-client-ui-primitives/lib/SegmentedControl.module.css:31` 都在用，
+  // 官方 composer 自己写的是 `box-shadow:var(--dsw-elevation-soft)`
+  //（`dsh-client-ui-conversation/lib/client.js` 的 `.uV2eYG_card`）。
+  'dsw-elevation-soft',
 ]);
 
 test('★ 0.19.0 任务板审美：CSS 只许用官方已有的 dsw token（不得凭直觉编 token 名）', () => {

@@ -69,6 +69,53 @@ test('glm：parts[].content[] 嵌套结构的正文与图片（glm-free-api 同�
   assert.equal(images[0].url, 'https://glm.example/a.png');
 });
 
+/**
+ * ★ 0.19.23：GLM 原生**结构化 code part** 里的调用必须被解出来。
+ *
+ * 参考实现 `reference/glm-free-api/src/api/controllers/chat.ts:994-1013` 把
+ * `type == 'code'` 当**一等公民**（为它拼 ``` 围栏再交给上层）——即在这条流里，
+ * `code` 与 `text` 是**并列的两种正文载体**。本桥此前只实现后者，
+ * `code` 一路落到 obj() 末尾被静默忽略。
+ *
+ * 离线实证（`.tmp-probe-glm-native.mjs` ①a 对照 ①b）：
+ *   同一段调用 JSON 放进 type:'code' ⇒ 修复前 deltas 为空、text 为空，
+ *                                     **整个调用消失**；放进 type:'text' ⇒ 正常外发。
+ *
+ * 判据刻意收窄：**只有调用形态才外发**。普通代码块维持既有行为（丢弃）——
+ * 把模型内部的草稿代码整段铺进会话，比丢一个调用是更常见的噪声。
+ */
+test('★ 0.19.23 glm：原生 code part 携带的调用必须解出来（普通代码块仍不外发）', () => {
+  const CALL = '{"mcp_action": "call", "name": "read", "arguments": {"path": "lib"}}';
+  const SEP = String.fromCharCode(10) + String.fromCharCode(10);
+  const mk = () => {
+    const deltas = [];
+    const d = new D.glm({ onDelta: (t) => deltas.push(t) });
+    return { d, deltas, f: (obj) => d.push('data: ' + JSON.stringify(obj) + SEP) };
+  };
+
+  // ① 调用形态：init 帧 + finish 帧重发全量 ⇒ 只外发一次。
+  const a = mk();
+  a.f({ conversation_id: 'c1', status: 'processing', parts: [{ status: 'processing', content: [{ status: 'init', type: 'code', code: CALL }] }] });
+  a.f({ conversation_id: 'c1', status: 'finish', parts: [{ status: 'finish', content: [{ status: 'finish', type: 'code', code: CALL }] }] });
+  const out1 = a.d.finish();
+  assert.equal(a.deltas.join(''), CALL, 'code part 里的调用 JSON 必须原样外发（修复前为空）');
+  assert.equal(out1.text, CALL, '结果正文里也必须带上它 —— 否则协议解析器看不到这条调用');
+
+  // ② 普通代码块：维持既有行为 —— 不外发。
+  const b = mk();
+  b.f({ conversation_id: 'c2', status: 'processing', parts: [{ status: 'processing', content: [{ status: 'init', type: 'code', code: 'const a = 1;\nconsole.log(a);' }] }] });
+  const out2 = b.d.finish();
+  assert.equal(b.deltas.join(''), '', '普通代码块不得被当正文外发（它没有 mcp_action、也不以 { 开头）');
+  assert.equal(out2.text, '', '普通代码块不得进入结果正文');
+
+  // ③ 分段累积：同一段分两次到达不得重复外发。
+  const c = mk();
+  const half = Math.floor(CALL.length / 2);
+  c.f({ status: 'processing', parts: [{ status: 'processing', content: [{ status: 'init', type: 'code', code: CALL.slice(0, half) }] }] });
+  c.f({ status: 'processing', parts: [{ status: 'processing', content: [{ status: 'processing', type: 'code', code: CALL }] }] });
+  assert.equal(c.deltas.join(''), CALL, '分段累积后只应外发一次完整内容（不得重复）');
+});
+
 test('glm：type=think 思维链增量 + finish 帧累积全文不重复（真机 2026-09-12 抓包形状）', () => {
   const th = [], tx = [];
   const decoder = new D.glm({ onThink: (t) => th.push(t), onDelta: (t) => tx.push(t) });
@@ -300,4 +347,98 @@ test('deepseek hint：非限流话术的截断帧仍按原语义归类（不误�
   const out = decoder.finish();
   assert.notEqual(out.reason, 'rate_limited', '审核类失败不得被误判成限流');
   assert.equal(out.hint, null);
+});
+
+// ---- 0.19.16：流未收尾时**已解内容不得被丢掉** ------------------------------
+//
+// 真机故障（用户报「glm-5.3-flash 思维链流到一半 → 空回复」，会话 a23e4ee4）：
+// 收束原因 `partial-wip-settled`、最终正文与思维链**双空** → 上层判
+// `empty response from web AI`。根因不在 DOM 也不在 SSE 解码，而在收尾：
+// JsonLinesDecoder.finish() 的 `!this.done` 分支**只返回 reason，不带
+// text/thinking** —— 而 emitText/emitThink 全程把内容累在 this.text/this.think 里，
+// 于是「流式通道有内容、finish() 返回值里没有」。驱动拿这个空结果去判空，
+// 整轮作废（browser-driver.js 的 partial-wip-settled → emptyWebResponseError）。
+//
+// 为什么单测原本全绿：既有用例**每一个都补了收尾帧**（status:'finish' / [DONE] /
+// finish_reason），于是永远走 `complete:true` 那一支。缺口是「正常关闭但没有收尾帧」
+// —— 而 GLM 捕获层在 HTTP 流结束时只 emit(id,'end','')，**不构造任何收尾帧**，
+// 所以那是必然出现的一类真实收尾，不是异常路径。
+
+test('glm：无收尾帧时已解的正文与思维链必须带出来（0.19.16 主修）', () => {
+  const SEP = String.fromCharCode(10) + String.fromCharCode(10);
+  const frame = (o) => 'data: ' + JSON.stringify(o) + SEP;
+  const decoder = new D.glm({});
+  decoder.push(frame({ conversation_id: 'c9', status: 'WIP', parts: [{ content: [{ type: 'think', think: 'Let me reason' }] }] }));
+  decoder.push(frame({ conversation_id: 'c9', status: 'WIP', parts: [{ content: [{ type: 'think', think: ' step by step' }] }] }));
+  decoder.push(frame({ conversation_id: 'c9', status: 'WIP', parts: [{ content: [{ type: 'text', text: 'Here is the answer.' }] }] }));
+  const out = decoder.finish();
+  // 没收完整（网页没送 status:'finish'）—— 这一点本身要如实报出来。
+  assert.equal(out.complete, false);
+  assert.equal(out.reason, 'incomplete');
+  // 但**已经解出来的内容一个字都不能少**：这就是本故障的全部内容。
+  assert.equal(out.text, 'Here is the answer.');
+  assert.equal(out.thinking, 'Let me reason step by step');
+  // partial 是驱动区分「有内容可交」与「整轮作废」的唯一依据（见 browser-driver
+  // 的 `!result.complete && !result.partial` 与 emptyWebResponseError）。
+  assert.equal(out.partial, true, 'partial 必须为真，否则驱动仍判空回复');
+  assert.equal(out.conversationId, 'c9', '会话身份在失败分支同样必须带出');
+});
+
+test('glm：缺终结空行的残缺尾帧不得丢内容（0.19.16 附带修）', () => {
+  const SEP = String.fromCharCode(10) + String.fromCharCode(10);
+  const decoder = new D.glm({});
+  decoder.push('data: ' + JSON.stringify({ status: 'WIP', parts: [{ content: [{ type: 'text', text: 'first ' }] }] }) + SEP);
+  // 末帧被截断：没有结尾空行。基类 finish() 走 `this.line(this.buf.trim())`，
+  // 而 line() 是 JSON.parse —— 缓冲区里是 `data: {...}`，JSON.parse 必抛，
+  // 于是整段最后一句静默消失。GlmDecoder 必须覆写 finish() 按 SSE 规则解析它。
+  decoder.push('data: ' + JSON.stringify({ status: 'WIP', parts: [{ content: [{ type: 'text', text: 'first second' }] }] }));
+  const out = decoder.finish();
+  assert.equal(out.text, 'first second', '残缺尾帧里的内容必须解出来，不能被 JSON.parse 静默吞掉');
+  assert.equal(out.partial, true);
+});
+
+test('glm：有收尾帧时结果形状与改动前逐字相同（不得因本次修复而漂移）', () => {
+  const SEP = String.fromCharCode(10) + String.fromCharCode(10);
+  const decoder = new D.glm({});
+  decoder.push('data: ' + JSON.stringify({ status: 'finish', parts: [{ content: [{ type: 'text', text: 'done' }] }] }) + SEP);
+  const out = decoder.finish();
+  assert.equal(out.complete, true);
+  assert.equal(out.text, 'done');
+  // 跑完整的结果**不许**带 partial：调用方用 `!complete && !partial` 判「空流宽限
+  // 重绑」（browser-driver.js:1335），多一个恒真字段会让「跑完了」与「跑一半」不可分。
+  assert.equal('partial' in out, false, 'complete 结果不得带 partial 字段');
+});
+
+test('同族 SSE 解码器：incomplete / invalid_stream 分支同样带出已解内容', () => {
+  const SEP = String.fromCharCode(10) + String.fromCharCode(10);
+  const F = (o) => 'data: ' + JSON.stringify(o) + SEP;
+  // openai-sse（zai / qwen 用）：已解出正文但没收到 finish_reason
+  const oai = new D['openai-sse']({});
+  oai.push(F({ choices: [{ delta: { content: 'Hi' }, finish_reason: null }] }));
+  const a = oai.finish();
+  assert.equal(a.complete, false);
+  assert.equal(a.text, 'Hi', 'openai-sse 已解正文不得在 incomplete 分支丢失');
+  assert.equal(a.partial, true);
+  // claude：content_block_delta 之后流断
+  const cl = new D.claude({});
+  cl.push(F({ type: 'content_block_delta', delta: { type: 'text_delta', text: 'partial' } }));
+  const b = cl.finish();
+  assert.equal(b.text, 'partial');
+  assert.equal(b.partial, true);
+  // chatgpt：JSON-patch 帧之后没有 message_stream_complete
+  const gpt = new D.chatgpt({});
+  gpt.push(F({ o: 'append', p: '/message/content/parts/0', v: 'Half' }));
+  const c = gpt.finish();
+  assert.equal(c.text, 'Half');
+  assert.equal(c.partial, true);
+});
+
+test('全空且流未收尾：partial 必须为假（不得把「真的什么都没来」伪装成部分流）', () => {
+  const decoder = new D.glm({});
+  decoder.push('data: ' + JSON.stringify({ conversation_id: 'c1', status: 'WIP', parts: [] }) + String.fromCharCode(10) + String.fromCharCode(10));
+  const out = decoder.finish();
+  assert.equal(out.complete, false);
+  assert.equal(out.partial, false, '零内容轮必须如实报 false，让驱动走真正的失败路径');
+  assert.equal(out.text, '');
+  assert.equal(out.thinking, '');
 });

@@ -162,6 +162,23 @@ export const GLM = site({
   input: 'textarea#chat-input, textarea[placeholder], textarea',
   attachSelector: "input[type='file']",
   attachPreview: "[class*='file'], [class*='attachment'], [data-file]",
+  // 助手回复节点选择器（0.19.19，审计 §三 C1 的收口）。
+  //
+  // 为什么必须有这个字段：在此之前全站共用一个写死 DeepSeek 类名的串
+  //（browser-driver 的 ANSWER_SELECTOR），而 chatglm.cn 对它**一个都不命中**
+  // ⇒ WIP 巡检的 domFound 恒为 false ⇒ 收束器只能凭「流静默 2.5s」动手，
+  // 真机上出现过「正文还没写完就被腰斩」。
+  //
+  // ⚠️ 诚实标注：下面这串**尚未取得真机命中读数**。2026-09-26 想复采时，
+  // 裸 playwright 深链导航会被 chatglm.cn 的阿里云滑块拦（页面变成「滑动验证
+  // 页面」，DOM 里只有 capture-container / aliyunCaptcha-*），那批 count=0 的
+  // 读数因此**不能**用来判定选择器好坏（取证条件不成立，见 doc/session-2026-09-26
+  // §4.3）。
+  //
+  // 但这条声明**不会比现状更差**，原因是判据三态：命中 → domFound=true（更好）；
+  // 不命中 → domFound=false → 走 DOM_BLIND_MS 宽窗（与今天逐字相同）。
+  // 也就是说它只有上行空间。`main` 放最后是保底：GLM 的对话容器就是 main。
+  answerSelector: 'div.markdown-body, .markdown-body, [class*="answer-content"], [class*="chatglm"], main',
   decoder: 'glm', stream: true,
   // 未登录特征（2026-09-13 真机）：GLM 游客页**自带完整输入框**，旧判定必然把
   // 未登录记成已登录（空 profile 上实测 verify-login 回 true）。它的登录入口
@@ -427,6 +444,10 @@ export const ZAI = site({
   attachSelector: "input[type='file']",
   // 附件落到页面上的可见证据（上传确认用，见 browser-driver 的 waitForAttachment）
   attachPreview: "img[src^='blob:'], [class*='attachment'], [class*='file-card']",
+  // 同 GLM：助手回复节点选择器（0.19.19）。z.ai 与 chatglm.cn 同源模型、
+  // 前端换过一代，这里按「宽特征」写——同样**未取得真机命中读数**，
+  // 但按三态判据只有上行空间（不命中即回落今天的宽窗行为）。
+  answerSelector: 'div.markdown-body, .markdown-body, [class*="prose"], [class*="message"], main',
   decoder: 'openai-sse', stream: true, experimental: true,
   loginProbe: {
     bad: 'button:has-text("登录"), a:has-text("登录"), button:has-text("Sign in"), a:has-text("Sign in")',

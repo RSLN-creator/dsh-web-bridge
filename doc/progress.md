@@ -165,11 +165,176 @@
 
 ---
 
+## 0.19.16 GLM-5.3-Flash「思维链流一半 → 空回复」根因修复（2026-09-26）
+
+**用户原话**：「glm-5.3-flash 的失败形态高度一致：思维链流到一半后捕获链死亡 → 驱动按
+partial-wip-settled 收束 → 最终正文和思维链都是空 → "empty response from web AI"。
+你补「你好？继续」后第二轮同型复发。疑点集中在 chatglm.cn 页面的 DOM 采样选择器适配和
+glm SSE 解码里 reasoning 增量的落账。」
+
+| 项 | 内容 |
+| --- | --- |
+| **主因（已复现）：`finish()` 在流未收尾时丢弃全部已解内容** | `JsonLinesDecoder.finish()` 的 `!this.done` 分支**只返回 reason，不带 `text`/`thinking`**——而 `emitText`/`emitThink` 全程把内容累进 `this.text`/`this.think`。**流式通道有内容、返回值里没有**。链路闭合：WIP 巡检 `browser-driver.js:1516` 拿 `decoder.finish()` → 空结果被包成 `{partial:true}`（spread 里没有 text/thinking）→ `emptyWebResponseError` 三空 → 抛 `empty response from web AI`。`settled_by='partial-wip-settled'` 与用户报告逐字一致。**证据**：本地 eval 注册表直接驱动 `D.glm`，3 帧（think×2+text）无 finish 帧 ⇒ 事件全收到而 `finish()` 返回 `{complete:false,reason:'incomplete'}`，text/thinking 消失；补一帧 `status:'finish'` ⇒ 正常。 |
+| **修法（4 个解码器族一次落齐）** | 失败分支一律带出 `{text,thinking,images}` + `partial`。**`partial` 只在没收完整时出现**——`complete` 结果必须与改动前逐字同形，否则调用方（`!result.complete && !result.partial` 的空流宽限重绑）分不开「跑完了」与「跑一半」。覆盖 `JsonLinesDecoder` / `OpenAiSseDecoder` / `ChatGptDecoder` / `ClaudeSseDecoder`。 |
+| **附带修真缺陷：残缺尾帧被静默吞掉** | 基类 `finish()` 走 `this.line(this.buf.trim())`，而 `line()` 是 `JSON.parse`；缓冲区里是原始 SSE 文本 `data: {...}` ⇒ `JSON.parse('data: {...}')` 必抛 `Unexpected token 'd'`。`GlmDecoder` 覆写了 `push()` 却**没覆写 `finish()`**，末帧（常缺 `\n\n`）整段消失。修法：抽 `frameData(frame)` 由 `push`/`finish` **共用**（各写一份必然漂移），`finish()` 先按 SSE 规则解析残余尾帧再交基类。 |
+| **诱因（真机实测）：DOM 采样选择器对 chatglm.cn 一个都不命中** | 两处硬编码 DeepSeek 专用串 `.markdown, [data-message-author-role="assistant"], .ds-markdown`。新增 `test-mock/real-probe-30-glm-dom.mjs`（**只读**：导航既有会话，不发消息/不耗额度）实测：`.markdown`/`.ds-markdown`/`.answer`/`.response-container`/`[data-message-author-role]`/`[class*=message]`… **count 全为 0**。旧实现把「采样到空串」当 `domAvailable=true` ⇒ `lastDomGrowthAt` **从不刷新** ⇒ `shouldSettleWip` 的「DOM 停长」**恒成立**，收束器只凭「流静默 2.5s」就动手；且 `shouldRescueStalledCapture` 要求 `domLen>0` ⇒ **DOM 兜底对 GLM 是死的**。 |
+| **收窄结论（不越界）：这是竞态，不是缺帧** | profile 里现存的真机抓包 `.sse-debug/sse-glm-1789973933106.log`（26 帧）实测：**顶层 `j.status` 确有 `finish`（1/26）**，`parts[].status` 亦有 init/finish。⇒ GLM **会**发收尾帧，失败是「WIP 在 finish 帧落地**之前**就收束」。因此主修必须是「收尾时别丢内容」（上面两条），DOM 那条是防提前截断的**加固**。**这一条修正了台账 0.19.15 行的疑点方向**（原写「疑点集中在 DOM 选择器与 reasoning 落账」——现已实测坐实为收尾丢内容）。 |
+| **第三态：`domFound`（与「页面取不到」刻意分开）** | `metrics.shouldSettleWip` 新增 `domFound`/`domBlindMs`：`domAvailable && !domFound`（页面在、但认不出哪条是回复）= 对「页面还在不在写」**零证据** ⇒ 改按 `6×wipIdleMs`（默认 15s）这个更宽的窗口收束。旧实现把「取不到页面」与「认不出节点」混成一态，正是提前收束的来源。宽窗口有界（不会永远挂住），且**远小于** 240s 总超时。「宁可多等，也不腰斩仍在生成的回复」——与 `shouldRescueStalledCapture` 同一条纪律。 |
+| **护栏（含 5 条变异反向验证，全部先红后绿）** | 解码器侧 +5 条（`multi-site-decoder.test.mjs`：无收尾帧保内容 / 残缺尾帧 / **有收尾帧时形状逐字不变** / 同族三族 / 全空时 `partial` 必须为假）。DOM 侧 +5 条（`wip-settle.test.mjs`：2.5s 不足以收束 / 加宽窗口有界 / 流仍在动绝不收束 / `domFound` 缺省不影响既有站点 / `domBlindMs` 可配）。**反向验证**：M1 恢复丢内容 → FAIL(1)；M2 去掉 `GlmDecoder.finish` 覆写 → FAIL(1)；M3 `partial` 恒 false → FAIL(1)；M4 删 `domFound` 分支 → FAIL(1)；M5 加宽窗口改成等于常规窗口 → FAIL(1)；全部还原 → 全绿。**M2 首跑被跳过**（替换字面量用 `\n` 拼、文件是 CRLF）——本仓库记过的同型陷阱第 N 次复现，改 CRLF-aware 后正确变红。 |
+| **闸门读数** | 全量 `node --test test/*.test.mjs` 串行独占：**1038 项 / 1038 通过 / 0 失败，exit 0**（基线 1028 + 本轮新增 10）。受影响的 5 个文件单跑 76/76。全部改动文件 `node --check` exit 0。 |
+
+---
+
+## 0.19.17 流式「调用围栏尾部」泄漏修复（用户报「正文有空白还有乱码」，2026-09-26）
+
+**用户原话**：「请你继续他的任务，顺便探查这次为什么失败，和他的返回为什么正文有空白还有乱码，一并修复」
+
+### 一、上一会话为什么失败
+
+会话 `session-0b292806-ce89-417b-8228-fcc99f8efb01`（GLM-5.3-flash）turn2 step3 收束：
+
+```
+WEB_NO_PROGRESS: 网页侧超过 120s 没有任何新内容（页面在，上一轮收束原因（120s 前） finished，
+判定相位=已开流后的静默，最近驱动活动时间 1s 前，页面已有 0 字回复未回传） — 本轮已中止，可重试
+```
+
+| 项 | 内容 |
+| --- | --- |
+| **取证方式（本次新增）** | 会话落盘是**多帧 zstd 容器**（27 帧）。`zstdDecompressSync` 只解**首帧**（220 字节 = 仅 session 头），因此「解出来只有一行」是**假象**。正确解法：扫 `28 b5 2f fd` 魔数分帧、逐帧解、再拼接（`.tmp-probe/dump.mjs`）。旧的「解不出」结论会让人误判成文件损坏。 |
+| **判据读数是自相矛盾的** | 报错自己写着「最近驱动活动时间 **1s** 前」+「判定相位=已开流后的静默」。**驱动 1s 前还在活动**，却报「120s 没有任何新内容」——说明**看门狗量错了对象**：它把「适配器侧事件通道静默」当成了「网页侧没在产出」。 |
+| **真因（与本轮修复的是同一件事）** | GLM 走 codeblock 传输。turn2 step1/step2 的正文块里全是 `\n```\n\n` 碎片（见下），说明**协议原文正在挤占正文通道**；step3 那一轮网页仍在跑（页面在、驱动 1s 前有活动），但适配器侧再没等到可外发的事件 ⇒ 看门狗开火。**即「正文乱码」与「本轮失败」是同一个根因的两个症状，不是两件事。** |
+| **本轮已装与未装** | `~/.dsh/profiles/web/node_modules/dsh-webcode-bridge` 实测**已含** 0.19.16 的解码器保内容与 `domFound` 修复（另一工作流所改），但**不含**本轮的围栏修复。⇒ 本轮修复**需重新安装后生效**。 |
+
+### 二、正文为什么有空白还有乱码
+
+**现场（会话 `session-0b292806` turn2，逐字）**：
+
+```
+[1] text "收到。这是一个“架构审计 + 可用性实测 + 按计划实施”的组合任务，……\n\n"
+[2] tool-call
+[3] text "\n```\n\n"        ← 乱码
+[4] tool-call
+[5] text "\n```\n\n``"     ← 乱码
+[6] tool-call
+[7] text "\n```\n\n"        ← 乱码（turn2 step1 共 7 个）
+```
+
+**根因（离线逐字符复现，`test-mock/probe-fence-decision.mjs`）**：
+
+流式循环里「正文能外发到哪」由 `findProtocolStart` 定。围栏是协议锚点，但它的判据在
+**「围栏刚开、JSON 还没吐出 `mcp_action` / `arguments`」**那一小段窗口里**尚不成立**
+（`firstCallFenceAt` 要求体内已有调用关键字段）⇒ 返回 -1 ⇒ 外发边界只剩
+`PROSE_TAIL_CHARS`（8）这个**定长尾巴** ⇒ 围栏与 JSON 开头被**一个字符一个字符**
+当正文发出去。而 `textSent` 单调不回退、**发出去的字节收不回来**。
+
+复现读数（修复前）：正文增量里出现 `"`"`"`"`"`"`"`"`"`"`"`"`"`"`"`"`"`"` 与 ` ```json\n{"mcp_actio `，
+拼接后正文 = `收到。……\n\n```json\n{"mcp_actio`。
+
+**第二个入口**：调用的 JSON 配平那一刻，它自己的**闭合围栏** ` ``` ` 还没到（闭合围栏是随后的
+增量），而 ` ``` ` 单独出现**不是**协议锚点（普通 markdown 代码块也是它）⇒ 闭合围栏同样
+被当正文发出。
+
+**修法（两条，都只收窄外发上限，绝不放宽）**：
+
+| 函数（`agent-preset.js`） | 判据 |
+| --- | --- |
+| `unresolvedCallFenceAt(text, from)` | ``` 两两配对，**落单的**那个还开着；其后首格是 `{`（调用 JSON 开口）或尚未开始 ⇒ 扣住。**普通正文代码块（```js 后面跟代码）不扣**——扣了会毁掉流式观感。 |
+| `closingFenceAfter(text, from)` | 紧跟**已消费协议区间**（调用 JSON 末尾）、只隔空白的 ` ``` ` 划进协议区间。`from<=0` 一律不认 ⇒ 回复开头的代码块不受影响。 |
+
+接线：`lib/index.js` 流式循环的 `proseLimit` 取二者与既有判据的**更小**者；游标推进两处
+（增量入口 / JSON 配平后）顺手越过闭合围栏。
+
+**修复后同一复现的读数**：正文 = `收到。这是一个组合任务，我先建立任务清单。\n\n`，
+反引号 **0 个**，3 个调用全部派发且顺序正确。
+
+### 三、护栏与闸门
+
+| 项 | 内容 |
+| --- | --- |
+| **新增护栏** | `test/fence-tail.test.mjs` **8/8**：① 逐字符驱动连续 3 个 codeblock 调用，正文与每个正文块**不得含任何围栏残渣**（主回归）；② 三个调用全部派发、顺序不变、各只开一块；③ 普通代码块（```js）照旧即时外发；③b 代码块与调用混排；④ 回复以代码块开头不受影响；⑤ 两个纯函数的边界行为（含「围栏闭合后立即放行」的**有界性**）；⑥ 整段一次到达（非逐字符）同样不泄漏。 |
+| **回归** | 受影响的 5 个文件 `stream-tail` / `markdown-block-integrity` / `protocol-leak` / `multi-site-decoder` / `wip-settle` 单跑 **78/78 通过 / 0 失败**。 |
+| **复现探针（落库）** | `test-mock/probe-fence-decision.mjs`（逐字符复演外发边界判定，打印每步 boundary/markerAt/proseLimit/safeEnd）与 `test-mock/probe-fence-tail-leak.mjs`（端到端 `adapter.stream`）。 |
+| **一条给下次的教训** | 这两个探针**必须用 `model: 'deepseek:deepseek'`**：只有 deepseek 槽会用 `config.driver` 注入的桩驱动，写 `glm:*` 会**真的去开浏览器打真机**（本轮首跑就踩到，产生了一次真实的 chatglm.cn 往返）。离线探针只用 deepseek 槽。 |
+| **附带的正向证据** | 那次「误打真机」反而拿到了 **GLM 真机可用性的直接证据**：`chatglm.cn` 真实返回（`send confirmed` → `request done chars=607`），模型自行调起 `pwsh` 并回传了本机环境读数。⇒ **`webcode/glm:glm-5.3-flash` 路由当前可用**。 |
+
+---
+
+## 0.19.18 账号互斥准则 + GLM 真机验证（2026-09-26）
+
+**用户原话**：「你需要修补加上一个准则记录：**同一账号不能同时桥接运行！**」「开始真实允许测试 glm 和完成 glm 真实适配」「先保证 0.19.x 版本不变」「记录更新打包安装交付」。
+
+### 一、用户新立准则：同一账号不能同时桥接运行
+
+| 项 | 内容 |
+| --- | --- |
+| **为什么必须有它** | 「账号」= 站点 × 账户槽，落盘形态是一个 `profileDir`。两个桥指向同一个 profileDir 时：① Chromium 的 `SingletonLock` 被一方持有，另一方启动即抛 ProcessSingleton，而**旧的「自愈」路径会按 profileDir 杀掉对方的浏览器**（`killOrphanEdgeForProfile`）⇒ 两个桥**互相杀**，表现为随机 240s 超时 / 登录态莫名丢失；② 更隐蔽：两边都启动成功、同时往同一个网页会话发消息，网页侧交错处理，两边都读到对方的回复。两种都**不可归因**。 |
+| **实现** | 新模块 `lib/bridge-lock.js`：纯函数 `decideBridgeLock(existing, now, self)` 输出三态 `free` / `mine` / `held`（**可离线反向验证**，不需要真起两个进程）+ 副作用层 `acquireBridgeLock` / `releaseBridgeLock` / `describeBridgeLockHolder`。锁文件 `webcode-bridge.lock.json` 放在 profileDir **里面**（一个账号一个目录，天然一对一）。 |
+| **判据要点** | ① 「是我的」要求 **pid 与进程启动时刻都对得上**——只比 pid 不够（pid 会被复用，Windows 尤其）；② 必须有**过期上限**（默认 12h）：否则崩溃进程留下的锁 + pid 复用 = 用户被永久挡在门外；③ 写文件用 `wx`（独占创建）保证并发下只有一个赢家；④ `releaseBridgeLock` **只释放自己的**——无条件删文件会在「我已过期被接管、新持有者正在跑」时把别人的锁删掉，准则被绕过。 |
+| **接线** | `lib/browser-driver.js`：`launch()` 里**启动浏览器之前**拿锁，被拒抛 `BRIDGE_ACCOUNT_BUSY` + 中文可行动提示；`close()` 里释放（否则用户主动关闭后反而打不开）。 |
+| **为什么放在 launch 之前** | Chromium 自带的锁失败形态是「抛异常 + 互相杀进程」；本锁失败形态是「友好拒绝 + 告诉你谁占着、怎么办」。本锁在前、Chromium 锁在后。 |
+| **护栏** | `test/bridge-lock.test.mjs` **14/14**：纯函数真值表 6 条（含边界「恰好等于上限不算过期」）+ 文件系统往返（拿→重入→被拒→释放→可再拿）+ 坏 JSON/过期锁的**接管与留痕** + 并发唯一赢家 + **release 不得删别人的锁**（最危险边界，含 pid 相同但 startedAt 不同的 pid 复用形态）+ 报错文案 + 驱动接线结构断言（拿锁必须排在 `clearStaleProfileLocks` 之前）。 |
+| **⚠️ 护栏抓到我自己的真 bug（先红后绿）** | 首版 `acquireBridgeLock` 在接管**坏锁/过期锁**时也会走到 `wx` 的 `EEXIST` 分支，而那一支原本一律拒绝 ⇒ **坏锁/过期锁会把用户永久挡在门外**，恰好违背该锁「有界」的设计目标。`test/bridge-lock.test.mjs` ②b/②c **两条断言先红**，定位后改为「用**同一条判据**重新裁决当前文件，只有它已不可信才允许覆盖」。这正是「纯函数真值表 + 文件系统往返**两层**都要有」的价值——只测纯函数会全绿。 |
+
+### 二、GLM 真机验证（用户要求「真实允许测试 glm 和完成 glm 真实适配」）
+
+两支新探针，走**生产路径**（`apply()` → `adapter.stream()`）：
+
+| 探针 | 判据 | 结果 |
+| --- | --- | --- |
+| `test-mock/real-glm-e2e.mjs` | 能否拿到正文（最小可用） | **PASS** — `text="2"`、思考 150 字、`finish=stop`、**6.1s**；会话槽 `after-submit` 已写入 |
+| `test-mock/real-glm-tool-loop.mjs` | **工具循环端到端**（用户要的「和 glm api 调用一样原生」） | **PASS** — 四条判据全过，见下 |
+
+工具循环四条判据（`glm:glm-5.3-flash`）：
+
+```
+① 第一轮解析出工具调用            PASS  calls=1
+② 调用名在工具表内且参数非空      PASS  pwsh {"command":"Write-Output ZQ913","description":"Prints the string ZQ913 to stdout"}
+③ 工具真的被执行                  PASS  command=Write-Output ZQ913
+④ 模型读到工具结果并复述          PASS  第二轮 text="ZQ913"
+[判定] PASS — GLM 工具循环端到端可用（48.1s）
+```
+
+**为什么 ④ 是有效证据**：secret（`ZQ913`）是**每轮随机生成**的，只存在于工具结果里。模型第二轮逐字复述它 ⇒ **回注链路真的是活的**，不是模型猜出来的。
+
+### 三、本轮如实修正的一处取证错误
+
+我先前在架构审计里把 `real-probe-30` 的「选择器 count 全为 0」当成「`ANSWER_SELECTOR` 对 chatglm.cn 瞎」的证据。
+**同日复测（`real-probe-31-glm-dom-deep.mjs`）推翻了该取证的成立条件**：
+
+```
+[页面] title="滑动验证页面"   ← 裸 playwright 深链导航被阿里云滑块拦住
+类名频率 top40 全是 aliyunCaptcha-* / nc-container / capture-container
+容器候选：（空）
+```
+
+⇒ 那批读数是在**滑块页**上读的，**不是在真实会话页上**。已在 `doc/research/2026-09-26-dwb-site-modularity-audit.md` §三 C1 就地加注修正：
+**结论方向不变**（`ANSWER_SELECTOR` 不含任何 GLM 类名，仍是「服务 10 站点却只写 DeepSeek 类名」的耦合，这一点从源码可判），
+但**「命中/不命中」的定论尚无有效读数**，待改用驱动路径重采。
+
+### 四、其它两条真机用法教训（记下来免得下次重踩）
+
+1. **离线探针必须用 `model: 'deepseek:deepseek'`**：只有 deepseek 槽会用 `config.driver` 注入的桩驱动；写 `glm:*` 会**真的开浏览器打真机**（本轮首跑即踩到）。
+2. **不要直接 `driver.sendTurn()` 做端到端**：会报 `WEB_SESSION_LOST: 会话槽为空（site=glm，no-stored-session）`——这不是缺陷，是**绕过了适配器层的「会话槽为空 ⇒ fresh」策略**。端到端必须走 `adapter.stream()`。
+
+### 五、闸门与交付
+
+| 项 | 读数 |
+| --- | --- |
+| 全量测试 | `node --test test/*.test.mjs` **1062/1062 通过、exit 0**（95 个文件） |
+| 台账闸门 | `node scripts/check-ledger.mjs` **exit 0** |
+| 语法检查 | 全部改动文件 `node --check` exit 0 |
+| 打包 | `pnpm pack` → `dsh-webcode-bridge-0.19.18.tgz`（644,317 字节） |
+| 安装 | `dsh plugin --profile web add …` 与 `--profile headless add …` **均 exit 0**；两 profile 实测 `"version": "0.19.18"` |
+| 装后核验 | 装出来的副本里：`unresolvedCallFenceAt` 在、`lib/bridge-lock.js` 在、`decoder.js` 的 `partial` ×5 在、`metrics.js` 的 `domFound` ×3 在 |
+| **待用户操作** | **重启 `dsh web`** —— 安装只换了磁盘文件，跑着的进程里仍是旧代码 |
+
+---
+
 ## 当前状态
 
 | 项 | 值 |
 | --- | --- |
-| 工作树版本 | **0.19.15（已打包装入双 profile、声明已同步、`dsh web` 已重启生效：8931 实读 `build.version=0.19.15` hash `d220a37511c1`；线上镜像真机验收：左侧会话历史完整加载）**。本轮修**用户报的「deepseek 网页端左侧会话历史全是加载失败」**，两个独立根因一次落齐：<br>① **0.19.14 自己引入的回归（主因）**：bootstrap IIFE 里 window.open 钩子声明 `var open0=window.open`，把 XHR 钩子的 `var open0=XMLHttpRequest.prototype.open` **重声明覆盖**（同一函数作用域）——此后每一次 `xhr.open()` 实际调用的是 `window.open`，应用的全部 XHR 数据请求静默失败 ⇒ 数据层整体不启动。定位手法：钩子段整段移除 → 存活；逐钩子单禁/组合禁用 12 个变体全死 ⇒ 查变量作用域才发现重名（test-mock/ab-hooks-bisect.mjs 留档）。修法：改名 `wopen0` 并注释钉住原因。<br>② **站点前端改版（独立于桥）**：新 bundle 的环境判定只认 localhost/chat.deepseek.com 等四种主机名，镜像主机名直接 `throw Error("Unknown hostname: …")`（bundle 逐字取证）——挂在 HTTP 客户端上的整片模块图随之死掉。修法 `patchSiteJs`：对站点 JS 响应做一次外科手术，把该 throw 换成 production 兜底（proxyAsset 与 handle 的 JS 分支都接）。<br>验收：双主机名形态（deepseek.localhost / localhost）各 10 个 `/api/v0/` 全 200（client/settings、users/current、auth_token/check_device、**chat_session/fetch_page**），左侧会话历史显示全部真实会话；全量 **1028/1028 exit 0**。已知余项：探针里 4 个 502（第三方探活请求经 /wr/ 到不可达域），不影响功能。<br>**GLM 5.3 Flash（用户报「一直没搞好」）——本轮取证，未修**：最近 glm 会话（a23e4ee4 等）每轮同型失败：reasoning 流到一半后捕获链死亡 ⇒ `partial-wip-settled` ⇒ 最终 text/thinking 双空 ⇒ "empty response from web AI"；用户补「你好？继续」同型复发。疑点：DOM 采样选择器（.markdown/.ds-markdown）对 chatglm.cn 页面结构的适配、以及 reasoning 增量在 glm SSE 解码里的落账。glm 账号登录态正常（sites/glm loggedIn=true 09-26 00:13）。**下一轮开局证据已留本行。** |
+| 工作树版本 | **0.19.23（源码已改，待打包安装）**：本轮三件事（用户 2026-09-26 指令：查 `json` 正文 / 补 GLM 原生格式 / 查 deepseek 失败是否要修），详见 [`doc/research/2026-09-26-glm-native-and-deepseek-no-progress.md`](research/2026-09-26-glm-native-and-deepseek-no-progress.md)。<br>① **`json` 正文泄漏：根因找到、端到端复现、已修**。真机会话 `session-53201b58` turn4 step1 的助手形状是 `text:62, call, text:4, call, text:4, call, call, text:4, call, text:4, call`——那 4 个 `len=4` 的正文块内容**恰好都是 `json`**（GLM codeblock 传输里每个调用围栏的语言标签）。根因：`agent-preset.js` 的 `closingFenceAfter` 契约是「已消费调用 JSON 之后的**闭合**围栏」，旧判据只看「游标之后隔空白就是 ` ``` `」⇒ **把下一个调用的开启围栏 ` ```json ` 也当闭合围栏返回**，调用方 `protocolFrom = cf + 3` **只吃掉三个反引号**，后面 4 个字符 `json` 落在协议区间之外 → 被当正文外发。**决定性读数**：去掉修复 ⇒ 24 种增量切分粒度里 **15 种泄漏**（5,7,9,10,13,14,15,16,17,18,19,20,21,22,23，正文实测 `"…我先建立任务清单。\n\njson"`）；带上修复 ⇒ **24/24 无泄漏**。⚠️ **最要紧的一条**：既有 `fence-tail` 护栏只跑 `sliceChars=1`，而那个粒度**恰好干净** ⇒ 对「边界敏感」的缺陷**天然失明**（护栏不是写错，是输入分布太窄）。修法用**窄**判据：围栏之后「信息串非空 **且** 信息串后首格是 `{`」⇒ 开启调用围栏，返回 -1；裸 ` ``` `（信息串为空）永远照常消费。护栏两条：单元级 `closingFenceAfter` + **切分粒度穷举**（`5`/`16` 是实测会红的粒度，少了它们抓不住回归）。<br>② **GLM 原生格式补齐**（用户「再加上一个他的那个原生 glm 格式的参考和调用」）：参考实现 `reference/glm-free-api/src/api/controllers/chat.ts:994-1013` 把 `content[].type === 'code'` 当**一等公民**（为它拼 ``` 围栏），即这条流里 `code` 与 `text` 是**并列的两种正文载体**；而 `GlmDecoder` 此前分支只有 `tool_calls/tool_result/think/text/image`，`code` **一路落到末尾被静默忽略**。离线实证（`.tmp/probe-glm-native.mjs`）：同一段调用 JSON 放进 `type:'code'` ⇒ 修复前 `deltas: []`、`text: ""`（**整条调用消失**）；放进 `type:'text'`（对照）⇒ 正常。修法：新增 `code` 分支，去重与相邻 `text` 分支同形（单槽 key、前缀吸收），**判据刻意收窄**——只有「含 `"mcp_action"` 或首格 `{`」才接进正文通道，普通代码块维持既有行为（丢弃，避免把草稿代码铺进会话）；解析不新开通路，仍交给既有裸 JSON 锚点。<br>③ **deepseek/deepseek 失败取证**（用户加问「是否为问题需要解决？」）：真机 `session-e7056e8c` turn3 step58 以 **`WEB_NO_PROGRESS`** 中止——step57 于 `…164930` 正常结束，step58 于 `…164951` 起，**120s 后**看门狗开火；该轮零工具调用。上下文压力 `surfaceTokens 80995 / 1_000_000`（**8%**）⇒ **不是上下文超限**。复发面实测：近 14 个会话里 **5 个**出现过（`session-0b292806` 一轮 3 次）⇒ 复发型。**分层结论**：失败本身是「网页侧开了流却长时间不产出」（驱动读数：页面在、最近活动 1s 前、**0 字回复未回传**），桥按设计判死，**不建议放宽窗口**（`idle-window.js` 文件头已论证：对「已开流后静默」给宽限会把真卡死从 120s 拖到 240s 才暴露，比旧行为更糟）；但**报错文案有一处确定缺陷**：`idleWindowDecision` 在「真·开流后静默」与「没开流且驱动不忙」两种情形**都返回 `phase:'mid-stream'`**，文案只印 phase ⇒ 把后者印成「判定相位=已开流后的静默」的**假陈述**，紧挨「最近驱动活动时间 1s 前」并排出现、读起来自相矛盾。修法为**加法**：每个返回分支多带显式布尔 `firstEventSeen`，文案据此分诊；`phase` 与窗口计算**逐字未变**。<br>闸门：三文件护栏 **58/58**；变异反向验证成立（去掉新判据 ⇒ 单元级与切分穷举**两条都红**，还原 ⇒ 12/12）。<br>（本轮前段，保留）**回查我上一轮（0.19.20/0.19.21）自己引入的两个真缺陷并修掉**——<br>① **注释与实现不符**：0.19.19 我在 `browser-driver.js` 写「`answerSelector` 供本文件**三处**消费点共用」，实际只有**两处**（WIP 巡检采样 + 超时现场）。第三处 `DOM_CAPTURE`（decoder:'dom' 站点的抄全文兜底）是**另一张表**——它多出 `.response-container` 与 `main`，不消费 `answerSelector`。已改成「两处」并留下**勘误段**（本仓库反复记过「注释与实现不符」，而那条催生该字段的注释漂移正是同型；错误的「三处」会让下一个读者去 `DOM_CAPTURE` 找接线、找不到、再怀疑接线断了——**错误的注释比没有注释更贵**）。<br>② **`.hwb/cols/<列键>/` 有两个真缺陷**（0.19.21 我把列身份拼进提示词时漏掉的）：**(a) 目录跨会话串扰**——列键是固定的 `c1/c2/c3`，而目录路径**没带会话作用域** ⇒ 两个不同 DSH 会话的第 2 列都写 `.hwb/cols/c2/`，草稿互相覆盖，而「互不影响」正是并列探索的全部意义；**(b) 路径穿越写进提示词**——`key` 来自客户端请求体，上一版直接 `String(raw.key).trim()` 就拼进路径，一个 `../` 就能把「产出写这里」指到工作区之外，而模型会照做。修法：新增 `safePathSegment`（**白名单** `[A-Za-z0-9_-]`，黑名单永远漏）、`scope` 参与目录名（`session-e7056e8c-c2`，实测 `../../etc` → `x-etc`）、两个片段都净化后为空则返回 **null**（宁可不给目录，也不给所有列共用的 `.hwb/cols/` —— 那比不给更坏，界面上还写着「该目录归本列使用」）。<br>护栏 `test/column-context.test.mjs` **8/8**（新增两条 0.19.23：路径白名单净化、目录隔离），并做**变异反向验证**（去掉白名单 ⇒ 2 条红；目录不带 scope ⇒ 1 条红；还原 ⇒ 8/8）。全量 **1079/1079 exit 0**。闸门：台账 / 注释 / 卫生 全 PASS。<br>**上一版行（0.19.22，保留）**：**0.19.22（已打包 + 装入双 profile）**：修**用户报的两件真缺陷**——<br>① **「账号 glm 已被另一个桥接实例占用（pid 17820）」把重启后的主人挡在门外**（用户原话「这个报错怎么回事？还有我是重启了的啊！」，且 **deepseek 同样中招**）：实测 `sites/glm` 与 profile 根目录两份锁都写着 pid=17820、`at`=05:50:38，而 **17820 早已不在进程表里**（活着的 dsh 是 08:39 起的另一个 pid）。0.19.18 的锁只有「同 pid 同 startedAt」与「12 小时时间上限」两条出路 ⇒ **进程被强杀后锁留在盘上，12 小时内连刚重启的主人都被拒**。修三条：**加存活判据**（`isProcessAlive`，`process.kill(pid,0)` 的 `ESRCH` 才判死、`EPERM` 一律算活，Windows 上不起子进程）、**同 pid 不同 startedAt 判为「本进程上一个化身」而不是「别人持锁」**（插件热重载不再自锁）、**`process.on('exit')` 兜底释放**；并补上一条 0.19.18 的**接线漏洞**：`acquireBridgeLock` 从未把本进程 pid 传进判据，导致「同进程重入」这条分支在生产路径上从未生效（单测传了 pid，所以看不出）。护栏 `test/bridge-lock.test.mjs` **20/20**，含 **⑦b 真进程复现**（真起一个 node 子进程持锁 ⇒ 必拒；杀掉它 ⇒ 同一把锁必须能接管），并做**变异反向验证**（删掉死锁分支 ⇒ ①g/②d/⑦b 三条必红，还原 ⇒ 20/20，`test-mock/probe-lock-verify-reverse.mjs`）。<br>② **「并列多会话」的布局与对话框照抄官方**（用户原话「每个列都能够做到上下宽度都全长和对话中的官方一样……直接抄 dsh」）：三列**各自**保留独立对话框（不变），但**不再自绘**——按官方 composer（`.uV2eYG_*`）逐条复刻（卡片 radius 22px / `--dsw-specific-input-major` / `--dsw-elevation-soft`、文本面 36→336px、34px 圆形主按钮、Enter 发送 / Shift+Enter 换行 / 组字不误发）；挤占的根因是 `.hwb-compare-view{height:100%}` 在**滚动容器**里等于「占满一屏」＋「官方对话框再加一截」，改为官方整屏协议 `data-conversation-composer-overlay`（官方轨迹视图同款）＋ `flex:1 1 auto;min-height:0;overflow:hidden` ＋ 列体 `min-height:0`；官方那个属于主会话的对话框座位在本视图挂载期间让位（`[data-conversation-scroll]:has(.hwb-compare-view)>[data-composer-seat]{display:none}`，**只在本视图挂载时命中**）。护栏 `test/team-compare.test.mjs` **13/13**（新增 0.19.22 一条），并用**官方样式原样回放 + 真 Chromium 计算样式**取证（`test-mock/probe-compare-layout.mjs` 10/10：视图 900/900 占满、三列卡片各占本列宽、radius 22px、发送按钮 34px 圆、让位规则挂载时命中/卸载即恢复、摘掉协议属性 `.viewArea` 立刻失去 `overflow:hidden`）。全量 **1077/1077 exit 0**。<br>**上一版行（0.19.21，保留）**：在 0.19.20 之上补齐用户 Q5 的**沙箱适配**那一问——新增 [`lib/column-context.js`](research/2026-09-26-glm-goal-round2-implementation.md)：列身份（role/key/index/total）由 `sendCol` 每轮随 `POST chat` 下发，渲染成一段**工作区约定**（探索列产出写 `<workspace>/.hwb/cols/<列键>/`、主审列负责汇总与裁决），`.gitignore` 新增 `.hwb/` 规则。**边界如实标注：只做约定、不做拦截**（模型发起的 edit/pwsh 由 Harness 工具执行器落地，那条链路没有本插件插槽）。护栏 `test/column-context.test.mjs` **6/6**，并做**反向验证**（把 `sendTurn(sessionKey, promptText,` 变异回 `prompt,` ⇒ 判据必红）。全量 **1070/1070 exit 0**。<br>**上一版行（0.19.20，保留）**：**0.19.20（已打包 + 装入 web / headless 双 profile）**：本轮交付用户 2026-09-26 六问的**第二轮实施**——① **并列多会话：移除「同时发送」**，共享输入条 / 全局 `sending` 锁 / `pendingRef` 计数器三样一并删除，改为**每列一个独立底部对话框**（各发各的、互不等待）；② **主审列**（全局唯一、可改选）+ **探索列**，回答「选定一个模型做主要审查」；③ **会话内容引用**落地（Q2 的另一半）：每条已完成回复带「引用」按钮 → 全局引用槽（**跨列**）→ `POST chat` 的 `quote`/`quoteFrom` 拼成 `> ` 块引（4000 字符上限、截前保尾、用掉即清）；④ **`answerSelector` 契约补齐**（审计 C1）：GLM / Z.ai 在 `providers.js` 声明站点专属助手节点选择器，`contract.js` 投影，`browser-driver.js` 一次求值三处共用，未声明站点回落原串（**纯增量**）。护栏：`test/team-compare.test.mjs` **12/12**（含三条新增 0.19.20 判据）；全量 **1064/1064 exit 0**。第二轮报告：[`doc/research/2026-09-26-glm-goal-round2-implementation.md`](research/2026-09-26-glm-goal-round2-implementation.md)。<br>**上一版行（0.19.18，保留）**：**0.19.18（已打包 + 装入 web / headless 双 profile，版本实测 0.19.18；待用户手动重启 `dsh web` 生效）**：新增用户准则「**同一账号不能同时桥接运行**」的账号级互斥锁 + GLM 真机验证双双通过。详见下方「0.19.18」节与 [`doc/session-2026-09-26-requirements-and-progress.md`](session-2026-09-26-requirements-and-progress.md)。<br>**上一版行（0.19.17，保留）**：**0.19.17（源码已修，待重新打包装入生效）**：修**用户报「正文有空白还有乱码」**——流式期间**调用围栏本身**被当正文外发。GLM/z.ai 走 codeblock 传输，围栏刚开、JSON 还没吐出 `mcp_action`/`arguments` 的那一小段窗口里 `findProtocolStart` 判据不成立 ⇒ 外发边界只剩 `PROSE_TAIL_CHARS`（8）⇒ 围栏与 JSON 头一个字符一个字符进了会话（真机会话 `session-0b292806` turn2 正文块里全是 `\n```\n\n`）。修法两条纯函数：`unresolvedCallFenceAt`（落单的未闭合围栏 + 其后首格是 `{` ⇒ 扣住；普通代码块 ```js 不扣）+ `closingFenceAfter`（紧跟已消费协议区间的闭合围栏划进协议区间）。护栏 `test/fence-tail.test.mjs` **8/8**；全量 **1046/1046 exit 0**。同一轮**已定位上一会话失败（WEB_NO_PROGRESS）与乱码同源**：报错自述「最近驱动活动时间 1s 前」+「相位=已开流后的静默」自相矛盾，说明看门狗量的是「适配器事件通道静默」而非「网页没产出」，而通道之所以静默正是协议原文在挤占正文通道。**另附上一会话落盘取证手法**：会话是**多帧 zstd**，`zstdDecompressSync` 只解首帧 ⇒ 「只有一行」是假象，须扫 `28 b5 2f fd` 分帧拼接（`test-mock/probe-fence-decision.mjs`）。<br>**上一版行（0.19.15，保留）**：**0.19.15（已打包装入双 profile、声明已同步、`dsh web` 已重启生效：8931 实读 `build.version=0.19.15` hash `d220a37511c1`；线上镜像真机验收：左侧会话历史完整加载）**。本轮修**用户报的「deepseek 网页端左侧会话历史全是加载失败」**，两个独立根因一次落齐：<br>① **0.19.14 自己引入的回归（主因）**：bootstrap IIFE 里 window.open 钩子声明 `var open0=window.open`，把 XHR 钩子的 `var open0=XMLHttpRequest.prototype.open` **重声明覆盖**（同一函数作用域）——此后每一次 `xhr.open()` 实际调用的是 `window.open`，应用的全部 XHR 数据请求静默失败 ⇒ 数据层整体不启动。定位手法：钩子段整段移除 → 存活；逐钩子单禁/组合禁用 12 个变体全死 ⇒ 查变量作用域才发现重名（test-mock/ab-hooks-bisect.mjs 留档）。修法：改名 `wopen0` 并注释钉住原因。<br>② **站点前端改版（独立于桥）**：新 bundle 的环境判定只认 localhost/chat.deepseek.com 等四种主机名，镜像主机名直接 `throw Error("Unknown hostname: …")`（bundle 逐字取证）——挂在 HTTP 客户端上的整片模块图随之死掉。修法 `patchSiteJs`：对站点 JS 响应做一次外科手术，把该 throw 换成 production 兜底（proxyAsset 与 handle 的 JS 分支都接）。<br>验收：双主机名形态（deepseek.localhost / localhost）各 10 个 `/api/v0/` 全 200（client/settings、users/current、auth_token/check_device、**chat_session/fetch_page**），左侧会话历史显示全部真实会话；全量 **1028/1028 exit 0**。已知余项：探针里 4 个 502（第三方探活请求经 /wr/ 到不可达域），不影响功能。<br>**GLM 5.3 Flash（用户报「一直没搞好」）——本轮取证，未修**：最近 glm 会话（a23e4ee4 等）每轮同型失败：reasoning 流到一半后捕获链死亡 ⇒ `partial-wip-settled` ⇒ 最终 text/thinking 双空 ⇒ "empty response from web AI"；用户补「你好？继续」同型复发。疑点：DOM 采样选择器（.markdown/.ds-markdown）对 chatglm.cn 页面结构的适配、以及 reasoning 增量在 glm SSE 解码里的落账。glm 账号登录态正常（sites/glm loggedIn=true 09-26 00:13）。**下一轮开局证据已留本行。** |
 | 工作树版本 | **0.19.14（已打包装入双 profile、声明已同步、`dsh web` 已重启生效：3080/8931 实读 `build.version=0.19.14`，hash `2c7779d68f56`）**：两件用户可见修复——**① 手动 /compact 修通**（取证+方案：doc/research/2026-09-25-compact-aux-delta.md）。病因：压缩调用带 `purpose` ⇒ 无会话键 ⇒ 整段历史（本项目最大会话 ≈190 万字符 ≈110 万 token）压成一条消息重发 ⇒ 撞桥自身 1M 预算闸（CONTEXT_WINDOW_EXCEEDED），**压缩恰恰只在需要压缩的会话上做不了**；真机阶梯探针证明网页输入框上限已 ≥320k（88k/160k/320k 三档全过，9 月 23 日 ~73k 的旧读数失效），长度不是病因。修法：主会话游标命中（契约指纹一致 + 内容锚重定位到「只多最后一条」）⇒ **只把压缩指令作为增量**发进既有网页会话（真机 A 相：3 秒产出结构化摘要、4/4 事实标记逐字复现，test-mock/real-compact-probe.mjs）；不命中回落整段独立首轮（辅助专用槽 `aux::<purpose>::<sessionId>` + fresh=true + rebuild；不再落到驱动 'main' 槽被 URL 自愈接进错误会话）；辅助轮一律**不碰主游标**；执行器 WEB_SESSION_LOST 对 purpose 轮跳过落盘正本（那份是真实首轮、不含本轮指令）。护栏 `test/aux-delta-compact.test.mjs` 5 条。**② 镜像图片/文件查看适配（真机字节级验收）**：观察真实前端实锤——聊天图片实际请求 **`https://files.deepseeksvc.com/api/file?file_id=…&state=…`（陌生域，不在任何改写清单）**、头像在 `static.deepseek.com`；镜像页里这些请求带着**镜像 origin 的 referer** 直打 CDN ⇒ 403 裂图（真机二分：referer=目标域 403、referer=chat.deepseek.com 200——这就是「查看图片不行」的机理）。修法三件：relay 新增 **`/wr/<encoded 绝对URL>`** 带 cookie 转发（cookie 按目标域取、referer 统一上游页面、SSRF 面与 /__static/ 同口径、HTML 响应同套「改写+注入」、Location 同口径收进镜像命名空间）；bootstrap `toLocal` 兜底把**一切**未知域 http(s) 绝对 URL 收进 `/wr/`（`isLocalPath` 认识 /wr/ 防二次加前缀）；补钩 **setAttribute srcset / innerHTML / window.open + fetch 的 URL 对象入参**（真机实锤：opus-decoder.wasm 以 URL 对象 fetch 漏改写 → CORS 拒；对照实验证明全新浏览器数据层停摆为环境差异、非本轮引入）。真机验收 `test-mock/real-wr-image.mjs`：/wr/ 取回真实签名图片 **200 image/webp**、头像 200；`real-mirror-control.mjs` 为对照实验。护栏 `test/mirror.test.mjs` 新增 /wr/ 用例（8/8）。**全量 1028/1028 exit 0**。SW 拦截层按「尽可能不复杂」裁量**暂缓**（研究文档 §三之二已记：客户端改写本来就是 SW 的前提）。**0.19.13 内容**（换路线版本 0.20.0–0.21.2 已按用户指令完全回退，备份分支 `backup/live-route-0.20.x-0.21.x`）：镜像 iframe 原生路线 + 游标持久化 + 命名键形修复，护栏 cursor-persistence 5 + session-continuity 14 = 19/19。 |**0.20.0（已打包并装入 web/headless 两 profile，声明=lockfile=已装三方一致；待用户手动重启生效）**：本轮开**新路线「自带内核工作区」**（用户拍板：右栏弃镜像 iframe，改为自带 Chromium 实时画面投屏，登录只有自带内核一份，先 DeepSeek 跑通），内容见下方「0.20.0 范围」行。0.19.12 修**真机复现的「开流后捕获链中断」**（2026-09-24 22:11-22:13，会话 `session-12d9c3c6`），内容见「0.19.12 范围」行。0.19.11 修四件（技能目录收敛 / 长文本解析 / 投递链自证 / 附件阈值站点收紧），内容见「0.19.11 范围」与「0.19.11 真机验证」两行。0.19.9 修**真机复现的「有图 + 超长正文时正文没走附件」**——用户原话「deepseek 明明在附件投递模式下，看的还是完整上下文」。真机复现（一轮里同时有一张图与 81,004 字符正文）：页面上的用户消息 `userMsgChars=81139`、`mentionsFullHistory=true`（正文整段进了输入框），而 `attachTransport` 停在**上一轮**读数 —— 面板显示「当前生效：附件投递」而用户看到全文。根因是调用点的 `if (!attachEvidence)` 守卫：`attachEvidence` 已被 `uploadImages` 置位，于是**整块投递判定被跳过**。改法：判据换成 `plan.mode`（正文是否需要附件），不再看「有没有用过附件」。同时修掉一个**假阳性陷阱**：`waitForAttachment` 的类名候选判据（`img[src^='blob:']`）分不出附件是谁的 —— 带图轮里会被图片命中，把「.md 没落地」误判成「已确认」；文本附件现在只认文件名（`allowCandidates:false`）。护栏 `attach-callsite` ⑥/⑥b（原⑥那条**判据说反了**，已改写并写明真机反证）。0.19.8 修**真机复现的「图片轮发不出去」**：带图的一轮上传证据命中却整轮 240s 超时，22 秒后页面仍停在站点首页、正文还躺在输入框里（程序化 Enter 没有提交）；根因是发送**只调用不确认**，修法为按页面事实确认（输入框清空 / 地址栏切会话）+ 三条发送路径 + `SEND_NOT_CONFIRMED`。0.19.7 落用户 UI 三条 —— ① 修「设置界面输入框超出卡片框」：控件 CSS 缺 `box-sizing:border-box`（旧版按内容盒算，加上 padding/边框比容器宽约 22px），补齐并加护栏；② 设置界面标题行右端加 **GitHub 项目主页链接**（原生面板 + 独立设置页两处）；③ 统一控件风格（模型下拉/文本框统一「填满可用宽度、上限 340px」；任务板弹窗 `.hwb-input/.hwb-select` 补上此前缺失的盒模型与刻度）。0.19.6 落用户界面文案与预设两条要求 —— ① 等待占比不再输出「（覆盖 n/N 轮）」（`waitRatio` 只给纯百分比，零覆盖仍 `未记录`）；② agent preset 展示名 `WebCode 真实模式` → **`wecode模式`**，description 与 persona 压成简短声明（去掉 303 份/23,636 次的统计叙述）；③ 设置页与右栏文案按「官方解释长短」精简：删掉「正在运行（子代理 / Team）」整卡（含 7.9KB 的 `AgentRoster` 组件、`rosterStateOf`、`.hwb-roster*` 样式）、「附件探针」与「最近一次实际投递」、限流退避与真机事故叙述、会话隔离的机制句、「全局指令」重复句；④ 「首轮提示词（只读）」卡重排美化（信息面不变）。另修**插件市场整页崩溃**：`dshmarket` 1.55.0 直接解构 primitives 的 `Icon*Outline14/16`，而 DSH 0.1.7-alpha.2 已把该族改名为 `…Regular/Medium` → `h(undefined)` → React error #130；已把 web profile 的 `dshmarket` 升到 **1.59.0**（其 bundle 带 `ICON_ALIASES` 两代名字回落）。0.19.5 修 DeepSeek 附件确认判据假阳性（正文同名文本被当成附件证据）、图片轮缺名字证据且失败判死整轮、长文本写入 O(n²)（400k 需 72s）三件，见下节。0.19.4：0.18.0 曾真机生效（线上 3080 实测 `build.version=0.18.0`、`hash a86bce573e0b`）；0.19.0 落三项用户要求；0.19.1 边界1/2 澄清落地 + 打包安装；0.19.2 修 DSH 升到 0.1.7-alpha.2 后的两个真故障（`settingsScope` 改名致整块不挂载、primitives 图标改名致等待药丸消失），诊断见 [`diagnosis-2026-09-23-dsh-0.1.7-alpha.2.md`](diagnosis-2026-09-23-dsh-0.1.7-alpha.2.md)；0.19.3 落用户五点（自动续跑整会话累计 + 完整提醒、WebCode 真实模式 preset、modsearch 实测、长上下文三/四轮、`imageRequestPricing` 修复）**并已真机重启生效**（3080 实测 `build.version=0.19.3`、`hash c6365c4acbbd`）；**0.19.4 落用户三点**（计费三类实测单价 + 绝不低估、右栏站点目录统一账号下拉含真实头像/昵称与「新账号」、relay 按账号多通道并发 + 会话绑定唯一账号） |——用户原话「deepseek 明明在附件投递模式下，看的还是完整上下文」。真机复现（一轮里同时有一张图与 81,004 字符正文）：页面上的用户消息 `userMsgChars=81139`、`mentionsFullHistory=true`（正文整段进了输入框），而 `attachTransport` 停在**上一轮**读数 —— 面板显示「当前生效：附件投递」而用户看到全文。根因是调用点的 `if (!attachEvidence)` 守卫：`attachEvidence` 已被 `uploadImages` 置位，于是**整块投递判定被跳过**。改法：判据换成 `plan.mode`（正文是否需要附件），不再看「有没有用过附件」。同时修掉一个**假阳性陷阱**：`waitForAttachment` 的类名候选判据（`img[src^='blob:']`）分不出附件是谁的 —— 带图轮里会被图片命中，把「.md 没落地」误判成「已确认」；文本附件现在只认文件名（`allowCandidates:false`）。护栏 `attach-callsite` ⑥/⑥b（原⑥那条**判据说反了**，已改写并写明真机反证）。0.19.8 修**真机复现的「图片轮发不出去」**：带图的一轮上传证据命中却整轮 240s 超时，22 秒后页面仍停在站点首页、正文还躺在输入框里（程序化 Enter 没有提交）；根因是发送**只调用不确认**，修法为按页面事实确认（输入框清空 / 地址栏切会话）+ 三条发送路径 + `SEND_NOT_CONFIRMED`。0.19.7 落用户 UI 三条 —— ① 修「设置界面输入框超出卡片框」：控件 CSS 缺 `box-sizing:border-box`（旧版按内容盒算，加上 padding/边框比容器宽约 22px），补齐并加护栏；② 设置界面标题行右端加 **GitHub 项目主页链接**（原生面板 + 独立设置页两处）；③ 统一控件风格（模型下拉/文本框统一「填满可用宽度、上限 340px」；任务板弹窗 `.hwb-input/.hwb-select` 补上此前缺失的盒模型与刻度）。0.19.6 落用户界面文案与预设两条要求 —— ① 等待占比不再输出「（覆盖 n/N 轮）」（`waitRatio` 只给纯百分比，零覆盖仍 `未记录`）；② agent preset 展示名 `WebCode 真实模式` → **`wecode模式`**，description 与 persona 压成简短声明（去掉 303 份/23,636 次的统计叙述）；③ 设置页与右栏文案按「官方解释长短」精简：删掉「正在运行（子代理 / Team）」整卡（含 7.9KB 的 `AgentRoster` 组件、`rosterStateOf`、`.hwb-roster*` 样式）、「附件探针」与「最近一次实际投递」、限流退避与真机事故叙述、会话隔离的机制句、「全局指令」重复句；④ 「首轮提示词（只读）」卡重排美化（信息面不变）。另修**插件市场整页崩溃**：`dshmarket` 1.55.0 直接解构 primitives 的 `Icon*Outline14/16`，而 DSH 0.1.7-alpha.2 已把该族改名为 `…Regular/Medium` → `h(undefined)` → React error #130；已把 web profile 的 `dshmarket` 升到 **1.59.0**（其 bundle 带 `ICON_ALIASES` 两代名字回落）。0.19.5 修 DeepSeek 附件确认判据假阳性（正文同名文本被当成附件证据）、图片轮缺名字证据且失败判死整轮、长文本写入 O(n²)（400k 需 72s）三件，见下节。0.19.4：0.18.0 曾真机生效（线上 3080 实测 `build.version=0.18.0`、`hash a86bce573e0b`）；0.19.0 落三项用户要求；0.19.1 边界1/2 澄清落地 + 打包安装；0.19.2 修 DSH 升到 0.1.7-alpha.2 后的两个真故障（`settingsScope` 改名致整块不挂载、primitives 图标改名致等待药丸消失），诊断见 [`diagnosis-2026-09-23-dsh-0.1.7-alpha.2.md`](diagnosis-2026-09-23-dsh-0.1.7-alpha.2.md)；0.19.3 落用户五点（自动续跑整会话累计 + 完整提醒、WebCode 真实模式 preset、modsearch 实测、长上下文三/四轮、`imageRequestPricing` 修复）**并已真机重启生效**（3080 实测 `build.version=0.19.3`、`hash c6365c4acbbd`）；**0.19.4 落用户三点**（计费三类实测单价 + 绝不低估、右栏站点目录统一账号下拉含真实头像/昵称与「新账号」、relay 按账号多通道并发 + 会话绑定唯一账号） |——用户要求「真实调用 webcode/deepseek、查看网页界面/内核」后，用桥自己的 OpenAI 前端 + CDP 直连在用浏览器取证：不带图的一轮 1.6s 正常回答；带图的一轮上传证据命中（`imageTransport.ok=true`、`img[src^='blob:']`）却整轮 240s 超时，22 秒后探活发现**页面仍停在站点首页、正文还躺在输入框里**（程序化 Enter 没有提交），而同页面手工按 Enter 立刻发送成功、模型正确读出图里的字符 `7QK-42`。根因是发送**只调用不确认**：「没发出去」与「发出去但网页不回」在读数上同形。修法：发送后按**页面事实**确认（输入框被清空 / 地址栏从根切到会话），未确认依次重试「契约按钮 → 聚焦输入框末位回车」，三条都不成立就抛 `SEND_NOT_CONFIRMED`，不再伪装成超时；护栏 `test/send-confirmed.test.mjs`。另：接用户指令把 `promptTransport` 从 `inline` 改为 **`attach`**（`~/.dsh/webcode-edge-profile/webcode-settings.json`），附件投递通道因此真正被走到。0.19.7 落用户 UI 三条 —— ① 修「设置界面输入框超出卡片框」：控件 CSS 缺 `box-sizing:border-box`（旧版按内容盒算，加上 padding/边框比容器宽约 22px），补齐并加护栏；② 设置界面标题行右端加 **GitHub 项目主页链接**（原生面板 + 独立设置页两处）；③ 统一控件风格（模型下拉/文本框统一「填满可用宽度、上限 340px」；任务板弹窗 `.hwb-input/.hwb-select` 补上此前缺失的盒模型与刻度）。0.19.6 落用户界面文案与预设两条要求 —— ① 等待占比不再输出「（覆盖 n/N 轮）」（`waitRatio` 只给纯百分比，零覆盖仍 `未记录`）；② agent preset 展示名 `WebCode 真实模式` → **`wecode模式`**，description 与 persona 压成简短声明（去掉 303 份/23,636 次的统计叙述）；③ 设置页与右栏文案按「官方解释长短」精简：删掉「正在运行（子代理 / Team）」整卡（含 7.9KB 的 `AgentRoster` 组件、`rosterStateOf`、`.hwb-roster*` 样式）、「附件探针」与「最近一次实际投递」、限流退避与真机事故叙述、会话隔离的机制句、「全局指令」重复句；④ 「首轮提示词（只读）」卡重排美化（信息面不变）。另修**插件市场整页崩溃**：`dshmarket` 1.55.0 直接解构 primitives 的 `Icon*Outline14/16`，而 DSH 0.1.7-alpha.2 已把该族改名为 `…Regular/Medium` → `h(undefined)` → React error #130；已把 web profile 的 `dshmarket` 升到 **1.59.0**（其 bundle 带 `ICON_ALIASES` 两代名字回落）。0.19.5 修 DeepSeek 附件确认判据假阳性（正文同名文本被当成附件证据）、图片轮缺名字证据且失败判死整轮、长文本写入 O(n²)（400k 需 72s）三件，见下节。0.19.4：0.18.0 曾真机生效（线上 3080 实测 `build.version=0.18.0`、`hash a86bce573e0b`）；0.19.0 落三项用户要求；0.19.1 边界1/2 澄清落地 + 打包安装；0.19.2 修 DSH 升到 0.1.7-alpha.2 后的两个真故障（`settingsScope` 改名致整块不挂载、primitives 图标改名致等待药丸消失），诊断见 [`diagnosis-2026-09-23-dsh-0.1.7-alpha.2.md`](diagnosis-2026-09-23-dsh-0.1.7-alpha.2.md)；0.19.3 落用户五点（自动续跑整会话累计 + 完整提醒、WebCode 真实模式 preset、modsearch 实测、长上下文三/四轮、`imageRequestPricing` 修复）**并已真机重启生效**（3080 实测 `build.version=0.19.3`、`hash c6365c4acbbd`）；**0.19.4 落用户三点**（计费三类实测单价 + 绝不低估、右栏站点目录统一账号下拉含真实头像/昵称与「新账号」、relay 按账号多通道并发 + 会话绑定唯一账号） |
 | **0.19.0 用户三项要求（原话，2026-09-22）** | ① 「已经登录网站实现和登录网站参考官方浏览器本地实现能原生打开」+「设置界面和右侧本插件带来的登录必须落实一处，必须脱离本机浏览器可用（零外部？就是自带浏览器完整实现）」；② 「优化任务板的 UI 统一官方 harness 审美！另外我想要的任务板是人能够手动添加任务的！然后是审批界面，参考 office 左正文，右划线编辑评论并合理显示：完全参考 office 实现」；③ 「删除参考官方用的 team 面板，和我设想的 team 不同，参考错误了……重构 team 功能，本插件的并列多会话组成的 team」。 |
 | **0.19.0 ③ 关键依据：用户对「Team」的定义（逐字，`doc/user-voice-log.md:3670`）** | 「**team 不是指的官方 team 那样，我想更多指的是能够充分发挥本多站点（如果实现）的优势，能够做到中心对话区域做到：并列不同模型对话进行回复**」。⇒ 本插件的 Team = **若干条各自独立的网页会话并排**（每列一个站点、各持稳定 `sessionKey`、各自接着聊），落点是**中央对话区**；**不是**官方 `agentTeams` 的右栏花名册。0.17.3 那份「参考官方 agentTeams」的实现是**参考错了**。 |
@@ -278,7 +443,7 @@
 | 已装版本（profile） | web = **0.21.0**、headless = **0.21.0**（2026-09-25 装箱；0.21.0 = 「0.21.0 范围」行：WebRTC 页面自采主路 + liveHeaded 有头三件套隐藏 + 失败自动降级投屏）、headless = **0.20.2**（2026-09-25 三次装箱；0.20.2 修「画面不适配面板大小+画质低」：hub 按面板尺寸 ×2 超采样做 CDP 视口仿真（viewportForPanel，钳制 720–1280 / 900–2000），投屏上限同步、quality 90，客户端 canvas 按 devicePixelRatio 绘制 + ResizeObserver 防抖上报、同尺寸跳过；护栏 14/14，真机探针帧元数据 640×900→1024×1440 仿真生效、点击端到端仍 PASS；0.20.1 修真机首因「正在加载遮罩盖死画面流」——LivePane 分支无 iframe、ready 永不置位、不透光遮罩盖住已连上的画面，修法=遮罩条件排除画面流分支；0.20.0 内容见「0.20.0 范围」行）（2026-09-25 用 `dsh plugin --profile <p> add` 持久装入；两 profile 的 `package.json` 依赖、`pnpm-lock.yaml` specifier、`node_modules` 实装版本三方实测均为 0.20.0；tarball sha512 `en1q5VLu7U2R3bguyR+Y8nF+iKvTNlrexbNVGauG1s3ulCm0Oq7gLF007SSqyqQwqI5Wb1jj+r9MVabPI6hBBQ==`；新符号 `lib/live.js`（createLiveHub/mapMouseInput/mapKeyInput）与 `browser-driver` 的 `live` API、`client.cjs` 的 `LivePane`/`LIVE_SITES` **全部就位**） |
 | 运行中的进程 | 3080 侧 relay 实测 `/__webcode/status` 的 `build` = `{hash:'ad70f8c267de', version:'0.19.11'}`、`browserSource='bundled'`（chromium-1232）（2026-09-25 01:05 实读）⇒ 磁盘已是 **0.20.0**，**进程仍跑 0.19.11，待用户手动重启** |
 | 上游 | `origin/main` = `fb7cd6e`（0.16.31 文档收口）；本轮 0.16.32–0.16.40 待提交/待推（0.16.38 / 0.16.39 / 0.16.40 **均已打包装机**） |
-| 单测基线 | **91/91 测试文件全绿**（2026-09-25 逐文件实跑；全量 `node --test test/*.test.mjs` **1017/1017 通过、exit 0**、串行独占 602s。0.19.12 新增 1 个护栏文件 `capture-stall-rescue` 18 项，故从 90/90 升到 91/91）。**M1 例外（既有状态，本轮未引入）**：`node test/run-m1.js` **3 项失败**（turn1 fresh / turn2 same / parallel agents 的会话连续性断言）；`git stash` 对照 **HEAD（f988ba1，0.19.10）同样 3 项失败** ⇒ 失败先于本轮存在（0.19.11 一轮的「90/90」读数只跑了 `node --test`，未跑 run-m1，正是这样漏掉的）。归因与修复留作独立任务，不混入本轮。<br>**复核方式必须写清（本轮踩过一次）**：全量必须**串行独占**——本轮曾让两个作业并发跑测试，结果 `empty-response` 挂住 53 分钟、`regression` 从 8 分钟涨到 19 分钟；单独复跑 `empty-response` **69.8s / 5/5 通过**。并发下的红/慢**不算读数**（本文件 0.19.0 行已记过同型判据）。 |
+| 单测基线 | **96/96 测试文件全绿**（2026-09-26 全量 `node --test test/*.test.mjs` **1083/1083 通过、exit 0**。0.19.23 在既有文件内新增 4 项（GLM 原生 code part 1 项 + `closingFenceAfter` 开启围栏单元 1 项 + **切分粒度穷举** 1 项 + `firstEventSeen` 相位分诊 1 项）；0.19.21 新增 `column-context` 6 项；0.19.16 新增 `multi-site-decoder` / `wip-settle`；0.19.17 新增 `fence-tail`；0.19.18 新增 `bridge-lock` 14 项，故 91/91 → 95/95 → 96/96）。<br>**上一版行（95/95，保留）**：**95/95 测试文件全绿**（2026-09-26 全量 `node --test test/*.test.mjs` **1062/1062 通过、exit 0**。0.19.16 新增 `multi-site-decoder` / `wip-settle`；0.19.17 新增 `fence-tail`；0.19.18 新增 `bridge-lock` 14 项，故 91/91 → 95/95）。<br>**上一版行（94/94，保留）**：**94/94 测试文件全绿**（2026-09-26 全量 `node --test test/*.test.mjs` **1046/1046 通过、exit 0**。0.19.16 新增 `multi-site-decoder` / `wip-settle`，0.19.17 新增 `fence-tail` 8 项，故 91/91 → 94/94）。<br>**更早一行（91/91，保留）**：**91/91 测试文件全绿**（2026-09-25 逐文件实跑；全量 `node --test test/*.test.mjs` **1017/1017 通过、exit 0**、串行独占 602s。0.19.12 新增 1 个护栏文件 `capture-stall-rescue` 18 项，故从 90/90 升到 91/91）。**M1 例外（既有状态，本轮未引入）**：`node test/run-m1.js` **3 项失败**（turn1 fresh / turn2 same / parallel agents 的会话连续性断言）；`git stash` 对照 **HEAD（f988ba1，0.19.10）同样 3 项失败** ⇒ 失败先于本轮存在（0.19.11 一轮的「90/90」读数只跑了 `node --test`，未跑 run-m1，正是这样漏掉的）。归因与修复留作独立任务，不混入本轮。<br>**复核方式必须写清（本轮踩过一次）**：全量必须**串行独占**——本轮曾让两个作业并发跑测试，结果 `empty-response` 挂住 53 分钟、`regression` 从 8 分钟涨到 19 分钟；单独复跑 `empty-response` **69.8s / 5/5 通过**。并发下的红/慢**不算读数**（本文件 0.19.0 行已记过同型判据）。 |
 | **0.20.0 范围（本轮，2026-09-25）：新路线「自带内核工作区」P1** | 用户拍板（对话取证：官方 `ui-sidebar-browser` Web 端=iframe 实为「用户自己浏览器的内核」，桌面端才有 webview ⇒ Web 平台「原生嵌第二内核」不存在）：右栏弃镜像 iframe，改为**自带 Chromium 的实时画面投屏**——登录只有自带内核 profile 一份（右栏画面=驱动=同一浏览器），图片查看/文件预览/下载/弹窗回归真实浏览器行为，同站点多账户=每槽一实例，多站点并存=工作区标签条。方案全文 [`PLAN-2026-09-25-live-workspace.md`](plans/PLAN-2026-09-25-live-workspace.md)。<br>**P1 落地四层**：<br>① `lib/live.js`：输入映射纯函数（mapMouseInput/mapKeyInput，非法形状返回 null 丢弃）+ createLiveHub（WebSocketServer noServer 挂中继 upgrade；每连接一个 CDP 会话；Page.startScreencast 损伤帧下发+逐帧 ack；Input.* 回传；断开必 detach）。**安全面双重**：远端地址必须回环 + Origin 出现时必须回环（缺席=非浏览器本机客户端，放行——undici/CLI 不发 Origin，真机踩过一次）。<br>② `browser-driver` 新增 `live` API：listPages/openPage/closePage/activatePage/attach（ctx.newCDPSession）/onPagesChanged；**activatePage 只 bringToFront 绝不 repoint 自动化页**、面板不得关自动化页（`automation-page` 拒绝）。<br>③ 中继 `onUpgrade` 钩子 + index.js 建 liveHub（getDriver 惰性接 driverFor）。<br>④ 客户端 `LivePane`：canvas 拟合绘制 + 帧元数据坐标换算（pageX=(mx-dx)·deviceWidth/dw）+ 鼠标/滚轮/键盘转发 + 页面标签条（激活/关闭/新开主页）+ 状态遮罩；**P1 只有 deepseek 走画面流**（`LIVE_SITES`），面板一键「改用镜像页」回落旧 iframe 且本会话不再自动切回。<br>**验证**：护栏 `test/live-view.test.mjs` 11/11（纯函数真值表 + 假驱动假 CDP 全行为 + 非回环拒绝 + 接线结构）；真机探针 `test-mock/real-live-view.mjs` **ALL PASS**——无头自带 Chromium（临时 profile，about:blank 级页面，不碰登录站点）：握手/页面列表/**真实损伤帧+视口元数据**/点击输入端到端生效（页面 onclick 改 title，playwright 直读证实）。affected 护栏（client-render/hooks-order/control-routes/browser-source/capture-stall-rescue）129/129 通过。 |
 | **0.20.0 已知边界（如实记）** | ① P1 范围：仅 deepseek 走画面流，其余站点仍镜像（模板复制在 P3）；账户槽 tab 复用现有槽机制，画面流的槽内多页标签条已就绪、跨槽切换 UI 在 P2。② IME 组合输入不走键事件转发（P2 用 Input.insertText 文本直输兜底）。③ 右键原菜单不可投（已 preventDefault，页面内菜单不受影响）。④ 文字放大略软（位图极限）。⑤ 下载落在内核下载目录（P2 下载卡片）。⑥ regression 全量本轮在跑（10–19 分钟级），结果见单测基线行。 |
 | **0.19.12 范围（2026-09-25）** | 修**真机复现的「开流后捕获链中断、内容整轮丢失」**，四层一次落齐：<br>① **归因（reply-log 时间线，不是猜）**：会话 `session-12d9c3c6`，2026-09-24 22:10:40 上一轮 `finished`；22:11 用户发三问，本轮首事件已到（报错「判定相位=已开流后的静默」）；22:13:10 前后适配器看门狗开火（120s 中流窗口，设计如此不给宽限），现场读数「最近驱动活动 2s 前（WIP 巡检在采页面）+ 页面已有 1072 字回复未回传」；22:26/22:27 重试成功、原始回复 **1081 字 ≈ 未回传的 1072 字** ⇒ 网页侧完整生成完了，是「页面 SSE → 页内捕获 → 解码器」管道在前几个事件后中断；中止轮不落 reply-log（22:10→22:26 的 16 分钟空档佐证）。既有三道防线为何都救不了：`shouldSettleWip` 要求 bodyReady（正文得先从流来过——恰恰没有）、思考硬上限救出的仍是流里的内容、看门狗只负责报错丢弃。<br>② **判据（纯函数，可离线反向验证）**：`metrics.shouldRescueStalledCapture`——流静默 ≥ `captureStallRescueMs`（默认 45s，**必须 < 看门狗 120s**）+ 本轮 DOM 相对发送后基线**变过**（防把上一轮留在页面上的旧回复张冠李戴）+ `domLen>0`（剥计时文案后）+（页面仍在写 或 流从未送来过正文）。反向安全线：流在动不救、DOM 没变不救、只有计时器在动不救、`0`=显式关闭。<br>③ **动作（与既有 partial 收束同形，不新增第二条收尾通路）**：`startWipWatch` tick 在 bodyReady 早退**之前**判定，命中则把 `cleanAnswerDomText` 剥计时文案后的 DOM 文本当 `{partial:true, reason:'dom-rescue-capture-stall'}` 交回——runTurn 的部分流落账（`recoveredTurns`/`lastRecovered`/`noteEndReason`）全部复用，适配器拿到正常 `{end}` 走原解析链。`active` 增基线字段 `domTextAtStart`/`domTextChanged`/`domRescueDone`（每拍重算、一轮至多一救）。配置 `captureStallRescueMs` 进 DEFAULTS 并**两处驱动创建点显式传入**（同 `answerTimeoutMs` 的教训）。<br>④ **护栏**：`test/capture-stall-rescue.test.mjs` 18 项——判据真值表（4 正向含真机形状 + 7 反向安全线含边界取等）+ 清洗与 `answerDomLength` 同源断言 + 5 条接线结构断言（tick 内调用、先于 bodyReady、partial 同形、基线字段、配置三处贯通）。 |

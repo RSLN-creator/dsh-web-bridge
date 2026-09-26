@@ -1,6 +1,6 @@
 {
   "name": "dsh-webcode-bridge",
-  "version": "0.19.15",
+  "version": "0.19.23",
   "description": "Harness Web Bridge: DeepSeek web models, native Harness tool loops, DSH native right-sidebar tab and native settings; multi-account slots per site; left-column task-board panel (sidebar.panellist + main); session-slot continuity with persisted send cursors, marker-typo tolerant protocol parsing, attach/inline transport switch, content-anchored session cursor, capture-stall DOM rescue.",
   "type": "module",
   "main": "./lib/index.js",

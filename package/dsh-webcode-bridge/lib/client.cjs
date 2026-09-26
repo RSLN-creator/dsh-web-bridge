@@ -2246,31 +2246,53 @@ window.__ModuleLoader__.load({
 
       // ★ 唯一的列状态：一个数组。加列 = 展开，删列 = filter，改站点 = map。
       const [cols, setCols] = React.useState(() => [
-        { key: 'c1', siteId: 'deepseek', sessionKey: '', messages: [], status: 'idle', error: '' },
-        { key: 'c2', siteId: 'glm', sessionKey: '', messages: [], status: 'idle', error: '' },
-        { key: 'c3', siteId: 'kimi', sessionKey: '', messages: [], status: 'idle', error: '' },
+        { key: 'c1', siteId: 'deepseek', sessionKey: '', messages: [], status: 'idle', error: '', input: '', role: 'review' },
+        { key: 'c2', siteId: 'glm', sessionKey: '', messages: [], status: 'idle', error: '', input: '', role: 'explore' },
+        { key: 'c3', siteId: 'kimi', sessionKey: '', messages: [], status: 'idle', error: '', input: '', role: 'explore' },
       ]);
-      const [prompt, setPrompt] = React.useState('');
-      const [sending, setSending] = React.useState(false);
+      // 0.19.20（用户 Q5）：共享输入条与全局 `sending` 锁**已移除**——三列各自
+      // 有输入区、各自发车、各自等待。旧的 `handleSendAll` 让「一列在跑」= 全体
+      // 发不出去，而用户要的正是「同时互不影响的方案探索」。
+      //
+      // `quote`：会话内容引用（用户 Q2）。它是**全局**的一个待引用片段，而不是
+      // 挂在某一列上——这样 A 列的产出可以引用给 B 列（探索列 → 主审列）用，
+      // 正是三框设计要的那条通路。发送时随 `quote`/`quoteFrom` 一起下发，
+      // 由 web-control 的 `POST chat` 拼成 `> ` 块引。
+      const [quote, setQuote] = React.useState(null);
       const seqRef = React.useRef(0);
       const aliveRef = React.useRef(true);
-      // 在途列数计数器。**必须在组件体顶层创建**（0.19.0 第四轮自查抓到的阻断级缺陷）。
+      // 0.19.22（用户：「每个列都能够做到上下宽度都全长和对话中的官方一样」）：
+      // 每列对话框的文本面是**自增高**的 textarea，最大高度对齐官方
+      //（`--dsh-composer-text-max-height`，官方默认 336px）。
+      // 用一个 key→元素的映射而不是「每列一个 useRef」——列是数组渲染出来的，
+      // 循环里调 hook 正是本文件 hooks 规则反复记过的那条红线。
+      const inputRefs = React.useRef({});
+      // 0.19.20（用户 Q5）：`pendingRef` 全局在途计数器**已随「同时发送」一起删除**。
       //
-      // 它的第一版被写在 `handleSendAll` 的函数体里 —— 那是**事件处理器**，不是渲染期。
-      // 真实 React 在渲染之外把 dispatcher 换成「只会抛错」的那一个，于是 `useRef`
-      // 当场抛 `Invalid hook call`：点一次「同时发送」整块视图就炸，一列都发不出去，
-      // 而它本来要修的是「按钮永久锁死」——修出来的病比原病更重。
-      // 即便某个 React 版本容忍这种写法，每次点击都会新建一个 ref 对象，
-      // 「计数在途列数」的语义也就不再跨渲染稳定。
+      // 它的全部职责是「等所有列都回来才解锁那一个共享发送按钮」。既然每列现在
+      // 有自己的按钮、自己的 `status`，就**不再存在**需要一个全局计数的场景：
+      // 每列的锁直接由那一列的 `status === 'streaming'` 派生——单一事实来源，
+      // 而且结构上不可能出现「三列都完成了按钮还锁着」那种 0.19.0 修过的老毛病。
       //
-      // 为什么 887 条单测全绿也没看见：`test/client-render.test.mjs` 的 React 桩是
-      // `useRef: (init) => ({ current: init })`，它**在任何位置都工作**，结构上无法
-      // 察觉 hooks 规则；而 `team-compare.test.mjs` 的判据只断言源码文本里
-      // **存在** `const pendingRef = React.useRef(0)` ——写在事件处理器里同样满足。
-      // 两处判据都已按「位置」而不是「存在」重写，见对应测试文件的注释。
-      const pendingRef = React.useRef(0);
+      // 历史留痕（不要删）：它曾经被错写在 `handleSendAll` 函数体里，而那是事件
+      // 处理器，真实 React 在渲染之外调 `useRef` 会抛 `Invalid hook call`——点一次
+      // 「同时发送」整块视图就炸。那次的教训「hooks 必须按位置判、不能按文本存在性判」
+      // 仍然有效，见 `test/hooks-order.test.mjs` 与本文件 hooks 判据的深度断言。
 
       React.useEffect(() => () => { aliveRef.current = false; }, []);
+
+      // 文本面自增高（对齐官方 `.uV2eYG_scroll` 的行为：到 336px 才出内部滚动条）。
+      // 放在**一个**顶层的 effect 里遍历，而不是每列一个 effect —— 同上，循环里
+      // 不能调 hook。依赖是 cols：每轮输入、发送清空、列增删都会重新量一次，
+      // 因此发送后高度会自动回到最小态（这是「手改 style.height」唯一的坑）。
+      React.useEffect(() => {
+        for (const c of cols) {
+          const el = inputRefs.current[c.key];
+          if (!el || typeof el.scrollHeight !== 'number') continue;
+          el.style.height = 'auto';
+          el.style.height = Math.min(Math.max(el.scrollHeight, 36), 336) + 'px';
+        }
+      }, [cols]);
 
       const MIN_COLS = 2;
       const MAX_COLS = 4;
@@ -2286,6 +2308,10 @@ window.__ModuleLoader__.load({
           return [...prev, {
             key: 'c' + Date.now().toString(36) + seqRef.current,
             siteId: pick, sessionKey: '', messages: [], status: 'idle', error: '',
+            input: '',
+            // 新列默认是**探索列**：用户要「选定一个模型做主要审查」，那个位置
+            // 已经由默认的 c1 占着，新加的列去探索更符合分工直觉。
+            role: 'explore',
           }];
         });
       };
@@ -2296,128 +2322,169 @@ window.__ModuleLoader__.load({
 
       /** 改某列的站点。**必须清空该列的会话与消息**：sessionKey 绑定在
        *  「站点+账号」上，换了站点还续用旧 key 会把消息发到一个完全陌生的会话里。
-       *  这是一次有意的、用户可见的重置，因此 status/error 一并归零。 */
+       *  这是一次有意的、用户可见的重置，因此 status/error/input 一并归零。 */
       const setColSite = (key, siteId) => {
         setCols((prev) => prev.map((c) => (c.key === key
-          ? { ...c, siteId, sessionKey: '', messages: [], status: 'idle', error: '' }
+          ? { ...c, siteId, sessionKey: '', messages: [], status: 'idle', error: '', input: '' }
           : c)));
       };
 
+      /** 改某列输入区。每列一个受控 input —— 这就是「三个独立对话框」的落点。 */
+      const setColInput = (key, text) => {
+        setCols((prev) => prev.map((c) => (c.key === key ? { ...c, input: text } : c)));
+      };
+
       /**
-       * 同时发送给所有列。
+       * 把某列设为**主审**（全局唯一）。
        *
-       * 每列**独立**发车、独立收尾：一列失败只标那一列，不 await 全体，
-       * 也不让一列的 rejection 影响其它列。
+       * 为什么必须唯一：审查的产出要有一个收口的出口，否则「选定一个模型进行
+       * 主要审查」这句话不成立——三条并列的审查意见等于没有审查。用户随时可以
+       * 改选，改选只影响下一轮「给主审」按钮的落点，不动任何在途轮次。
        */
-      const handleSendAll = (e) => {
-        e?.preventDefault();
-        const p = String(prompt || '').trim();
-        if (!p || sending) return;
-        setPrompt('');
-        setSending(true);
+      const setReviewCol = (key) => {
+        setCols((prev) => prev.map((c) => ({ ...c, role: c.key === key ? 'review' : 'explore' })));
+      };
 
-        // 先给每一列挂上「用户消息 + 占位回复」；占位回复带 id 供精确回填。
-        // jobs 在这里就收集好（含该列的 sessionKey），因为 setCols 的回调
-        // 在 React 里可能被延后执行，不能依赖它的副作用顺序。
-        const jobs = [];
-        setCols((prev) => prev.map((c) => {
-          seqRef.current += 1;
-          const n = seqRef.current;
-          const userId = 'u' + n;
-          const botId = 'b' + n;
-          // 首次发送时为该列铸一个**稳定会话键**，之后每轮复用 ——
-          // 这就是「并列多会话」里「会话」二字的落点。
-          const sessionKey = c.sessionKey || ('team-' + sessionScope + '-' + c.key + '-' + c.siteId);
-          jobs.push({ key: c.key, siteId: c.siteId, sessionKey, botId });
-          return {
-            ...c,
-            sessionKey,
-            status: 'streaming',
-            error: '',
-            messages: [
-              ...c.messages,
-              { id: userId, role: 'user', text: p },
-              { id: botId, role: 'assistant', text: '正在向 ' + siteName(c.siteId) + ' 发送并等待回复…' },
-            ],
-          };
-        }));
+      /** 引用某列某条回复（Q2）：把片段挂到**全局**待引用槽。 */
+      const quoteFrom = (col, msg) => {
+        setQuote({ text: String(msg.text || ''), from: siteName(col.siteId) });
+      };
 
-        // 逐列独立收尾；**用计数器判「全体都回来了」**，而不是事后去猜列状态。
-        //
-        // 0.19.0 修掉的真缺陷（第三轮对抗审查抓到，本文件自己的护栏没覆盖）：
-        // 原先的做法是「排一个微任务，在 `setCols` 的 updater 里扫一遍列状态，没有
-        // `streaming` 残留才解锁」。它**必然不解锁**——那段微任务排进队列时，上面刚把
-        // 每一列设成 `streaming`，而下面那句 POST chat 的网络往返还没回来，于是每列都被
-        // 判为「仍在回复」，updater 提前返回，解锁那一行**永不执行**。
-        // 后果是**一次挂载只能问一句**：三列最终都显示「已完成」，而发送按钮永远停在
-        // 「发送中…」且 disabled —— 而 `conversation.view` 是中央常驻视图、不随交互卸载，
-        // 所以不会自愈。（此处**刻意不逐字引用旧写法**：本仓库有多处判据按源码**文本**
-        // 解析且不剥注释，写下可被解析成真实调用的字面量会被它们读成真代码，见
-        // `doc/verify.md` 0.19.0 补记第六节。）
-        //
-        // 修法两条：① 用 `pendingRef` 计数（每列发出 +1、回来 -1），归零才解锁；
-        // ② **在 updater 之外**调 `setSending`——在 `setCols` 的 updater 里调另一个
-        // setState 是**不纯的 reducer**，StrictMode 双调用下行为未定义，即便修好
-        // 提前返回也不该这么写。
-        //
-        // ① 的 `pendingRef` 声明在**组件体顶层**（本函数上方），不是这里 ——
-        // 第一版把它写在本函数体里，那是事件处理器，真实 React 会抛
-        // `Invalid hook call`。完整成因见那个声明处的注释。
-        pendingRef.current += jobs.length;
-        for (const job of jobs) {
-          api('chat', { siteId: job.siteId, prompt: p, sessionKey: job.sessionKey })
-            .then((res) => {
-              if (!aliveRef.current) return;
-              const ok = res?.ok !== false;
-              setCols((prev) => prev.map((c) => (c.key !== job.key ? c : {
-                ...c,
-                status: ok ? 'done' : 'error',
-                error: ok ? '' : String(res?.error || '未知错误'),
-                // ★ 按 **id** 回填，而不是按「最后一条」。
-                //   并发下「最后一条」可能已是用户刚发的下一轮消息。
-                messages: c.messages.map((m) => (m.id !== job.botId ? m : {
-                  ...m,
-                  text: ok
-                    ? String(res?.reply || res?.text || '（空回复）')
-                    : '[' + siteName(job.siteId) + ' 失败] ' + String(res?.error || '未知错误'),
-                })),
-              })));
-            })
-            .catch((err) => {
-              if (!aliveRef.current) return;
-              setCols((prev) => prev.map((c) => (c.key !== job.key ? c : {
-                ...c,
-                status: 'error',
-                error: String(err?.message || err),
-                messages: c.messages.map((m) => (m.id !== job.botId ? m : {
-                  ...m,
-                  text: '[' + siteName(job.siteId) + ' 异常] ' + String(err?.message || err),
-                })),
-              })));
-            })
-            .finally(() => {
-              // 计数归零 = 本轮全线收尾。`finally` 保证**无论成功/失败**都会减，
-              // 因此不存在「某一列异常导致按钮永久锁死」。
-              pendingRef.current -= 1;
-              if (pendingRef.current <= 0 && aliveRef.current) {
-                pendingRef.current = 0;
-                setSending(false);
-              }
-            });
-        }
+      /** 某一列是否在途。**单一事实来源**：列自己的 status —— 没有跨列共享的可变量。 */
+      const isColSending = (c) => c.status === 'streaming';
+
+      /**
+       * 发送**一列**（用户 Q5：不再有「同时发送」）。
+       *
+       * 0.19.20 之前这里是一个 `handleSendAll`：一个共享输入条 + 一个全局
+       * `sending` 锁 + 一个 `pendingRef` 计数器。三样东西都随「同时发送」删掉了，
+       * 理由是它们的**全部职责**就是让「一列在跑」变成「全体发不出去」——
+       * 而用户要的恰恰是相反的东西（互不影响的方案探索）。
+       *
+       * 删掉计数器之后，0.19.0 修过的那个老毛病（按钮永久锁死）在**结构上**
+       * 不可能复发：每列的锁由那一列自己的 status 派生，没有跨列共享的可变量。
+       * 这比「用计数器记得把它减回来」强一个量级。
+       */
+      const sendCol = (colKey) => {
+        // 要发的东西先从**当前**快照里算好再 setState：updater 在 React 里可能
+        // 被延后执行，不能依赖它的副作用顺序（这是 0.19.0 那一课的直接继承）。
+        const col = cols.find((c) => c.key === colKey);
+        if (!col) return;
+        const p = String(col.input || '').trim();
+        if (!p || isColSending(col)) return;
+
+        seqRef.current += 1;
+        const n = seqRef.current;
+        const userId = 'u' + n;
+        const botId = 'b' + n;
+        // 首次发送时为该列铸一个**稳定会话键**，之后每轮复用 ——
+        // 这就是「并列多会话」里「会话」二字的落点。
+        const sessionKey = col.sessionKey || ('team-' + sessionScope + '-' + col.key + '-' + col.siteId);
+        // 引用是**一次性**的：用掉即清。否则下一轮会莫名其妙又带上同一段，
+        // 而用户完全看不出为什么——「隐式延续的状态」正是最难排查的一类。
+        const q = quote;
+        setQuote(null);
+
+        setCols((prev) => prev.map((c) => (c.key !== colKey ? c : {
+          ...c,
+          sessionKey,
+          input: '',
+          status: 'streaming',
+          error: '',
+          messages: [
+            ...c.messages,
+            // 用户那条消息**带上引用预览**：否则用户看不出这一轮带了引用，
+            // 而「看不见的输入」是调试这类桥最难的一环。
+            { id: userId, role: 'user', text: q
+              ? ('引用「' + q.from + '」: ' + q.text.slice(0, 60) + (q.text.length > 60 ? '…' : '') + '\n\n' + p)
+              : p },
+            { id: botId, role: 'assistant', text: '正在向 ' + siteName(c.siteId) + ' 发送并等待回复…' },
+          ],
+        })));
+
+        // 独立收尾：成功/失败都落到**这一列自己**的 status 上，
+        // 因此发送锁自动解除（锁就是从 status 派生的），不存在需要「记得减回来」
+        // 的共享计数器。一列失败也绝不波及其它列——对比的价值就在这里。
+        api('chat', {
+          siteId: col.siteId,
+          prompt: p,
+          sessionKey,
+          // Q2：引用片段随请求下发，由 `POST chat` 拼成 `> ` 块引。
+          ...(q ? { quote: q.text, quoteFrom: q.from } : {}),
+          // Q5 沙箱适配：把**列身份**一起下发，由 `POST chat` 渲染成一段工作区约定
+          // （探索列写 `.hwb/cols/<列键>/`、主审列负责汇总）。
+          //
+          // 为什么每轮都发：这段文本只占十来行，而「这一列是哪一列」是**每轮都成立**
+          // 的事实。只在首轮发会让模型在长会话里逐渐忘记自己的角色——而那正是
+          // 「三列开始互相踩」的起点。
+          columnContext: {
+            role: col.role === 'review' ? 'review' : 'explore',
+            key: col.key,
+            // `scope` 必须带上（0.19.23 修的真缺陷）：列键是固定的 `c1/c2/c3`，
+            // 只靠它，**两个不同的 DSH 会话**里的第 2 列会写进同一个
+            // `.hwb/cols/c2/`，草稿互相覆盖——而「互不影响」正是并列探索的全部意义。
+            scope: sessionScope,
+            index: cols.findIndex((x) => x.key === col.key) + 1,
+            total: cols.length,
+          },
+        })
+          .then((res) => {
+            if (!aliveRef.current) return;
+            const ok = res?.ok !== false;
+            setCols((prev) => prev.map((c) => (c.key !== colKey ? c : {
+              ...c,
+              status: ok ? 'done' : 'error',
+              error: ok ? '' : String(res?.error || '未知错误'),
+              // ★ 按 **id** 回填，而不是按「最后一条」。
+              //   并发下「最后一条」可能已是用户刚发的下一轮消息——
+              //   而三框现在真的能并发（每列各发各的），这条比 0.18.0 更要紧。
+              messages: c.messages.map((m) => (m.id !== botId ? m : {
+                ...m,
+                text: ok
+                  ? String(res?.reply || res?.text || '（空回复）')
+                  : '[' + siteName(col.siteId) + ' 失败] ' + String(res?.error || '未知错误'),
+              })),
+            })));
+          })
+          .catch((err) => {
+            if (!aliveRef.current) return;
+            setCols((prev) => prev.map((c) => (c.key !== colKey ? c : {
+              ...c,
+              status: 'error',
+              error: String(err?.message || err),
+              messages: c.messages.map((m) => (m.id !== botId ? m : {
+                ...m,
+                text: '[' + siteName(col.siteId) + ' 异常] ' + String(err?.message || err),
+              })),
+            })));
+          });
       };
 
       const statusText = (c) => (c.status === 'streaming' ? '回复中…'
         : c.status === 'done' ? '已完成'
           : c.status === 'error' ? '失败' : '待发');
 
-      return h('div', { className: 'hwb-compare-view' },
+      const reviewCol = cols.find((c) => c.role === 'review') || null;
+
+      return h('div', {
+        className: 'hwb-compare-view',
+        // ★ 官方协议（0.19.22）：视图根节点声明这个属性，官方布局就把本视图当成
+        // 「整屏视图」对待 —— `.viewArea{flex:1 1 0;min-height:0;overflow:hidden}`、
+        // 官方 composer 座位改为绝对定位浮在底部。这不是我们自己发明的钩子：
+        // 官方 `dsh-client-ui-trajectory` 的轨迹视图用的就是同一条属性。
+        // 不声明它，`.viewArea` 在活跃相位是 `flex:1 0 auto;min-height:auto`，
+        // 于是「占满一屏」和「下面还有官方对话框」互相打架 —— 三列被挤掉一截。
+        'data-conversation-composer-overlay': '',
+      },
         h('div', { className: 'hwb-compare-header' },
           h('h3', { className: 'hwb-compare-title' }, '并列多会话 Team'),
           h('p', { className: 'hwb-hint' },
-            '同一句话同时发给每一列；每列各持一条独立网页会话，可继续追问，互不干扰。'),
+            '每列一条独立网页会话、各有一个对话框，互不等待。' +
+            '把某列设为「主审」后，可把其它列的回复引用给它做统一审查。'),
           h('div', { className: 'hwb-compare-tools' },
             h('span', { className: 'hwb-chip' }, cols.length + ' 列'),
+            reviewCol && h('span', { className: 'hwb-chip review' },
+              '主审：' + siteName(reviewCol.siteId)),
             h('button', {
               className: 'hwb-btn small',
               onClick: addCol,
@@ -2425,10 +2492,24 @@ window.__ModuleLoader__.load({
               title: cols.length >= MAX_COLS ? '最多 ' + MAX_COLS + ' 列' : '再加一列',
             }, '+ 加一列'))),
 
+        // 引用状态条：**引用是跨列的**，所以它的可见位置必须在列之外——
+        // 夹在某一列里会让「引用来自哪一列」看起来像是那一列的属性。
+        quote && h('div', { className: 'hwb-quote-bar' },
+          h('span', { className: 'hwb-quote-label' }, '待引用「' + quote.from + '」：'),
+          h('span', { className: 'hwb-quote-text' },
+            quote.text.slice(0, 120) + (quote.text.length > 120 ? '…' : '')),
+          h('button', {
+            type: 'button',
+            className: 'hwb-btn-close',
+            title: '取消引用',
+            onClick: () => setQuote(null),
+          }, '✕')),
+
         h('div', { className: 'hwb-compare-columns', 'data-cols': String(cols.length) },
           cols.map((c) => h('div', {
             key: c.key,
-            className: 'hwb-compare-col' + (c.status === 'error' ? ' bad' : ''),
+            className: 'hwb-compare-col' + (c.status === 'error' ? ' bad' : '')
+              + (c.role === 'review' ? ' review' : ''),
           },
             h('div', { className: 'hwb-compare-col-head' },
               h('select', {
@@ -2437,6 +2518,16 @@ window.__ModuleLoader__.load({
                 onChange: (e) => setColSite(c.key, e.target.value),
               }, siteOptions.map((o) => h('option', { key: o.id, value: o.id }, o.name))),
               h('span', { className: 'hwb-compare-state ' + c.status }, statusText(c)),
+              // 主审标记：既是显示，也是**可点的选择**——用户要能随时改选。
+              // 这里刻意用「设为」而不是 aria-checked 的开关：它改的是下一轮的
+              // 落点，不是当前状态，按钮的措词要说清这一点。
+              c.role === 'review'
+                ? h('span', { className: 'hwb-chip review', title: '本列是主审列' }, '主审')
+                : h('button', {
+                  className: 'hwb-btn small',
+                  title: '把这一列设为唯一的主审列',
+                  onClick: () => setReviewCol(c.key),
+                }, '设为主审'),
               cols.length > MIN_COLS && h('button', {
                 className: 'hwb-btn-close',
                 title: '移除这一列',
@@ -2450,21 +2541,68 @@ window.__ModuleLoader__.load({
             h('div', { className: 'hwb-compare-col-body' },
               c.messages.length === 0 && h('p', { className: 'hwb-hint' }, '等待输入提示词…'),
               c.messages.map((m) => h('div', { key: m.id, className: 'hwb-chat-msg ' + m.role },
-                h('strong', null, m.role === 'user' ? '用户: ' : siteName(c.siteId) + ': '),
-                h('span', null, m.text)))),
+                h('div', { className: 'hwb-chat-head' },
+                  h('strong', null, m.role === 'user' ? '用户: ' : siteName(c.siteId) + ': '),
+                  // 引用入口只给**助手回复**：引用自己的提问没有意义，
+                  // 而用户要的正是「把 A 的结论拿去问 B」（Q2 + Q5 的交汇点）。
+                  m.role === 'assistant' && c.status !== 'streaming' && h('button', {
+                    className: 'hwb-btn small',
+                    title: '引用这条回复（可发送给任一列）',
+                    onClick: () => quoteFrom(c, m),
+                  }, '引用')),
+                h('span', { className: 'hwb-chat-text' }, m.text)))),
 
             // 失败只标这一列，其余列照常。
-            c.status === 'error' && c.error && h('p', { className: 'hwb-hint bad' }, c.error)))),
+            c.status === 'error' && c.error && h('p', { className: 'hwb-hint bad' }, c.error),
 
-        h('form', { onSubmit: handleSendAll, className: 'hwb-compare-input-bar' },
-          h('input', {
-            className: 'hwb-input',
-            placeholder: '输入问题，同时发送给上述 ' + cols.length + ' 个模型…',
-            value: prompt,
-            onChange: (e) => setPrompt(e.target.value),
-          }),
-          h('button', { type: 'submit', className: 'hwb-btn primary', disabled: sending },
-            sending ? '发送中…' : '同时发送给 ' + cols.length + ' 个模型')));
+            // ── 每列自己的对话框（0.19.20 起每列一个；0.19.22 起**照抄官方**）──
+            // 用户 2026-09-26 原话：
+            //   「参考原生的对话框完成并列会话的设计……每个列都能够做到上下宽度都
+            //     全长和对话中的官方一样……直接抄 dsh」
+            //
+            // 所以这里不再自绘「一个输入框 + 一个发送按钮」，而是**复刻官方 composer
+            // （dsh-client-ui-conversation 的 InputBar，类前缀 uV2eYG_）的结构与刻度**：
+            // 外层居中容器；卡片圆角 22 像素、底色取官方的输入底 token、投影取官方的
+            // 柔和投影 token；文本面最小 36 像素、以官方的文本上限 token 封顶、左右
+            // 内边距 14/8 像素；工具栏行左侧一行提示、右侧一枚 34 像素圆形主按钮
+            //（底色取官方的按钮语义 token，并像官方那样上移 2 像素）。
+            //
+            // 三列**各自**有一个 —— 用户要的「3 者独立、互不等待」不变。
+            // 官方那套 Lexical 编辑器拿不到（shell 内部件），textarea 是能拿到的
+            // 等价物；回车发送 / Shift+回车换行 / 输入法组字不误发三条都如实做到。
+            h('form', {
+              className: 'hwb-col-composer',
+              onSubmit: (e) => { e.preventDefault(); sendCol(c.key); },
+            },
+              h('div', { className: 'hwb-col-composer-card' },
+                h('textarea', {
+                  className: 'hwb-col-composer-input',
+                  rows: 1,
+                  ref: (el) => { inputRefs.current[c.key] = el; },
+                  placeholder: '向 ' + siteName(c.siteId) + ' 继续提问…',
+                  value: c.input || '',
+                  onChange: (e) => setColInput(c.key, e.target.value),
+                  onKeyDown: (e) => {
+                    // 官方语义：Enter 发送、Shift+Enter 换行、**组字中绝不发送**。
+                    // 最后一条不是细节：中文输入法选词时按 Enter 会把半成品发出去。
+                    if (e.key !== 'Enter' || e.shiftKey) return;
+                    if (e.isComposing || e.nativeEvent?.isComposing) return;
+                    e.preventDefault();
+                    sendCol(c.key);
+                  },
+                }),
+                h('div', { className: 'hwb-col-composer-row' },
+                  h('span', { className: 'hwb-col-composer-hint' },
+                    isColSending(c) ? '回复中…'
+                      : String(c.input || '').trim() ? 'Enter 发送 · Shift+Enter 换行'
+                        : (c.role === 'review' ? '主审列：汇总与裁决' : '探索列：独立方案')),
+                  h('button', {
+                    type: 'submit',
+                    className: 'hwb-col-composer-send',
+                    title: '发送（Enter）',
+                    // 这一列的锁只看这一列的 status —— 别列在跑与本列无关。
+                    disabled: isColSending(c) || !String(c.input || '').trim(),
+                  }, '↑'))))))));
     }
 
     function SettingsSection(props) {
@@ -4551,8 +4689,27 @@ window.__ModuleLoader__.load({
         ".hwb-form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}",
         ".hwb-modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}",
         // 并列多会话视图样式（列布局按 data-cols 自适应 2~4 列，见下）
-        ".hwb-compare-view{display:flex;flex-direction:column;gap:16px;width:100%;height:100%;padding:16px;box-sizing:border-box}",
-        ".hwb-compare-header{display:flex;flex-direction:column;gap:4px}",
+        //
+        // ── 0.19.22：布局照抄官方（用户：「每个列上下宽度都全长，和对话里的官方一样」）
+        //
+        // 官方对话区的真实结构（实测 dsh-client-ui-conversation/lib/client.js）：
+        //   .body > .scrollBody[data-conversation-scroll]
+        //             > [data-slot="conversation.session"] > .viewArea   ← 视图（我们）
+        //             > .composerSeat[data-composer-seat]               ← 官方对话框（兄弟）
+        //
+        // 两个要点：
+        //   ① 视图根节点带 `data-conversation-composer-overlay` 时，官方给出
+        //        .viewArea{flex:1 1 0;min-height:0;overflow:hidden}
+        //      —— 视图拿到**确定的整屏高度**，这是「上下全长」的前提；
+        //   ② 官方对话框与视图在**同一个滚动容器**里。本视图的每一列都自带对话框
+        //      （用户要求 3 列各自独立），所以官方那个属于主会话的对话框在本视图
+        //      激活期间必须让位；否则最底部会再叠第四个框 —— 正是用户说的
+        //      「被下面原生的挤了」。这条规则**只在本视图挂载时**命中
+        //      （`:has(.hwb-compare-view)`），切回官方 Chat 视图立即失效，
+        //      是纯局部覆盖，不动官方任何样式。
+        "[data-conversation-scroll]:has(.hwb-compare-view)>[data-composer-seat]{display:none}",
+        ".hwb-compare-view{display:flex;flex-direction:column;gap:12px;width:100%;flex:1 1 auto;min-height:0;overflow:hidden;padding:12px 12px 0;box-sizing:border-box}",
+        ".hwb-compare-header{display:flex;flex-direction:column;gap:4px;flex:none}",
         ".hwb-compare-title{margin:0;font-size:18px;font-weight:600}",
         // 列数**按实际列数**排（0.18.0）：原先写死 repeat(3,1fr)，于是「加一列」
         // 加出来的第四列会被挤到第二行 —— 那是 0.17.3 硬编码三列的另一半。
@@ -4560,11 +4717,37 @@ window.__ModuleLoader__.load({
         ".hwb-compare-columns[data-cols=\"2\"]{grid-template-columns:repeat(2,minmax(0,1fr))}",
         ".hwb-compare-columns[data-cols=\"3\"]{grid-template-columns:repeat(3,minmax(0,1fr))}",
         ".hwb-compare-columns[data-cols=\"4\"]{grid-template-columns:repeat(4,minmax(0,1fr))}",
-        ".hwb-compare-col{background:var(--dsw-alias-bg-layer-1,#f8f9fa);border:.5px solid var(--dsw-alias-border-l4,#8883);border-radius:8px;display:flex;flex-direction:column;overflow:hidden}",
-        ".hwb-compare-col-head{padding:10px 12px;background:var(--dsw-alias-bg-base,#fff);border-bottom:.5px solid var(--dsw-alias-border-l4,#8883);display:flex;align-items:center;gap:8px}",
+        ".hwb-compare-col{background:var(--dsw-alias-bg-layer-1,#f8f9fa);border:.5px solid var(--dsw-alias-border-l4,#8883);border-radius:8px;display:flex;flex-direction:column;min-height:0;overflow:hidden}",
+        ".hwb-compare-col-head{padding:10px 12px;background:var(--dsw-alias-bg-base,#fff);border-bottom:.5px solid var(--dsw-alias-border-l4,#8883);display:flex;align-items:center;gap:8px;flex:none}",
         ".hwb-col-idx{font-weight:600;font-size:12px}",
-        ".hwb-compare-col-body{padding:12px;display:flex;flex-direction:column;gap:8px;flex:1;overflow-y:auto}",
-        ".hwb-compare-input-bar{display:flex;gap:8px;padding-top:12px;border-top:.5px solid var(--dsw-alias-border-l3,#8884)}",
+        // `min-height:0` 是 flex 子项能真正滚动的**必要条件**：没有它，flex 项的
+        // 最小高度是内容高度，`overflow-y:auto` 永远不触发，长回复会把列撑破。
+        // 旧版缺这一条，长会话下三列会被顶出可视区（与「被下面原生挤了」叠加）。
+        ".hwb-compare-col-body{padding:12px;display:flex;flex-direction:column;gap:8px;flex:1;min-height:0;overflow-y:auto}",
+        // ── 每列对话框：官方 composer 的复刻（0.19.22）─────────────────────
+        // 刻度全部取自官方 `.uV2eYG_*`（见渲染处的对照表）。刻意**不**用本插件
+        // 自己的 `.hwb-input`（那是设置页表单的形态，圆角 8px、灰底），
+        // 因为用户要的是「和对话里的官方一样」。
+        ".hwb-col-composer{display:flex;flex-direction:column;align-items:center;padding:0 6px 6px;flex:none}",
+        ".hwb-col-composer-card{box-sizing:border-box;width:100%;background:var(--dsw-specific-input-major,#fff);box-shadow:var(--dsw-elevation-soft,0 1px 6px #00000014);border-radius:22px;display:flex;flex-direction:column;padding-top:8px;position:relative}",
+        ".hwb-col-composer-input{box-sizing:border-box;display:block;width:100%;min-height:36px;max-height:var(--dsh-composer-text-max-height,336px);resize:none;border:none;background:transparent;font:inherit;font-size:var(--dsh-content-font-size,14px);line-height:24px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;color:var(--dsw-alias-label-primary);caret-color:var(--dsw-alias-state-business-primary,#4f6ef7);outline:none;padding:4px 8px 0 14px;overflow-y:auto}",
+        ".hwb-col-composer-input::placeholder{color:var(--dsw-alias-label-caption,#888)}",
+        ".hwb-col-composer-row{display:flex;flex-wrap:wrap;align-items:center;gap:12px;min-width:0;padding:2px 8px 6px}",
+        ".hwb-col-composer-hint{flex:1;min-width:0;font-size:12px;line-height:20px;color:var(--dsw-alias-label-caption,#888);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
+        ".hwb-col-composer-send{flex:none;width:34px;height:34px;border:none;border-radius:999px;background:var(--dsw-alias-button-info-fill,#4f6ef7);color:#fff;cursor:pointer;display:grid;place-items:center;font-size:16px;line-height:1;padding:0;transform:translateY(-2px);transition:background-color .1s}",
+        ".hwb-col-composer-send:hover:not(:disabled){background:var(--dsw-alias-button-info-hover,#3f5ce0)}",
+        ".hwb-col-composer-send:disabled{opacity:.4;cursor:default}",
+        // 主审列：左侧强调条 + 头像徽标同一色。用 border-left 而不是背景色——
+        // 背景色会与「失败列」的 `.bad` 混淆，而这两件事的严重程度完全不同。
+        ".hwb-compare-col.review{border-color:var(--dsw-alias-state-business-primary,#4f6ef7)}",
+        ".hwb-compare-col.review .hwb-compare-col-head{border-left:3px solid var(--dsw-alias-state-business-primary,#4f6ef7)}",
+        ".hwb-chip.review{color:var(--dsw-alias-state-business-primary,#4f6ef7);border-color:var(--dsw-alias-state-business-primary,#4f6ef7);font-weight:600}",
+        // 引用状态条：跨列可见，所以放在列之外（见渲染处的注释）。
+        ".hwb-quote-bar{display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;background:var(--dsw-alias-brand-subtle,#eff6ff);border:.5px solid var(--dsw-alias-border-l3,#8884);font-size:12px;flex:none}",
+        ".hwb-quote-label{flex:none;font-weight:600}",
+        ".hwb-quote-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-secondary,inherit)}",
+        ".hwb-chat-head{display:flex;align-items:center;gap:6px}",
+        ".hwb-chat-text{display:block;white-space:pre-wrap;word-break:break-word}",
       ].join('');
       document.head.appendChild(style);
       const disposers = [() => style.remove()];

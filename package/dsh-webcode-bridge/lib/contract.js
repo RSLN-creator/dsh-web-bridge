@@ -41,6 +41,10 @@ function genericContract(st) {
     //（0.12.9 之前固定 waitForTimeout(500) 就当成功，这正是「有图说没图」
     // 的链路：桥以为传完了，网页端其实一个附件都没有）。
     attachPreviewSelector: st.attachPreview ?? null,
+    // 助手回复节点选择器（0.19.19）：站点声明里有就用它，没有则 null ——
+    // 驱动侧对 null 的处理是回落到那份 DeepSeek 串（行为与今天逐字相同，
+    // 因此这是一条**纯增量**声明，不会把任何一个站点改坏）。
+    answerSelector: st.answerSelector ?? null,
     decoder: st.decoder,
     searchTogglePattern: null,
     requestMetadataKeys: [],

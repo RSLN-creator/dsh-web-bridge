@@ -22,7 +22,7 @@ import { createBrowserDriver } from './browser-driver.js';
 import { zeroProgressDecision } from './zero-progress.js';
 import { idleWindowDecision } from './idle-window.js';
 import { createWebControl, buildSessionEvents, mainLineOf } from './web-control.js';
-import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, stripProtocolRegions, proseSafeEnd, readCallAt, partialProtocolAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeOfficialToolCalls, normCallArgs, inferToolNameFromArgs, recoverUnparsedCalls, officialToolCallSpecimen, officialCallExampleFor, buildPreset } from './agent-preset.js';
+import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, stripProtocolRegions, proseSafeEnd, readCallAt, partialProtocolAt, unresolvedCallFenceAt, closingFenceAfter, coerceArguments, fillMissingRequired, trainNoteFor, normalizeOfficialToolCalls, normCallArgs, inferToolNameFromArgs, recoverUnparsedCalls, officialToolCallSpecimen, officialCallExampleFor, buildPreset } from './agent-preset.js';
 // 只用 `teachFor`（1146 的续跑重申、3290 的首轮落盘）——那两处是**真调用**，
 // 即计划 Task 1.4 所说的「教学提示按 teachShape 选支」。
 // `transportShapeForSite` 曾一并 import 但全文件零调用（第三轮自审发现），已移除；
@@ -557,10 +557,22 @@ function idleTimeoutError(timeoutMs, scene) {
     : '';
   // 相位必须写进报错：只说「超过 240s」读者不知道那是不是已经宽限过的窗口，
   // 也就分不清「网页还没开口」与「网页不说了」——这两者下一步完全不同。
+  //
+  // 0.19.23：`mid-stream` 必须**再分一次**。它同时是「开流后静默」与「没开流且
+  // 驱动不忙」的返回相位，而旧文案把两者都印成「已开流后的静默」——后一种是
+  // **假陈述**。真机 session-e7056e8c turn3 step58 的报错就是这一句，它紧挨着
+  // 「最近驱动活动时间 1s 前」与「页面已有 0 字回复未回传」，三者并排读起来
+  // 自相矛盾，排查方向当场被带偏。现在按 `firstEventSeen` 分开说。
   const phaseNote = scene?.phase === 'awaiting-first-byte'
     ? `，判定相位=网页还没开口（窗口已放宽到 ${Math.round(timeoutMs / 1000)}s`
       + `${scene.windowCapped === true ? '，且已被整轮预算压到 90% 以内' : ''}）`
-    : scene?.phase === 'mid-stream' ? '，判定相位=已开流后的静默' : '';
+    : scene?.phase === 'mid-stream'
+      ? (scene.firstEventSeen === false
+        // 没开流 + 驱动不忙：链路没跑起来，按常规窗口快报（这是安全侧的判定）。
+        ? '，判定相位=网页还没开口且驱动不在忙（按常规窗口未宽限）'
+        // 真·开流后静默。
+        : '，判定相位=已开流后的静默')
+      : '';
   // 收束原因必须**带时刻**（0.16.3）。真机 2026-09-17 18:43 的报错原文是
   // 「（页面在，本轮收束原因 finished）」——而那一轮根本没跑完，`finished` 是
   // **上一轮**写的。一个无标注的旧读数把「网页还在生成」读成了「网页已收束」，
@@ -1037,6 +1049,11 @@ export function apply(ctx, config = {}) {
         // 事后必须能一眼读出（旧实现只有一个超时数字，分不清相位）。
         const base = {
           phase: decision?.phase ?? null,
+          // 0.19.23：本轮到底有没有收到过事件。`phase` 的 'mid-stream' 同时覆盖
+          // 「开流后静默」与「没开流且驱动不忙」两种情形，只印 phase 会让报错
+          // 说出一句假陈述（真机 session-e7056e8c turn3）。这个布尔是**只读**的
+          // 定性读数，用来把两种情形在文案里分开——窗口计算一个字都没动。
+          firstEventSeen: decision?.firstEventSeen === true,
           windowMs: decision?.windowMs ?? null,
           // capped=true ⇒ 相位窗口被整轮预算压过（不是配置写错）。报错里要说出来，
           // 否则下一次看到「判定相位=网页还没开口（窗口已放宽到 216s）」的人
@@ -1457,6 +1474,15 @@ export function apply(ctx, config = {}) {
         if (ev.image) { genImages.push(ev.image); continue; }
         if (ev.delta) {
           acc += ev.delta;
+          // 0.19.17：已消费协议区间若紧跟着**闭合围栏**，把它一并划进协议区间。
+          //
+          // 调用的 JSON 配平那一刻它自己的 ` ``` ` 还没到（闭合围栏是随后的增量），
+          // 所以上面推进游标时只能停在 JSON 末尾。而 ``` 单独出现不是协议锚点
+          // （普通 markdown 代码块也是它）⇒ findProtocolStart 返回 -1 ⇒ 闭合围栏
+          // 被当正文发出（离线复现：正文块里多出两块 ` ``` `，见 test/fence-tail.test.mjs）。
+          // 判据安全：只在「游标之后只隔空白」时才认，普通散文代码块前面总有散文。
+          const cfAdv = closingFenceAfter(acc, protocolFrom);
+          if (cfAdv >= 0) protocolFrom = cfAdv + 3;
           // 未消化的部分里找协议起点（半角/全角标签、围栏、Calling、裸 JSON 行）。
           const rest = findProtocolStart(acc, protocolFrom);
           // 单调边界：游标推进后，后续搜索可能又命中**更早**的收尾标签
@@ -1526,9 +1552,24 @@ export function apply(ctx, config = {}) {
           // 围栏窗口取错让 `rest.index` 恒为 -1，正文于是被整段放行（协议泄漏）。
           // 现在两处都修了，且 `proseSafeEnd` 另有独立兜底（见 agent-preset.js 的
           // 同名函数）。改动这一段之前先读那条注释。
-          const proseLimit = (rest.index >= 0 && rest.transport) ? boundary
+          // 0.19.17：尾部「还开着的调用围栏」也必须参与外发上限。
+          //
+          // 真机缺陷（会话 `session-0b292806` turn2，用户报「正文有空白还有乱码」）：
+          // 围栏刚开、JSON 还没吐出 `mcp_action` / `arguments` 的那一小段窗口里，
+          // `findProtocolStart` 的围栏判据（体内要有调用关键字段）尚不成立 ⇒ 返回 -1
+          // ⇒ 下面只剩 `PROSE_TAIL_CHARS`（8）这个定长尾巴兜底 ⇒ 围栏与 JSON 开头被
+          // 当正文一个字符一个字符发出去，且 `textSent` 单调不回退、**收不回来**。
+          // 界面上的样子就是助手块里夹着一串 `\n```\n\n` 与 ```` ```json\n{"mcp_actio ````。
+          //
+          // 判据是纯函数（agent-preset.unresolvedCallFenceAt）：``` 两两配对，落单的
+          // 那个还开着，且其后首格是 `{`（调用 JSON）或尚未开始 ⇒ 扣住；普通正文代码块
+          // （```js 后面跟代码）不扣，流式观感不受影响。护栏 test/fence-tail.test.mjs。
+          const fenceTailAt = unresolvedCallFenceAt(acc, textSent.length);
+          let proseLimit = (rest.index >= 0 && rest.transport) ? boundary
             : (rest.index >= 0 && tagAhead) ? boundary
             : (markerAt >= 0 ? markerAt : Math.max(0, acc.length - PROSE_TAIL_CHARS));
+          // 取**更小**者：这一条只会让外发变少，永远不会把原本扣住的内容放出去。
+          if (fenceTailAt >= 0 && fenceTailAt < proseLimit) proseLimit = fenceTailAt;
           const safeEnd = Math.max(from, proseLimit);
           const proseChunk = safeEnd > from ? acc.slice(from, safeEnd) : '';
           // 调用标签的残尸（真机 2026-09-14 会话 c7c7a03c step69：两个调用之间流出
@@ -1603,7 +1644,13 @@ export function apply(ctx, config = {}) {
           // 调用对象已配平：把游标推到该对象末尾。闭标签边界的 completed 认出的
           // 是**下一个**调用的 JSON（闭标签自己没有 JSON）——同样消费掉，不开块
           // （收尾循环会补发），这样闭标签永远不会再挡住后续锚点。
-          if (isCallObj && completed.end > protocolFrom) protocolFrom = completed.end;
+          if (isCallObj && completed.end > protocolFrom) {
+            protocolFrom = completed.end;
+            // 闭合围栏常与 JSON 同一个增量到达；这里顺手越过，免得下一次增量
+            // 从它开头重扫（上面的 closingFenceAfter 是增量边界切开时的兜底）。
+            const cf = closingFenceAfter(acc, protocolFrom);
+            if (cf >= 0) protocolFrom = cf + 3;
+          }
           continue;
         }
         if (ev.err) throw ev.err;

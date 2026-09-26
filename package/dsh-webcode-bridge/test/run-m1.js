@@ -30,6 +30,22 @@ const ok = (name, cond, detail = '') => {
   if (!cond) failures += 1;
 };
 
+/**
+ * 会话键的分段形状：`<sessionId>[::<agentId>][::<accountKey>]`。
+ *
+ * 为什么比「段」而不是比整串字面量（2026-09-26 修正）：本文件此前写死
+ * `key === 'dsh-session-A'`，而 `lib/index.js` 的键在 0.14.7 追加了 agentId 段、
+ * 在 0.19.4 追加了 accountKey 段（同站多账号各自独立游标，用户指令）。
+ * 两次**正交维度扩展**都让这条闸门假红——它守的从来不是「整串长这样」，
+ * 而是「第一段是 DSH 会话 id」「同一会话的两轮键不漂移」「子代理有自己的段」。
+ * 写死整串会让下一次正常扩展继续假红，而假红的闸门比没有闸门更坏
+ * （见 scripts/gen-reference-index.mjs 的同类裁决）。
+ *
+ * @param {unknown} k 会话键
+ * @returns {string[]} 分段数组
+ */
+const keySegments = (k) => String(k ?? '').split('::');
+
 // ---- scripted driver (stands in for the playwright web driver) ----------
 const turns = []; // every message the "web page" received: {key, message, fresh}
 let replyScript = ['...'];
@@ -192,7 +208,7 @@ try {
     { role: 'user', content: [{ type: 'text', text: '请读取 README.md 的标题行' }] },
   ])));
   const t1 = turns[0] || {};
-  ok('turn1: fresh conversation used', t1.fresh === true && t1.key === 'dsh-session-A', JSON.stringify({ key: t1.key, fresh: t1.fresh }));
+  ok('turn1: fresh conversation used', t1.fresh === true && keySegments(t1.key)[0] === 'dsh-session-A', JSON.stringify({ key: t1.key, fresh: t1.fresh }));
   ok('turn1: preset injected (system)', String(t1.message).includes('[系统指令]') && String(t1.message).includes('工作区在本地'));
   ok('turn1: tools+protocol injected', String(t1.message).includes('# 可用本地工具') && String(t1.message).includes('mcp_action') && String(t1.message).includes('read'));
   ok('turn1: opening user message present', String(t1.message).includes('请读取 README.md 的标题行'));
@@ -226,7 +242,9 @@ try {
   ok('turn2: final answer streamed', finalText.includes('E2E-MARKER-FROM-PLAN'), finalText.slice(0, 60));
 
   const t2 = turns[1] || {};
-  ok('turn2: SAME conversation (not fresh)', t2.fresh === false && t2.key === 'dsh-session-A');
+  // 「同一对话」的判据是**两轮的键逐字相等**（比写死一个字面量更强：它还挡住了
+  // 「同一会话两轮算出了不同键」这种真缺陷，而后者才是这条闸门存在的理由）。
+  ok('turn2: SAME conversation (not fresh)', t2.fresh === false && t2.key === t1.key, JSON.stringify({ t1: t1.key, t2: t2.key }));
   ok('turn2: increment ONLY — mcp_action result fence', String(t2.message).includes('"mcp_action"') && String(t2.message).includes('"name"') && String(t2.message).includes('"status": "success"'), String(t2.message).slice(0, 90));
   ok('turn2: tool output carried', String(t2.message).includes('# Harness Web Bridge'));
   ok('turn2: NO preset repetition', !String(t2.message).includes('[系统指令]'));
@@ -386,7 +404,7 @@ try {
     tools, sessionId: 'dsh-session-A', agentId: 'sub-agent-1',
   }));
   const tAgent = turns.at(-1);
-  ok('parallel agents: agent-qualified web conversation', tAgent.key === 'dsh-session-A::sub-agent-1' && tAgent.fresh === true, JSON.stringify({ key: tAgent.key, fresh: tAgent.fresh }));
+  ok('parallel agents: agent-qualified web conversation', keySegments(tAgent.key)[0] === 'dsh-session-A' && keySegments(tAgent.key)[1] === 'sub-agent-1' && tAgent.fresh === true, JSON.stringify({ key: tAgent.key, fresh: tAgent.fresh }));
   // ---- relay healthy after loop ----
   const relayStatus = await callRoute('/__webcode/status', mockReq('GET'), mockRes());
   const rs = JSON.parse(relayStatus.body());

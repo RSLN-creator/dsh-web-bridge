@@ -133,12 +133,32 @@ export function computeSendGap({ lastSendAt, lastEndAt = null, basis = 'send-to-
  * @param {number} o.lastDomGrowthAt  最后一次观察到页面助手消息**变长**的时刻
  * @param {boolean} [o.domAvailable]  页面是否可采样；false 时退回「仅流停」判定
  *                                    （收束原因由调用方标注 dom-unavailable）
+ * @param {boolean} [o.domFound]      采样到了页面、但**有没有找到助手节点**。
+ *                                    false = 选择器对本站点是瞎的（0.19.16）：
+ *                                    对「页面还在不在写」零证据，改按 domBlindMs
+ *                                    这个更宽的窗口收束，避免腰斩仍在生成的回复。
  * @param {number} [o.wipIdleMs]      稳态窗口，默认 2500ms
+ * @param {number} [o.domBlindMs]     找不到助手节点时的收束窗口；0/缺省 = 6×wipIdleMs
  * @returns {boolean} true = 可以按已有正文收束本轮
  */
-export function shouldSettleWip({ now, lastProgressAt, lastDomGrowthAt, domAvailable = true, wipIdleMs = 2500 } = {}) {
+export function shouldSettleWip({ now, lastProgressAt, lastDomGrowthAt, domAvailable = true, domFound = true, wipIdleMs = 2500, domBlindMs = 0 } = {}) {
   const idle = Math.max(0, Math.round(Number(wipIdleMs) || 0));
   if (!(now - Number(lastProgressAt) >= idle)) return false;   // 流还在动 → 绝不动
+  // 「页面能采样，但**找不到**助手节点」——选择器对本站点是瞎的。
+  //
+  // 这是 0.19.16 补的第三态，与 `!domAvailable`（页面整个取不到：关窗/导航中）
+  // 刻意分开。旧实现把两者混成一种：采样拿到空字符串也算 domAvailable=true，
+  // 于是 `lastDomGrowthAt` **从不刷新**、下面那行「页面还在长 → 绝不动」恒不成立，
+  // 收束器只凭「流静默 2.5s」就动手。真机后果（GLM，2026-09-26）：页面还在写字，
+  // 桥已按 partial 收束，且那一刻解码器还没收到 status:'finish' 帧 → 内容被丢。
+  //
+  // 找不到节点时我们对「页面还在不在写」**没有任何证据**，因此必须比常规窗口
+  // 宽得多才允许收束（默认 6×）。宁可多等，不可腰斩仍在生成的回复——
+  // 与 shouldRescueStalledCapture 的「宁可漏救，不可误救」同一条纪律。
+  if (domAvailable && !domFound) {
+    const blind = Math.max(0, Math.round(Number(domBlindMs) || 0)) || idle * 6;
+    return now - Number(lastProgressAt) >= blind;
+  }
   if (!domAvailable) return true;                              // 页面不可用：退回仅流停判定
   return now - Number(lastDomGrowthAt) >= idle;                // 页面还在长 → 绝不动
 }

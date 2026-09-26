@@ -64,7 +64,7 @@ function positiveOr(value, fallback) {
  *   非法（<=0/NaN/非数字）→ 1（= 不做任何放宽）。
  * @param {number} [totalBudgetMs] 驱动**整轮**预算（`requestTimeoutMs`）。给了就对
  *   相位窗口设上限（见下）。缺省/非法 ⇒ 不设上限（纯函数保持无依赖、可独立求值）。
- * @returns {{ windowMs: number, phase: 'awaiting-first-byte' | 'mid-stream', capped: boolean }}
+ * @returns {{ windowMs: number, phase: 'awaiting-first-byte' | 'mid-stream', firstEventSeen: boolean, capped: boolean }}
  *
  * ## 为什么相位窗口必须留有余量（capped 字段的来由，0.16.3）
  *
@@ -80,21 +80,33 @@ function positiveOr(value, fallback) {
 export function idleWindowDecision({ baseMs, firstEventAt, driverBusy, multiplier = 2, totalBudgetMs } = {}) {
   const base = positiveOr(baseMs, DEFAULT_BASE_MS);
   const mul = positiveOr(multiplier, 1);
+  // 本轮**是否真的收到过事件**（0.19.23 新增，必须显式带出去）。
+  //
+  // 为什么非加不可：`phase` 的 `'mid-stream'` 同时覆盖两种情形——
+  //   ① 开流之后静默（真的卡住）；
+  //   ② 还没开流且驱动不忙（链路没跑起来，按常规窗口快报）。
+  // 只看 phase 的读者会把 ② 读成「已开流后的静默」——那是一句**假陈述**。
+  // 真机报错（session-e7056e8c turn3 step58）里它就与「最近驱动活动时间 1s 前」
+  // 并排出现，读起来自相矛盾，排查方向当场被带偏。
+  //
+  // 这是**加法**：`phase` 的取值与窗口计算逐字不变，既有护栏
+  // （test/watchdog-first-byte.test.mjs）不受影响；新增的读法给报错文案用。
+  const firstEventSeen = firstEventAt !== null;
   // 已经开流 → 阶段 B：不管驱动忙不忙都按常规窗口判（多等只会让真正卡住的轮次更晚失败）。
-  if (firstEventAt !== null) return { windowMs: base, phase: 'mid-stream', capped: false };
+  if (firstEventSeen) return { windowMs: base, phase: 'mid-stream', firstEventSeen, capped: false };
   // 还没开口，但链路没跑起来 → 不给宽限（见文件头第三条安全线）。
-  if (driverBusy !== true) return { windowMs: base, phase: 'mid-stream', capped: false };
+  if (driverBusy !== true) return { windowMs: base, phase: 'mid-stream', firstEventSeen, capped: false };
   // 还没开口 + 网页正在忙 = prefill。倍数只在**这一格**生效；Math.round 而非 floor：
   // 配置成 1.5 这类非整数倍时不要凭空少给半毫秒。
   const wanted = Math.round(base * mul);
   const budget = positiveOr(totalBudgetMs, 0);
-  if (budget <= 0) return { windowMs: wanted, phase: 'awaiting-first-byte', capped: false };
+  if (budget <= 0) return { windowMs: wanted, phase: 'awaiting-first-byte', firstEventSeen, capped: false };
   // 留 10% 余量（至少 1s）：余量必须**严格**大于零，同值就是上面那条赛跑。
   const reserve = Math.max(1_000, Math.round(budget * 0.1));
   const ceiling = budget - reserve;
   // 余量本身比 base 还小（极端配置，如整轮预算 1.2s）时，宁可按常规窗口快报，
   // 也不给出一个比常规窗口还长的「宽限」。
-  if (ceiling <= base) return { windowMs: base, phase: 'awaiting-first-byte', capped: false };
-  if (wanted > ceiling) return { windowMs: ceiling, phase: 'awaiting-first-byte', capped: true };
-  return { windowMs: wanted, phase: 'awaiting-first-byte', capped: false };
+  if (ceiling <= base) return { windowMs: base, phase: 'awaiting-first-byte', firstEventSeen, capped: false };
+  if (wanted > ceiling) return { windowMs: ceiling, phase: 'awaiting-first-byte', firstEventSeen, capped: true };
+  return { windowMs: wanted, phase: 'awaiting-first-byte', firstEventSeen, capped: false };
 }

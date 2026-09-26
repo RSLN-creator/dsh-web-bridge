@@ -28,6 +28,8 @@ import { isLoopbackHost, originMatchesHost } from './loopback.js';
 // 避免「驱动用一个、面板报另一个」。
 import { resolveBrowserExecutable, installBundledChromium } from './browser-runtime.js';
 import { httpFetch } from './upstream.js';
+// 并列多会话的列身份 → 提示词（0.19.21，用户 Q5 的沙箱适配）。
+import { withColumnGuidance } from './column-context.js';
 import {
   readLedger, writeLedger, applyCreate, applyUpdate, applyDelete,
   applyAddComment, applyResolveComment, rowsOf,
@@ -1365,6 +1367,50 @@ export function createWebControl(deps = {}) {
       // url-heal 本身是对的（它救的是「失败轮次没落盘」的历史槽，见那里的长注释），
       // 不该动它；错的是调用方把一个**从未建立过**的会话键当成可续会话递给它。
       // 判据：先问驱动有没有这个槽，有才 resume。
+      // ── 会话内容引用（0.19.19，用户 Q2「完整实现引用会话内容」）───────────────
+      //
+      // 在此之前，「引用」只有**一半**：任务板批注能把正文片段带下去（`POST
+      // task-implement` 的 `quote`，本文件上方），而**会话消息级**的引用不存在——
+      // 用户引用上一条回复再提问的链路整条缺失，并列多会话之间也没法互相引。
+      //
+      // 这里补上另一半，刻意沿用 task-implement 的同一套拼接习惯（`> ` 块引 +
+      // 一行出处），理由是一条事实只写一处语义：两处引用格式不同会让模型
+      // 面对两种「引用」先验。
+      //
+      // ⚠️ 截断规则是**必须**的，不是锦上添花：引用整条长回复会把上下文预算
+      // 瞬间吃掉（GLM 站点声明 1M，一次长引用就顶掉大半），而用户的意图通常
+      // 只需要那句被指着的话。这里取 4000 字符，**截前保尾**（保留开头，
+      // 尾部用省略号）——被引用的结论通常在开头，而尾部常是寒暄。
+      const quoteText = String(body?.quote || '').trim();
+      const quoteFrom = String(body?.quoteFrom || '').trim();
+      const QUOTE_LIMIT = 4000;
+      const quoted = quoteText.length > QUOTE_LIMIT
+        ? quoteText.slice(0, QUOTE_LIMIT) + '\n…（引用过长，此处已截断）'
+        : quoteText;
+      // ── 列身份与沙箱约定（0.19.21，用户 Q5 的后半问）───────────────────────
+      //
+      // 「并列多会话」里每一列都该知道**自己是哪一列、该把产出放哪**：
+      // 探索列写 `<workspace>/.hwb/cols/<列键>/`，主审列负责汇总。
+      // 不这么做，三列就只是三个并排的聊天窗口——各自为战，还会同时改同一个文件。
+      //
+      // ⚠️ 边界（不要夸大）：本插件**只做约定，不做拦截**。模型发起的
+      // `edit` / `pwsh` 由 Harness 的工具执行器落地，那条链路上没有本插件的插槽；
+      // 要真在文件系统层拦住越界写，必须在 provider → adapter → 工具调用元数据
+      // 全链带上列身份。完整论证见 `lib/column-context.js` 的文件头。
+      //
+      // 拼装顺序刻意是「列身份 → 引用 → 用户原文」：身份是**本轮语境**，
+      // 引用是**材料**，用户那句话才是**任务**——任务放最后，模型读到的最后一句
+      // 就是它要回答的东西（这也是本项目提示词组装的一贯顺序）。
+      const columnText = withColumnGuidance(prompt, body?.columnContext);
+      const promptText = quoted
+        ? [
+          quoteFrom ? `引用会话内容（来自「${quoteFrom}」的回复片段）:` : '引用会话内容:',
+          '> ' + quoted.split(/\r?\n/).join('\n> '),
+          '',
+          columnText,
+        ].join('\n')
+        : columnText;
+
       const sessionKey = String(body?.sessionKey || `chat-${siteId}-${Date.now().toString(36)}`);
       const target = relay?.config?.siteConnect?.(accountKeyOf(body)) || driver;
       const stored = typeof target?.conversationFor === 'function'
@@ -1372,7 +1418,7 @@ export function createWebControl(deps = {}) {
         : null;
       const fresh = !stored?.webSessionId;
       if (typeof target?.sendTurn === 'function') {
-        const res = await target.sendTurn(sessionKey, prompt, { fresh, model: body?.model });
+        const res = await target.sendTurn(sessionKey, promptText, { fresh, model: body?.model });
         return { ok: true, reply: res?.text || res || '', sessionKey, fresh, resumed: !fresh };
       }
       // 没有可用的驱动时**如实报错**。原先这里回 `{ok:true, reply:'[已向 X 投递: …]'}`

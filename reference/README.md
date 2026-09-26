@@ -90,9 +90,11 @@ node scripts\gen-reference-index.mjs --missing  # 只列「不是 clone」的条
 | `node-http-proxy` | https://github.com/http-party/node-http-proxy.git | `9b96cd725127a024dabebec6c7ea8c807272223d` | 0.7 MB |
 | `openai-stream-parser` | https://github.com/jy02140251/openai-stream-parser.git | `3f4ee58d4310de93b02182fee84e775cc2c51367` | 0 MB |
 | `opencode2dsh` | https://github.com/FishBottle7/opencode2dsh.git | `dd8d0b1f06c55723928e535c853d20a4100bd970` | 1.2 MB |
+| `puppeteer-stream` | https://github.com/SamuelScheit/puppeteer-stream.git | `2932b7f0cdd879232ff5103abd2c4097de9fe722` | 0.2 MB |
 | `qwen-code` | https://ghfast.top/https://github.com/QwenLM/qwen-code.git ⚠️镜像 | `1ac097163389b7b85b21bf74c396052fc2fcc59f` | 255.7 MB |
 | `Qwen-Copilot` | https://ghfast.top/https://github.com/zelosleone/Qwen-Copilot.git ⚠️镜像 | `6e33880263d5946c496d8385de7ec3451ec5687f` | 0.5 MB |
 | `qwen-free-api` | https://ghfast.top/https://github.com/LNpks/qwen-free-api.git ⚠️镜像 | `bf42bce60f2b1eea3801f9f6f3277ebf64226816` | 3.8 MB |
+| `steel-browser` | https://github.com/steel-dev/steel-browser.git | `04f691d3e40677fefbebfc7fac2fcd92c3af4cb6` | 200.7 MB |
 | `steel-browser-npm` | **不是 clone**（见 §6「约定违例」） | — | 0 MB |
 | `wabac.js` | https://github.com/webrecorder/wabac.js.git | `281e9bc7affba4ce520301b10723b01f661aa7e5` | 2.8 MB |
 | `web-login` | **不是 clone**（npm 包解包，见 `local-refs/web-login-notes.md`）：`dsh-login@0.1.1` / `@islibaodong/dsh-login@0.2.1` / `dsh-auth-gate@0.13.0` | — | 1.4 MB |

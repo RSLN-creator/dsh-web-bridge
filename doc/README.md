@@ -84,6 +84,10 @@
 - `task-board-vs-agentteams-graph.md` — **Graph Engineering 对照分析**：`dsh-task-board`（cron 驱动的执行台账，无依赖边）与官方 AgentTeams 任务图（`blockedBy` DAG + 全图环检测，但**无调度器**）的逻辑拆解，以及落地一张可自动推进的任务图还需要考虑什么
 - `prompt-engineering-evidence-2026-09-14.md` — **提示词工程实测证据与差评**（NeurIPS/ACL/arXiv 五篇；含「不能宣称最优」「必须披露 harness」两条立场）
 - `agent-ui-design-references.md` — **UI 设计语言**（Apple HIG 可执行约束、Fluent 4px 间距全表、Harness 官方 token 实测清单、teammate 面板信息架构）
+- `2026-09-26-dwb-site-modularity-audit.md` — **按站点分模块架构审计**：`lib/` 站点字符串分布实测（`providers.js` 157 行 vs `browser-driver.js` 95 行欠账）、四个耦合点 C1–C5 逐条判定、`git log -S` 跨站点影响取证、以及「不要为隔离而复制，要收成 `lib/sites/<siteId>.js`」的正面回答
+- `2026-09-26-glm-native-and-deepseek-no-progress.md` — **0.19.23 三件事**：① **`json` 正文泄漏根因**（`closingFenceAfter` 把**开启**围栏当**闭合**围栏消费，只吃三个反引号、漏出语言标签 `json`；决定性读数：去掉修复 **24 种切分粒度里 15 种泄漏**、带上 **24/24 干净**；并记下「既有护栏只跑 `sliceChars=1` 因而对边界敏感缺陷**天然失明**」这一课）② **GLM 原生 `code` part 补齐**（`content[].type === 'code'` 此前被静默丢弃 ⇒ 真机形态下整条调用会消失；参考 `glm-free-api:994-1013`）③ **deepseek `WEB_NO_PROGRESS` 取证与分层结论**（5/14 会话复发、8% 上下文压力排除超限、报错相位标签假陈述的加法修法）
+- `2026-09-26-glm-goal-round1-investigation.md` — **GLM 六问第一轮（调查，零改动）**：① 真实消耗来源（无任何智谱 API key，走网页桥）② 引用会话内容「已有一半缺另一半」③ `mcp_action` 原文三源 ④ GLM 真机适配现状（正文 + 工具循环双 PASS）⑤ 并列多会话方案 ⑥ 其余问题全景 8 条
+- `2026-09-26-glm-goal-round2-implementation.md` — **GLM 六问第二轮（实施 + 验证）**：**移除「同时发送」+ 三个独立底部对话框 + 主审/探索分工 + 跨列引用**（Q2+Q5）、`answerSelector` 契约补齐（审计 C1）、全量 **1064/1064**；含**列级沙箱的诚实边界**与 `ref-index` 既有红的如实说明
 - `2026-09-25-compact-aux-delta.md` — **手动 /compact 失效的取证与修复（0.19.14）**：压缩调用的真实形状、无键整包重放撞 1M 预算闸的病因链、真机 A/B/阶梯探针读数（网页输入框上限已 ≥320k）、游标命中只发增量的修法与「辅助轮不碰主游标」的边界
 - `2026-09-25-mirror-real-viewer-research.md` — **镜像路线「真实查看器」方案研究**：图片/文件查看失效的机理（陌生域 + referer 403 真机二分实锤）、/wr/ 带 cookie 转发 + bootstrap 补钩的 0.19.14 交付记录、SW 拦截层暂缓的裁量理由
 - `2026-09-23-longrun-two-rounds-thinking.md` — **长跑健全性两轮思考**（纯文档，零代码）：第一轮从「什么会杀死长会话」落到「压缩路径从未被行使」；第二轮换起点从「桥凭什么相信网页」落到「防护全是单轮闭环」；两轮独立成立并给出共同结构与可检验的下一步

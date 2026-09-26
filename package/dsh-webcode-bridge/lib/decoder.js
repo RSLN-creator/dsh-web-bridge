@@ -368,9 +368,15 @@
     push(c) { for (const ev of this.sse.push(c)) this.eat(ev); }
     finish() {
       for (const ev of this.sse.finish()) this.eat(ev);
-      if (this.failed) return { complete: false, reason: 'invalid_stream' };
-      if (!this.done) return { complete: false, reason: 'incomplete' };
-      return { complete: true, text: this.text.trim(), thinking: this.think.trim(), images: this.images };
+      // 与 JsonLinesDecoder.finish 同一条纪律：两个失败分支都要把**已解内容**
+      // 带出去，且 partial 只在没收完整时出现（见该处的完整注释）。这里不合并成
+      // 一个基类方法，是因为三个 SSE 类各有自己的 eat/字段，合并会把「收尾」与
+      // 「解析」两件事耦合到一起。
+      const content = { text: this.text.trim(), thinking: this.think.trim(), images: this.images };
+      const partial = Boolean(content.text || content.thinking || content.images.length);
+      if (this.failed) return { complete: false, partial, reason: 'invalid_stream', ...content };
+      if (!this.done) return { complete: false, partial, reason: 'incomplete', ...content };
+      return { complete: true, ...content };
     }
     eat(ev) {
       if (ev.event === 'close') { this.done = true; return; }
@@ -429,9 +435,15 @@
     push(c) { for (const ev of this.sse.push(c)) this.eat(ev); }
     finish() {
       for (const ev of this.sse.finish()) this.eat(ev);
-      if (this.failed) return { complete: false, reason: 'invalid_stream' };
-      if (!this.done) return { complete: false, reason: 'incomplete' };
-      return { complete: true, text: this.text.trim(), thinking: this.think.trim(), images: this.images };
+      // 与 JsonLinesDecoder.finish 同一条纪律：两个失败分支都要把**已解内容**
+      // 带出去，且 partial 只在没收完整时出现（见该处的完整注释）。这里不合并成
+      // 一个基类方法，是因为三个 SSE 类各有自己的 eat/字段，合并会把「收尾」与
+      // 「解析」两件事耦合到一起。
+      const content = { text: this.text.trim(), thinking: this.think.trim(), images: this.images };
+      const partial = Boolean(content.text || content.thinking || content.images.length);
+      if (this.failed) return { complete: false, partial, reason: 'invalid_stream', ...content };
+      if (!this.done) return { complete: false, partial, reason: 'incomplete', ...content };
+      return { complete: true, ...content };
     }
     emitText(t) { if (!t) return; this.text += t; try { this.onDelta?.(t); } catch {} }
     emitThink(t) { if (!t) return; this.think += t; try { this.onThink?.(t); } catch {} }
@@ -514,10 +526,20 @@
     }
     finish() {
       if (this.buf.trim()) this.line(this.buf.trim());
-      if (this.failed) return { complete: false, reason: 'invalid_stream', conversationId: this.conversationId };
-      if (!this.done) return { complete: false, reason: 'incomplete', conversationId: this.conversationId };
+      // 已解内容的唯一出口。**两个失败分支都必须带上它**——否则流里明明解出了
+      // 正文/思考，返回值里却是空的（真机 2026-09-26：GLM 流无收尾帧时整轮被判
+      // 「网页什么都没产出」）。
+      const content = { text: this.text.trim(), thinking: this.think.trim(), images: this.images };
+      // 「有内容可交」与「跑完整了」是两件事：partial 为真表示正文/思考/图片至少
+      // 有一项已解出来，调用方可以按部分流收束。**只在没收完整时出现**——
+      // complete 结果必须与改动前逐字同形，多一个恒真字段会让调用方
+      // （browser-driver 的 `!result.complete && !result.partial` 等）分不开
+      // 「跑完了」与「只跑了一半」。
+      const partial = Boolean(content.text || content.thinking || content.images.length);
+      if (this.failed) return { complete: false, partial, reason: 'invalid_stream', conversationId: this.conversationId, ...content };
+      if (!this.done) return { complete: false, partial, reason: 'incomplete', conversationId: this.conversationId, ...content };
       return {
-        complete: true, text: this.text.trim(), thinking: this.think.trim(), images: this.images,
+        complete: true, ...content,
         conversationId: this.conversationId,
       };
     }
@@ -556,6 +578,20 @@
   //   纯增量流（t 恒为新增后缀）与累积流在 diff 下语义一致，两种都兼容。
   class GlmDecoder extends JsonLinesDecoder {
     constructor(options) { super(options); this.seen = new Map(); this.glmSegBuf = ''; }
+    /**
+     * 一帧原始 SSE 文本 → 待解析的数据行。
+     *
+     * **必须由 push() 与 finish() 共用**：finish() 要把缓冲区里那半帧（缺 \n\n
+     * 终结符）按**同一条规则**解出来。若各写一份，「被截断的尾帧能不能救回来」
+     * 就取决于哪一份先被改，而漏掉的恰恰是整段回复的**最后一句**。
+     */
+    frameData(frame) {
+      const dataLines = [];
+      for (const line of String(frame || '').split('\n')) {
+        if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
+      }
+      return dataLines.join('\n');
+    }
     push(chunk) {
       this.buf += chunk;
       this.buf = this.buf.replace(/\r\n/g, '\n');
@@ -563,13 +599,27 @@
       while ((idx = this.buf.indexOf('\n\n')) >= 0) {
         const frame = this.buf.slice(0, idx);
         this.buf = this.buf.slice(idx + 2);
-        const dataLines = [];
-        for (const line of frame.split('\n')) {
-          if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
-        }
-        const data = dataLines.join('\n');
+        const data = this.frameData(frame);
         if (data) this.line(data);
       }
+    }
+    /**
+     * 收尾：先把缓冲区里的**残缺尾帧**按 SSE 规则解析掉，再交给基类。
+     *
+     * 基类 finish() 走的是 `this.line(this.buf.trim())`，而本类（及基类）的
+     * line() 是 `JSON.parse(l)` —— 缓冲区里躺的是原始 SSE 文本 `data: {...}`，
+     * `JSON.parse('data: {...}')` 必抛 `Unexpected token 'd'`，于是被静默吞掉。
+     * 真机后果（2026-09-26 取证）：GLM 正常收尾时**没有** status:'finish' 帧，
+     * 末帧常常缺终结空行，那一段正文就此消失。
+     */
+    finish() {
+      const tail = this.buf.trim();
+      this.buf = '';
+      if (tail) {
+        const data = this.frameData(tail);
+        if (data) { try { this.line(data); } catch { /* 残缺到解不出 JSON：如实丢弃 */ } }
+      }
+      return super.finish();
     }
     line(l) {
       let j; try { j = JSON.parse(l); } catch { return; }
@@ -659,6 +709,54 @@
               this.glmSegBuf += t;
               this.emitText(t);
             }
+          } else if (type === 'code') {
+            // GLM 原生**结构化代码块** part（0.19.23 补）。
+            //
+            // ## 为什么必须补
+            //
+            // GLM 网页把「模型要求发起一个调用」表示成 `content[].type === 'code'`
+            // 的**结构化字段** `code`，而不是正文里的 ``` 围栏文本。本解码器此前只认
+            // text / think / image，`code` 一路落到末尾被静默忽略。
+            //
+            // 离线实证（`.tmp/probe-glm-native.mjs` ①a 对照 ①b，随机可复跑）：
+            //   同一段调用 JSON 放进 `type:'code'`  ⇒ deltas 为空、text 为空，
+            //                                        **整个调用消失**；
+            //   同一段放进 `type:'text'`           ⇒ 正常外发。
+            //
+            // 参考实现同构：`reference/glm-free-api/src/api/controllers/chat.ts:994-1013`
+            // 把 `type == 'code'` 当**一等公民**，为它拼 codeHead/codeFooter（``` 围栏）
+            // 再交给上层——即在这条流里，`code` 与 `text` 是并列的两种正文载体。
+            // 本桥此前只实现了后者，这就是「原生 glm 格式」缺的那一半。
+            //
+            // ## 判据刻意收窄（不要放宽）
+            //
+            // **只在它确实是工具调用时才接进正文通道**：
+            //   · 普通代码块（GLM 自带的代码解释器等）维持 0.19.22 及以前的既有行为
+            //     ——丢弃，不外发。贸然外发会把模型内部的草稿代码整段铺进会话，
+            //     那是比丢一个调用更常见的噪声；
+            //   · 调用形态（含 `"mcp_action"` 或以 `{` 开头）才 emit，让**既有**协议
+            //     解析器认出它（findProtocolStart 的裸 JSON 锚点认 `{\s*["\{]`，
+            //     见 index.js 的 openerBoundary）——不新开第二条解析通路。
+            //
+            // 去重与上面 text 分支**同形**：GLM 的 finish 帧会重发全量，前缀吸收即可。
+            // 槽位 key 用单槽 'code'（与 text 同理：part 索引在帧间会漂移，
+            // 用索引做 key 会让同一段重复外发）。
+            const codeText = typeof c.code === 'string' ? c.code : '';
+            if (!codeText) continue;
+            const codeIsCall = codeText.includes('"mcp_action"') || /^\s*\{/.test(codeText);
+            if (!codeIsCall) continue;
+            const codeKey = 'code';
+            const prevCode = this.seen.get(codeKey) || '';
+            if (codeText === prevCode) continue;
+            if (codeText.startsWith(prevCode)) {
+              this.seen.set(codeKey, codeText);
+              if (codeText.length > prevCode.length) this.emitText(codeText.slice(prevCode.length));
+            } else if (prevCode.startsWith(codeText)) {
+              continue;                                  // 迟到的旧帧
+            } else {
+              this.seen.set(codeKey, prevCode + codeText);
+              this.emitText(codeText);
+            }
           } else if (type === 'image' && Array.isArray(c.image)) {
             for (const im of c.image) {
               if (isRecord(im) && typeof im.image_url === 'string' && im.image_url) {
@@ -740,9 +838,15 @@
     push(c) { for (const ev of this.sse.push(c)) this.eat(ev); }
     finish() {
       for (const ev of this.sse.finish()) this.eat(ev);
-      if (this.failed) return { complete: false, reason: 'invalid_stream' };
-      if (!this.done) return { complete: false, reason: 'incomplete' };
-      return { complete: true, text: this.text.trim(), thinking: this.think.trim(), images: this.images };
+      // 与 JsonLinesDecoder.finish 同一条纪律：两个失败分支都要把**已解内容**
+      // 带出去，且 partial 只在没收完整时出现（见该处的完整注释）。这里不合并成
+      // 一个基类方法，是因为三个 SSE 类各有自己的 eat/字段，合并会把「收尾」与
+      // 「解析」两件事耦合到一起。
+      const content = { text: this.text.trim(), thinking: this.think.trim(), images: this.images };
+      const partial = Boolean(content.text || content.thinking || content.images.length);
+      if (this.failed) return { complete: false, partial, reason: 'invalid_stream', ...content };
+      if (!this.done) return { complete: false, partial, reason: 'incomplete', ...content };
+      return { complete: true, ...content };
     }
     eat(ev) {
       if (ev.event === 'close') { this.done = true; return; }

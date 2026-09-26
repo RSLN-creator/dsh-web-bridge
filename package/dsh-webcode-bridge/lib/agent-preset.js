@@ -1667,6 +1667,123 @@ export function readCallAt(text, start) {
 }
 
 /**
+ * 尾部「还没判定完的代码围栏」起点（0.19.17）。
+ *
+ * ## 为什么需要它（真机 + 离线复现，2026-09-26）
+ *
+ * GLM / z.ai 走 codeblock 传输（```` ```json ```` + 调用 JSON）。流式循环里
+ * 「正文能外发到哪」由 `findProtocolStart` 定：它命中围栏 ⇒ 停在围栏起点。
+ * 但**围栏刚开、JSON 还没把 `mcp_action` / `arguments` 吐出来**的那一小段窗口里，
+ * `firstCallFenceAt` 的判据（体内要有调用关键字段）还不成立 ⇒ `findProtocolStart`
+ * 返回 -1 ⇒ 外发边界只剩 `PROSE_TAIL_CHARS`（8）这个定长尾巴 ⇒ 围栏与 JSON 开头
+ * 被当正文一个字符一个字符发了出去。
+ *
+ * 后果（离线逐字符复现，`.tmp-probe/probe-fence-decision.mjs`）：助手正文块里出现
+ * ` ```json\n{"mcp_actio `；且因为 `textSent` 单调不回退，**发出去的字节收不回来**。
+ * 真机会话（`session-0b292806` turn2）里用户看到的就是「正文有空白还有乱码」——
+ * 正文块之间夹着一串 `\n```\n\n`。
+ *
+ * ## 判据：围栏「还开着」且「仍可能是调用」
+ *
+ * ` ``` ` 按出现次数两两配对，落单的那个就是还开着的围栏。再加一道**兼容性**
+ * 判据，避免把普通正文代码块也扣住（那会毁掉流式观感）：围栏信息串之后的首个
+ * 非空白字符必须是 `{`（调用 JSON 的开口），或者正文还没开始（无从判断 ⇒ 宁可
+ * 先扣住）。于是：
+ *
+ *   ` ```js\nconst a = 1; `   → 首格是 `c`，不是调用 ⇒ 返回 -1，照旧即时外发；
+ *   ` ```json\n{"mcp_actio ` → 首格是 `{` ⇒ 返回围栏起点，扣住。
+ *
+ * 扣住是**有界**的：围栏一旦闭合（哪怕闭合的是普通代码块）配对即抵消，本函数
+ * 返回 -1，正文立刻放行；流断在半截围栏里时由收尾的 `proseSafeEnd` 决定去留，
+ * 一个字节都不会永久丢掉。
+ *
+ * @param {string} text 累积文本
+ * @param {number} [from] 只报告该下标之后的围栏（已经外发过的区域不必再扣）
+ * @returns {number} 围栏起点下标；-1 表示尾部没有「还开着的调用围栏」
+ */
+export function unresolvedCallFenceAt(text, from = 0) {
+  const src = String(text ?? '');
+  const base = Math.max(0, Number(from) || 0);
+  // 配对扫描：``` 成对抵消，剩下的那个 open 就是还开着的围栏。
+  let open = -1;
+  let i = 0;
+  for (;;) {
+    const at = src.indexOf('```', i);
+    if (at < 0) break;
+    open = open < 0 ? at : -1;
+    i = at + 3;
+  }
+  if (open < base) return -1;
+  // 信息串之后的首个非空白字符：`{` ⇒ 仍可能是调用围栏；空 ⇒ 还没开始，先扣住。
+  // 其余（```js 后面跟代码）是普通正文代码块，不扣——扣了就没有流式观感。
+  const body = src.slice(open + 3);
+  const nl = body.indexOf('\n');
+  if (nl < 0) return open;
+  const head = body.slice(nl + 1).replace(/^\s+/, '');
+  return head === '' || head.startsWith('{') ? open : -1;
+}
+
+/**
+ * 紧跟在一个**已消费调用 JSON** 之后的闭合围栏起点（0.19.17）。
+ *
+ * ## 为什么它不能和 JSON 一起跳过
+ *
+ * 调用的 JSON 配平那一刻，它自己的 ` ``` ` **还没到**——闭合围栏是随后的增量。
+ * 于是流式循环在「消费掉 JSON」时只能把游标推到 JSON 末尾，围栏留在后面。
+ * 而 ` ``` ` 单独出现**不是**协议锚点（这是刻意的：普通 markdown 代码块也是它），
+ * `findProtocolStart` 因此在那一小段里返回 -1，外发边界只剩 `PROSE_TAIL_CHARS`，
+ * 闭合围栏被当正文发出（离线复现见 `.tmp-probe/probe-fence-leak2.mjs`：正文块里
+ * 多出两块 ` ``` `）。
+ *
+ * ## 判据为什么是安全的
+ *
+ * 只看「游标之后、只隔空白、紧接着就是 ` ``` `」。`from` 是**已消费协议区间的终点**
+ * （调用 JSON 的右花括号），普通散文里的代码块不可能紧贴在那里——它前面总有散文。
+ * 且 `from <= 0`（还没消费过任何协议）时一律返回 -1，回复开头的代码块不受影响。
+ *
+ * @param {string} text 累积文本
+ * @param {number} from 已消费协议区间的终点（调用 JSON 末尾的下标）
+ * @returns {number} 闭合围栏起点；-1 表示没有
+ */
+export function closingFenceAfter(text, from) {
+  const src = String(text ?? '');
+  const base = Math.max(0, Number(from) || 0);
+  if (base <= 0) return -1;
+  let i = base;
+  while (i < src.length && /\s/.test(src[i])) i += 1;
+  if (!src.startsWith('```', i)) return -1;
+  // ── 0.19.23：不得把**开启**的调用围栏当成闭合围栏消费 ──────────────────────
+  //
+  // 真机缺陷（session-53201b58 turn4 step1，用户报「正文里出现 json」）。
+  //
+  // 增量分支对**每个增量**都调本函数，而下一个增量的开头常常正是**下一个调用
+  // 的开启围栏** `\n\n```json\n{…}`。旧判据只看「游标之后隔空白就是 ```」，于是
+  // 把这枚开启围栏当闭合围栏消费掉（调用方做 `protocolFrom = cf + 3`）——
+  // 只吃掉三个反引号，后面那四个字符 `json` 落在协议区间**之外**，被当正文发出去。
+  //
+  // 单元级实证（`.tmp/probe-json-leak-mechanism.mjs`）：
+  //   acc = call1 的 JSON + "```" + "\n\n" + "```json\n" + call2 的 JSON + "```"
+  //   closingFenceAfter(acc, 70) = 72 → 指向 ```` ```json ````，消费后泄漏 `json`
+  // 与会话形状逐字吻合：`text:62, call, text:4("json"), call, text:4("json"), …`
+  // 而那 4 个字符恰是 GLM codeblock 传输里每个调用围栏的语言标签。
+  //
+  // 判据**刻意收窄**（不要放宽成「后面是不是 JSON」）：
+  //   只有「**带信息串**（```json 这类）**且**信息串之后首个非空白字符是 `{`」
+  //   才算开启的调用围栏。真正的闭合围栏是裸 ` ``` `（信息串为空），永远照常消费。
+  // 这样既不误伤「闭合围栏后紧跟一段以 { 开头的散文」，也不会漏掉唯一的真实形状。
+  //
+  // 另外补一条：围栏之后**没有换行**且信息串非空 ⇒ 那是刚开、还没写完的开启围栏，
+  // 同样不得消费（消费它会连信息串一起漏）。
+  const body = src.slice(i + 3);
+  const nl = body.indexOf('\n');
+  if (nl < 0) return body.trim() === '' ? i : -1;
+  const info = body.slice(0, nl).trim();
+  const head = body.slice(nl + 1).replace(/^\s+/, '');
+  if (info !== '' && head.startsWith('{')) return -1;
+  return i;
+}
+
+/**
  * 正文尾部出现「协议标记写到一半」的位置。
  *
  * 流式期间标记是一个字符一个字符到的：`<` → `<t` → `<to` → `<tool_call>`。

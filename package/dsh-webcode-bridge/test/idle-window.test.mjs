@@ -100,6 +100,54 @@ test('③b 反向安全线：firstEventAt=undefined（忘传参数）⇒ 按「�
   assert.equal(r.windowMs, BASE, 'firstEventAt 缺省时应是常规窗口');
 });
 
+/**
+ * ★ 0.19.23：`mid-stream` 必须能被**再分一次**（否则报错会说出假陈述）。
+ *
+ * `phase: 'mid-stream'` 同时是两种情形的返回相位：
+ *   ① 开流之后静默（真的卡住）；
+ *   ② 还没开流且驱动不忙（链路没跑起来，按常规窗口快报）。
+ *
+ * 真机 `session-e7056e8c` turn3 step58 的报错只印了 phase，于是把 ② 说成
+ * 「判定相位=已开流后的静默」——**假陈述**；而且它紧挨着
+ * 「最近驱动活动时间 1s 前」「页面已有 0 字回复未回传」并排出现，读起来自相矛盾，
+ * 排查方向当场被带偏。
+ *
+ * 修法是**加法**：phase 与窗口逐字不变（上面 ③/③b 仍原样通过），只多带一个
+ * 显式布尔 `firstEventSeen` 供报错文案分诊。
+ */
+test('★ 0.19.23 firstEventSeen：把两种 mid-stream 分开（phase 与窗口不变）', () => {
+  // ① 真·开流后静默 ⇒ true。
+  const opened = idleWindowDecision({ baseMs: BASE, firstEventAt: Date.now(), driverBusy: true });
+  assert.equal(opened.phase, 'mid-stream');
+  assert.equal(opened.firstEventSeen, true, '开流过就必须标 true');
+  assert.equal(opened.windowMs, BASE, '窗口不得因为新增字段而变');
+
+  // ② 没开流 + 驱动不忙 ⇒ 同样 mid-stream，但 firstEventSeen 必须是 false。
+  const never = idleWindowDecision({ baseMs: BASE, firstEventAt: NO_FIRST_EVENT, driverBusy: false });
+  assert.equal(never.phase, 'mid-stream', 'phase 取值保持兼容（既有护栏断言它）');
+  assert.equal(never.firstEventSeen, false,
+    '没收到过事件必须标 false —— 否则文案会把它说成「已开流后的静默」');
+  assert.equal(never.windowMs, BASE, '窗口不得因为新增字段而变');
+
+  // ③ 未开流的宽限格（prefill）同样是 false。
+  const prefill = idleWindowDecision({ baseMs: BASE, firstEventAt: NO_FIRST_EVENT, driverBusy: true });
+  assert.equal(prefill.firstEventSeen, false, '还没开口就是 false');
+  assert.equal(prefill.phase, 'awaiting-first-byte');
+
+  // ④ **每一个**返回分支都必须带这个字段（漏带会让文案退回假陈述）。
+  for (const input of [
+    { baseMs: BASE, firstEventAt: null, driverBusy: true },
+    { baseMs: BASE, firstEventAt: null, driverBusy: false },
+    { baseMs: BASE, firstEventAt: 0, driverBusy: true },
+    {},
+    { baseMs: 0, firstEventAt: null, driverBusy: true, totalBudgetMs: 120_000 },
+  ]) {
+    const r2 = idleWindowDecision(input);
+    assert.equal(typeof r2.firstEventSeen, 'boolean',
+      JSON.stringify(input) + ' 的返回值缺 firstEventSeen（实际 ' + String(r2.firstEventSeen) + '）');
+  }
+});
+
 // ── ④ 非法入参必须回落到安全值 ─────────────────────────────────────────────
 
 test('④ baseMs 非法（0/-1/NaN/undefined/"x"）⇒ 回落到基础值 120000', () => {

@@ -24,6 +24,8 @@ import { DEFAULT_SLOT, normalizeSlot } from './accounts.js';
 import { selectWebModel, pickerUsable } from './model-picker.js';
 import { deriveLastRate, shouldSettleWip, shouldSettleStalledThinking, answerDomLength, cleanAnswerDomText, shouldRescueStalledCapture } from './metrics.js';
 import { emptyWebResponseError } from './zero-progress.js';
+// 0.19.18 用户准则「同一账号不能同时桥接运行」：账号级互斥锁（见 lib/bridge-lock.js）。
+import { acquireBridgeLock, releaseBridgeLock, describeBridgeLockHolder } from './bridge-lock.js';
 // 只用 ATTACH_PICK_SRC：判定主体注入浏览器执行（见 pageAttachEvidence）。
 // 不 import pickAttachEvidence 本身——那是给单测直接驱动用的，在这里 import 会成死导入
 // （本仓库对死导入有过明确处置：0.19.0 删过 transportNoteFor）。
@@ -32,6 +34,12 @@ import child_process from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+// 0.19.18 账号级互斥（用户准则「同一账号不能同时桥接运行」）：本进程的启动时刻。
+// 参与 bridge-lock 的「这把锁是不是我的」判定。刻意用**进程**启动时刻而不是
+// 驱动创建时刻：同一进程里同一账号只会有一个驱动实例，用创建时刻会让「进程内
+// 重建驱动」把前一个实例的锁误判成别人的而拒绝自己。
+const PROCESS_STARTED_AT = Date.now();
 
 const decoderPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'decoder.js');
 // SSE 原始帧抓包目录（WEBCODE_SSE_DEBUG=<dir> 时启用，仅用于新站点解码器取证）。
@@ -189,6 +197,52 @@ function captureInit(paths, opts = {}) {
 })();
 `;
 }
+
+/**
+ * 助手回复节点的采样选择器（WIP 巡检与超时现场共用一份）。
+ *
+ * ## 为什么必须是唯一一份
+ *
+ * 0.19.16 之前这两处各写一份**逐字相同**的字面量（原先还有第三处）。三份并存的
+ * 代价不是冗余而是**漂移**：修一处、忘两处，于是「判据用的节点」与「兜底交出去的
+ * 节点」不是同一个，读数自相矛盾且看不出来。契约层（providers.js 的 answerSelector）
+ * 一旦给出站点专属选择器，这里就是它唯一的消费者。
+ *
+ * ## 0.19.19：从「唯一一份」升级为「兜底那一份」
+ *
+ * 上面那句承诺（「契约层一旦给出站点专属选择器，这里就是它唯一的消费者」）
+ * 在 0.19.19 兑现：`createBrowserDriver` 现在按 `contract.answerSelector ??
+ * 本串` 求值一次，得出 `answerSelector` 供**两处**消费点共用——WIP 巡检采样
+ * 与超时现场（两处 `page.evaluate`，见下方各自的长注释）。
+ * 本串因此降级为**未声明站点**的兜底——这是纯增量：没写 answerSelector 的
+ * 站点走到的仍是逐字相同的那一串。
+ *
+ * ## ⚠️ 勘误：0.19.19 这里一度写成「**三**处消费点共用」（0.19.23 修正）
+ *
+ * 那是错的，实际只有两处。第三处 `DOM_CAPTURE`（decoder:'dom' 站点的抄全文兜底）
+ * 是**另一张表**——它多出 `.response-container` 与 `main`，服务的是「等回答区
+ * 稳定后抄 innerText」，不是 WIP 采样，因此**不消费** `answerSelector`。
+ *
+ * 为什么留这句勘误而不直接删干净：本仓库反复记过「注释与实现不符」（审计 §六-4
+ * 记过同型的 `answerSelector` 注释漂移，而那条正是催生本字段的原因）。
+ * 一条错误的「三处」会让下一个读者去 `DOM_CAPTURE` 里找接线、找不到、然后
+ * 怀疑接线断了——**错误的注释比没有注释更贵**，所以勘误本身要留下。
+ *
+ * 写死它服务全部 10 个站点曾是审计 C1 记的耦合点；现在站点差异有了声明位，
+ * 「改一个站点不影响别人」在**这一项**上成立。
+ *
+ * ## 真机事实（2026-09-26）
+ *
+ * chatglm.cn 对这份 DeepSeek 专用串**一个都不命中**。⚠️ 但要注意取证条件：
+ * 当时那批 count 读数是在**阿里云滑块页**上采的（裸 playwright 深链导航被拦，
+ * 页面 title 变成「滑动验证页面」），因此它**不能**用来判定「选择器对 GLM 瞎」——
+ * 见 doc/session-2026-09-26-requirements-and-progress.md §4.3 的诚实修正。
+ * 结论方向不变（串里确实没有任何 GLM 类名），但「命中/不命中」尚待有效读数。
+ *
+ * 因此调用方**不能**把「采样到空串」当成「页面可采样」——必须由页面回报
+ * found，见 startWipWatch 里的三态处理（metrics.shouldSettleWip 的 domFound）。
+ */
+const ANSWER_SELECTOR = '.markdown, [data-message-author-role="assistant"], .ds-markdown';
 
 /** DOM 兜底抓取（decoder:'dom' 站点）：等回答区稳定后抄全文。 */
 const DOM_CAPTURE = `
@@ -566,6 +620,11 @@ export function createBrowserDriver(options = {}) {
   const site = getSite(siteId);
   const contract = getContract(siteId);
   if (!site || !contract) throw new Error('webcode driver: unknown siteId ' + siteId);
+  // 助手节点选择器（0.19.19）：站点在 providers.js 声明了 answerSelector 就用它，
+  // 否则回落到那份 DeepSeek 兜底串。**求值一次、三处消费点共用**——这正是
+  // 0.19.16 用「唯一一份」换来的东西，别在这里又抄第二份。
+  // 缺省分支逐字等于 0.19.18 的行为，所以未声明站点零位移。
+  const answerSelector = contract.answerSelector || ANSWER_SELECTOR;
   // 账户槽（0.14.7）：同一站点的第 2 个账户是**另一个驱动实例**，用另一个 profileDir。
   // 槽在驱动里只做两件事：① 透出给 /status 与面板（用户要知道这行是哪个账户）；
   // ② 进日志前缀（两个槽的日志混在一起时能分开）。
@@ -574,6 +633,12 @@ export function createBrowserDriver(options = {}) {
   // 在槽目录里再写一份带槽名的文件名是冗余的——而冗余的名字意味着多一条迁移路径，
   // 迁移就是风险。默认槽因此逐字保持 0.14.6 的落盘形状。
   const slot = normalizeSlot(options.slot) || DEFAULT_SLOT;
+  // 0.19.18 账号级互斥（用户准则「同一账号不能同时桥接运行」）的本实例状态：
+  //   · accountKey 与 status() 里那一份**同口径**（默认槽 = siteId，非默认槽 = siteId#slot），
+  //     两处必须是同一个字符串，否则「锁报的账号名」与「面板显示的账号名」会对不上；
+  //   · accountLock.held 记本实例是否已持有锁，close() 据此决定要不要释放。
+  const accountKey = slot === DEFAULT_SLOT ? siteId : siteId + '#' + slot;
+  const accountLock = { held: false, path: '' };
   const siteUrl = options.site ?? site.origin + '/';
   const cfg = {
     siteId,
@@ -659,6 +724,16 @@ export function createBrowserDriver(options = {}) {
     const n = Number(cfg.captureStallRescueMs);
     return Number.isFinite(n) && n >= 0 ? n : 45_000;
   })();
+  // 0.19.16：**找不到助手节点**时的收束窗口。
+  //
+  // 与 WIP_IDLE_MS 的分工：那个是「页面看得到、也停长了」的常规窗口；这个用在
+  // 「页面在、但选择器认不出哪条是回复」——此时「DOM 停长」这条判据**没有证据**
+  // （a.lastDomGrowthAt 从不刷新），若仍按 2.5s 就收束，等于只凭流静默决定，
+  // 真机后果就是 GLM 那类站点在页面还在写字时被腰斩。取 6×（默认 15s）是刻意的
+  // 粗估：宁可多等十几秒，也不腰斩仍在生成的回复。
+  // 必须远小于 requestTimeoutMs（240s），否则这一轮永远轮不到稳态收束、
+  // 只能等通用超时（报错信息也就失去「收束原因」这条线索）。
+  const DOM_BLIND_MS = Math.max(WIP_IDLE_MS * 6, 15_000);
   // 本轮收束原因，供 /status 与右栏显示：finished | partial-wip-settled |
   // partial-wip-settled(dom-unavailable) | timeout。null = 尚未跑过轮次。
   let lastEndReason = null;
@@ -1428,16 +1503,28 @@ export function createBrowserDriver(options = {}) {
       // 采样返回**原始 innerText**，剥计时文案在 Node 侧做：注入浏览器的函数里
       // 不能用模块作用域，而且把判据留在 metrics.answerDomLength 才能离线单测。
       let domText = null;
+      // 采样返回**两件事**：找到了助手节点吗（found）+ 它的文本。
+      //
+      // 为什么必须区分（0.19.16 真机）：旧实现只返回文本，找不到节点时回空串，
+      // 而调用方把「拿到一个字符串」当成「页面可采样」⇒ domAvailable=true。
+      // 对 chatglm.cn 选择器实测一个都不命中（real-probe-30-glm-dom.mjs），
+      // 于是 lastDomGrowthAt 永不刷新、「DOM 停长」恒成立，收束器只凭流静默
+      // 2.5s 就动手——而那一刻解码器还没收到 status:'finish'，内容被丢。
+      // found=false 表示「对页面还在不在写零证据」，必须走更宽的窗口。
+      let domFound = false;
       try {
-        domText = await page?.evaluate?.(() => {
-          const last = [...document.querySelectorAll('.markdown, [data-message-author-role="assistant"], .ds-markdown')].pop();
-          return last ? (last.innerText || '') : '';
-        });
-      } catch { domText = null; }
+        const s = await page?.evaluate?.((sel) => {
+          const last = [...document.querySelectorAll(sel)].pop();
+          return last ? { found: true, text: (last.innerText || '') } : { found: false, text: '' };
+        }, answerSelector);
+        if (s && typeof s === 'object') { domText = s.text; domFound = s.found === true; }
+        else if (typeof s === 'string') { domText = s; domFound = true; }   // 注入式测试页兜底
+      } catch { domText = null; domFound = false; }
       if (active !== a) return;                              // 轮次已结束或被替换
       const domLen = typeof domText === 'string' ? answerDomLength(domText) : null;
       if (typeof domLen === 'number') {
         a.domAvailable = true;
+        a.domFound = domFound;
         // 0.16.3：采样成功既算「页面还活着」（noteActivity），也留下最新读数
         // （domReplyChars）。只在**真的读到页面**时刷新：取不到页面是「读不到」，
         // 把它记成一次活动会让看门狗报出「最近驱动活动 0s 前」这种假活的读数。
@@ -1502,7 +1589,12 @@ export function createBrowserDriver(options = {}) {
         lastProgressAt: a.lastProgressAt,
         lastDomGrowthAt: a.lastDomGrowthAt,
         domAvailable: a.domAvailable,
+        // 第三态（0.19.16）：页面在、但**认不出哪条是助手回复**（选择器对本站
+        // 点瞎）。此时对「页面还在不在写」零证据，必须走更宽的窗口才允许收束，
+        // 否则 GLM 那类站点会只凭「流静默 2.5s」被腰斩。
+        domFound: a.domFound !== false,
         wipIdleMs: WIP_IDLE_MS,
+        domBlindMs: DOM_BLIND_MS,
       })) { a.wipTimer = setTimeout(tick, WIP_IDLE_MS); return; }
       // 已达稳态：网页这一轮事实上结束了，只是没送 FINISHED。按已有正文收束。
       // 收束原因如实区分三种来历，不再一律 partial-wip-settled——「只出思维链」
@@ -1673,6 +1765,35 @@ export function createBrowserDriver(options = {}) {
   async function launch({ headless } = {}) {
     await ensureExecutable();
     fs.mkdirSync(cfg.profileDir, { recursive: true });
+    // 0.19.18 用户准则（2026-09-26 原话「同一账号不能同时桥接运行！」）：
+    // 启动浏览器**之前**先拿账号级互斥锁，被拒就当场报错。
+    //
+    // 为什么必须在 launch 之前、而不是靠 Chromium 自己的 SingletonLock：
+    // 那一道的失败形态是「抛 ProcessSingleton + 本文件的 killOrphanEdgeForProfile
+    // 按 profileDir 杀掉对方浏览器」——两个桥会**互相杀**，表现为随机超时与
+    // 登录态丢失，用户完全看不出原因。本锁给出的是「谁占着、怎么办」的明确拒绝。
+    //
+    // 一次性语义：只在这一轮 launch 里尝试；拿到后由 close() 释放（见 releaseBridgeLock
+    // 的调用点）。失败即抛，绝不自愈式重试——重试就等于绕过这条准则。
+    if (!accountLock.held) {
+      const got = acquireBridgeLock(cfg.profileDir, {
+        siteId, accountKey, startedAt: PROCESS_STARTED_AT,
+      }, { logger: console });
+      if (!got.ok) {
+        // 0.19.22：报错里必须带上**存活读数**与**锁文件路径**——用户最先想知道
+        // 「那个 pid 到底还在不在」，以及「我能不能自己清掉它」。判据只会在
+        // 确认持有者活着时给出 held，因此这里传 true。
+        const err = new Error(describeBridgeLockHolder(got.holder, siteId, accountKey, {
+          alive: true, lockPath: got.path,
+        }));
+        err.code = 'BRIDGE_ACCOUNT_BUSY';
+        err.bridgeLock = got;
+        warn(err.message);
+        throw err;
+      }
+      accountLock.held = true;
+      accountLock.path = got.path;
+    }
     clearStaleProfileLocks();
     const launchOnce = () => chromium.launchPersistentContext(cfg.profileDir, {
       executablePath: cfg.executablePath,
@@ -2791,13 +2912,17 @@ export function createBrowserDriver(options = {}) {
         const a = finishActive();
         // 超时必须带页面现场：「网页没生成」和「捕获链死了」修法完全不同，
         // 黑盒超时只能瞎猜（2026-09-12 断流事故：页面早有全文、捕获从未建立）。
-        const scene = await page?.evaluate?.(() => {
-          const last = [...document.querySelectorAll('.markdown, [data-message-author-role="assistant"], .ds-markdown')].pop();
+        const scene = await page?.evaluate?.((sel) => {
+          const last = [...document.querySelectorAll(sel)].pop();
           return {
             captureAlive: typeof window.__webcodeChunk === 'function' && window.__webcodeCaptureInstalled === true,
             replyChars: last ? (last.innerText || '').length : 0,
+            // 找不到节点本身就是要紧的读数（0.19.16）：它把「页面真的没有回复文本」
+            // 与「我们的选择器对这个站点是瞎的」分成两种现场——两者的下一步完全不同，
+            // 而 replyChars:0 会把它们印成同一句话。
+            selectorHit: Boolean(last),
           };
-        }).catch(() => null);
+        }, answerSelector).catch(() => null);
         const detail = !scene ? '页面不可用'
           : (scene.captureAlive ? '捕获链在' : '捕获链缺失')
             + (scene.replyChars ? `，页面已有 ${scene.replyChars} 字回复未回传` : '，页面无回复文本');
@@ -3921,6 +4046,14 @@ export function createBrowserDriver(options = {}) {
     finishActive()?.reject?.(abortError());
     try { await ctx?.close(); } catch {}
     ctx = null; page = null; busy = false; active = null;
+    // 0.19.18：浏览器关掉即释放账号锁（否则下一次启动会被自己的陈旧锁挡住——
+    // 那是最糟的失败形态：用户主动关闭后反而打不开）。只释放自己的那份，
+    // 已被别人接管的锁不动（见 releaseBridgeLock 的判据）。
+    if (accountLock.held) {
+      releaseBridgeLock(cfg.profileDir, { startedAt: PROCESS_STARTED_AT });
+      accountLock.held = false;
+      accountLock.path = '';
+    }
   }
 
   async function webApi(apiPath, { method = 'GET', body = null, timeoutMs = 20_000 } = {}) {

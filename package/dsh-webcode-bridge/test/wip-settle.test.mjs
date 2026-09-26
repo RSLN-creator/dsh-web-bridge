@@ -67,3 +67,65 @@ test('窗口可配置：调小后能更早收束（离线测试与真机可调�
     now: NOW, lastProgressAt: NOW - 300, lastDomGrowthAt: NOW - 300, wipIdleMs: IDLE,
   }), false);
 });
+
+// ---- 0.19.16：第三态「页面能采样，但找不到助手节点」 -----------------------
+//
+// 真机故障（用户报 glm-5.3-flash「思维链流到一半 → 空回复」，会话 a23e4ee4）。
+// WIP 巡检与超时现场两处硬编码的是 DeepSeek 专用选择器串，对 chatglm.cn
+// 实测**一个都不命中**（real-probe-30-glm-dom.mjs 候选读数全为 0）。旧实现把
+// 「采样到空串」当成 domAvailable=true，于是 lastDomGrowthAt 从不刷新，
+// 下面那行「页面还在长 → 绝不动」**恒不成立**——收束器只凭流静默 2.5s 就动手，
+// 而那一刻解码器还没收到 GLM 的 status:'finish' 帧，内容在收尾时被丢掉。
+//
+// 判据：对「页面还在不在写」没有证据时，必须用**更宽的窗口**才允许收束。
+// 这一组与上一组的区别正是「页面取不到」(domAvailable=false) 与「页面在、
+// 但认不出哪条是回复」(domAvailable=true, domFound=false) 两件事。
+
+test('找不到助手节点 → 2.5s 流停**不足以**收束（本故障的主修）', () => {
+  // 这是旧实现会误判的那一拍：流停 2.5s、DOM 采样「成功」但读到 0 个节点。
+  assert.equal(shouldSettleWip({
+    now: NOW, lastProgressAt: NOW - IDLE, lastDomGrowthAt: NOW - 60_000,
+    domAvailable: true, domFound: false, wipIdleMs: IDLE,
+  }), false, '选择器瞎掉时不得凭 2.5s 流停就收束');
+});
+
+test('找不到助手节点 → 超过加宽窗口才收束（有界，不会永远挂住）', () => {
+  const blind = IDLE * 6;
+  assert.equal(shouldSettleWip({
+    now: NOW, lastProgressAt: NOW - (blind - 1), lastDomGrowthAt: NOW - 60_000,
+    domAvailable: true, domFound: false, wipIdleMs: IDLE,
+  }), false, '未到加宽窗口仍不收束');
+  assert.equal(shouldSettleWip({
+    now: NOW, lastProgressAt: NOW - blind, lastDomGrowthAt: NOW - 60_000,
+    domAvailable: true, domFound: false, wipIdleMs: IDLE,
+  }), true, '到加宽窗口必须收束——否则这一轮永远不结束');
+});
+
+test('找不到助手节点：流仍在动时依然绝不收束', () => {
+  assert.equal(shouldSettleWip({
+    now: NOW, lastProgressAt: NOW - 10, lastDomGrowthAt: NOW - 60_000,
+    domAvailable: true, domFound: false, wipIdleMs: IDLE,
+  }), false);
+});
+
+test('找到节点且长度在长 → 走常规窗口，不受第三态影响（防误伤正常站点）', () => {
+  // domFound 缺省为 true：既有调用方与既有行为必须逐字不变。
+  assert.equal(shouldSettleWip({
+    now: NOW, lastProgressAt: NOW - IDLE, lastDomGrowthAt: NOW - 200, wipIdleMs: IDLE,
+  }), false, '页面还在长 → 绝不收束');
+  assert.equal(shouldSettleWip({
+    now: NOW, lastProgressAt: NOW - IDLE, lastDomGrowthAt: NOW - IDLE,
+    domFound: true, wipIdleMs: IDLE,
+  }), true, '找到节点且也停长了 → 正常收束');
+});
+
+test('domBlindMs 可显式配置（真机排障与离线测试的旋钮）', () => {
+  assert.equal(shouldSettleWip({
+    now: NOW, lastProgressAt: NOW - 5_000, lastDomGrowthAt: NOW - 60_000,
+    domAvailable: true, domFound: false, wipIdleMs: IDLE, domBlindMs: 5_000,
+  }), true);
+  assert.equal(shouldSettleWip({
+    now: NOW, lastProgressAt: NOW - 5_000, lastDomGrowthAt: NOW - 60_000,
+    domAvailable: true, domFound: false, wipIdleMs: IDLE, domBlindMs: 30_000,
+  }), false);
+});
