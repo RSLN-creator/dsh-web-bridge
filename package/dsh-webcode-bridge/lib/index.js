@@ -20,6 +20,7 @@ import { createRelay } from './relay.js';
 import { createOpenAiFront } from './openai.js';
 import { createBrowserDriver } from './browser-driver.js';
 import { zeroProgressDecision } from './zero-progress.js';
+import { findDegenerateRepeat } from './repeat-detect.js';
 import { idleWindowDecision } from './idle-window.js';
 import { createWebControl, buildSessionEvents, mainLineOf } from './web-control.js';
 import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, stripProtocolRegions, proseSafeEnd, readCallAt, partialProtocolAt, unresolvedCallFenceAt, closingFenceAfter, headlessCallTailAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeOfficialToolCalls, normCallArgs, inferToolNameFromArgs, recoverUnparsedCalls, officialToolCallSpecimen, officialCallExampleFor, buildPreset } from './agent-preset.js';
@@ -1141,6 +1142,9 @@ export function apply(ctx, config = {}) {
         // pure chat: stream deltas as they arrive
         let acc = '';
         let thinkAcc = '';
+        // 0.19.26：思维链退化重复的读数（见 lib/repeat-detect.js）。本轮一旦命中就
+        // 记下来，收尾时把「只出思考」的归因提示换成**循环专用**提示。
+        let thinkRepeat = null;
         let thinkOpen = false;
         let textOpen = false;
         let thinkIndex = -1;
@@ -1172,8 +1176,25 @@ export function apply(ctx, config = {}) {
           const ev = await nextWithIdle();
           if (ev.think) {
             thinkAcc += ev.think;
+            // 0.19.26：思维链退化重复探测（通用，无词表——见 lib/repeat-detect.js）。
+            // 只在**还没命中**时探测，命中后不再重复算（退化循环一旦成立就一直成立）。
+            if (!thinkRepeat) thinkRepeat = findDegenerateRepeat(thinkAcc);
             yield* openThink();
             yield { type: 'reasoning-delta', index: thinkIndex, text: ev.think };
+            // 命中即**打断**：退化循环不会自己停下来，继续读下去只是让思考块越长越荒唐。
+            //
+            // `break` 之前**必须保留 continue**。漏掉它这一格会一直掉到循环末尾的
+            // `end = ev.end; break`，而 think 事件根本没有 `ev.end` ⇒ 流被当场截断、
+            // 后半个回合的事件永远收不到。本文件**真的写错过这一版**，由
+            // `test/watchdog-first-byte.test.mjs` 第 ① 项抓出（期望 '网页答复'，
+            // 实际收到 THINKING_ONLY_NO_ANSWER）。——这正是「收窄改动也要跑全量」的
+            // 实例：它跟重复检测毫无关系，却因为一个 `continue` 被删而变红。
+            //
+            // break 本身是安全的：循环外的 `await settled` 仍会等 relay.submit 落地
+            // （.catch 已把失败推进 ch，不会 reject）。代价如实记：本轮不再收 end.text，
+            // finalText 退回 acc —— 对「正文零字符」的循环轮无差别；思考全文仍由
+            // appendReplyLog 落盘（收尾处读的正是 thinkAcc）。
+            if (thinkRepeat) break;
             continue;
           }
           if (ev.image) { images.push(ev.image); continue; }
@@ -1209,7 +1230,7 @@ export function apply(ctx, config = {}) {
         // 只赋值不发 delta 的话块内容与已外发内容不一致（界面依旧空白）。
         const thinkingOnly = !acc.trim() && !endImages.length && Boolean(String(thinkAcc || '').trim());
         if (thinkingOnly) {
-          acc = thinkingOnlyNotice(thinkAcc, idleScene());
+          acc = thinkingOnlyNotice(thinkAcc, idleScene(), thinkRepeat);
           warn(acc);
         }
         const imageMd = imageMarkdown(endImages);
@@ -1248,6 +1269,9 @@ export function apply(ctx, config = {}) {
       let proseBlockStart = 0;
       let textOpen = false;
       let thinkAcc = '';
+      // 0.19.26：思维链退化重复的读数（见 lib/repeat-detect.js）。与纯聊天轮同一判据、
+      // 同一阈值；只在本轮收尾判定里消费，不改变任何流式外发行为。
+      let thinkRepeat = null;
       let thinkOpen = false;
       let thinkIndex = -1;
       let textIndex = -1;
@@ -1467,8 +1491,15 @@ export function apply(ctx, config = {}) {
         const ev = await nextWithIdle();
         if (ev.think) {
           thinkAcc += ev.think;
+          // 0.19.26：工具轮的思考通道同型探测（与纯聊天轮同一判据、同一阈值）。
+          // 不 break 的理由同上：`await settled` 在循环外。
+          if (!thinkRepeat) thinkRepeat = findDegenerateRepeat(thinkAcc);
           if (!thinkOpen) { thinkIndex = nextIndex++; yield { type: 'block-start', index: thinkIndex, blockType: 'reasoning' }; thinkOpen = true; }
           yield { type: 'reasoning-delta', index: thinkIndex, text: ev.think };
+          // 命中即打断（与纯聊天轮同一处置）。`end` 保持 null ⇒ finalText 退回 acc；
+          // 循环轮正文通常是空的，于是本轮落到 thinking-only 分支，由下面的 thinkRepeat
+          // 读数换成循环专用提示并走 autoContinueRound 重发。
+          if (thinkRepeat) break;
           continue;
         }
         if (ev.image) { genImages.push(ev.image); continue; }
@@ -2026,7 +2057,7 @@ export function apply(ctx, config = {}) {
           return;
         }
         if (decision === 'thinking-only') {
-          const notice = thinkingOnlyNotice(thinkAcc, idleScene());
+          const notice = thinkingOnlyNotice(thinkAcc, idleScene(), thinkRepeat);
           warn(notice);
           // 0.16.26 自动续跑：这一支与 UNPARSED 是**同一个病**——交回一条纯文本提示
           // 后 agent 循环把它当最终答案收场，长任务就此停摆。真机 session-181c23b1
@@ -2233,11 +2264,38 @@ function assertNonEmpty(text, thinkText, images) {
  *
  * @param {string} thinkAcc 本轮已累积的思考全文
  * @param {object|null} scene 驱动现场（driverFor(...).status() 的最小投影）
+ * @param {object|null} [repeat] findDegenerateRepeat 的读数；非空时改发循环专用归因
  * @returns {string} 作为助手回复交回会话的提示文本
  */
-function thinkingOnlyNotice(thinkAcc, scene) {
+function thinkingOnlyNotice(thinkAcc, scene, repeat = null) {
   const think = String(thinkAcc || '');
   const tail = think.length > 200 ? '…' + think.slice(-200) : think;
+  // 0.19.26：命中退化重复时，归因**必须说出真正发生了什么**。
+  //
+  // 旧文案（下面那条通用提示）对循环轮说的是「模型停在思考里没有转入正文——请重试
+  // 一次」。这句话对普通 thinking-only 是对的，对退化循环则是错的：它不是「没转正文」，
+  // 而是**卡在一个周期里出不来**（真机形态见 doc/long-term-issues.md 第 22 条）。
+  // 两种成因的处置不同——前者重试即可，后者必须**打断并重发**，而且要告诉模型
+  // 「不要复述计划、直接落笔」。所以这里另起一段带读数的归因，让下一次诊断不用
+  // 再从「思考末尾 200 字符」里靠人眼数重复。
+  //
+  // 读数（period/repeats/sample）一并交出：只说「检测到循环」而不说循环的是什么，
+  // 下一个人无法复核这条提示是对是错。sample 截断到 60 字符——它是提示不是日志，
+  // 全文已随思考通道落 reply-log。
+  if (repeat) {
+    const bitsR = [];
+    if (scene?.lastEndReason) bitsR.push(`本轮收束原因 ${scene.lastEndReason}`);
+    if (Number.isFinite(scene?.thinkingOnlyTurns)) bitsR.push(`只出思维链累计 ${scene.thinkingOnlyTurns} 次`);
+    const detailR = bitsR.length ? `（${bitsR.join('，')}）` : '';
+    const sample = String(repeat.sample || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+    return `THINKING_REPEAT_DETECTED: 网页的思考内容在原地打转${detailR}。`
+      + `检测到同一段内容连续重复 ${repeat.repeats} 次（周期 ${repeat.period} 个词块，`
+      + `重复段 ${repeat.runChars} 字符）：\`${sample}\`。`
+      + '这不是「想完没写」，而是**卡在循环里出不来**——重复多少遍都不会产生新结论。'
+      + '本轮已按「没有可交付正文」收束。请立刻换一种做法：不要复述计划、不要催促自己、'
+      + '不要重写同一个判断，**直接输出**下一步动作（工具调用）或最终结论；'
+      + '如果确实需要更多信息才能继续，就直接说出缺哪一项。';
+  }
   const bits = [];
   if (scene?.lastEndReason) bits.push(`本轮收束原因 ${scene.lastEndReason}`);
   if (Number.isFinite(scene?.thinkingOnlyTurns)) bits.push(`只出思维链累计 ${scene.thinkingOnlyTurns} 次`);
