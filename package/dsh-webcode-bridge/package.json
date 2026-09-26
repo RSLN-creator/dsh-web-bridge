@@ -1,6 +1,6 @@
 {
   "name": "dsh-webcode-bridge",
-  "version": "0.19.26",
+  "version": "0.19.27",
   "description": "Use your logged-in web AI (DeepSeek, GLM, Kimi, Qwen, Doubao...) as model providers in DeepSeek Harness. Web models emit tool calls, DSH runs them under its native permission system, and results return to the same web session. No API keys.",
   "type": "module",
   "main": "./lib/index.js",
