@@ -34,6 +34,7 @@
 | [tutorial-agent-teams.md](tutorial-agent-teams.md) | 官方 Agent Teams 插件教程：身份、版本锁定理由、安装、9 个工具用法、边界 | 想用/升级/排查 agent team 时 |
 | [tutorial-phone-access.md](tutorial-phone-access.md) | 手机连接 DSH 教程：选型对比、`dsh-local-link` 安装、配对、安全边界、**二维码位置（§3.5）** | 想从手机/平板访问 DSH 时 |
 | [bridge-failure-ledger.md](bridge-failure-ledger.md) | **桥接失败台账**：错误码 × 已做适配 × 残留风险；含 `<call>` 泄漏根因 | 排查桥接问题；决定先修哪个时 |
+| [session-cleanup-2026-09-26.md](session-cleanup-2026-09-26.md) | **会话清理记录**：257 条会话按「有没有跑完一轮」分类（19 条零产出已删 + 52 条待复核）、71 条失败的错误码分布、「没跑成 ≠ 没价值」的三条判据修正、备份与还原步骤 | 清理会话前；想知道某条会话为什么失败时 |
 | [ci-cd.md](ci-cd.md) | **CI/CD 与代码审查**：流水线分工、刻意不在 CI 里跑的东西、本地复现、发版、必需检查 | 改流水线 / 提 PR / 发版前 |
 | [settings-copy.md](settings-copy.md) | **设置界面文案总表**：每句界面提示对应的完整解释（被精简掉的部分全在这里）、以及「哪张卡属于全局页/站点页」的作用域表 | 改设置页文案或卡片归属前 |
 | [review-0.17.x.md](review-0.17.x.md) | **0.17.x 审查报告**：基线核验、0.17.0 等待占比 `100%` 真缺陷、0.17.1 台账归因不成立、交付卫生（零提交/零 tag）、三份交付物不一致、计划完成度 | 接手 0.17 之后的版本前 |
@@ -90,6 +91,8 @@
 - `2026-09-26-headless-call-tail-fragment.md` — **0.19.24 GLM 无头调用残片泄漏的修复取证**：真机 `session-c20f43e9` 的 364 字符残片（`name":"pwsh"…` 缺 JSON 头）如何穿过围栏/标签/裸 JSON 三道锚点、`headlessCallTailAt` 的语法判据与流式键前缀扣留、1341 个真实正文块的误伤扫描（3 处命中全为真残片）、逐字符模式的诚实边界
 - `2026-09-26-glm-goal-round1-investigation.md` — **GLM 六问第一轮（调查，零改动）**：① 真实消耗来源（无任何智谱 API key，走网页桥）② 引用会话内容「已有一半缺另一半」③ `mcp_action` 原文三源 ④ GLM 真机适配现状（正文 + 工具循环双 PASS）⑤ 并列多会话方案 ⑥ 其余问题全景 8 条
 - `2026-09-26-glm-goal-round2-implementation.md` — **GLM 六问第二轮（实施 + 验证）**：**移除「同时发送」+ 三个独立底部对话框 + 主审/探索分工 + 跨列引用**（Q2+Q5）、`answerSelector` 契约补齐（审计 C1）、全量 **1064/1064**；含**列级沙箱的诚实边界**与 `ref-index` 既有红的如实说明
+- `2026-09-26-column-sandbox-round1-thinking.md` — **并列三列沙箱·第一轮思考（零代码改动）**：决定性取证「同一个模型有两条路径」—— provider 通路（`lib/index.js`，会执行工具、真改文件）vs 控制面通路（`web-control.js` 的 `POST chat`，**只回文本**）；结论是**并列三列今天对工作区没有任何文件效果**，故「按列改写 workdir」是为不存在的问题造机器；并指出 `columnGuidance` 那句「你的产出请写入 `.hwb/cols/…`」**是在要求该路径做不到的动作**（真缺陷）；附官方 `sandboxPolicy.resolve()` 只认 `session` 的逐字证据
+- `2026-09-26-column-sandbox-round2-thinking.md` — **并列三列沙箱·第二轮思考（零代码改动）**：四个候选方案判定 —— A 只留约定（保留但改掉谎话）/ **B 桥侧产物围栏（采用）** / **C 让产出目录真的存在（采用）** / D 每列独立 DSH 会话（**不做**，要改产品且跨层改造，只写进文档）；围栏口径**照抄官方 `dsh-fs-sandbox`** 的 `canonicalize-then-contain` + 身份回退 + 委托前再解析；含「不声称什么」五条与 15 条成对判据的验证计划
 - `2026-09-25-compact-aux-delta.md` — **手动 /compact 失效的取证与修复（0.19.14）**：压缩调用的真实形状、无键整包重放撞 1M 预算闸的病因链、真机 A/B/阶梯探针读数（网页输入框上限已 ≥320k）、游标命中只发增量的修法与「辅助轮不碰主游标」的边界
 - `2026-09-25-mirror-real-viewer-research.md` — **镜像路线「真实查看器」方案研究**：图片/文件查看失效的机理（陌生域 + referer 403 真机二分实锤）、/wr/ 带 cookie 转发 + bootstrap 补钩的 0.19.14 交付记录、SW 拦截层暂缓的裁量理由
 - `2026-09-23-longrun-two-rounds-thinking.md` — **长跑健全性两轮思考**（纯文档，零代码）：第一轮从「什么会杀死长会话」落到「压缩路径从未被行使」；第二轮换起点从「桥凭什么相信网页」落到「防护全是单轮闭环」；两轮独立成立并给出共同结构与可检验的下一步

@@ -2245,10 +2245,14 @@ window.__ModuleLoader__.load({
       const sessionScope = String(props?.sessionId || 'local');
 
       // ★ 唯一的列状态：一个数组。加列 = 展开，删列 = filter，改站点 = map。
+      //
+      // 0.19.29（用户第 2 点）：每列多一个 `modelId` —— 官方 composer 那颗模型
+      // 选择器在本插件的落点。空串表示「该站的默认模型」，由桥端
+      //（`POST chat` → `sendTurn(..., { model })`）按缺省处理，与既有行为逐字相同。
       const [cols, setCols] = React.useState(() => [
-        { key: 'c1', siteId: 'deepseek', sessionKey: '', messages: [], status: 'idle', error: '', input: '', role: 'review' },
-        { key: 'c2', siteId: 'glm', sessionKey: '', messages: [], status: 'idle', error: '', input: '', role: 'explore' },
-        { key: 'c3', siteId: 'kimi', sessionKey: '', messages: [], status: 'idle', error: '', input: '', role: 'explore' },
+        { key: 'c1', siteId: 'deepseek', modelId: '', sessionKey: '', messages: [], status: 'idle', error: '', input: '', role: 'review', artifactDir: '' },
+        { key: 'c2', siteId: 'glm', modelId: '', sessionKey: '', messages: [], status: 'idle', error: '', input: '', role: 'explore', artifactDir: '' },
+        { key: 'c3', siteId: 'kimi', modelId: '', sessionKey: '', messages: [], status: 'idle', error: '', input: '', role: 'explore', artifactDir: '' },
       ]);
       // 0.19.20（用户 Q5）：共享输入条与全局 `sending` 锁**已移除**——三列各自
       // 有输入区、各自发车、各自等待。旧的 `handleSendAll` 让「一列在跑」= 全体
@@ -2281,6 +2285,34 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => () => { aliveRef.current = false; }, []);
 
+      // ── 0.19.29（用户第 2 点）：每列的**模型选择** ─────────────────────────
+      //
+      // 用户原话（逐字）：「『并列』中每列的对话框改为：官方原生的对话框：
+      // 保留完整的切换模式，模型显示项目等完整能力/UI！直接照抄！」
+      //
+      // 官方 composer 工具栏右侧那个下拉（`.uV2eYG_select`）在官方是**模型选择器**。
+      // 本插件每列的「模型」由「网页站点 + 该站的模型」两级构成，而这两级桥里
+      // **都已有现成数据源**（不新造后端）：
+      //   · 站点级 → `siteOptions`（宿主注入或内置六站，见函数头）；
+      //   · 模型级 → `GET models`（`web-control.js:805`，即 `providers.js` 的
+      //     `listAllModels()`，每条带 `{ id, siteId, name }`，按 siteId 可分）。
+      //
+      // 这里刻意**不写死一份模型清单**：写死会在桥端新增/改名模型时静默过期，
+      // 而用户看到的是一个永远列不全的下拉。取不到就只渲染站点级（如实降级），
+      // 不伪造选项 —— 与本仓库「不撒谎」的纪律一致。
+      const [modelCatalog, setModelCatalog] = React.useState([]);
+      React.useEffect(() => {
+        let alive = true;
+        api('models')
+          .then((m) => {
+            if (!alive) return;
+            const rows = Array.isArray(m?.models) ? m.models : [];
+            setModelCatalog(rows.filter((r) => r && r.id && r.siteId));
+          })
+          .catch(() => { /* 取不到就只显示站点级：降级是诚实的，伪造选项不是 */ });
+        return () => { alive = false; };
+      }, []);
+
       // 文本面自增高（对齐官方 `.uV2eYG_scroll` 的行为：到 336px 才出内部滚动条）。
       // 放在**一个**顶层的 effect 里遍历，而不是每列一个 effect —— 同上，循环里
       // 不能调 hook。依赖是 cols：每轮输入、发送清空、列增删都会重新量一次，
@@ -2297,6 +2329,105 @@ window.__ModuleLoader__.load({
       const MIN_COLS = 2;
       const MAX_COLS = 4;
 
+      // ── 0.19.29（用户第 3 点）：列的**宽度上下限**与左右切换 ────────────────
+      //
+      // 用户原话（逐字）：「然后会话框最小就是右侧和左侧栏目拉到最小距离，多出来的
+      // 别的列框通过点击居中中心左右的左右按钮进行切换视角--注意适配官方UI，然后最大
+      // 一样最多是左右 tab 最大距离，不够显示就显示左右框点击左右切换--然后 3 个会话
+      // 宽度同步」
+      //
+      // ## 上下限（用户 0.19.29 的澄清，方向与我第一版**相反**）
+      //
+      // 我第一版把上限理解成「左栏最窄 + 右栏最宽」，实测**站不住**：官方右栏上限是
+      // `viewport×0.7`，1440 视口下右栏最宽 1008 ⇒ 中间区只剩 168px，比下限还小，
+      // 上下限整个翻转（列宽被夹成一个恒定小值，切换按钮永不出现）。
+      //
+      // 用户的澄清是：
+      //   · 下限 = 中间区**最窄**（左栏拉最宽 420 + 右栏拉最窄 300）
+      //   · 上限 = **官方会话的默认完整最宽**
+      //
+      // 两者都从官方常量推，不自己编：
+      //   下限 = viewport − SIDEBAR_MAX − RIGHTBAR_MIN
+      //        （SIDEBAR_MAX/RIGHTBAR_MIN 来自官方 `ui-layout/src/client/columns.ts`）
+      //   上限 = 官方内容宽上限 920 + 官方卡片余量 32 = 952（见下方常量注释）
+      //
+      // ## 为什么是常量而不是「实时读左右栏宽度」
+      //
+      // 用户明确纠正过这一点：「我没有让你随着左右栏自适应啊！我只让你看左右栏导致
+      // 切换按钮的位置以及上下限」。所以左右栏只影响两件事：**上下限**与**按钮位置**，
+      // 列宽本身是**三列同步的一个独立值**，不是左右栏的实时函数。
+      const SIDEBAR_MAX = 420;
+      const RIGHTBAR_MIN = 300;
+      // 官方会话的**完整最宽**：官方对话内容宽上限 920（`ConversationRoot.module.css`
+      // 的 `--dsh-chat-content-width: clamp(680px, column*0.64, 920px)`）加上官方
+      // composer 卡片的左右余量 32（`--dsh-composer-card-max-width: content + 32px`）
+      // ⇒ 952。这是用户第 3 点「上限 = 官方会话的默认完整最宽」的落点。
+      const OFFICIAL_CONTENT_MAX = 920;
+      const OFFICIAL_CARD_PAD = 32;
+      // 列间距（`.hwb-compare-columns` 的 gap）：算宽度时必须扣掉，否则「刚好放下 N 列」
+      // 会因为 gap 而溢出几个像素，切换按钮就不会出现。
+      const COL_GAP = 16;
+
+      // 当前中间区宽度（左右栏之间）。初始用 window.innerWidth，挂载后按实测面宽校准
+      // —— 视图根节点的宽度**就是**中间区宽度（`.viewArea` 在官方整屏协议下 flex:1 1 0）。
+      const [viewportW, setViewportW] = React.useState(
+        () => (typeof window !== 'undefined' ? window.innerWidth : 1440),
+      );
+      const viewRef = React.useRef(null);
+      React.useEffect(() => {
+        const el = viewRef.current;
+        if (!el || typeof ResizeObserver === 'undefined') return;
+        const publish = () => {
+          const w = el.getBoundingClientRect().width;
+          if (w > 0) setViewportW(Math.round(w));
+        };
+        const ro = new ResizeObserver(publish);
+        ro.observe(el);
+        publish();
+        return () => { ro.disconnect(); };
+      }, []);
+
+      // 三列同步宽度：取官方对话的**默认内容宽**公式
+      //（`ConversationRoot.module.css` 的 `--dsh-chat-content-width`：
+      //  `clamp(680px, column * 0.64, 920px)`），再夹进上面算出的上下限。
+      //
+      // 用户答「官方对话的默认值！」—— 所以默认就这么取，而不是我另定一个数。
+      // 下限 = 中间区**最窄**（左栏拉到最宽 + 右栏拉到最窄）。
+      const colWidthMin = Math.max(200, viewportW - SIDEBAR_MAX - RIGHTBAR_MIN);
+      // 上限 = 官方会话的**完整最宽**（内容 920 + 卡片余量 32 = 952）。
+      const colWidthMax = OFFICIAL_CONTENT_MAX + OFFICIAL_CARD_PAD;
+      // 默认 = 官方对话的**默认内容宽**（`clamp(680px, column*0.64, 920px)`），
+      // 再夹进上面算出的上下限之间。
+      //
+      // 注意夹取顺序是 `min(上限, max(下限, 默认))`：视口很大时下限会超过上限
+      //（1920 视口下限 1200 > 上限 952），这个顺序让**上限赢**——因为「不超过官方
+      // 会话最宽」是硬约束，而「不窄于中间区最窄」在那种视口下已经自动满足。
+      const officialDefault = Math.min(OFFICIAL_CONTENT_MAX, Math.max(680, Math.round(viewportW * 0.64)));
+      const colWidth = Math.round(Math.min(colWidthMax, Math.max(colWidthMin, officialDefault)));
+
+      // 一屏放得下几列（按整数列算，永远不出现半列）。
+      const visible = Math.max(1, Math.floor((viewportW + COL_GAP) / (colWidth + COL_GAP)));
+
+      // 平移位置：第几列**左对齐视口左端**。用户原话：「如果刚好切换列就切换列，
+      // 如果有一半就是优先跳转下一列让列左边对齐左端总的来说」。
+      //
+      // 所以平移量永远是**整列宽 + 列间距**（不是视口宽的零头）⇒ 永远不会停在半列上。
+      const [firstCol, setFirstCol] = React.useState(0);
+      // 末列贴右端时无法再整列平移 ⇒ 退到「刚好全放下」的位置（用户：「不够显示就显示
+      // 左右框点击左右切换」）。`maxFirst` 就是这个退化上界。
+      const maxFirst = Math.max(0, cols.length - visible);
+      const first = Math.min(firstCol, maxFirst);
+      const canPanLeft = first > 0;
+      const canPanRight = first < maxFirst;
+      // 列数变少（删列）后把平移位置夹回来，否则视图会停在一片空白上。
+      React.useEffect(() => {
+        setFirstCol((prev) => Math.min(prev, Math.max(0, cols.length - visible)));
+      }, [cols.length, visible]);
+
+      const panBy = (delta) => {
+        setFirstCol((prev) => Math.min(Math.max(0, prev + delta), maxFirst));
+      };
+
       const addCol = () => {
         setCols((prev) => {
           if (prev.length >= MAX_COLS) return prev;
@@ -2307,11 +2438,14 @@ window.__ModuleLoader__.load({
           seqRef.current += 1;
           return [...prev, {
             key: 'c' + Date.now().toString(36) + seqRef.current,
-            siteId: pick, sessionKey: '', messages: [], status: 'idle', error: '',
+            siteId: pick, modelId: '', sessionKey: '', messages: [], status: 'idle', error: '',
             input: '',
             // 新列默认是**探索列**：用户要「选定一个模型做主要审查」，那个位置
             // 已经由默认的 c1 占着，新加的列去探索更符合分工直觉。
             role: 'explore',
+            // 列对象形状必须与初始三列**逐字一致**：渲染处读 `c.artifactDir`，
+            // 少一个字段就会在「加了列才发现」的时刻读到 undefined。
+            artifactDir: '',
           }];
         });
       };
@@ -2322,12 +2456,28 @@ window.__ModuleLoader__.load({
 
       /** 改某列的站点。**必须清空该列的会话与消息**：sessionKey 绑定在
        *  「站点+账号」上，换了站点还续用旧 key 会把消息发到一个完全陌生的会话里。
-       *  这是一次有意的、用户可见的重置，因此 status/error/input 一并归零。 */
+       *  这是一次有意的、用户可见的重置，因此 status/error/input 一并归零。
+       *
+       *  0.19.29：`modelId` 也必须一并归零 —— 模型清单是**按站点**分组的
+       *（`GET models` 每条带 `siteId`），留着上一个站点的模型 id 会把它发给
+       *  一个根本没有这个模型的站点，用户看到的是「选了却发不动」。 */
       const setColSite = (key, siteId) => {
         setCols((prev) => prev.map((c) => (c.key === key
-          ? { ...c, siteId, sessionKey: '', messages: [], status: 'idle', error: '', input: '' }
+          ? { ...c, siteId, modelId: '', sessionKey: '', messages: [], status: 'idle', error: '', input: '' }
           : c)));
       };
+
+      /** 改某列的模型（用户第 2 点：官方 composer 那颗模型选择器）。
+       *
+       *  与改站点**不同**，换模型**不清空会话**：同一站点换个模型接着聊是合理用法
+       *（网页端就是同一个会话里切模型），而且清空会让「对比同一段上下文下两个模型的
+       *  回答」这个最自然的用法变得做不到。 */
+      const setColModel = (key, modelId) => {
+        setCols((prev) => prev.map((c) => (c.key === key ? { ...c, modelId } : c)));
+      };
+
+      /** 某列可选的模型清单：按该列的站点过滤，取不到就是空数组（如实降级为只显示站点级）。 */
+      const modelsForSite = (siteId) => modelCatalog.filter((m) => m.siteId === siteId);
 
       /** 改某列输入区。每列一个受控 input —— 这就是「三个独立对话框」的落点。 */
       const setColInput = (key, text) => {
@@ -2409,6 +2559,13 @@ window.__ModuleLoader__.load({
           siteId: col.siteId,
           prompt: p,
           sessionKey,
+          // 0.19.29（用户第 2 点）：模型随请求下发。
+          //
+          // 只在选了具体模型时才带这个字段 —— 空串（=「该站默认」）时**不发**，
+          // 这样请求体与 0.19.22 逐字相同，不改变未选模型时的既有行为。
+          // `POST chat` 把它交给 `sendTurn(..., { model })`，而 `web-control.js:1421`
+          // 本来就有这个形参（本改动不新增后端路径）。
+          ...(col.modelId ? { model: col.modelId } : {}),
           // Q2：引用片段随请求下发，由 `POST chat` 拼成 `> ` 块引。
           ...(q ? { quote: q.text, quoteFrom: q.from } : {}),
           // Q5 沙箱适配：把**列身份**一起下发，由 `POST chat` 渲染成一段工作区约定
@@ -2431,10 +2588,21 @@ window.__ModuleLoader__.load({
           .then((res) => {
             if (!aliveRef.current) return;
             const ok = res?.ok !== false;
+            // 0.19.29（round2 的第三条「披露」）：把服务端落盘读数记到本列。
+            //
+            // 服务端在 `POST chat` 里已经把本列产出写进 `.hwb/cols/<键>/`（见
+            // `column-fs.js` 的围栏写入口），而**用户看不见这件事** —— 目录在磁盘上，
+            // 界面上没有任何线索。记下来并在工具栏的提示里透出，用户才核得出
+            // 「这一列的产出到底去哪了」。
+            //
+            // 只在成功时覆盖：失败轮不清掉上一轮已知的目录（否则用户刚找到的路径
+            // 会因为一次网络抖动而消失）。
+            const artifactDir = ok ? String(res?.artifacts?.dir || '') : '';
             setCols((prev) => prev.map((c) => (c.key !== colKey ? c : {
               ...c,
               status: ok ? 'done' : 'error',
               error: ok ? '' : String(res?.error || '未知错误'),
+              artifactDir: artifactDir || c.artifactDir || '',
               // ★ 按 **id** 回填，而不是按「最后一条」。
               //   并发下「最后一条」可能已是用户刚发的下一轮消息——
               //   而三框现在真的能并发（每列各发各的），这条比 0.18.0 更要紧。
@@ -2468,6 +2636,7 @@ window.__ModuleLoader__.load({
 
       return h('div', {
         className: 'hwb-compare-view',
+        ref: viewRef,
         // ★ 官方协议（0.19.22）：视图根节点声明这个属性，官方布局就把本视图当成
         // 「整屏视图」对待 —— `.viewArea{flex:1 1 0;min-height:0;overflow:hidden}`、
         // 官方 composer 座位改为绝对定位浮在底部。这不是我们自己发明的钩子：
@@ -2475,22 +2644,25 @@ window.__ModuleLoader__.load({
         // 不声明它，`.viewArea` 在活跃相位是 `flex:1 0 auto;min-height:auto`，
         // 于是「占满一屏」和「下面还有官方对话框」互相打架 —— 三列被挤掉一截。
         'data-conversation-composer-overlay': '',
+        // 0.19.29（用户第 3 点）：三列同步的宽度由组件算出来，交给 CSS 用。
+        // 放在 style 上而不是类上：它是一个**算出来的像素值**，不是可枚举的档位。
+        style: { '--hwb-col-width': colWidth + 'px' },
       },
+        // 0.19.29（用户 2026-09-26 原话，逐字）：
+        //   「将『并列多会话』改为『并列』，然后上方不必要占用位置：『并列多会话 Team／
+        //     每列一条独立网页会话、各有一个对话框，互不等待。把某列设为「主审」后，
+        //     可把其它列的回复引用给它做统一审查。／3 列主审：DeepSeek+ 加一列』说明去除」
+        //
+        // 因此这一块**只剩标题**：
+        //   · 「并列多会话 Team」→「并列」（用户要的词就是这两个字）；
+        //   · 那两行说明文字整段删除 —— 用户说它们「上方不必要占用位置」；
+        //   · 「3 列／主审：X／+ 加一列」这条工具行也一并删除。
+        //
+        // 控件（加列／设为列／移除列）没有丢，只是**移进了每列的原生对话框工具栏**
+        //（见下方 `hwb-col-composer-tools`）—— 这是用户第 2 点「保留完整切换模式、
+        //  模型显示项目等完整能力」的落点，也让顶部不再占高度。
         h('div', { className: 'hwb-compare-header' },
-          h('h3', { className: 'hwb-compare-title' }, '并列多会话 Team'),
-          h('p', { className: 'hwb-hint' },
-            '每列一条独立网页会话、各有一个对话框，互不等待。' +
-            '把某列设为「主审」后，可把其它列的回复引用给它做统一审查。'),
-          h('div', { className: 'hwb-compare-tools' },
-            h('span', { className: 'hwb-chip' }, cols.length + ' 列'),
-            reviewCol && h('span', { className: 'hwb-chip review' },
-              '主审：' + siteName(reviewCol.siteId)),
-            h('button', {
-              className: 'hwb-btn small',
-              onClick: addCol,
-              disabled: cols.length >= MAX_COLS,
-              title: cols.length >= MAX_COLS ? '最多 ' + MAX_COLS + ' 列' : '再加一列',
-            }, '+ 加一列'))),
+          h('h3', { className: 'hwb-compare-title' }, '并列')),
 
         // 引用状态条：**引用是跨列的**，所以它的可见位置必须在列之外——
         // 夹在某一列里会让「引用来自哪一列」看起来像是那一列的属性。
@@ -2505,36 +2677,63 @@ window.__ModuleLoader__.load({
             onClick: () => setQuote(null),
           }, '✕')),
 
-        h('div', { className: 'hwb-compare-columns', 'data-cols': String(cols.length) },
+        // ── 0.19.29（用户第 3 点）：视口 + 左右切换 ──────────────────────────
+        //
+        // 用户原话（逐字）：「多出来的别的列框通过点击居中中心左右的左右按钮进行切换
+        // 视角--注意适配官方UI，然后最大一样最多是左右 tab 最大距离，不够显示就显示
+        // 左右框点击左右切换--然后 3 个会话宽度同步」
+        //
+        // 结构：`.hwb-compare-viewport` 是**固定宽度的观察窗**（宽 = 中间区宽），
+        // 里面 `.hwb-compare-columns` 是一条**按列宽同步排开的长条**，靠 transform
+        // 整列平移。平移到第 N 列时那一列**左对齐观察窗左端**（用户要的对齐语义），
+        // 而末列贴右端放不下时退到「刚好全放下」的位置（`maxFirst` 已经算好）。
+        //
+        // 按钮只在**放不下**时出现（`cols.length > visible`）—— 放得下就没有「多出来的
+        // 列」，画两个点不动的箭头是噪音。位置按用户要求「绝对定位在中间区左右边缘
+        // 垂直居中」，见 CSS 的 `.hwb-compare-pan`。
+        h('div', { className: 'hwb-compare-viewport' },
+          cols.length > visible && h('button', {
+            type: 'button',
+            className: 'hwb-compare-pan left',
+            disabled: !canPanLeft,
+            title: '看左边一列',
+            onClick: () => panBy(-1),
+          }, '‹'),
+          cols.length > visible && h('button', {
+            type: 'button',
+            className: 'hwb-compare-pan right',
+            disabled: !canPanRight,
+            title: '看右边一列',
+            onClick: () => panBy(1),
+          }, '›'),
+          h('div', {
+            className: 'hwb-compare-columns',
+            'data-cols': String(cols.length),
+            // 平移量 = 整列宽 + 列间距 × 第几列 ⇒ **永远整列对齐**，不停在半列上。
+            style: { transform: 'translateX(' + (-first * (colWidth + COL_GAP)) + 'px)' },
+          },
           cols.map((c) => h('div', {
             key: c.key,
+            // 0.19.29（用户第 1 点）：**列头整行已删除**。
+            //
+            // 用户原话（逐字）：「然后去除每列对话的对话框分界，用官方现在的隐形加上
+            // 鼠标移到后显示一点光线的结构，完全照抄 dsh」。
+            //
+            // 所以这一列不再有 `.hwb-compare-col-head`（站点下拉 / 状态文字 / 设为主审 /
+            // ✕ 移除那一整行），也不再有列的边框与底色 —— 那些正是用户说的「分界」。
+            // 列的可见边界改为官方那套**平时隐形、hover 才浮起一点光**的结构，
+            // 见下方 `.hwb-compare-col` 的 CSS（border:0 + 极淡 token → :hover 升一档）。
+            //
+            // 原先挂在这一行上的四件事**没有丢**，全部移进了本列原生对话框的工具栏
+            //（`hwb-col-composer-tools`，即官方 `.uV2eYG_tools` 的位置）：
+            // 站点选择 → 工具栏左侧下拉；状态 → 工具栏提示文字；
+            // 设为主审 / 移除 → 工具栏右侧按钮。这样顶部不再占高度（用户第 1 点），
+            // 能力一个不少（用户第 2 点）。
             className: 'hwb-compare-col' + (c.status === 'error' ? ' bad' : '')
               + (c.role === 'review' ? ' review' : ''),
           },
-            h('div', { className: 'hwb-compare-col-head' },
-              h('select', {
-                className: 'hwb-select',
-                value: c.siteId,
-                onChange: (e) => setColSite(c.key, e.target.value),
-              }, siteOptions.map((o) => h('option', { key: o.id, value: o.id }, o.name))),
-              h('span', { className: 'hwb-compare-state ' + c.status }, statusText(c)),
-              // 主审标记：既是显示，也是**可点的选择**——用户要能随时改选。
-              // 这里刻意用「设为」而不是 aria-checked 的开关：它改的是下一轮的
-              // 落点，不是当前状态，按钮的措词要说清这一点。
-              c.role === 'review'
-                ? h('span', { className: 'hwb-chip review', title: '本列是主审列' }, '主审')
-                : h('button', {
-                  className: 'hwb-btn small',
-                  title: '把这一列设为唯一的主审列',
-                  onClick: () => setReviewCol(c.key),
-                }, '设为主审'),
-              cols.length > MIN_COLS && h('button', {
-                className: 'hwb-btn-close',
-                title: '移除这一列',
-                onClick: () => removeCol(c.key),
-              }, '✕')),
-
             // 会话身份可见：用户要能核对「这一列到底续在哪条会话上」。
+            // 保留但不再占一整行 —— 它是标题属性，hover 与读屏都拿得到。
             c.sessionKey && h('div', { className: 'hwb-compare-session', title: c.sessionKey },
               '会话 ' + c.sessionKey.slice(-12)),
 
@@ -2564,8 +2763,14 @@ window.__ModuleLoader__.load({
             // （dsh-client-ui-conversation 的 InputBar，类前缀 uV2eYG_）的结构与刻度**：
             // 外层居中容器；卡片圆角 22 像素、底色取官方的输入底 token、投影取官方的
             // 柔和投影 token；文本面最小 36 像素、以官方的文本上限 token 封顶、左右
-            // 内边距 14/8 像素；工具栏行左侧一行提示、右侧一枚 34 像素圆形主按钮
+            // 内边距 14/8 像素；工具栏行左侧工具组、右侧一枚 34 像素圆形主按钮
             //（底色取官方的按钮语义 token，并像官方那样上移 2 像素）。
+            //
+            // 0.19.29：工具栏按官方 `.uV2eYG_row` 的三段结构补齐 ——
+            //   左 `.uV2eYG_tools`（官方放 + 号与模式切换）→ 本列放**站点选择器**
+            //                             （原列头那个 select，外观改官方 `.uV2eYG_select`）
+            //   右 `.uV2eYG_trailing`（官方放模型选择器与主按钮）→ 本列放**状态提示、
+            //                             设为主审、移除列**与主按钮。
             //
             // 三列**各自**有一个 —— 用户要的「3 者独立、互不等待」不变。
             // 官方那套 Lexical 编辑器拿不到（shell 内部件），textarea 是能拿到的
@@ -2592,17 +2797,90 @@ window.__ModuleLoader__.load({
                   },
                 }),
                 h('div', { className: 'hwb-col-composer-row' },
-                  h('span', { className: 'hwb-col-composer-hint' },
-                    isColSending(c) ? '回复中…'
-                      : String(c.input || '').trim() ? 'Enter 发送 · Shift+Enter 换行'
-                        : (c.role === 'review' ? '主审列：汇总与裁决' : '探索列：独立方案')),
-                  h('button', {
-                    type: 'submit',
-                    className: 'hwb-col-composer-send',
-                    title: '发送（Enter）',
-                    // 这一列的锁只看这一列的 status —— 别列在跑与本列无关。
-                    disabled: isColSending(c) || !String(c.input || '').trim(),
-                  }, '↑'))))))));
+                  // ── 官方 `.uV2eYG_tools` 位置：本列的站点选择 ───────────────
+                  // 原列头那个下拉搬到这里（用户第 2 点：能力不能少，位置按官方）。
+                  // 外观用官方 `.uV2eYG_select` 的刻度：高 28、字号 13、圆角 8、
+                  // 右侧 20px 内边距给官方那条 SVG 箭头。
+                  h('div', { className: 'hwb-col-composer-tools' },
+                    h('select', {
+                      className: 'hwb-col-composer-select',
+                      value: c.siteId,
+                      title: '本列的网页站点',
+                      onChange: (e) => setColSite(c.key, e.target.value),
+                    }, siteOptions.map((o) => h('option', { key: o.id, value: o.id }, o.name))),
+                    // 0.19.29（用户第 2 点）：官方 composer 工具栏右侧那颗**模型选择器**
+                    // （官方 `.uV2eYG_select`，在官方由 conversation.input.model 槽承载）。
+                    // 本插件按「站点 → 该站模型」两级给出，清单来自桥的 GET models。
+                    //
+                    // 取不到清单时**整颗不渲染**：画一个只有一项、或列着假模型的下拉
+                    // 会让用户以为选得动，而实际发出去的是默认模型 —— 那是撒谎。
+                    // 如实降级成「只有站点级」，能力少一个但每一样都是真的。
+                    modelsForSite(c.siteId).length > 0 && h('select', {
+                      className: 'hwb-col-composer-select',
+                      value: c.modelId,
+                      title: '本列使用的模型',
+                      onChange: (e) => setColModel(c.key, e.target.value),
+                    }, [
+                      // 第一项 = 该站默认（空串），与「不选」语义一致。
+                      h('option', { key: '__default', value: '' }, siteName(c.siteId) + ' 默认'),
+                      ...modelsForSite(c.siteId).map((m) => h('option', { key: m.id, value: m.id }, m.name || m.id)),
+                    ])),
+                  // ── 官方 `.uV2eYG_trailing` 位置：状态 + 列操作 + 主按钮 ────
+                  h('div', { className: 'hwb-col-composer-trailing' },
+                    // 0.19.29（「披露」）：服务端把本列产出落到了 `.hwb/cols/<键>/`，
+                    // 而那个目录**在磁盘上、界面上看不见** —— 用户没有任何线索去核。
+                    // 因此状态文字带上「已存」标记，`title` 给出完整路径（hover 可读、
+                    // 读屏可读）。刻意**不**把完整路径铺在行里：工具栏宽度有限，
+                    // 而路径很长，铺出来会把站点/模型选择器挤掉。
+                    h('span', {
+                      className: 'hwb-col-composer-hint ' + c.status,
+                      title: c.artifactDir
+                        ? '本列产出已保存到：' + c.artifactDir
+                        : '本列还没有落盘产出（发送后自动保存）',
+                    },
+                      isColSending(c) ? '回复中…'
+                        : statusText(c) + ' · ' + (c.role === 'review' ? '主审' : '探索')
+                          + (c.artifactDir ? ' · 已存' : '')),
+                    // 主审标记：既是显示，也是**可点的选择**——用户要能随时改选。
+                    // 这里刻意用「设为」而不是 aria-checked 的开关：它改的是下一轮的
+                    // 落点，不是当前状态，按钮的措词要说清这一点。
+                    // 0.19.29：主审标记按用户要求改成**极小徽标**（不再用一整行 + 说明文字）。
+                    c.role === 'review'
+                      ? h('span', {
+                        className: 'hwb-col-composer-badge review',
+                        title: '本列是主审列：汇总与裁决',
+                      }, '主审')
+                      : h('button', {
+                        type: 'button',
+                        className: 'hwb-col-composer-mini',
+                        title: '把这一列设为唯一的主审列',
+                        onClick: () => setReviewCol(c.key),
+                      }, '设为主审'),
+                    cols.length > MIN_COLS && h('button', {
+                      type: 'button',
+                      className: 'hwb-col-composer-mini',
+                      title: '移除这一列',
+                      onClick: () => removeCol(c.key),
+                    }, '✕'),
+                    // 「加一列」原来在顶部工具行里，随用户第 1 点删掉整行后**无处安放**。
+                    // 它不能跟着消失：`addCol` 会变成「定义了却没人调」的死代码，
+                    // 而 2~4 列是这款视图的既有能力（0.18.0 的核心需求）。
+                    // 因此把它放到**最后一列**的工具栏里 —— 加出来的新列接在末尾，
+                    // 按钮跟着末尾走，位置与语义一致，顶部也不用再占高度。
+                    c.key === cols[cols.length - 1].key && h('button', {
+                      type: 'button',
+                      className: 'hwb-col-composer-mini',
+                      title: cols.length >= MAX_COLS ? '最多 ' + MAX_COLS + ' 列' : '在末尾再加一列',
+                      disabled: cols.length >= MAX_COLS,
+                      onClick: addCol,
+                    }, '+ 加一列'),
+                    h('button', {
+                      type: 'submit',
+                      className: 'hwb-col-composer-send',
+                      title: '发送（Enter）',
+                      // 这一列的锁只看这一列的 status —— 别列在跑与本列无关。
+                      disabled: isColSending(c) || !String(c.input || '').trim(),
+                    }, '↑'))))))))));
     }
 
     function SettingsSection(props) {
@@ -4711,14 +4989,61 @@ window.__ModuleLoader__.load({
         ".hwb-compare-view{display:flex;flex-direction:column;gap:12px;width:100%;flex:1 1 auto;min-height:0;overflow:hidden;padding:12px 12px 0;box-sizing:border-box}",
         ".hwb-compare-header{display:flex;flex-direction:column;gap:4px;flex:none}",
         ".hwb-compare-title{margin:0;font-size:18px;font-weight:600}",
+        // ── 0.19.29（用户第 3 点）：固定列宽 + 观察窗平移 ──────────────────────
+        //
+        // 旧写法是 grid 等分（`repeat(N,minmax(0,1fr))`）—— 那是「列数越多列越窄」，
+        // 正是用户不要的：他要的是**每列都有确定的宽度**，放不下就左右切换。
+        //
+        // 现在：
+        //   `.hwb-compare-viewport`  固定观察窗（宽 = 中间区），`overflow:hidden`
+        //   `.hwb-compare-columns`   按 `--hwb-col-width` **同步**排开的长条
+        //                             （`grid-auto-flow:column` + 固定列宽）
+        //   `.hwb-compare-col`       每列都是一个 `--hwb-col-width`
+        //
+        // 宽度由组件算（官方常量推出的上下限 + 官方默认内容宽），三列**同一个值**
+        // ⇒ 用户要的「3 个会话宽度同步」在结构上成立：不存在「某列比别列宽」的可能。
+        ".hwb-compare-viewport{position:relative;flex:1;min-height:0;overflow:hidden;display:flex}",
+        ".hwb-compare-columns{display:grid;grid-auto-flow:column;grid-auto-columns:var(--hwb-col-width,420px);gap:16px;min-height:0;flex:none;transition:transform .18s ease}",
+        // 尊重「减少动态效果」偏好：平移是纯装饰性的，不该强迫用户接受动画。
+        "@media (prefers-reduced-motion:reduce){.hwb-compare-columns{transition:none}}",
+        // 左右切换按钮（用户：「绝对定位在中间区左右边缘垂直居中（贴在中间区边界内侧）」）。
+        // 外观对齐官方那套圆形图标按钮：28px、50% 圆角、二级字色、hover 才现形。
+        // `z-index` 与官方 DragHandle 同层（11），保证浮在列体之上可点。
+        ".hwb-compare-pan{position:absolute;top:50%;transform:translateY(-50%);z-index:11;width:28px;height:28px;padding:0;display:grid;place-items:center;font:inherit;font-size:16px;line-height:1;cursor:pointer;border:none;border-radius:50%;color:var(--dsw-alias-label-secondary,#666);background:var(--dsw-specific-input-major,#fff);box-shadow:var(--dsw-elevation-soft,0 1px 6px #00000014);opacity:0;transition:opacity .12s,background-color .1s}",
+        ".hwb-compare-viewport:hover .hwb-compare-pan,.hwb-compare-pan:focus-visible{opacity:1}",
+        ".hwb-compare-pan:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-solid,#eceff3);color:var(--dsw-alias-label-primary)}",
+        ".hwb-compare-pan:disabled{opacity:0;pointer-events:none}",
+        ".hwb-compare-pan.left{left:6px}",
+        ".hwb-compare-pan.right{right:6px}",
         // 列数**按实际列数**排（0.18.0）：原先写死 repeat(3,1fr)，于是「加一列」
         // 加出来的第四列会被挤到第二行 —— 那是 0.17.3 硬编码三列的另一半。
-        ".hwb-compare-columns{display:grid;gap:16px;flex:1;min-height:0;grid-auto-rows:minmax(0,1fr)}",
-        ".hwb-compare-columns[data-cols=\"2\"]{grid-template-columns:repeat(2,minmax(0,1fr))}",
-        ".hwb-compare-columns[data-cols=\"3\"]{grid-template-columns:repeat(3,minmax(0,1fr))}",
-        ".hwb-compare-columns[data-cols=\"4\"]{grid-template-columns:repeat(4,minmax(0,1fr))}",
-        ".hwb-compare-col{background:var(--dsw-alias-bg-layer-1,#f8f9fa);border:.5px solid var(--dsw-alias-border-l4,#8883);border-radius:8px;display:flex;flex-direction:column;min-height:0;overflow:hidden}",
-        ".hwb-compare-col-head{padding:10px 12px;background:var(--dsw-alias-bg-base,#fff);border-bottom:.5px solid var(--dsw-alias-border-l4,#8883);display:flex;align-items:center;gap:8px;flex:none}",
+        //
+        // 0.19.29：列宽改由 `grid-auto-columns:var(--hwb-col-width)` 统一给，
+        // 因此这几条 `data-cols` 规则不再决定宽度，只保留「列数被真实反映」这一点
+        //（`data-cols` 仍是可断言的锚点，见 test/team-compare.test.mjs）。
+        ".hwb-compare-columns[data-cols=\"2\"]{grid-template-rows:minmax(0,1fr)}",
+        ".hwb-compare-columns[data-cols=\"3\"]{grid-template-rows:minmax(0,1fr)}",
+        ".hwb-compare-columns[data-cols=\"4\"]{grid-template-rows:minmax(0,1fr)}",
+        // ── 0.19.29（用户第 1 点）：**去除列的分界**，改成官方那套「隐形 + hover 光」──
+        //
+        // 用户原话（逐字）：「然后去除每列对话的对话框分界，用官方现在的隐形加上
+        // 鼠标移到后显示一点光线的结构，完全照抄 dsh」。
+        //
+        // 被删掉的是旧列那条**常驻可见**的卡片底 + 边框（layer-1 底 + 半像素 border-l4
+        // + 8px 圆角）—— 那就是用户说的「分界」。判据在 test/team-compare.test.mjs
+        // 里成对钉着：旧的必须没了、新的 hover 光必须在。
+        //
+        // 官方在这个位置的做法是**交互时才升一档**：平时无边框、底色透明，hover 时
+        // 浮起交互底色并显出一道极淡的描边。取值逐字来自官方 composer 卡片
+        //（InputBar.module.css 的 `.uV2eYG_card`）与官方三列皮肤：描边用 border-l3，
+        // 底色用 interactive-bg-hover。
+        //
+        // 所以这里：底色透明、无边框；hover / focus-within 时才浮起一点光。
+        // `focus-within` 一并给上，否则键盘用户永远看不到自己的落点在哪一列。
+        ".hwb-compare-col{background:transparent;border:0;border-radius:12px;display:flex;flex-direction:column;min-height:0;overflow:hidden;transition:background-color .12s ease,box-shadow .12s ease}",
+        ".hwb-compare-col:hover,.hwb-compare-col:focus-within{background:var(--dsw-alias-interactive-bg-hover,#00000008);box-shadow:inset 0 0 0 .5px var(--dsw-alias-border-l3,#8884)}",
+        // 列头那一整行（`.hwb-compare-col-head`）已随用户第 1 点删除，
+        // 其四个控件移进每列对话框工具栏（`.hwb-col-composer-tools` / `-trailing`）。
         ".hwb-col-idx{font-weight:600;font-size:12px}",
         // `min-height:0` 是 flex 子项能真正滚动的**必要条件**：没有它，flex 项的
         // 最小高度是内容高度，`overflow-y:auto` 永远不触发，长回复会把列撑破。
@@ -4732,15 +5057,35 @@ window.__ModuleLoader__.load({
         ".hwb-col-composer-card{box-sizing:border-box;width:100%;background:var(--dsw-specific-input-major,#fff);box-shadow:var(--dsw-elevation-soft,0 1px 6px #00000014);border-radius:22px;display:flex;flex-direction:column;padding-top:8px;position:relative}",
         ".hwb-col-composer-input{box-sizing:border-box;display:block;width:100%;min-height:36px;max-height:var(--dsh-composer-text-max-height,336px);resize:none;border:none;background:transparent;font:inherit;font-size:var(--dsh-content-font-size,14px);line-height:24px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;color:var(--dsw-alias-label-primary);caret-color:var(--dsw-alias-state-business-primary,#4f6ef7);outline:none;padding:4px 8px 0 14px;overflow-y:auto}",
         ".hwb-col-composer-input::placeholder{color:var(--dsw-alias-label-caption,#888)}",
-        ".hwb-col-composer-row{display:flex;flex-wrap:wrap;align-items:center;gap:12px;min-width:0;padding:2px 8px 6px}",
-        ".hwb-col-composer-hint{flex:1;min-width:0;font-size:12px;line-height:20px;color:var(--dsw-alias-label-caption,#888);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
+        ".hwb-col-composer-row{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:12px;min-width:0;padding:2px 8px 6px}",
+        // 官方 `.uV2eYG_row` 是三段：`.tools`（左）/ `.modes` / `.trailing`（右，
+        // `margin-left:auto`）。本列按这个结构放：左 = 站点选择，右 = 状态与列操作。
+        // `@container` 那条降级（官方窄到 560px 时 gap 12→8）也照抄。
+        ".hwb-col-composer-tools{display:flex;align-items:center;gap:12px;min-width:0}",
+        ".hwb-col-composer-trailing{display:flex;align-items:center;gap:6px;min-width:0;flex:none;margin-left:auto}",
+        // 站点选择器 = 官方 `.uV2eYG_select` 的刻度（高 28 / 字号 13 / 圆角 8 /
+        // 右侧 20px 内边距给官方那条 12px 的 SVG 下拉箭头）。
+        ".hwb-col-composer-select{max-width:150px;height:28px;color:var(--dsw-alias-label-secondary,#666);white-space:nowrap;cursor:pointer;appearance:none;background-color:transparent;background-image:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%2381858C' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E\");background-position:right 4px center;background-repeat:no-repeat;background-size:12px 12px;border:none;border-radius:8px;outline:none;padding:0 20px 0 8px;font:inherit;font-size:13px;font-weight:500;line-height:20px}",
+        ".hwb-col-composer-select:hover{background-color:var(--dsw-alias-interactive-bg-hover,#00000008)}",
+        // 状态文字：退到 caption 档，不再抢视觉（用户第 1 点要求上方不再占位）。
+        ".hwb-col-composer-hint{font-size:12px;line-height:20px;color:var(--dsw-alias-label-caption,#888);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
+        ".hwb-col-composer-hint.error{color:var(--dsw-alias-state-error-primary,#e5484d)}",
+        // 主审徽标（用户第 1 点：「主审标记改为 hover 光线/极小徽标」）：
+        // 极小、语义色，不再是一整行 + 说明文字。
+        ".hwb-col-composer-badge{flex:none;font-size:11px;line-height:16px;padding:0 6px;border-radius:999px;font-weight:600;color:var(--dsw-alias-state-business-primary,#4f6ef7);box-shadow:inset 0 0 0 .5px currentColor}",
+        // 列操作（设为主审 / 移除）：官方 `.uV2eYG_add` 那一档的迷你按钮 ——
+        // 平时隐形，hover 到列上才现形，符合「隐形 + 一点光」的总体要求。
+        ".hwb-col-composer-mini{flex:none;height:28px;padding:0 8px;font:inherit;font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary,#666);cursor:pointer;background:transparent;border:none;border-radius:8px;opacity:0;transition:opacity .12s,background-color .1s}",
+        ".hwb-compare-col:hover .hwb-col-composer-mini,.hwb-compare-col:focus-within .hwb-col-composer-mini{opacity:1}",
+        ".hwb-col-composer-mini:hover{background:var(--dsw-alias-interactive-bg-hover-solid,#00000012);color:var(--dsw-alias-label-primary)}",
         ".hwb-col-composer-send{flex:none;width:34px;height:34px;border:none;border-radius:999px;background:var(--dsw-alias-button-info-fill,#4f6ef7);color:#fff;cursor:pointer;display:grid;place-items:center;font-size:16px;line-height:1;padding:0;transform:translateY(-2px);transition:background-color .1s}",
         ".hwb-col-composer-send:hover:not(:disabled){background:var(--dsw-alias-button-info-hover,#3f5ce0)}",
         ".hwb-col-composer-send:disabled{opacity:.4;cursor:default}",
-        // 主审列：左侧强调条 + 头像徽标同一色。用 border-left 而不是背景色——
-        // 背景色会与「失败列」的 `.bad` 混淆，而这两件事的严重程度完全不同。
-        ".hwb-compare-col.review{border-color:var(--dsw-alias-state-business-primary,#4f6ef7)}",
-        ".hwb-compare-col.review .hwb-compare-col-head{border-left:3px solid var(--dsw-alias-state-business-primary,#4f6ef7)}",
+        // 主审列：主审身份改由**工具栏里的极小徽标**表达（`.hwb-col-composer-badge`），
+        // 不再用列边框 —— 列边框已被用户第 1 点整体去掉（「去除每列对话的对话框分界」）。
+        // 因此这里只在 hover 时把光线换成品牌色，既保住「一眼看出审查落在哪列」，
+        // 又不让主审列在三列里重新长出一条常驻的分界线。
+        ".hwb-compare-col.review:hover,.hwb-compare-col.review:focus-within{box-shadow:inset 0 0 0 .5px var(--dsw-alias-state-business-primary,#4f6ef7)}",
         ".hwb-chip.review{color:var(--dsw-alias-state-business-primary,#4f6ef7);border-color:var(--dsw-alias-state-business-primary,#4f6ef7);font-weight:600}",
         // 引用状态条：跨列可见，所以放在列之外（见渲染处的注释）。
         ".hwb-quote-bar{display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;background:var(--dsw-alias-brand-subtle,#eff6ff);border:.5px solid var(--dsw-alias-border-l3,#8884);font-size:12px;flex:none}",

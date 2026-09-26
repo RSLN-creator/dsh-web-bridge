@@ -88,17 +88,25 @@ const mine = compareCss();
  *  它是官方 slot 渲染器自己的锚点样式（`dsh-client-ui-renderer/lib/client.js:1094`
  *  `const ANCHOR_STYLE = { display: "contents" }`，注释原文「keeps the wrapper out of
  *  layout (grid/flex parents see the slot's own children)」）。少了它，`.viewArea`
- *  就不是滚动容器的 flex 子项，整条链的高度都算不对 —— 探针会红在**自己**身上。 */
+ *  就不是滚动容器的 flex 子项，整条链的高度都算不对 —— 探针会红在**自己**身上。
+ *
+ *  0.19.29：列头（`.hwb-compare-col-head`）已按用户第 1 点删除；列宽不再是 grid 等分，
+ *  而是「固定 `--hwb-col-width` + 观察窗平移」（用户第 3 点）。因此这里同步成新结构，
+ *  否则探针量到的是**已经不存在的** DOM，读数全是假的。 */
 const COL = (n, site) => `
   <div class="hwb-compare-col">
-    <div class="hwb-compare-col-head"><span>${site}</span></div>
     <div class="hwb-compare-col-body">第 ${n} 列正文</div>
     <form class="hwb-col-composer">
       <div class="hwb-col-composer-card">
         <textarea class="hwb-col-composer-input" placeholder="向 ${site} 继续提问…"></textarea>
         <div class="hwb-col-composer-row">
-          <span class="hwb-col-composer-hint">Enter 发送</span>
-          <button type="submit" class="hwb-col-composer-send">↑</button>
+          <div class="hwb-col-composer-tools">
+            <select class="hwb-col-composer-select"></select>
+          </div>
+          <div class="hwb-col-composer-trailing">
+            <span class="hwb-col-composer-hint">Enter 发送</span>
+            <button type="submit" class="hwb-col-composer-send">↑</button>
+          </div>
         </div>
       </div>
     </form>
@@ -115,8 +123,12 @@ const html = `<!doctype html><html><head><meta charset="utf-8">
     <div class="wSkVaW_scrollBody" data-conversation-scroll="1">
       <div data-slot="conversation.session" style="display:contents">
         <div class="wSkVaW_viewArea">
-          <div class="hwb-compare-view" data-conversation-composer-overlay="1">
-            <div class="hwb-compare-columns" data-cols="3">${COL(1, 'DeepSeek')}${COL(2, 'GLM')}${COL(3, 'Kimi')}</div>
+          <div class="hwb-compare-view" data-conversation-composer-overlay="1" style="--hwb-col-width:420px">
+            <div class="hwb-compare-viewport">
+              <button type="button" class="hwb-compare-pan left">‹</button>
+              <button type="button" class="hwb-compare-pan right">›</button>
+              <div class="hwb-compare-columns" data-cols="3" style="transform:translateX(-436px)">${COL(1, 'DeepSeek')}${COL(2, 'GLM')}${COL(3, 'Kimi')}</div>
+            </div>
           </div>
         </div>
       </div>
@@ -175,6 +187,34 @@ try {
         const o = cs(viewArea).overflow; root.setAttribute('data-conversation-composer-overlay', '1'); return o;
       })(),
       hasSupport: CSS.supports('selector(:has(*))'),
+      // ── 0.19.29（用户第 3 点）：固定列宽 + 观察窗平移 ─────────────────────
+      viewport: {
+        overflow: cs(q('.hwb-compare-viewport')).overflow,
+        w: Math.round(q('.hwb-compare-viewport').getBoundingClientRect().width),
+      },
+      // 三列宽度必须**逐字相同**（用户：「3 个会话宽度同步」）。
+      colWidthsUniq: [...new Set(cols.map((c) => Math.round(c.getBoundingClientRect().width)))],
+      // 平移到第 2 列后：第 2 列的左边缘必须贴观察窗左端（用户要的对齐语义）。
+      panAligned: (() => {
+        const vp = q('.hwb-compare-viewport').getBoundingClientRect();
+        const second = cols[1].getBoundingClientRect();
+        return Math.round(second.left - vp.left);
+      })(),
+      // 左右按钮：位置在观察窗左右边缘内侧、垂直居中。
+      panButtons: [...document.querySelectorAll('.hwb-compare-pan')].map((b) => {
+        const vp = q('.hwb-compare-viewport').getBoundingClientRect();
+        const box = b.getBoundingClientRect();
+        return {
+          cls: b.className,
+          radius: cs(b).borderRadius,
+          offsetFromEdge: b.className.includes('left')
+            ? Math.round(box.left - vp.left)
+            : Math.round(vp.right - box.right),
+          // 垂直居中：按钮中心与观察窗中心的差（应为 0）。
+          vCenterDelta: Math.round((box.top + box.height / 2) - (vp.top + vp.height / 2)),
+          zIndex: cs(b).zIndex,
+        };
+      }),
     };
     return out;
   });
@@ -197,6 +237,25 @@ try {
   check('卡片是官方刻度（radius 22px）', r.cardRadius === '22px', r.cardRadius);
   check('发送按钮是官方那枚 34px 圆形主按钮',
     r.sendBox.w === 34 && r.sendBox.h === 34 && r.sendBox.radius === '999px', JSON.stringify(r.sendBox));
+
+  // ── 0.19.29（用户第 3 点）：宽度同步 + 整列平移 + 按钮位置 ──────────────────
+  check('★ 三列宽度逐字相同（用户要的「3 个会话宽度同步」）',
+    r.colWidthsUniq.length === 1, '实测宽度集合=' + JSON.stringify(r.colWidthsUniq));
+  check('★ 列宽真的吃到了 --hwb-col-width（固定宽，不是 grid 等分）',
+    r.colWidthsUniq[0] === 420, '实测=' + r.colWidthsUniq[0] + ' 期望=420');
+  check('观察窗裁掉溢出的列（overflow:hidden —— 切换视角的前提）',
+    r.viewport.overflow === 'hidden', r.viewport.overflow);
+  check('★ 平移后第 2 列**左边缘贴观察窗左端**（用户要的整列对齐，不是半列）',
+    r.panAligned === 0, '第2列左缘距观察窗左端=' + r.panAligned + 'px');
+  check('左右按钮都渲染在观察窗边缘内侧',
+    r.panButtons.length === 2 && r.panButtons.every((b) => b.offsetFromEdge <= 8),
+    JSON.stringify(r.panButtons.map((b) => b.offsetFromEdge)));
+  check('★ 左右按钮垂直居中（用户要的「垂直居中」）',
+    r.panButtons.every((b) => b.vCenterDelta === 0),
+    JSON.stringify(r.panButtons.map((b) => b.vCenterDelta)));
+  check('左右按钮浮在列体之上可点（z-index:11，与官方 DragHandle 同层）',
+    r.panButtons.every((b) => b.zIndex === '11'),
+    JSON.stringify(r.panButtons.map((b) => b.zIndex)));
   console.log('读数：', JSON.stringify(r, null, 1));
 } finally {
   await browser.close();

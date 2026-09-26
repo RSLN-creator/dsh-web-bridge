@@ -1955,6 +1955,12 @@ const OFFICIAL_DSW_TOKENS = new Set([
   // 官方 composer 自己写的是 `box-shadow:var(--dsw-elevation-soft)`
   //（`dsh-client-ui-conversation/lib/client.js` 的 `.uV2eYG_card`）。
   'dsw-elevation-soft',
+  // 0.19.29（并列列操作按钮照抄官方 composer 的 `.uV2eYG_add:hover`）：
+  // 官方 composer 那个 `+` 圆按钮的 hover 底色就是这一档，因此本插件照抄时
+  // 必须用同一个 token，而不是自己编一个近似的。
+  // 取证：官方主题的 design-platform.css 第 211 行（浅色）与第 311 行（深色）
+  // 各有定义；官方用法见 dsh-client-ui-conversation 里 `.uV2eYG_add` 的 hover 规则。
+  'dsw-alias-interactive-bg-hover-solid',
 ]);
 
 test('★ 0.19.0 任务板审美：CSS 只许用官方已有的 dsw token（不得凭直觉编 token 名）', () => {

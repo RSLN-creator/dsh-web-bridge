@@ -29,7 +29,8 @@ import { isLoopbackHost, originMatchesHost } from './loopback.js';
 import { resolveBrowserExecutable, installBundledChromium } from './browser-runtime.js';
 import { httpFetch } from './upstream.js';
 // 并列多会话的列身份 → 提示词（0.19.21，用户 Q5 的沙箱适配）。
-import { withColumnGuidance } from './column-context.js';
+import { withColumnGuidance, normalizeColumnContext } from './column-context.js';
+import { writeColumnArtifact, fencedBlocks, ColumnFsDenied } from './column-fs.js';
 import {
   readLedger, writeLedger, applyCreate, applyUpdate, applyDelete,
   applyAddComment, applyResolveComment, rowsOf,
@@ -312,6 +313,48 @@ export function createWebControl(deps = {}) {
       if (typeof resolved === 'string' && resolved.trim()) return resolved.trim();
     } catch { /* 宿主给的解析器抛错不该让写路径失败，落到 cwd */ }
     return process.cwd();
+  }
+
+  /**
+   * 把一列的回复落到**本列目录**（0.19.29）。
+   *
+   * 返回 `{ dir, files, error }`：成功时 `error` 为 null；失败时**如实**放进 `error`，
+   * 而调用方（`POST chat`）**不**因此把整轮判为失败 —— 消息确实发出去了、回复确实
+   * 拿到了，落盘是附带的。把附带的事故报成主流程失败，是本项目反复记过的假失败。
+   *
+   * 只认带**有效列身份**的请求（`normalizeColumnContext` 返回 null 就整体不落盘）：
+   * 没有列身份的 `POST chat` 是普通调用，不该往磁盘上写东西。
+   *
+   * @param {unknown} rawCtx 请求体的 columnContext（未归一化）
+   * @param {string} workspaceRoot 工作区根
+   * @param {string} reply 模型回复原文
+   * @param {string} sessionKey 本列的网页会话键（用于文件名，便于与别轮区分）
+   * @returns {{dir:(string|null), files:string[], error:(string|null)}|null} 落盘读数，或 null（未落盘）
+   */
+  function saveColumnReply(rawCtx, workspaceRoot, reply, sessionKey) {
+    const ctx = normalizeColumnContext(rawCtx);
+    if (!ctx) return null;
+    const text = String(reply ?? '');
+    if (!text.trim()) return null;
+    // 文件名带时间戳 + 会话键后缀：同一列多轮不会互相覆盖，用户也能按轮次找。
+    const stamp = Date.now().toString(36);
+    const tag = String(sessionKey || '').slice(-6).replace(/[^A-Za-z0-9_-]/g, '') || 's';
+    try {
+      const files = [];
+      const main = writeColumnArtifact(workspaceRoot, ctx, `${stamp}-${tag}-reply.md`, text);
+      files.push(main);
+      // 围栏代码块单独落成真文件：探索列的「方案」这才可打开、可 diff。
+      fencedBlocks(text).forEach((b, i) => {
+        files.push(writeColumnArtifact(workspaceRoot, ctx, `${stamp}-${tag}-block${i + 1}.${b.ext}`, b.code));
+      });
+      return { dir: path.dirname(main), files, error: null };
+    } catch (e) {
+      const why = e instanceof ColumnFsDenied
+        ? e.code + '（围栏拒绝了本次写入，产物未落盘）'
+        : String(e?.message || e);
+      log('column-artifact: 落盘失败（消息本身已成功）：' + why);
+      return { dir: null, files: [], error: why };
+    }
   }
 
   /**
@@ -1419,7 +1462,25 @@ export function createWebControl(deps = {}) {
       const fresh = !stored?.webSessionId;
       if (typeof target?.sendTurn === 'function') {
         const res = await target.sendTurn(sessionKey, promptText, { fresh, model: body?.model });
-        return { ok: true, reply: res?.text || res || '', sessionKey, fresh, resumed: !fresh };
+        const reply = res?.text || res || '';
+        // ── 0.19.29：把本列产出落到**本列目录**（用户「沙箱」需求的落地）────────
+        //
+        // 为什么必须落盘（两轮思考的第一条结论）：并列三列走的是**控制面通路**，
+        // 它只回文本、不执行工具，所以那句「你的产出请写入 .hwb/cols/<键>/」在
+        // 这条路上**根本做不到** —— 网页聊天模型没有文件工具。那是一句谎话。
+        // 落盘让它变成事实：约定说的目录**真的存在**，主审列的「统一审查」也终于
+        // 有实物可吃（而不是只有引用通道里的一段文本）。
+        //
+        // 围栏在本插件唯一的写入口上（`column-fs.js`）：目标必须落在本列目录内，
+        // 越界抛 `COLUMN_FS_DENIED`。它**只**保护这个写入口，不是内核边界、也不
+        // 拦截模型（模型侧本来就没有写的能力）—— 这条边界在 `column-fs.js` 文件头
+        // 与两份思考文档里写死了，不许在这里被说大。
+        //
+        // **best-effort**：落盘失败绝不能让「消息已经发出去并拿到回复」变成一次失败
+        // 上报 —— 那会让用户以为消息没发出去（真机最恼人的一类假失败）。失败只记
+        // 一行日志，并把原因放进 `artifacts.error` 如实透出。
+        const artifacts = saveColumnReply(body?.columnContext, taskRootOf(body), reply, sessionKey);
+        return { ok: true, reply, sessionKey, fresh, resumed: !fresh, ...(artifacts ? { artifacts } : {}) };
       }
       // 没有可用的驱动时**如实报错**。原先这里回 `{ok:true, reply:'[已向 X 投递: …]'}`
       // —— 那是一条编出来的「成功」，用户会以为消息真的发出去了。

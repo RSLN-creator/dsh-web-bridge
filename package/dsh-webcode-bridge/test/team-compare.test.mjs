@@ -154,18 +154,241 @@ test('★ 0.19.0 Team：官方 agentTeams 花名册面板不得复活（用户�
     'label 仍写「三列模型对比」而实际支持 2~4 列 —— 名称与能力不符即假陈述');
 });
 
-test('★ 0.19.0 Team：并列多会话视图必须自述「并列多会话」且列数自适应', () => {
-  const src = clientSrc();
-  const body = compareBody(src);
-  // 标题与 label 都要表达真实语义。
-  assert.match(body, /并列多会话 Team/,
-    '视图标题必须自述「并列多会话 Team」—— 这是本插件对 Team 的定义');
-  // 列数上限必须真的封顶（护栏同时确认 MAX_COLS 被用于禁用加列按钮）。
-  assert.match(body, /disabled: cols\.length >= MAX_COLS/,
+test('★ 0.19.29 Team：标题必须自述「并列」，且上方不得再占位置', () => {
+  const raw = clientSrc();
+  const body = compareBody(raw);
+  // 判据只看**去掉注释的代码**：本文件的注释会逐字引用用户原话（含「并列多会话 Team」），
+  // 不去注释就会把「解释」当成「旧标题还在」——本仓库反复踩到这个坑
+  //（team-compare 与 client-render 都为此立过规矩）。
+  // 另注意文件是 **CRLF**：按 `\r?\n` 切分，否则尾部 `\r` 会让 `$` 对不上、整行注释剥不掉。
+  const code = body
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s*\/\/.*$/, ''))
+    .join('\n')
+    .replace(/\/\*[\s\S]*?\*\//g, '');
+
+  // 标题：用户 2026-09-26 原话「将『并列多会话』改为『并列』」。
+  assert.match(code, /h\('h3', \{ className: 'hwb-compare-title' \}, '并列'\)/,
+    '视图标题必须是「并列」（用户要求把「并列多会话」改为「并列」）');
+  assert.ok(!/并列多会话/.test(code),
+    '「并列多会话」必须从渲染代码里消失 —— 用户要求改名为「并列」并删掉说明');
+  // 那两行说明文字必须删除（用户：「上方不必要占用位置……说明去除」）。
+  assert.ok(!/每列一条独立网页会话/.test(code),
+    '标题下的说明文字必须删除 —— 用户说它「上方不必要占用位置」');
+  assert.ok(!/把某列设为「主审」后/.test(code), '说明文字第二句也必须删除');
+  assert.ok(!/hwb-compare-tools/.test(code),
+    '顶部工具行（3 列／主审：X／+ 加一列）必须移走 —— 它也是「上方占位置」的一部分');
+  // 加列能力**没有丢**（用户第 2 点：能力不能少）。列数上限必须真的封顶。
+  assert.match(code, /disabled: cols\.length >= MAX_COLS/,
     '加列按钮必须在达到 MAX_COLS 时禁用 —— 否则用户可以加出布局撑不住的列数');
   // 会话身份可见：用户要能核对「这一列续在哪条网页会话上」。
-  assert.match(body, /hwb-compare-session/,
+  assert.match(code, /hwb-compare-session/,
     '每列的会话身份必须可见');
+});
+
+/**
+ * ★ 0.19.29：**去除列的分界**，改成官方那套「隐形 + hover 一点光」（用户第 1 点）。
+ *
+ * 用户原话（逐字）：「然后去除每列对话的对话框分界，用官方现在的隐形加上鼠标移到后
+ * 显示一点光线的结构，完全照抄 dsh」。
+ *
+ * 判据成对：既要有「旧的可见分界确实没了」，也要有「新的 hover 光确实在」——
+ * 只测前者能过掉「把样式全删了」，只测后者能过掉「旧边框还在」。
+ */
+test('★ 0.19.29 Team：列分界必须改为「隐形 + hover 光」（照抄官方）', () => {
+  const raw = clientSrc();
+  const body = compareBody(raw);
+  // 同前：剥掉注释再判 —— 渲染处的注释会逐字解释「旧的列头长什么样」。
+  const code = body
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s*\/\/.*$/, ''))
+    .join('\n')
+    .replace(/\/\*[\s\S]*?\*\//g, '');
+
+  // ── 负判据：常驻可见的分界必须整体消失 ──────────────────────────────────
+  // 列头那一行（站点下拉 / 状态 / 设为主审 / ✕）就是用户说的「分界」。
+  assert.ok(!/hwb-compare-col-head/.test(code),
+    '列头整行必须删除（用户：「去除每列对话的对话框分界」）');
+  // 旧写法：常驻的卡片底色 + 边框 —— 那是「分界」的本体。
+  assert.ok(!/\.hwb-compare-col\{[^}]*background:var\(--dsw-alias-bg-layer-1/.test(raw),
+    '列不得再有常驻的卡片底色（那就是用户看到的分界）');
+  assert.ok(!/\.hwb-compare-col\{[^}]*border:\.5px solid/.test(raw),
+    '列不得再有常驻边框（那就是用户看到的分界）');
+
+  // ── 正判据：官方那套 hover 光线必须在 ──────────────────────────────────
+  assert.match(raw, /\.hwb-compare-col\{[^}]*background:transparent[^}]*border:0/,
+    '列必须隐形：底色透明、无边框');
+  assert.match(raw, /\.hwb-compare-col:hover[^{]*\{[^}]*var\(--dsw-alias-interactive-bg-hover/,
+    '鼠标移到列上必须浮起官方那档交互底色（用户要的「一点光线」）');
+  // 键盘用户也要能看到落点，否则光线只在鼠标下存在。
+  assert.match(raw, /\.hwb-compare-col:focus-within/,
+    'focus-within 必须同样给光 —— 否则键盘用户永远看不到自己的落点在哪一列');
+
+  // ── 控件没有丢：四个都搬进了每列对话框工具栏 ────────────────────────────
+  const mapBody = body.slice(body.indexOf('cols.map('));
+  assert.match(mapBody, /className: 'hwb-col-composer-select'/, '站点选择必须搬进对话框工具栏');
+  assert.match(mapBody, /onChange: \(e\) => setColSite\(c\.key, e\.target\.value\)/,
+    '站点选择必须仍然改得动本列的站点');
+  assert.match(mapBody, /onClick: \(\) => setReviewCol\(c\.key\)/, '「设为主审」必须搬进工具栏');
+  assert.match(mapBody, /onClick: \(\) => removeCol\(c\.key\)/, '「移除列」必须搬进工具栏');
+  assert.match(mapBody, /hwb-col-composer-badge review/, '主审标记必须是极小徽标（用户要求）');
+});
+
+/**
+ * ★ 0.19.29（用户第 2 点）：每列对话框必须**照抄官方**，且带完整的模型选择。
+ *
+ * 用户原话（逐字）：「『并列』中每列的对话框改为：官方原生的对话框：保留完整的
+ * 切换模式，模型显示项目等完整能力/UI！直接照抄！」
+ *
+ * 这条要防的是「把类名改了、能力没接上」这种假修复，因此判据**四跳齐全**：
+ *   ① 选择器在渲染里存在且受控（改得动）；
+ *   ② 选项**真的来自桥的模型清单**，不是写死一份（写死的清单会随桥端新增模型静默过期）；
+ *   ③ 选中的模型**真的随请求下发**（选了不发 = 假功能，本项目记过多次）；
+ *   ④ 后端**本来就有**这个形参（不新增后端路径 —— 用户要求别动真实桥接 web 端）。
+ */
+test('★ 0.19.29 Team：每列的模型选择必须四跳齐全（渲染 → 清单 → 下发 → 后端已有）', () => {
+  const raw = clientSrc();
+  const body = compareBody(raw);
+
+  // ① 渲染：工具栏里必须有受控的模型选择器。
+  assert.match(body, /className: 'hwb-col-composer-select'[\s\S]{0,400}?onChange: \(e\) => setColModel\(c\.key, e\.target\.value\)/,
+    '每列对话框工具栏必须有模型选择器，且改写的是**本列**的 modelId');
+
+  // ② 清单来自桥，不写死。
+  assert.match(body, /api\('models'\)/, '模型清单必须来自桥的 GET models（写死的清单会静默过期）');
+  assert.match(body, /const modelsForSite = \(siteId\) => modelCatalog\.filter\(\(m\) => m\.siteId === siteId\)/,
+    '必须按该列的站点过滤模型（跨站点的模型 id 发过去会发不动）');
+  // 写死清单的具体形态：组件里出现一个字面量模型数组。
+  assert.ok(!/modelCatalog: \[|modelOptions = \[\s*\{/.test(body),
+    '不得在组件里写死一份模型清单 —— 那会在桥端新增/改名模型时静默过期');
+
+  // ③ 下发：选了模型必须真的随请求发出（只在选了具体模型时才带，空串=该站默认）。
+  assert.match(body, /\.\.\.\(col\.modelId \? \{ model: col\.modelId \} : \{\}\)/,
+    '选中的模型必须随 api(chat) 下发 —— 选了不发就是假功能');
+
+  // ④ 后端已有该形参：本改动**不新增后端路径**（用户要求别动真实桥接 web 端）。
+  const wc = fs.readFileSync(path.join(root, 'lib', 'web-control.js'), 'utf8');
+  assert.match(wc, /sendTurn\(sessionKey, promptText, \{ fresh, model: body\?\.model \}\)/,
+    'POST chat 必须本来就把 body.model 交给 sendTurn（本改动只接线，不改后端）');
+
+  // 换站点必须清掉模型（模型清单按站点分组，留着旧 id 会发不动）。
+  assert.match(body, /const setColSite = \(key, siteId\) => \{[\s\S]{0,200}?modelId: ''/,
+    '换站点必须一并清空 modelId —— 否则会把 A 站的模型发给 B 站');
+  // 换模型**不清会话**：同一会话里切模型是合理用法，且「同上下文比较两个模型」正需要它。
+  const setModel = body.slice(body.indexOf('const setColModel = '), body.indexOf('const setColModel = ') + 400);
+  assert.ok(!/sessionKey: ''|messages: \[\]/.test(setModel),
+    '换模型不得清空会话或消息 —— 否则「同一段上下文下比较两个模型」这个用法就没了');
+});
+
+/**
+ * ★ 0.19.29（round2 的第三条「披露」）：产出落盘必须**用户看得见**。
+ *
+ * 两轮思考的结论是：本插件把每列产出写进 `.hwb/cols/<键>/`（围栏见 `column-fs.js`），
+ * 而那个目录**在磁盘上、界面上看不见**。只说「不撒谎」不够 —— 一个用户无从核对的
+ * 事实，与没有这个事实几乎等价。因此披露必须三跳齐全：
+ *
+ *   ① 服务端 `POST chat` 把落盘读数放进响应（`artifacts`）；
+ *   ② 客户端 `sendCol` 把它记到**本列**（不是全局、不是丢掉）；
+ *   ③ 渲染处把它透出（`title` 给完整路径，行内给「已存」标记）。
+ *
+ * 只钉其中一跳的话，另外两跳断掉照样全绿（本仓库记过多次的「三跳只钉一跳」）。
+ */
+test('★ 0.19.29 Team：产出落盘必须「服务端返回 → 客户端记录 → 用户看得见」三跳齐全', () => {
+  const raw = clientSrc();
+  const body = compareBody(raw);
+
+  // 第一跳：服务端必须把落盘读数放进响应。
+  const wc = fs.readFileSync(path.join(root, 'lib', 'web-control.js'), 'utf8');
+  const chatBlock = wc.slice(wc.indexOf("'POST chat'"), wc.indexOf('  };\n\n  // ── `status`'));
+  assert.match(chatBlock, /saveColumnReply\(body\?\.columnContext, taskRootOf\(body\), reply, sessionKey\)/,
+    'POST chat 必须真的落盘并拿到读数');
+  assert.match(chatBlock, /\.\.\.\(artifacts \? \{ artifacts \} : \{\}\)/,
+    '落盘读数必须随响应透出（不透出 ⇒ 用户永远不知道产出在哪）');
+
+  // 第二跳：客户端必须把读数记到**本列**。
+  const sendFn = body.slice(body.indexOf('const sendCol = '));
+  assert.match(sendFn, /const artifactDir = ok \? String\(res\?\.artifacts\?\.dir \|\| ''\) : ''/,
+    'sendCol 必须读取 res.artifacts.dir（读到却不用 = 白读）');
+  assert.match(sendFn, /artifactDir: artifactDir \|\| c\.artifactDir \|\| ''/,
+    '必须把落盘目录记进本列，且失败轮不清掉上一轮已知的目录');
+
+  // 第三跳：渲染处必须真的透出（否则「记录了」等于没记录）。
+  const mapBody = body.slice(body.indexOf('cols.map('));
+  assert.match(mapBody, /title: c\.artifactDir/, '必须把完整目录放进 title（hover 与读屏都能读到）');
+  assert.match(mapBody, /c\.artifactDir \? ' · 已存' : ''/, '行内必须有「已存」标记（用户扫一眼就知道）');
+
+  // 列对象形状一致：初始三列与 addCol 都必须带 artifactDir，
+  // 否则「加了列才发现读到 undefined」。
+  const initCount = (body.match(/artifactDir: ''/g) || []).length;
+  assert.ok(initCount >= 4, '初始三列 + 加列路径都必须带 artifactDir，实际=' + initCount);
+});
+
+/**
+ * ★ 0.19.29（用户第 3 点）：列宽上下限必须来自官方常量，且放不下时用左右按钮切换。
+ *
+ * 用户原话（逐字）：「然后会话框最小就是右侧和左侧栏目拉到最小距离，多出来的别的列框
+ * 通过点击居中中心左右的左右按钮进行切换视角--注意适配官方UI，然后最大一样最多是左右
+ * tab 最大距离，不够显示就显示左右框点击左右切换--然后 3 个会话宽度同步」
+ *
+ * 以及他对「自适应」的明确否认：「我没有让你随着左右栏自适应啊！我只让你看左右栏导致
+ * 切换按钮的位置以及上下限」—— 因此这里同时钉住「上下限取自官方常量」与
+ * 「列宽不是左右栏的实时函数」两件事。
+ */
+test('★ 0.19.29 Team：列宽上下限取自官方常量，放不下时左右切换（三条同步）', () => {
+  const raw = clientSrc();
+  const body = compareBody(raw);
+
+  // ── 上下限（用户 0.19.29 澄清后的方向）──────────────────────────────────
+  //
+  // 用户原话：「下限 = 中间区**最窄**，上限 = 官方会话的默认完整最宽」。
+  // 我第一版把上限写成「左栏最窄 + 右栏最宽」，实测**站不住**：官方右栏上限是
+  // viewport×0.7（1440 下右栏最宽 1008），中间区只剩 168px，比下限还小 ⇒ 上下限
+  // 整体翻转、列宽被夹成恒定小值、切换按钮永不出现。这条判据就是那次修正的钉子。
+  for (const [name, value] of [
+    ['SIDEBAR_MAX', 420], ['RIGHTBAR_MIN', 300],
+    ['OFFICIAL_CONTENT_MAX', 920], ['OFFICIAL_CARD_PAD', 32],
+  ]) {
+    assert.ok(new RegExp('const ' + name + ' = ' + String(value).replace('.', '\\.') + ';').test(body),
+      name + ' 必须逐字等于官方常量 ' + value + '（来自 ui-layout 与 ConversationRoot）');
+  }
+  // 下限 = 左栏拉最宽 + 右栏拉最窄 ⇒ 中间区最窄。
+  assert.match(body, /viewportW - SIDEBAR_MAX - RIGHTBAR_MIN/,
+    '列宽下限必须由「左栏最宽 + 右栏最窄」推出（= 中间区最窄）');
+  // 上限 = 官方完整最宽 = 内容 920 + 卡片余量 32。
+  assert.match(body, /OFFICIAL_CONTENT_MAX \+ OFFICIAL_CARD_PAD/,
+    '列宽上限必须是官方完整最宽（内容 920 + 卡片余量 32）');
+  // 旧的反向公式必须消失 —— 留着它就是把那次修正退回去。
+  assert.ok(!/SIDEBAR_MIN|RIGHTBAR_MAX_RATIO/.test(body),
+    '不得再出现「左栏最窄 + 右栏最宽」那套反向常量（那是被实测否掉的第一版）');
+  // 夹取顺序：上限赢（视口很大时下限会超过上限，此时「不超过官方最宽」是硬约束）。
+  assert.match(body, /Math\.min\(colWidthMax, Math\.max\(colWidthMin, officialDefault\)\)/,
+    '夹取顺序必须是 min(上限, max(下限, 默认)) —— 让上限在冲突时赢');
+
+  // ── 默认值 = 官方对话的默认内容宽（用户答「官方对话的默认值！」）──────────────
+  assert.match(body, /Math\.min\(OFFICIAL_CONTENT_MAX, Math\.max\(680, Math\.round\(viewportW \* 0\.64\)\)\)/,
+    '默认列宽必须用官方 ConversationRoot 的默认内容宽公式 clamp(680, column*0.64, 920)');
+
+  // ── 三条同步：宽度是**一个值**给到每一列（结构上不可能某列比别列宽）──────────
+  assert.match(raw, /\.hwb-compare-columns\{[^}]*grid-auto-columns:var\(--hwb-col-width/,
+    '列宽必须由同一个 --hwb-col-width 统一给 —— 「3 个会话宽度同步」的落点');
+  assert.match(body, /'--hwb-col-width': colWidth \+ 'px'/,
+    '视图必须把这个算出**一个**宽度发到 CSS（而不是每列各算一个）');
+
+  // ── 放不下时出现左右按钮，且整列平移（永不半列）────────────────────────────
+  assert.match(body, /cols\.length > visible && h\('button'/, '放不下时才出现切换按钮（放得下画两个点不动的箭头是噪音）');
+  assert.match(body, /const visible = Math\.max\(1, Math\.floor\(\(viewportW \+ COL_GAP\) \/ \(colWidth \+ COL_GAP\)\)\)/,
+    '一屏放得下几列必须按**整数列**算（否则会出现半列）');
+  // 用 indexOf 而不是正则：这段字面量里括号与加号密集，正则要过两层转义，
+  // 极易写成本仓库反复记过的「看起来对、实际匹配不到」的空转判据。
+  assert.ok(body.includes("transform: 'translateX(' + (-first * (colWidth + COL_GAP)) + 'px)'"),
+    '平移量必须是整列宽 + 列间距（用户：「优先跳转下一列让列左边对齐左端」）');
+  // 末列贴右端放不下时退到「刚好全放下」，两个方向都要能到头。
+  assert.match(body, /const maxFirst = Math\.max\(0, cols\.length - visible\)/, '必须有平移上界（末列贴边时退化到刚好全放下）');
+  assert.match(body, /disabled: !canPanLeft/, '到最左时左按钮必须置灰');
+  assert.match(body, /disabled: !canPanRight/, '到最右时右按钮必须置灰');
+  // 按钮位置按用户要求贴中间区左右边缘、垂直居中。
+  assert.match(raw, /\.hwb-compare-pan\{position:absolute;top:50%;transform:translateY\(-50%\)/,
+    '左右按钮必须绝对定位在中间区左右边缘并垂直居中');
 });
 
 /**
@@ -393,8 +616,14 @@ test('★ 0.19.20 Team：主审列全局唯一且可改选', () => {
   // 可改选：非主审列上必须有「设为主审」入口。
   assert.match(body, /onClick: \(\) => setReviewCol\(c\.key\)/, '非主审列必须能一键改选为主审');
   // 可见性：主审身份要看得见（用户要能一眼看出审查落在哪个模型上）。
+  //
+  // 0.19.29：头部那行「主审：X」随列头一起删除（用户第 1 点「上方不必要占用位置」），
+  // 主审身份改由**每列工具栏里的极小徽标** + 该列自己的站点下拉共同表达 ——
+  // 徽标说「这列是主审」，下拉说「主审落在哪个站点」。判据因此跟着能力搬家，
+  // 而不是把这条护栏删掉（删掉它 = 主审变成不可见，那是功能倒退）。
   assert.match(body, /const reviewCol = cols\.find\(\(c\) => c\.role === 'review'\)/, '必须能取出当前主审列');
-  assert.match(body, /'主审：' \+ siteName\(reviewCol\.siteId\)/, '头部必须显示当前主审是哪个模型');
+  assert.match(body, /className: 'hwb-col-composer-badge review'/,
+    '主审列的徽标必须可见 —— 用户要能一眼看出审查落在哪一列');
 });
 
 
