@@ -4,7 +4,9 @@
 
 ## 安装
 
-本插件**不发 npm registry**，唯一交付物是打包好的 `.tgz`。两条路二选一。
+当前**尚未发布到 npm registry**，交付物是打包好的 `.tgz`。下面是「马上能用」的两条路，以及想发 npm 时需要做什么。
+
+> **能不能发 npm？能。** 包名 `dsh-webcode-bridge` 在本机实测 `npm view dsh-webcode-bridge` 返回 **E404**，即该名字**未被占用**。但本仓库当前**没有发**，原因不是技术限制而是缺一步人工授权：`npm whoami` 返回 `ENEEDAUTH`（本机未登录任何 npm 账号），而「以谁的名义发布、用哪个 registry」是账号决策，不该由 CI 代替决定。发布步骤见下方「方式 C」。
 
 ### 方式 A — 下载已打包的安装包（推荐，不用本地构建）
 
@@ -31,6 +33,44 @@
 > 逐文件核对 tarball 与工作树（改完代码忘了重新 pack 时直接报错），
 > `scripts/install-profiles.mjs` 先删旧目录再解包（绕开 pnpm 对同版本 tarball
 > 「Already up to date」不重解的坑）。两条都是真实踩过的坑。
+
+### 方式 C — 从 npm registry 安装（**当前不可用，需先发布**）
+
+发出去之后，用户侧就是标准一条命令：
+
+```powershell
+dsh plugin --profile web add dsh-webcode-bridge
+```
+
+要走到那一步，需要一位**有 npm 账号权限的人**在本机执行（三步都是账号决策，不能由 CI 代办）：
+
+1. **登录**：`npm login`。注意本机 `npm config get registry` 当前是
+   `https://registry.npmmirror.com`——这是**只读镜像**，只能装不能发。发布前必须显式切回官方源：
+
+   ```powershell
+   npm config set registry https://registry.npmjs.org
+   npm login
+   npm whoami          # 必须打印出你的用户名；仍报 ENEEDAUTH 就是没登上
+   ```
+
+2. **预演**（不真发）：`npm publish --dry-run`。它会打印将进包的文件清单——
+   与 `package.json` 的 `files` 白名单（`lib` / `bin` / `cordis.patch.yml` / `README.md` / `LICENSE`）
+   逐条核对，确认没有 `test/`、`doc/`、`scripts/` 意外混入。本仓库此前有过
+   「同版本号不同内容」的事故，所以**发布前先 `pnpm pack` 再 `node scripts/verify-pack.mjs`**，
+   让 tarball 与工作树逐文件对齐后再发。
+
+3. **发布**：`npm publish --access public`（包名无 scope，`--access` 可省）。
+   之后每次升版本都要重跑 2–3 步；**版本号一经发布不可复用**，所以发布前那次
+   `verify-pack` 不是可选项。
+
+> 为什么现在没发：本机 `npm whoami` = `ENEEDAUTH`、registry 指向只读镜像，
+> 两条都是**账号/环境事实**而非代码问题。此处如实写明步骤，不代替账号持有人做决定。
+>
+> **发布通道目前是被刻意锁死的**：`.github/workflows/release.yml` 的文件头写明本工作流
+> 「绝不 publish 到任何 registry」，且最后一步有一道守卫——工作流里一旦出现
+> `npm publish` / `pnpm publish` 命令行，构建**直接失败**。所以方式 C 是**纯手工操作**：
+> 要在 CI 里自动发布，必须先把这个守卫拆掉，那是「改发布策略」的决定，不是顺手能做的改动。
+> 现有形态下不存在「误推一版」的风险面——这正是那道守卫的用途。
 
 ## 初次启动
 
@@ -134,49 +174,13 @@
 - **`pnpm test` 恢复可跑**（0.16.9）：lockfile 曾把可选 peerDep 记为 `specifier:'*'` 对
   `version:0.1.5-alpha.1`，pnpm 的前置检查必然失败，且在 CI 下**会先删 `node_modules` 再报错**——
   全量测试连启动都做不到。已把 specifier 收紧为 `^0.1.5-alpha.1`。
-- **右栏画面清晰度**（0.21.2）：0.21.1 修好了**比例**，但**分辨率上限 1280×2000 没动**——
-  客户端画布 backing 是「面板 CSS × dpr」，服务端却把页面渲染成「面板 CSS × k，
-  k ≤ min(2, 1280/宽, 2000/高)」。只要面板宽 × dpr > 1280（临界点 **640 CSS px**），
-  源图就小于画布，`drawImage` 上采样 ⇒ 糊。实算最坏 2.19×（1400×900 @dpr2）；
-  **RTC 路线同样中招**（`rtc-offer` 只停 screencast、不撤 Emulation，页面仍被压在 1280 宽）。
-  现在视口 = **面板 CSS × dpr**（= 画布 backing），两端 1:1、零重采样；上限抬到 2560×3200
-  覆盖「1280×1600 面板 @dpr2」，超出时按比例收缩（误差 <0.5%）。dpr 由面板经 `resize` 上报，
-  上限与客户端 `panelDpr()` 同口径（2）。
-- **三档画质：静止无损 PNG / 运动中半分辨率**（0.21.2）：用户要「高精度 + 低占用」，
-  一个折中参数做不到，改为按内容状态换编码——`idle` 用 **PNG 全分辨率**（损伤帧在静止时
-  本就稀疏，无损几乎不增开销，**文字零 JPEG 伪影**）、`stream` 用 JPEG q88 全分辨率、
-  `motion` 用 JPEG q55 **0.55× 出帧**（滚动时降分辨率换帧率）。判据从「500ms 内 ≥3 帧」
-  换成**帧间隔 EWMA**（纯函数 `pickStreamMode`）：损伤帧在静止时一帧不发，用计数会把
-  「静止但编码慢」误判成静止并回满质量，形成正反馈。
-- **RTC 锐度四件套**（0.21.2）：`contentHint='detail'`（W3C 映射到 maintain-resolution）、
-  `degradationPreference='maintain-resolution'`、**显式 `maxBitrate` 20 Mbps**、帧率随档位
-  （运动 60 / 其余 30）。缺 `contentHint` 时编码器按「摄像头」假设工作，**为保帧率主动降分辨率**；
-  不给 `maxBitrate` 则走 BWE 慢爬——实测 VP9 在 3 Mbps 上要 **12 秒**才收敛，收敛前持续降分辨率，
-  这正是「刚滚起来是糊的、过十几秒才清楚」。本机是回环、带宽无穷，没有理由让它慢慢猜。
-- **右栏 UI 与生命周期**（0.21.2）：删掉面板内那条自建状态行（`.hwb-live-bar`，
-  「● DeepSeek · 实时画面」+ 页签 + 「+」）——上面 `.hwb-toolbar` 已含站点名与状态，
-  那行是重复信息且**在骗人**（点「+」开了新页，行里标题变了、画面却没跟着换）。
-  新页现在**立刻成为画面**（`openPage` 返回新页 id，hub 收到即 attach）。
-  右栏**全部面板关闭 ⇒ 回收该账户浏览器**（省内存；正在跑轮次时不关，避免掐断回复；
-  驱动对象保留在表中，下一轮 `ensure()` 重新拉起，回收可逆）。
-  新增**昼夜同步**：客户端观察 DSH 的 `data-ds-dark-theme`，经 `Emulation.setEmulatedMedia`
-  把 `prefers-color-scheme` 推给页面，站点深浅色跟着宿主走。
-- **右栏画面流比例适配**（0.21.1）：`viewportForPanel` 的宽、高曾**各自独立**做
-  `max(下限, min(上限))`，任一维触边就改写视口比例；客户端按 `contain` 居中绘制
-  ⇒ 比例不等的部分全变黑边，观感即「不适配窗口大小」。实算最坏 −68%（全屏工作区
-  2400×1200 → 视口 0.640 vs 面板 2.000），且**RTC 路线同样受影响**（`rtc-offer` 只停
-  screencast、不停 Emulation，getDisplayMedia 采到的仍是失配比例）。现改为**一次按比例
-  缩放**：先求唯一标量 `k = clamp(min(1280/w, 2000/h), 0.25, 2)` 再同时缩放宽高，
-  比例严格等于面板（10/10 组误差 0.0%，原来就正确的两组数值逐字不变），k 上限仍为 2
-  ⇒ 0.20.2 的 ×2 超采样画质手段完整保留。护栏 `test/live-view.test.mjs` 从「宽高双钳制」
-  改判「比例误差 < 0.5% 且双上限同时成立」。
-- **RTC 状态机两处漏判**（0.21.1）：`rtcActive` 此前只被**写**、没有任何产帧路径读它，
-  于是 RTC 接管后仍有两条路把 JPEG 投屏**重新拉起**——`adaptTimer`（250ms 轮询判定切画质）
-  与 `resize` 分支（拖分栏每 120ms 一次）。后果是 RTC 视频与 JPEG 编码同时跑、CPU 翻倍，
-  而客户端 canvas 此时 `visibility:hidden`，帧根本没人看。现两处各加 `rtcActive` 守卫，
-  且守卫只挡 RTC 活跃期（`rtc-failed` 回落投屏后 resize 照常生效）。
-  护栏：`test/live-view.test.mjs` 的 RTC 守卫 A/B 与反向线三条用例（缺守卫时 A/B 必失败，
-  已用变异测试确认）。
+- **右栏实时画面 / WebRTC 路线：已按用户指令整体回退，当前不存在**（0.19.13）：0.20.0–0.21.2
+  曾经做过「画面流 / RTC 自采 / 视口按面板适配 / 三档画质」一整套（`lib/live.js`、
+  `viewportForPanel`、`pickStreamMode`、`rtc-offer`、`.hwb-live-bar`…）。`ac449f2` 的提交信息是
+  「revert(bridge): 0.19.13 —— 按用户指令完全回退换路线版本（0.20.0–0.21.2）」，分支存于
+  `backup/live-route-0.20.x-0.21.x`。**本 README 此前仍在介绍这批已删功能，是文档滞后**——
+  现按事实更正：`grep -r 'viewportForPanel|pickStreamMode|rtc-offer|live.js' package/dsh-webcode-bridge/lib/`
+  **零命中**，说明这些符号不在当前代码里。回退前的实现与取舍见备份分支，不在本版本的能力面内。
 
 ## 许可与第三方来源
 
