@@ -113,4 +113,4 @@
 | `package/dsh-webcode-bridge/test-mock/prompt-bench.mjs` | [prompt-engineering-evidence-2026-09-14.md](research/prompt-engineering-evidence-2026-09-14.md)（变体的文献依据）+ [comment-style.md](comment-style.md) **§9**（实验与取证纪律、报告模板）+ `test/prompt-bench-harness.test.mjs` |
 | `package/dsh-webcode-bridge/lib/bench.js` | [comment-style.md](comment-style.md) **§9.3**（判据先于实现）+ `test/bench.test.mjs` |
 | 全部源码注释与文档 | [comment-style.md](comment-style.md) **§10**（注释与文档是能力放大器） |
-| `.github/workflows/`、`scripts/lint-comments.mjs`、`scripts/check-ledger.mjs`、`scripts/ci-local.mjs` | [ci-cd.md](ci-cd.md)（流水线分工、刻意不跑的东西、本地复现、台账闸门 §7.1.1）、[CONTRIBUTING.md](../CONTRIBUTING.md) |
+| `.github/workflows/`、`scripts/lint-comments.mjs`、`scripts/check-ledger.mjs`、`scripts/check-long-term-issues.mjs`、`scripts/ci-local.mjs` | [ci-cd.md](ci-cd.md)（流水线分工、刻意不跑的东西、本地复现、台账闸门 §7.1.1）、[CONTRIBUTING.md](../CONTRIBUTING.md) |

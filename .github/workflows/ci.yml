@@ -141,6 +141,23 @@ jobs:
       - name: 台账一致性（scripts/check-ledger.mjs，阻断）
         run: node scripts/check-ledger.mjs
 
+      # ---- 长期问题台账：一览表 ↔ 正文自洽（阻断）----
+      #
+      # `doc/long-term-issues.md` 有两份「同一事实」的副本：开头的一览表（读者先看到的那份）
+      # 与下面的正文条目（唯一有权写「已修 / 未修」的地方）。2026-09-16 抓到过一次不同步
+      # （正文有条目、表里没有），当时在 `doc/diagnosis-2026-09-16.md` §6.2 的 P1 排期里
+      # 写下了「一览表完整性闸门」，**但那条闸门从来没有被建出来**——于是 2026-09-26 同一族
+      # 缺陷复发（#26 正文已写「0.16.11 已修」而表里仍是「未修」；#27 有正文条目、表里无行）。
+      #
+      # 判据三条：正文→表（缺行）、表→正文（孤儿行，子条目豁免）、状态不矛盾
+      # （正文标题宣告「已修」时表里不得仍写「未修」）。措辞判据会静默失效，
+      # 因此它自带 `--self-test`，也在这里单独跑一次。
+      - name: 长期问题台账（scripts/check-long-term-issues.mjs，阻断）
+        run: node scripts/check-long-term-issues.mjs
+
+      - name: 长期问题台账判据自检（--self-test，阻断）
+        run: node scripts/check-long-term-issues.mjs --self-test
+
       # ---- 文件规范：编码（无 BOM）+ doc/README.md 索引无死链（阻断）----
       #
       # 这两条都是**已经写在文档里、但此前没有任何机器检查**的规范，于是都发生过

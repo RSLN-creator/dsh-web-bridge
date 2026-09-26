@@ -36,12 +36,20 @@
 | 23 | **缺 `name` 字段的调用被静默丢弃**（0.15.9 新发现，**已修**） | 高 | 否 | `lib/agent-preset.js`（`inferToolNameFromArgs`）、`lib/index.js`、`test/nameless-call.test.mjs` |
 | 10b | 本机 `%TEMP%` 受限导致 3 个测试文件假失败（2026-09-16 实测）——**#10 的子条目**，正文见 §10 的「10b」小节 | 低 | 否 | `package.json`、`test/*.test.mjs`、`doc/progress.md` |
 | 24 | **网页侧回复被时间窗判死 / 超长纯文本投递**（0.16.3 部分解决：首字节相位已分） | 高 | 否 | `lib/idle-window.js`、`lib/index.js`、`lib/browser-driver.js`、`test/watchdog-first-byte.test.mjs` |
-| 25 | **TOOL_CALL_UNPARSED 两类残根：缺 `name` 的流式块 / 断流截断的参数**（0.16.10 定性，**未修**） | 高 | 否 | `lib/agent-preset.js`、`lib/index.js`、`test/fixtures/unparsed-notice-*.txt` |
-| 26 | **`empty response from web AI`：思考-only 流走硬失败**（2026-09-19 新登记，**未修**） | 高 | 否 | `lib/index.js`、`lib/browser-driver.js`；与 #22 同族 |
+| 25 | **TOOL_CALL_UNPARSED 两类残根：缺 `name` 的流式块 / 断流截断的参数**（0.16.10 定性；0.16.11–0.16.16 **大幅收口**，残余形态未修，见正文 §25） | 高 | 否 | `lib/agent-preset.js`、`lib/index.js`、`test/fixtures/unparsed-notice-*.txt` |
+| 26 | **`empty response from web AI`：思考-only 流走硬失败**（2026-09-19 新登记，**0.16.11 已修**） | 高 | 否 | `lib/index.js`、`lib/browser-driver.js`；与 #22 同族 |
+| 27 | **站点品牌图标的来源无法在本机复核**（0.16.36 新登记，**0.16.37 已解决**） | 低 | 否 | `lib/client.cjs`（`SITE_ICON_PATHS`） |
 
-> **一览表完整性（2026-09-16 修正）**：本表此前**漏登记 #19 与 #20**（正文有、表里没有）。
+> **一览表完整性（2026-09-16 修正；2026-09-26 补上闸门）**：本表此前**漏登记 #19 与 #20**（正文有、表里没有）。
 > 这两条都是可机检的登记错误，而当时没有任何闸门覆盖「正文条目 ↔ 表格条目」的一致性。
 > 补登记的同时，这条缺口已写进 [`diagnosis-2026-09-16.md`](diagnosis-2026-09-16.md) §6.2 的 P1 排期。
+>
+> **那条闸门当时并没有被建出来，于是同一族缺陷在 2026-09-26 复发**：#26 的正文标题已写
+> 「0.16.11 已修」而表里仍是「未修」；#27 有正文条目、表里根本没有这一行。现已补齐
+> [`scripts/check-long-term-issues.mjs`](../../scripts/check-long-term-issues.mjs)（三条判据：
+> 正文→表缺行 / 表→正文孤儿行 / 状态矛盾）并接进 `ci-local` 与 `ci.yml`。它自带
+> `--self-test`——措辞判据最典型的失效形态不是报错，而是**悄悄不再匹配任何东西**，
+> 那时它会一路 PASS、看起来比谁都干净。
 
 错误码视角的横向台账（已做哪些适配 / 残留风险）见 [`bridge-failure-ledger.md`](bridge-failure-ledger.md)。
 

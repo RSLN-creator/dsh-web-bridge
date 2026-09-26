@@ -255,7 +255,7 @@ node scripts\lint-comments.mjs --max-warnings=5   # 允许最多 5 条 warn
 
 完整说明、必需检查列表、以及「CI 在本地怎么复现」见 [doc/ci-cd.md](doc/ci-cd.md)。
 
-### 6.1 四个本机也能跑的闸门脚本
+### 6.1 五个本机也能跑的闸门脚本
 
 闸门的价值取决于**能不能在本机先跑一遍**——跑到 CI 才发现，等于花一轮往返买同一句话。
 
@@ -263,10 +263,11 @@ node scripts\lint-comments.mjs --max-warnings=5   # 允许最多 5 条 warn
 | --- | --- | --- |
 | `scripts\lint-comments.mjs` | 注释纪律（错误码、§引用、TODO 形态） | `node scripts\lint-comments.mjs` |
 | `scripts\check-ledger.mjs` | 台账数字与事实一致（版本号、测试文件数） | `node scripts\check-ledger.mjs` |
+| `scripts\check-long-term-issues.mjs` | 长期问题台账「一览表 ↔ 正文」自洽（缺行 / 孤儿行 / 状态矛盾） | `node scripts\check-long-term-issues.mjs` |
 | `scripts\check-repo-hygiene.mjs` | 文件编码不得带 BOM + `doc/README.md` 索引无死链 | `node scripts\check-repo-hygiene.mjs` |
 | `scripts\check-commit-msg.mjs` | 提交信息形状（见 §9） | `node scripts\check-commit-msg.mjs --self-test` |
 
-四个脚本都是**独立可跑、不引第三方依赖、不用 `spawnSync`** 的纯 Node 工具——这不是风格偏好：
+五个脚本都是**独立可跑、不引第三方依赖、不用 `spawnSync`** 的纯 Node 工具——这不是风格偏好：
 本机实测 Node 里 `spawnSync` 调任何外部程序都 `EPERM`（`doc\progress.md`「已知环境约束」），
 凡是靠它去问 git 的闸门在本机都会**空转**，而空转的闸门比没有闸门更坏（它给的是「检查过了」的错觉）。
 

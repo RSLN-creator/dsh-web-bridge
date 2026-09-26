@@ -20,6 +20,7 @@
 //
 //   1. `scripts/lint-comments.mjs`           注释纪律（§10 的机检部分）
 //   2. `scripts/check-ledger.mjs`            台账与事实一致（版本号 / 测试文件数）
+//   2b. `scripts/check-long-term-issues.mjs` 长期问题台账「一览表 ↔ 正文」自洽
 //   3. `scripts/check-repo-hygiene.mjs`      文件编码无 BOM + 索引无死链 + CI/engines Node 版本相容
 //   4. `scripts/check-plugin-contract.mjs`   DSH 插件契约（仓库指向 / 许可证三处一致 / 运行依赖无死声明 / 边界声明被索引）
 //   5. `scripts/check-commit-msg.mjs`        提交信息判据自检（--self-test）
@@ -28,7 +29,7 @@
 //   8. `test-mock/prompt-bench.mjs --offline` 基准 harness 离线回放（不联网、不碰真机）
 //   9. `pnpm test`                           全量单测（`--fast` 跳过）
 //
-// 前七步是秒级的，第八步十余秒，第九步约 10 分钟。因此 `--fast` 只砍第九步——**砍掉的必须是
+// 前八步是秒级的，第九步十余秒，第十步约 10 分钟。因此 `--fast` 只砍第九步——**砍掉的必须是
 // 慢的那一步**，而不是「顺手也砍掉检查」的那一步。
 //
 // **第 3~5 步是纯 `fs`、不用 `spawnSync`**，因此它们在开发者本机（含沙箱）也能真正跑起来；
@@ -104,6 +105,14 @@ const STEPS = [
     hint: '改 doc/progress.md 的「当前状态」表让它与事实一致；不要改脚本去迁就台账。',
   },
   {
+    id: 'long-term-issues',
+    title: '长期问题台账：一览表 ↔ 正文自洽（缺行 / 孤儿行 / 状态矛盾）',
+    cmd: process.execPath,
+    args: [path.join('scripts', 'check-long-term-issues.mjs')],
+    cwd: repoRoot,
+    hint: '改 doc/long-term-issues.md 让一览表与正文两份副本一致（正文标题宣告「已修」时表里不得仍写「未修」）。',
+  },
+  {
     id: 'repo-hygiene',
     title: '文件编码无 BOM + doc/README.md 索引无死链 + CI/engines 的 Node 版本',
     cmd: process.execPath,
@@ -127,6 +136,14 @@ const STEPS = [
     args: [path.join('scripts', 'check-commit-msg.mjs'), '--self-test'],
     cwd: repoRoot,
     hint: '改了 scripts/check-commit-msg.mjs 的判据就必须同步改自检的正反例。规范见 CONTRIBUTING.md §9。',
+  },
+  {
+    id: 'lti-self-test',
+    title: '长期问题台账判据自检（正反例都必须对）',
+    cmd: process.execPath,
+    args: [path.join('scripts', 'check-long-term-issues.mjs'), '--self-test'],
+    cwd: repoRoot,
+    hint: '改了 scripts/check-long-term-issues.mjs 的判据就必须同步改自检的正反例——措辞判据会静默失效。',
   },
   {
     id: 'ref-index',
