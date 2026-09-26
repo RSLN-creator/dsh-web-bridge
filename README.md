@@ -4,9 +4,12 @@
 
 ## 安装
 
-当前**尚未发布到 npm registry**，交付物是打包好的 `.tgz`。下面是「马上能用」的两条路，以及想发 npm 时需要做什么。
+已发布到 npm registry：`dsh-webcode-bridge@0.19.26`。同时保留打包好的 `.tgz` 交付。
 
-> **能不能发 npm？能。** 包名 `dsh-webcode-bridge` 在本机实测 `npm view dsh-webcode-bridge` 返回 **E404**，即该名字**未被占用**。但本仓库当前**没有发**，原因不是技术限制而是缺一步人工授权：`npm whoami` 返回 `ENEEDAUTH`（本机未登录任何 npm 账号），而「以谁的名义发布、用哪个 registry」是账号决策，不该由 CI 代替决定。发布步骤见下方「方式 C」。
+> **能不能发 npm？已发。** 包名 `dsh-webcode-bridge` 首发前实测 `npm view` 返回 **E404**（名字未被占用），
+> 0.19.26 已作为**首个 npm 版本**发布（`npm whoami` = `rsyhn`，registry = `https://registry.npmjs.org`）。
+> 首次发布前先 `pnpm pack` 再 `node scripts/verify-pack.mjs` 对齐 tarball 与工作树（49/49 逐字相同）后才发。
+> 注意：CI 仍**不 publish 任何 registry**，npm 发布是**纯手工**动作，见下方「方式 C」。
 
 ### 方式 A — 下载已打包的安装包（推荐，不用本地构建）
 
@@ -34,20 +37,21 @@
 > `scripts/install-profiles.mjs` 先删旧目录再解包（绕开 pnpm 对同版本 tarball
 > 「Already up to date」不重解的坑）。两条都是真实踩过的坑。
 
-### 方式 C — 从 npm registry 安装（**当前不可用，需先发布**）
-
-发出去之后，用户侧就是标准一条命令：
+### 方式 C — 从 npm registry 安装（**推荐**）
 
 ```powershell
 dsh plugin --profile web add dsh-webcode-bridge
 ```
 
-要走到那一步，需要一位**有 npm 账号权限的人**在本机执行（三步都是账号决策，不能由 CI 代办）：
+上一条命令只在 registry 上确实有该版本时才成立（0.19.26 起成立）。手工发布流程如下，
+三步都是账号决策，不能由 CI 代办：
 
-1. **登录**：`npm login`。注意本机 `npm config get registry` 当前是
-   `https://registry.npmmirror.com`——这是**只读镜像**，只能装不能发。发布前必须显式切回官方源：
+1. **登录**：`npm login`。**registry 必须是官方源**：`https://registry.npmmirror.com`
+   是**只读镜像**，只能装不能发，发布前必须显式切回官方源。
+   本机 0.19.26 发布时已是官方源（`npm whoami` 实测打印 `rsyhn`）：
 
    ```powershell
+   npm config get registry    # 必须打印 https://registry.npmjs.org
    npm config set registry https://registry.npmjs.org
    npm login
    npm whoami          # 必须打印出你的用户名；仍报 ENEEDAUTH 就是没登上
@@ -63,11 +67,12 @@ dsh plugin --profile web add dsh-webcode-bridge
    之后每次升版本都要重跑 2–3 步；**版本号一经发布不可复用**，所以发布前那次
    `verify-pack` 不是可选项。
 
-> 为什么现在没发：本机 `npm whoami` = `ENEEDAUTH`、registry 指向只读镜像，
-> 两条都是**账号/环境事实**而非代码问题。此处如实写明步骤，不代替账号持有人做决定。
+> **npm 首发记录（0.19.26）**：本包此前从未发过 registry，0.19.26 是**首个 npm 版本**。
+> 发布前先 `pnpm pack` 再 `node scripts/verify-pack.mjs`，实测「逐字相同 49/49」——
+> tarball 与工作树完全对齐后才 `npm publish`。
 >
-> **发布通道目前是被刻意锁死的**：`.github/workflows/release.yml` 的文件头写明本工作流
-> 「绝不 publish 到任何 registry」，且最后一步有一道守卫——工作流里一旦出现
+> **CI 仍被刻意锁死**：`.github/workflows/release.yml` 的文件头写明本工作流
+> 「绝不 publish 到任何 registry」，且有一道守卫——工作流里一旦出现
 > `npm publish` / `pnpm publish` 命令行，构建**直接失败**。所以方式 C 是**纯手工操作**：
 > 要在 CI 里自动发布，必须先把这个守卫拆掉，那是「改发布策略」的决定，不是顺手能做的改动。
 > 现有形态下不存在「误推一版」的风险面——这正是那道守卫的用途。

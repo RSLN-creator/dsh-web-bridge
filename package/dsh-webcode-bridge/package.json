@@ -5,7 +5,7 @@
   "type": "module",
   "main": "./lib/index.js",
   "bin": {
-    "webcode-bridge-standalone": "./bin/bridge-standalone.js"
+    "webcode-bridge-standalone": "bin/bridge-standalone.js"
   },
   "scripts": {
     "start": "node bin/bridge-standalone.js",

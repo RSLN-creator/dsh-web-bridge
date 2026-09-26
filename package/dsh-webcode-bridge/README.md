@@ -1,12 +1,20 @@
 # Harness Web Bridge
 
-已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.19.10（已打包并装入 web / headless 两个 profile；重启 DSH 后生效）。
+已登录的网页版内容服务（DeepSeek / GLM / Z.ai / Kimi / 豆包 / Grok …）作为 Harness 的模型提供方，复用原生本地工具、会话持久化及权限系统。当前版本 0.19.26。
 
-安装（本包**不发 npm registry**，只以 `.tgz` 交付）：
+安装（**已发布到 npm registry**：`dsh-webcode-bridge@0.19.26`）：
 
-1. 从 [Releases](https://github.com/RSLN-creator/dsh-web-bridge/releases) 下载 `dsh-webcode-bridge-<版本>.tgz`；
-   或在本目录 `pnpm install`（**不要加 `--frozen-lockfile`**）后 `pnpm pack` 自己打一份。
-2. `dsh plugin --profile web add ./dsh-webcode-bridge-<版本>.tgz`
+1. 首选，直接装 registry 版本：
+
+   ```powershell
+   dsh plugin --profile web add dsh-webcode-bridge
+   ```
+
+   需要固定版本时写 `dsh-webcode-bridge@0.19.26`。
+2. 离线 / 指定 tarball：从 [Releases](https://github.com/RSLN-creator/dsh-web-bridge/releases)
+   下载 `dsh-webcode-bridge-<版本>.tgz`；或在本目录 `pnpm install`
+   （**不要加 `--frozen-lockfile`**）后 `pnpm pack` 自己打一份，然后
+   `dsh plugin --profile web add ./dsh-webcode-bridge-<版本>.tgz`
    （本地排查也可用 `node scripts/install-profiles.mjs`，它先删旧目录再解包，
    绕开 pnpm 对同版本 tarball「Already up to date」不重解的坑）。
 3. **重启 `dsh web`。** 不重启等于没装。需要 Node.js 22.13+、系统 Edge；无需浏览器扩展。
