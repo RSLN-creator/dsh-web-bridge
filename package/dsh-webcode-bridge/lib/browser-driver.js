@@ -2723,9 +2723,26 @@ export function createBrowserDriver(options = {}) {
         // 会话真被删是少数，瞬时加载失败是多数，所以**先重试一次再下结论**。
         // 重试只针对「没有风控页」的情形：命中风控页时再撞一次只会加重风控
         //（doc/bridge-failure-ledger.md §3 的纪律）。
+        //
+        // ⚠ 这一支**不能**引用 `nav`（0.15.2 起的真实缺陷，2026-09-26 修）：`nav` 是
+        // `conversationNav()` 的返回值，只存在于 `sendTurn` 的作用域里；`runTurn`
+        // 收到的是**已经解好的** `navigate` 字符串（'fresh' 或目标 URL），两者不是
+        // 同一个作用域。原写法 `${nav.reason || 'n/a'}` 在本行必然抛
+        // `ReferenceError: nav is not defined`。
+        //
+        // 为什么能潜伏这么久：`attempt=0` 时不进这一支，第一次导航失败走的是正常
+        // 重试路径；**只有第二次仍不 ready 才踏进来**，而那正是「页面冷加载慢」的
+        // 常见现场。此时抛出的 ReferenceError 被外层当成普通失败，用户看到的是
+        // 「这一轮模型整个没回复」（GLM 现场逐字为 `assistant/attempt` 直接
+        // finish(error): `nav is not defined`），而不是「重试了一次仍然失败」——
+        // 归因方向被彻底带偏。`node --check` 抓不到它（语法合法，作用域非法），
+        // 因此护栏必须做**作用域走查**而不是语法检查。
+        //
+        // 诊断信息改用本作用域真实持有的 `target`（本轮要导航回去的会话 URL）：
+        // 同样是可复核的现场，且不依赖任何外层变量。
         for (let attempt = 0; attempt < 2 && !ready; attempt += 1) {
           if (attempt > 0) {
-            warn(`resume navigation not ready — retrying once (site=${siteId}, ${nav.reason || 'n/a'})`);
+            warn(`resume navigation not ready — retrying once (site=${siteId}, target=${safeUrl(target)})`);
             await sleep(1500);
           }
           try {
