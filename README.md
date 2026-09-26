@@ -178,6 +178,18 @@
   护栏：`test/live-view.test.mjs` 的 RTC 守卫 A/B 与反向线三条用例（缺守卫时 A/B 必失败，
   已用变异测试确认）。
 
+## 许可与第三方来源
+
+本项目以 **MIT** 分发（`package.json` 的 `license` 字段 = `MIT`），许可全文见 [LICENSE](LICENSE)：
+仓库根与 `package/dsh-webcode-bridge/LICENSE` **字节相同**，打包时随 `files` 白名单进入分发产物
+⇒ manifest、GitHub 与分发产物三处的许可标识一致。根 `LICENSE` 刻意**只放标准 MIT 全文**：
+多插一段说明会被 GitHub 的许可识别判成 `NOASSERTION`（实测），反而与 manifest 的 `MIT` 不一致
+——第三方来源因此写在这里，而不是塞进许可正文。
+
+SSE 解码协议参考 MIT 项目 [`three-water666/webcode`](https://github.com/three-water666/webcode)，
+包内 README 记有同一条来源声明。依赖、权限、外部服务与失败边界的完整声明见
+[依赖、权限、外部服务与失败边界](doc/permissions-and-boundaries.md)（DSH STORE 收录契约的声明面）。
+
 [进度台账](doc/progress.md)记录当前走到哪与下一步；[长期问题](doc/long-term-issues.md)记录已知缺陷与「为什么不现在修」；[全局诊断](doc/diagnosis-2026-09-16.md)给出一次完整的进度/缺陷/质量/框架评估；[安全审查](doc/security-review.md)记录实际防护及剩余限制；[审查入口](doc/review-guide.md)给出代码地图与探针清单。
 
 > **注**：根目录 `PLAN*.md`、`REPORT.md` 是**本地私有留痕**（`.gitignore` 已排除），
