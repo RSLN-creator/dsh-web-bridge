@@ -46,6 +46,17 @@ this file is the package-facing release history.
 渲染路径（挂载 effect 内 `addEventListener` + 订阅，逐层 try/catch 降级），并给
 `sessions.create({ workspaceId })` 加「被拒回落不绑」重试。判据改钉新形态并双向反向变异。
 
+### 真机第二轮回执：仍然空白 → 结构免疫 + 「从未重启」取证（同版收口）
+
+机器取证：正在运行的宿主进程全部启动于两轮安装**之前**，桥控制面实读
+`build.version = "0.19.60"`——用户的「重启」没有重启宿主进程，页面刷新拿到的仍是
+0.19.60 的客户端 bundle（由内存中的宿主下发）。空白面板的结构性问题是：官方
+SlotErrorBoundary 把崩溃条目渲染成**空 div**，任何一层渲染抛错在真机上都表现为
+「全空」。本轮加插件自建 `HwbBoundary`（惰性 class 边界，`React.Component` 缺席
+回退透传），包住列区整体与每列正文两层：崩溃显示「渲染失败 + 错误 message」的
+可读文本，其余列照常——空白从此变成可贴的诊断。`client-render` 新增 1 条判据
+并反向验证（拆挂点 ⇒ 红，还原 ⇒ 71/71 绿）。
+
 ### 护栏
 
 `test/team-compare.test.mjs` 新增 2 条（建列绑工作区的取值回落链、守卫三件套 +

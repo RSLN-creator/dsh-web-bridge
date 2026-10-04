@@ -2927,11 +2927,57 @@ window.__ModuleLoader__.load({
               }, '✕')),
             h('div', { className: 'hwb-concurrent-col-body' },
               SessionProvider && refsRef.current[col.sessionId]
-                ? h(SessionProvider, { session: refsRef.current[col.sessionId] },
-                  renderSlot(slotName, { hwbView: view }))
+                ? h(HwbBoundary, { label: '并发列 ' + titleOf(col.sessionId) },
+                  h(SessionProvider, { session: refsRef.current[col.sessionId] },
+                    renderSlot(slotName, { hwbView: view })))
                 : h('p', { className: 'hwb-hint' }, '这一列的会话引用不可用（换 profile 或会话被删）')))))),
       );
     }
+
+    /**
+     * 插件自己的**条目内错误边界**（0.19.62 真机排障轮）。
+     *
+     * 官方 SlotErrorBoundary 对崩溃条目的呈现是一只**空 div**（`data-slot-error`），
+     * 控制台报错只有 F12 才看得到——真机上「哪里炸了」完全不可见，用户只能看到
+     * 「一片空白」。本边界包住**列正文**（官方 SessionProvider + 官方会话体）与
+     * 整个列区：任何一层渲染抛错时，显示**可读的错误文本**（含错误 message），
+     * 其余部分照常——把「空白」变成「能贴给助手的诊断」。
+     *
+     * 为什么不用函数组件 + try/catch：渲染期异常只能被 class 边界
+     *（getDerivedStateFromError / componentDidCatch）捕获，函数体 try/catch 够不着。
+     *
+     * 边界类**惰性构建**：`class extends React.Component` 在模块求值时就读
+     * React.Component——测试桩（client-render 的 React 桩没有 Component）会让
+     * **整个 bundle 求值失败**（本轮实锤：32 条用例全死在 "Class extends value
+     * undefined"，组件连渲染机会都没有）。所以 React.Component 存在才建类，
+     * 否则回退为透传函数组件——没有边界 = 退回官方空盒行为（与 0.19.61 相同），
+     * 真机 React 必有 Component，回退分支只在桩里生效。
+     */
+    const HwbBoundary = (typeof React.Component === 'function')
+      ? class extends React.Component {
+          constructor(props) {
+            super(props);
+            this.state = { error: null };
+          }
+          static getDerivedStateFromError(error) {
+            return { error };
+          }
+          componentDidCatch(error) {
+            // 与官方边界同一口径：报进 console（F12 可查），但 UI 上不再空白。
+            console.error('[webcode-bridge] ' + (this.props.label || 'panel') + ' render failed:', error);
+          }
+          render() {
+            if (this.state.error) {
+              const msg = String(this.state.error && this.state.error.message || this.state.error);
+              return h('div', { className: 'hwb-hint bad', 'data-hwb-boundary': this.props.label || '' },
+                h('p', { style: { margin: '0 0 6px', fontWeight: 600 } },
+                  (this.props.label || '这一块') + ' 渲染失败：'),
+                h('p', { style: { margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, msg));
+            }
+            return this.props.children;
+          }
+        }
+      : (props) => props.children;
 
     /**
      * 并发会话面板：两条**并列的视图**——「并发对话」与「并发轨迹」。
@@ -2985,7 +3031,10 @@ window.__ModuleLoader__.load({
             'aria-selected': view === t.id ? 'true' : 'false',
             onClick: () => setView(t.id),
           }, t.name))),
-        h(ConcurrentColumns, { ...props, view }));
+        // 列区整体再包一层边界：ConcurrentColumns 自身（restore/create 等逻辑）
+        // 抛错时不再把整个 main 条目炸成官方空 div，而是显示可读错误。
+        h(HwbBoundary, { label: '并发会话面板' },
+          h(ConcurrentColumns, { ...props, view })));
     }
 
     /**

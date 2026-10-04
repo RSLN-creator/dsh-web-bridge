@@ -1663,6 +1663,41 @@ test('★ 0.19.55 并发会话：必须由左栏行 + 同名 main 提供，且�
     'conversation.view 上不得再有并发视图（0.19.55 起它必然抛 recursive render of factory）');
 });
 
+/**
+ * 0.19.62 真机排障轮：并发面板「一片空白」的**结构免疫**。
+ *
+ * 真机故障链（两轮都成立）：main 条目里任何一层渲染抛错 → 官方 SlotErrorBoundary
+ * 渲染 `<div data-slot-error>`（**空 div**）→ 用户看到「连页签都没有的全空面板」，
+ * 控制台报错只有 F12 才看得到。修法两层：
+ *   ① 面板自己的 `HwbBoundary` 包住列区与每列正文——崩溃显示**可读错误文本**，
+ *      不再整块空白（这是本条用例钉的）；
+ *   ② 边界类惰性构建（React.Component 不存在时回退透传）——否则桩上整个
+ *      bundle 求值失败，本文件全部用例死在 "Class extends value undefined"
+ *     （上一版实锤，见 0.19.62 台账「三之二」）。
+ */
+test('★ 0.19.62 并发：条目内错误边界必须存在——崩溃显示可读错误而非官方空盒', async () => {
+  const src = clientSrcOf();
+  // ① 边界存在且惰性：React.Component 缺席时必须回退为透传，而不是让 bundle 求值崩掉。
+  assert.match(src, /const HwbBoundary = \(typeof React\.Component === 'function'\)/,
+    '边界类必须按 React.Component 是否存在惰性构建（桩上没有 Component）');
+  assert.match(src, /\: \(props\) => props\.children;/, '缺席回退必须是透传函数组件');
+  // ② 两层挂点：列区整体 + 每列正文。
+  assert.match(src, /h\(HwbBoundary, \{ label: '并发会话面板' \},\s*\n\s*h\(ConcurrentColumns/,
+    '列区必须包在 HwbBoundary 里（面板逻辑崩溃 ≠ 整块空白）');
+  assert.match(src, /h\(HwbBoundary, \{ label: '并发列 ' \+ titleOf\(col\.sessionId\) \}/,
+    '每列正文必须各自包一层 HwbBoundary（一列崩溃不拖垮其余列）');
+  // ③ 崩溃时的呈现必须可读：有 label、有 message，而不是空 div。
+  assert.match(src, /渲染失败：/, '崩溃呈现必须带「渲染失败」说明');
+  assert.match(src, /whiteSpace: 'pre-wrap'/, '错误 message 必须可读地换行显示');
+  // ④ 与官方边界的分工写清楚（后人改动前先读到）。
+  assert.match(src, /空 div/, '必须写明官方空盒机理（后人改前先读到为什么需要自建边界）');
+});
+
+/** client-render 侧读 client.cjs 源码（复用本文件既有的 readFileSync 导入）。 */
+function clientSrcOf() {
+  return readFileSync(path.join(here, '..', 'lib', 'client.cjs'), 'utf8');
+}
+
 // 0.19.0 删除：三条「官方花名册 Team 面板」用例（成员角色/状态/模型渲染、inactive
 // 显示「可唤醒」、只有 lead 时说明没有派生 teammate）。
 //
