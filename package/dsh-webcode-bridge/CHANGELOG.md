@@ -5,6 +5,52 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.62
+
+**并发会话防跳走：列内点击不再把中央区换回单个会话（建列绑工作区 + 面板意图守卫）。**
+
+### 用户报了什么（原话）
+
+> 「现状是一点击选择范围就会跳成单独那里对话，没有实现我的设想想！」
+
+### 真因（实读官方 0.2.0-rc.2 bundle 取证，非推测）
+
+官方导航链条：`uiWorkspace.openSession(id)` / `openWorkspace(...)` →
+`replaceMain(target, signal, "reveal")` → **`ctx.layout.selectPanel(null)`**。
+官方布局契约里 `main` keyed 面板与 `conversation`（单个会话）**互斥**，`selectPanel(null)`
+= 整个中央区换回单个会话——并发面板由此消失。
+
+列内的触发点是官方 `conversation.content` 自带的「工作区选择」：`sessions.create({})`
+造出的会话没绑工作区 ⇒ 列里渲染「虚线选择工作区」composer 卡 ⇒ 一点就走
+`selectWorkspace → openWorkspace → selectPanel(null)` 那条链。
+
+### 修法（两半配套）
+
+1. **建列绑工作区（治本）**：`createColumns` 先取 `currentWorkspaceId()`
+   （当前会话所在工作区 → 最近更新的工作区 → 不绑），传给
+   `sessions.create({ workspaceId })`——与官方 `reuseOrCreateBlank` 同款参数。
+   绑上之后 composer 直接可用，「选择工作区」这一步根本不出现。
+2. **面板意图守卫（兜底）**：列内还有其它官方导航入口（hero 工作区胶囊、crumb、
+   分支按钮），都是官方组件内部行为，无法逐个替换。守卫在面板根记
+   `pointerdown` 时间戳并订阅 `ctx.layout.panelInfo`：**紧跟面板内点击**发生的
+   `selectPanel(null)` 判定为列内官方交互触发，立刻 `selectPanel(面板id)` 拉回；
+   面板外导航（如点左栏清单打开某条会话）没有面板内点击，照常放行。
+   `ctx.layout` 服务缺席（旧宿主/测试桩）时守卫整体降级关闭。
+
+### 真机第一轮回执：面板全空（同版收口）
+
+重启后回执「并发界面打开是一片空白」。取证：官方渲染器对每个条目套 `SlotErrorBoundary`，
+崩溃条目渲染成**空 div** ⇒「连页签都没有的全空面板」= 并发 main 条目渲染抛错。首版守卫
+在渲染期同步 `createPanelGuard(...)`，其中 `panelInfo.subscribe()` 若同步抛，`guardRef.current`
+停在 null ⇒ 下一行读 `.onPointerDown` 即 TypeError——正是这个形状。修法：守卫彻底退出
+渲染路径（挂载 effect 内 `addEventListener` + 订阅，逐层 try/catch 降级），并给
+`sessions.create({ workspaceId })` 加「被拒回落不绑」重试。判据改钉新形态并双向反向变异。
+
+### 护栏
+
+`test/team-compare.test.mjs` 新增 2 条（建列绑工作区的取值回落链、守卫三件套 +
+挂接 + 卸载注销 + 渲染路径零守卫），并做反向变异验证（改实现 → 红；还原 → 绿）。
+
 ## 0.19.61
 
 **六条用户反馈收口：站点标题改网站名 + 头像被矢量盖住的真根因 + 目录居中 + 模型目录随账号 + 版本/更新。**

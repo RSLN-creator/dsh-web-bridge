@@ -312,8 +312,69 @@ test('★ 0.19.0 Team：官方 agentTeams 花名册面板不得复活（用户�
   assert.ok(!/label: \(\) => '三列模型对比'/.test(src), '旧名字不得复活');
 });
 
-// ── ⑨ 官方 agentTeams 读取本身保留（它仍是任务板的来源）──────────────────────
+// ── ⑨ 0.19.62 防跳走：建列绑工作区 + 面板意图守卫（官方 replaceMain→selectPanel(null) 链）──
 
+// 用户 2026-10-04 报「一点击选择范围就会跳成单独那里对话」。官方机理（实读
+// 0.2.0-rc.2 bundle）：uiWorkspace.openSession/openWorkspace → replaceMain(…, "reveal")
+// → ctx.layout.selectPanel(null) —— main 面板与单个会话互斥，于是整个并发面板被换掉。
+// 列内触发点：未绑工作区的会话渲染「虚线选择工作区」composer 卡，点击即走
+// selectWorkspace → openWorkspace 那条链。修法两半：①建列带 workspaceId（治本）；
+// ②panelInfo 订阅 + 面板内 pointerdown 意图判别（兜住其余官方导航入口）。
+
+test('★ 0.19.62 并发：新建列必须尝试绑定当前工作区（「选择工作区」卡不该在列里出现）', () => {
+  const src = clientSrc();
+  const body = compareBody(src);
+  // 建列取工作区 id，且 create 的参数随有无 workspaceId 分叉（缺工作区时保持旧行为）。
+  assert.match(body, /const workspaceId = currentWorkspaceId\(\);/,
+    'createColumns 必须先取 currentWorkspaceId()');
+  assert.match(body, /workspaceId\s*\?\s*sessions\.create\(\{ workspaceId \}\)\.catch\(\(\) => sessions\.create\(\{\}\)\)\s*:\s*sessions\.create\(\{\}\)/,
+    '有 workspaceId 必须传给 sessions.create（官方 reuseOrCreateBlank 同款参数）；'
+    + '被宿主拒时必须回落不绑重试（最坏退回 0.19.61 行为），而不是整组建不出来');
+  // 取值回落链：当前会话所在工作区 → 最近更新 → null（不绑，交守卫兜底）。
+  assert.match(body, /currentWorkspaceId = \(\) =>/, '必须有 currentWorkspaceId 助手');
+  assert.match(body, /w\.sessionIds\.includes\(currentSessionId\)/,
+    '第一回落：当前会话所在的工作区');
+  assert.match(body, /Number\(w\.updatedAt\)/, '第二回落：最近更新的工作区（官方 recentWorkspace 语义）');
+  assert.match(body, /return null;/, '取不到时明确返回 null（不绑），不得编造 id');
+  // useWorkspaces 必须进面板（root 作用域标准 hook，官方 materializeStandardBinding 提供）。
+  assert.match(body, /const useWorkspaces = typeof props\.useWorkspaces === 'function' \? props\.useWorkspaces : noSessions;/,
+    'useWorkspaces 必须经标准 prop 取、缺席降级为 noSessions（绝不条件调用 hook）');
+});
+
+test('★ 0.19.62 并发：面板意图守卫必须存在（panelInfo 订阅 + 面板内 pointerdown 判别）', () => {
+  const src = clientSrc();
+  // 守卫三件套：服务面可用性探测、时间窗、回拉。
+  assert.match(src, /const PANEL_GUARD_MS = \d+;/, '回拉判别必须有明确的时间窗常量');
+  assert.match(src, /function panelGuardAvailable\(layout\)/, '必须先探测 ctx.layout 服务面（缺席降级，不是崩溃）');
+  assert.match(src, /function createPanelGuard\(layout, panelId\)/, '必须有守卫运行体');
+  const guard = src.slice(src.indexOf('function createPanelGuard'), src.indexOf('function ConcurrentPanelIcon'));
+  assert.ok(guard.length > 0, '找不到 createPanelGuard 函数体（改名/移动需同步本判据）');
+  assert.match(guard, /layout\.panelInfo\.subscribe\(/, '必须订阅 panelInfo（官方裸 observable：getSnapshot + subscribe）');
+  // 0.19.62 真机教训（「面板全空」）：守卫绝不能在渲染期同步建——subscribe 同步抛
+  // 会把整个 main 条目炸成官方边界下的空 div。两道防线都必须在位：
+  //   ① createPanelGuard 内部 subscribe 自带 try/catch（订阅失败只损失守卫）；
+  //   ② ConcurrentPanel 的守卫只存在于挂载 effect 里（渲染路径零守卫），
+  //      且 effect 体对 create/监听/清理全部 try/catch。
+  assert.match(guard, /try \{[\s\S]*?unsubscribe = layout\.panelInfo\.subscribe\(/,
+    'createPanelGuard 内部必须把 subscribe 包进 try/catch（订阅失败降级，不外抛）');
+  const panel = src.slice(src.indexOf('function ConcurrentPanel(props)'), src.indexOf('function createPanelGuard'));
+  assert.ok(panel.length > 0, '找不到 ConcurrentPanel 函数体（改名/移动需同步本判据）');
+  assert.ok(!/onPointerDown: guardRef/.test(panel),
+    '渲染路径不得再同步建守卫/挂 onPointerDown prop（0.19.62 首版正是这个形态炸出空白面板）');
+  assert.match(panel, /createPanelGuard\(props\.layout, CONCURRENT_PANEL_ID\)/,
+    '守卫必须在挂载 effect 里创建');
+  assert.match(panel, /addEventListener\('pointerdown', onDown, true\)/,
+    'pointerdown 指纹必须用 DOM addEventListener 接（渲染路径零守卫）');
+  assert.match(panel, /createPanelGuard\(props\.layout, CONCURRENT_PANEL_ID\); \} catch/,
+    'effect 里 createPanelGuard 必须 try/catch（任何失败降级成没有守卫）');
+  assert.match(panel, /removeEventListener\('pointerdown', onDown, true\)/,
+    '卸载必须 removeEventListener（与 addEventListener 成对）');
+  assert.match(guard, /layout\.selectPanel\(panelId\)/, '回拉必须走官方 layout.selectPanel（不绕过宿主）');
+  // ctx.layout 必须从注册处传进面板（reflect 服务面，与 sessions 同口径）。
+  assert.match(src, /layout: ctx\.layout/, '注册处必须把 ctx.layout 传给 ConcurrentPanel');
+});
+
+// ── ⑩ 官方 agentTeams 读取本身保留（它仍是任务板的来源）──────────────────────
 /**
  * ★ 0.19.0：用户要的「设置开始时间 / 模式 / 权限」必须**三跳齐全**。
  *

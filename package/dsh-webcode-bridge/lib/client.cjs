@@ -2675,9 +2675,38 @@ window.__ModuleLoader__.load({
       const slotName = props.slotName;
       const groupKey = props.groupKey || 'panel';
       const useSessions = typeof props.useSessions === 'function' ? props.useSessions : noSessions;
+      const useWorkspaces = typeof props.useWorkspaces === 'function' ? props.useWorkspaces : noSessions;
       // 只取 byId 这个**稳定引用**（store 自己的对象），不要在选择器里造新对象：
       // 每次返回新对象会让 useSyncExternalStore 判定「变了」，进而无限重渲染。
       const byId = useSessions(s => s && s.byId) || {};
+      // 当前会话 id 与工作区清单：createColumns 给新列绑 workspaceId 用（见其注释）。
+      // current 在官方快照里是「主视图选中的会话 id」；无会话（面板是唯一焦点）时为空。
+      const currentSessionId = useSessions(s => (s && s.current) || null);
+      const workspaces = useWorkspaces(s => s) || null;
+
+      /**
+       * 新列要绑的工作区 id（依次回落：当前会话的工作区 → 最近更新的工作区 → 不绑）。
+       * 全部按官方字段语义取（workspace.sessionIds / workspaceId / updatedAt），不猜形状；
+       * 快照未就绪（phase 缺失/非 ready）一律按「取不到」处理，交给守卫兜底。
+       */
+      const currentWorkspaceId = () => {
+        try {
+          const items = (workspaces && Array.isArray(workspaces.items)) ? workspaces.items : [];
+          if (items.length) {
+            const ofCurrent = currentSessionId
+              ? items.find(w => Array.isArray(w.sessionIds) && w.sessionIds.includes(currentSessionId))
+              : null;
+            if (ofCurrent) return ofCurrent.workspaceId;
+            let recent = null;
+            for (const w of items) {
+              if (!w || typeof w.workspaceId !== 'string' || !w.workspaceId) continue;
+              if (!recent || (Number(w.updatedAt) || 0) > (Number(recent.updatedAt) || 0)) recent = w;
+            }
+            if (recent) return recent.workspaceId;
+          }
+        } catch (e) { /* 快照形状漂移：按「取不到」处理，不建列失败 */ }
+        return null;
+      };
 
       // ★ 唯一的列状态：一个数组。加列 = 展开，删列 = filter。
       const [cols, setCols] = React.useState([]);
@@ -2778,13 +2807,37 @@ window.__ModuleLoader__.load({
       }, [cols.length, visible]);
       const panBy = (delta) => setFirstCol(prev => Math.min(Math.max(0, prev + delta), maxFirst));
 
-      /** 新建一列（或首次建组）。每条列都是一条 Host 上的真会话。 */
+      /**
+       * 新建一列（或首次建组）。每条列都是一条 Host 上的真会话。
+       *
+       * ## 为什么必须带 `workspaceId`（0.19.62，「点击选择范围就跳走」的治本半边）
+       *
+       * `sessions.create({})` 造出的会话没有绑定工作区 ⇒ 官方 conversation 把它渲染成
+       * 「虚线选择工作区」的 composer 卡 ⇒ 用户一点就走到
+       * `selectWorkspace → uiWorkspace.openWorkspace → replaceMain('reveal') →
+       * selectPanel(null)`，中央区整体跳回单个会话（机理见 createPanelGuard 注释）。
+       * 官方自己建会话也走这条：`reuseOrCreateBlank` 用
+       * `sessions.create({ workspaceId: workspace.workspaceId })`（ui-workspace 源码）。
+       *
+       * 工作区取值（依次回落，全部官方语义，缺工作区服务时不绑、保持旧行为）：
+       *   ① **当前会话所在的工作区**——与主视图一致，最符合「就在这里开几列」的直觉；
+       *   ② **最近更新的工作区**——官方 `startSession` 的回落就是 recentWorkspace；
+       *   ③ 都取不到（极端：宿主还没就绪）才允许不绑，此时守卫（createPanelGuard）
+       *      兜住「选择工作区」跳走的那一下。
+       */
       const createColumns = (n) => {
         if (!sessions || typeof sessions.create !== 'function' || busy) return;
         setBusy(true);
         setError('');
         const want = Math.max(1, Math.min(Number(n) || 1, CONCURRENT_MAX_COLS));
-        Promise.all(Array.from({ length: want }, () => sessions.create({})))
+        const workspaceId = currentWorkspaceId();
+        // 0.19.62 真机韧性：带 workspaceId 的 create 若被宿主拒（工作区参数形状漂移、
+        // workspace 未连接、writer-held……），**回落到不绑**重试一次——最坏退回
+        // 0.19.61 的行为（有守卫兜住「选择工作区」那一下），而不是整组建不出来。
+        const make = () => (workspaceId
+          ? sessions.create({ workspaceId }).catch(() => sessions.create({}))
+          : sessions.create({}));
+        Promise.all(Array.from({ length: want }, make))
           .then((ids) => {
             if (!aliveRef.current) return;
             const added = [];
@@ -2899,7 +2952,32 @@ window.__ModuleLoader__.load({
         { id: 'chat', name: '并发对话' },
         { id: 'trajectory', name: '并发轨迹' },
       ];
-      return h('div', { className: 'hwb-concurrent-panel' },
+      // 意图守卫：机理与降级口径见 createPanelGuard 的注释。
+      //
+      // 0.19.62 真机教训（「并发界面打开是一片空白」）：守卫绝不能进**渲染路径**。
+      // 首版在渲染期同步 `createPanelGuard(...)`——其中 `layout.panelInfo.subscribe()`
+      // 一旦同步抛错（服务面形状/时机与预期不符），赋值中断、`guardRef.current` 停在
+      // null，紧接着读 `.onPointerDown` 就是 TypeError ⇒ 整个 main 条目被官方
+      // SlotErrorBoundary 捕获，渲染成 `<div data-slot-error>` **空 div**——这就是
+      // 「面板全空、连页签都没有」的形态（官方边界对崩溃条目就是一只空盒子）。
+      // 修法：渲染路径**零守卫**——根节点不挂 onPointerDown prop，挂载后用
+      // `addEventListener` 在 DOM 上接 pointerdown，订阅也在同一个 effect 里，
+      // 整个 effect 体 try/catch：守卫的任何失败都降级成「没有守卫」，面板照常渲染。
+      // 清理走 effect 的返回函数（卸载时 removeEventListener + 注销订阅）。
+      const rootRef = React.useRef(null);
+      React.useEffect(() => {
+        const el = rootRef.current;
+        if (!el) return;
+        let guard = null;
+        try { guard = createPanelGuard(props.layout, CONCURRENT_PANEL_ID); } catch (e) { warn('concurrent panel guard', e); }
+        const onDown = () => { try { guard?.onPointerDown(); } catch (e) { /* 指纹失败不影响面板 */ } };
+        try { el.addEventListener('pointerdown', onDown, true); } catch (e) { warn('concurrent panel pointerdown', e); }
+        return () => {
+          try { el.removeEventListener('pointerdown', onDown, true); } catch (e) { /* 同上 */ }
+          try { guard?.dispose(); } catch (e) { /* 注销失败不影响卸载 */ }
+        };
+      }, []);
+      return h('div', { className: 'hwb-concurrent-panel', ref: rootRef },
         h('div', { className: 'hwb-concurrent-tabs', role: 'tablist' },
           tabs.map(t => h('button', {
             key: t.id, type: 'button', role: 'tab',
@@ -2908,6 +2986,105 @@ window.__ModuleLoader__.load({
             onClick: () => setView(t.id),
           }, t.name))),
         h(ConcurrentColumns, { ...props, view }));
+    }
+
+    /**
+     * 并发面板的「选中意图守卫」（0.19.62）。
+     *
+     * ## 症状与官方机理（实读官方 0.2.0-rc.2 bundle 取证，不是推测）
+     *
+     * 用户报「一点击选择范围就会跳成单独那里对话」。链条在**官方代码**里：
+     *
+     *   uiWorkspace.openSession(id) / openWorkspace(...)
+     *     → replaceMain(target, signal, "reveal")
+     *         → ctx.layout.selectPanel(null)      ← 中央区整体切回「单个会话」
+     *
+     * 官方布局契约：`main` keyed 面板与 `conversation`（单个会话）互斥，
+     * `selectPanel(null)` = 回到单个会话（ui-layout README：「`null` 则选中会话界面」）。
+     * 官方 `ui-workspace` 的 `replaceMain` 在 `panel === "reveal"` 时就这么做。
+     *
+     * ## 为什么列内点击会走到那条链
+     *
+     * 官方 `conversation.content` factory 把「工作区选择」作为**inject 注入**的
+     * `selectWorkspace` prop 交给 hero/composer（`conversation.hero.workspace` 拾取器、
+     * composer 卡片的 `onRequestWorkspace`）。`sessions.create({})` 造出的会话没有绑定
+     * 工作区 ⇒ 列里渲染的是「虚线选择工作区」卡 ⇒ 用户一点，`selectWorkspace →
+     * openWorkspace → replaceMain → selectPanel(null)` —— 面板被换掉，列全没了。
+     * 这就是「点击选择（工作区）范围就跳走」的准确机理。
+     *
+     * ## 修法（两件配套，缺一不可）
+     *
+     * ① **治本**：`createColumns` 建列时带 `workspaceId`（当前工作区），composer
+     *    直接可用，「选择工作区」这一步根本不出现（见 ConcurrentColumns 的注释）。
+     * ② **兜底（本函数）**：列内还有别的官方入口会导航（hero 胶囊、crumb、分支按钮），
+     *    无法逐个替换——它们都是官方组件的内部行为。所以在面板根上记「最近一次
+     *    pointerdown 发生在面板内」，并订阅 `ctx.layout.panelInfo`：当面板被
+     *    `selectPanel(null)` 切回会话、且那次切换**紧邻一次面板内点击**（PANEL_GUARD_MS
+     *    内），判定为「列内官方交互触发的跳走」，立刻 `selectPanel(面板id)` 拉回。
+     *    面板外的导航（用户点左栏清单里的某条会话——官方行为，用户已确认放行）
+     *    没有面板内 pointerdown，不拦截。
+     *
+     * `ctx.layout` 经 `ctx.reflect` 服务面公开（ui-layout 源码：`ctx.reflect.provide(
+     * "layout", layout)`），`panelInfo` 是 `{ getSnapshot(): { activePanelId },
+     * subscribe(listener) }` 的裸 observable——与本文件既有的「官方事实、运行时探测、
+     * 缺席降级」口径一致，不硬编码宿主实现。
+     */
+    const PANEL_GUARD_MS = 900;
+
+    /** @returns {boolean} ctx.layout 服务面是否可用（旧宿主/测试桩缺席时守卫整体关闭）。 */
+    function panelGuardAvailable(layout) {
+      return !!layout
+        && typeof layout.selectPanel === 'function'
+        && !!layout.panelInfo
+        && typeof layout.panelInfo.getSnapshot === 'function'
+        && typeof layout.panelInfo.subscribe === 'function';
+    }
+
+    /**
+     * 守卫的运行体（独立成函数以便护栏与复用；ConcurrentPanel 挂载 effect 里调用）。
+     *
+     * 0.19.62 真机教训：本函数内部**任何**一步都可能因官方服务面的真实形状而抛
+     * （subscribe 同步抛、getSnapshot 抛……）。调用方已把整个调用包进 try/catch
+     *（降级 = 没有守卫），但本函数自身也不该让「后半段可降级的失败」变成「调用方
+     * 拿不到守卫体」——所以 subscribe 也单独 try/catch：订阅失败只损失守卫，
+     * onPointerDown 指纹照常记录。
+     *
+     * @param {Object} layout ctx.layout 服务（缺席时返回 no-op，守卫关闭）
+     * @param {string} panelId 本面板的 main key
+     * @returns {{ onPointerDown: () => void, dispose: () => void }}
+     *   onPointerDown 由挂载 effect 接到根节点 DOM；dispose 注销订阅。
+     */
+    function createPanelGuard(layout, panelId) {
+      if (!panelGuardAvailable(layout)) {
+        // 降级不是崩溃：没有服务面就等于没有守卫，行为与 0.19.61 相同。
+        return { onPointerDown: () => {}, dispose: () => {} };
+      }
+      let lastInsidePointerAt = 0;
+      let suppress = false; // 自己 selectPanel 回拉触发的订阅回调不再处理，防自激
+      let unsubscribe = () => {};
+      try {
+        unsubscribe = layout.panelInfo.subscribe(() => {
+          try {
+            if (suppress) return;
+            const active = layout.panelInfo.getSnapshot().activePanelId;
+            if (active === panelId) return;             // 别的面板被选中：放行（用户真实选择）
+            if (active !== null) return;                // 仍是某个全局面板：同样放行
+            // 面板被切回「单个会话」。看它是不是紧跟一次面板内点击：
+            if (Date.now() - lastInsidePointerAt <= PANEL_GUARD_MS) {
+              suppress = true;
+              try { layout.selectPanel(panelId); } finally { suppress = false; }
+            }
+          } catch (e) { /* 监听回调里的任何失败不外泄：守卫坏一拍，不炸面板 */ }
+        });
+      } catch (e) {
+        // subscribe 本身同步抛（服务面时机/形状不符）：守卫降级，指纹仍记录，
+        // 至少 dispose 语义完整（回一个 no-op）。
+        warn('concurrent panel guard subscribe', e);
+      }
+      return {
+        onPointerDown: () => { lastInsidePointerAt = Date.now(); },
+        dispose: () => { try { unsubscribe(); } catch (e) { /* 注销失败不影响卸载 */ } },
+      };
     }
 
     /**
@@ -6330,6 +6507,7 @@ window.__ModuleLoader__.load({
             }, (props) => h(ConcurrentPanel, {
               ...props,
               sessions: ctx.sessions,
+              layout: ctx.layout,
               slotName: CONCURRENT_COLUMN_SLOT,
               groupKey: 'panel',
             }));
