@@ -5,6 +5,35 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.66
+
+**照抄官方 header：模式 chip 落地（官方投影路径 + 官方文案）；官方漂移闸门 11 段并接提交前钩子；
+左栏并发会话目录找回历史组；列头第一段按官方规格。**
+
+### 用户选了什么
+
+> 「自己复刻三块 chip」
+
+⇒ 三块 chip（标准模式 / 后台任务 / 子智能体·团队）**自己复刻**。复刻口径写进代码注释：
+**数据面抄官方、文案抄官方、拿不到就不画**（绝不摆假壳）。
+
+### 落地
+
+| 项 | 结果 |
+| --- | --- |
+| **模式 chip** | 走官方**会话清单投影**：`state.byId[sessionId].projectionValues.agentPreset`（照 `ui-agent-preset:357`）；文案逐字来自官方 i18n（`:309` 「标准模式」／`:311` 「PTC 模式」）。真机：每列列头出现「标准模式」，探针新增硬判据 |
+| 后台任务 / 子智能体 | 代码走 `props.useJobs` / `props.useSubagents`，**宿主未发 ⇒ 不渲染**（如实留空，注释写明原因与后续路径） |
+| **官方漂移闸门** | `scripts/check-official-drift.mjs` 扩到 **11 段**（新增 `agent-preset-labels`、`jobs-count-label`）；接 **提交前钩子**（`scripts/hooks/pre-commit` + `install-git-hooks.mjs`），官方一侧变了会在提交前点名；钩子在 `node` 不在 PATH 时**放行**（否则会拦死所有提交） |
+| **列 vs 官方对照探针** | `test-mock/probe-column-parity.mjs`：共用 `[data-conversation-scroll]` + 官方 composer + 同族会话体；差异 = 官方 4 处 header vs 列 0 |
+| **左栏并发会话目录** | 多组留痕 + 每组一条 `sidebar.panellist` 行 + 同名 `main` key；真机验证：点「并发会话 · N 列」能**找回**那一组 |
+| 列头第一段 | 标题常显 + 官方 44px / 13px 规格 |
+| 面板级页签 | **移除**（视图交回官方默认：会话自己记住的那一个） |
+
+### 未完成（如实记，见 `doc/long-term-issues.md` #47）
+
+后台任务与子智能体两块 chip 的数据面（官方 hook 未发到第三方座位）；右侧 tab（官方右栏被
+`activePanelId === null` 闸门收走，受支持路径下第三方无法在自有面板里渲染官方右栏内容）。
+
 ## 0.19.64
 
 **「还是会切回到官方工作区」的真根因：守卫从未生效（`CONCURRENT_PANEL_ID` 跨作用域）＋
