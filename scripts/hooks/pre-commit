@@ -1,0 +1,15 @@
+#!/bin/sh
+# pre-commit — 提交前告诉人「照抄官方的段落是否失同步」（用户 2026-10-06 明令）。
+#
+# 安装：node scripts/install-git-hooks.mjs
+# 跳过（确实知道自己在干什么时才用）：git commit --no-verify
+set -e
+repo_root="$(git rev-parse --show-toplevel)"
+if [ -f "$repo_root/scripts/check-official-drift.mjs" ]; then
+  node "$repo_root/scripts/check-official-drift.mjs" || {
+    echo ""
+    echo "[pre-commit] 官方一侧变了：上面点名的每一段都需要人工看一眼再决定是否同步。"
+    echo "[pre-commit] 确认已同步（或确认与本次改动无关）后：node scripts/check-official-drift.mjs --update"
+    exit 1
+  }
+fi

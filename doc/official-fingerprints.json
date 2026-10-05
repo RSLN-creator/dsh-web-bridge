@@ -1,0 +1,154 @@
+{
+  "at": "2026-10-05T17:55:51.855Z",
+  "asar": "D:/2_Download_Main/4_DeepSeek Harness_code/resources/app.asar",
+  "segments": {
+    "conversation-view-switcher": {
+      "file": "dsh-client-ui-conversation/lib/client.js",
+      "why": "视图切换（对话⇄轨迹）的渲染位置；我们不再自绘页签，视图交给会话自己记住的那一个",
+      "sha256": "8c9dadc5eeb673af",
+      "lines": 2,
+      "perPattern": [
+        {
+          "pattern": "/renderSlot\\(\"conversation\\.view\"/",
+          "hits": 1
+        },
+        {
+          "pattern": "/viewId !== void 0/",
+          "hits": 1
+        }
+      ]
+    },
+    "conversation-header-slot": {
+      "file": "dsh-client-ui-conversation/lib/client.js",
+      "why": "顶部那一行（标题/子智能体/团队/标准模式/后台任务）= conversation.header 槽；列头要在同一位置照抄",
+      "sha256": "7950fe5e0db39e1e",
+      "lines": 4,
+      "perPattern": [
+        {
+          "pattern": "/renderSlot\\(\"conversation\\.header\"/",
+          "hits": 1
+        },
+        {
+          "pattern": "/name: \"conversation\\.header\"/",
+          "hits": 1
+        },
+        {
+          "pattern": "/conversation\\.header\\.leading/",
+          "hits": 2
+        }
+      ]
+    },
+    "conversation-content-factory": {
+      "file": "dsh-client-ui-conversation/lib/client.js",
+      "why": "列里渲染的就是这个 factory（embedded 形态）；相位/局部槽的接法一旦变，列会跟着变",
+      "sha256": "f3f794c2fd636775",
+      "lines": 8,
+      "perPattern": [
+        {
+          "pattern": "/name: \"conversation\\.content\"/",
+          "hits": 1
+        },
+        {
+          "pattern": "/scope: \"session-maybe\"/",
+          "hits": 6
+        },
+        {
+          "pattern": "/renderSlot\\(\"conversation\\.session\"/",
+          "hits": 1
+        }
+      ]
+    },
+    "session-view-ids": {
+      "file": "dsh-client-ui-chat/lib/client.js",
+      "why": "「对话」视图的注册（id 与位置）——会话自己记住的视图 id 来源",
+      "sha256": "4df6b7b4622c9e38",
+      "lines": 2,
+      "perPattern": [
+        {
+          "pattern": "/inject\\(\"conversation\\.view\"/",
+          "hits": 1
+        },
+        {
+          "pattern": "/name: \"conversation\\.view\"/",
+          "hits": 1
+        }
+      ]
+    },
+    "trajectory-view-ids": {
+      "file": "dsh-client-ui-trajectory/lib/client.js",
+      "why": "「轨迹」视图的注册（id 与位置）",
+      "sha256": "ddda94b854a9546c",
+      "lines": 2,
+      "perPattern": [
+        {
+          "pattern": "/inject\\(\"conversation\\.view\"/",
+          "hits": 1
+        },
+        {
+          "pattern": "/name: \"conversation\\.view\"/",
+          "hits": 1
+        }
+      ]
+    },
+    "rightbar-gate": {
+      "file": "dsh-client-ui-sidebar-right/lib/client.js",
+      "why": "右栏的显示闸门（activePanelId === null 才显示）——决定了「面板开着时右侧 tab 为什么没了」，也是照抄右栏时的依据",
+      "sha256": "683d7f8488154fc0",
+      "lines": 2,
+      "perPattern": [
+        {
+          "pattern": "/activePanelId === null/",
+          "hits": 2
+        }
+      ]
+    },
+    "rightbar-session-seat": {
+      "file": "dsh-client-ui-sidebar-right/lib/client.js",
+      "why": "右栏 per-session 座位（rightbar.session）——照抄右栏内容时的落点",
+      "sha256": "3813c82ead801d5e",
+      "lines": 3,
+      "perPattern": [
+        {
+          "pattern": "/rightbar\\.session/",
+          "hits": 3
+        }
+      ]
+    },
+    "slot-ownership-rule": {
+      "file": "dsh-client-ui-renderer/lib/client.js",
+      "why": "槽归属校验（renderSlot 只允许声明者渲染 / renderFactorySlot 不校验）——「能不能把官方 header 搬进列」的判据",
+      "sha256": "6a13d3b9ea723a97",
+      "lines": 4,
+      "perPattern": [
+        {
+          "pattern": "/is not declared by this entry's children/",
+          "hits": 2
+        },
+        {
+          "pattern": "/is not declared by this Factory/",
+          "hits": 2
+        }
+      ]
+    },
+    "client-hmr-reload": {
+      "file": "dsh-client-hmr/lib/index.js",
+      "why": "客户端热换链（mtime/ctime/size → rebuilt 帧）——桌面端「不重启就生效」的全部依据",
+      "sha256": "2162759247fb8fd3",
+      "lines": 8,
+      "perPattern": [
+        {
+          "pattern": "/artifactRevision|mtimeMs/",
+          "hits": 3
+        },
+        {
+          "pattern": "/clientModules\\.rebuilt/",
+          "hits": 2
+        },
+        {
+          "pattern": "/pollIntervalMs/",
+          "hits": 3
+        }
+      ]
+    }
+  }
+}
