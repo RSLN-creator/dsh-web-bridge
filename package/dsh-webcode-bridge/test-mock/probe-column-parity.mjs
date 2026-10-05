@@ -84,31 +84,35 @@ try {
   const column = await page.evaluate(reading);
   await page.screenshot({ path: path.join(outDir, 'parity-column-' + stamp + '.png') });
 
-  // 官方单会话入口：在左栏逐行试，直到**真的离开我们的面板**（自检驱动的选择器，不靠猜名字）。
-  // 第一版固定选第一行，点到了宠物挂件「小鲸鱼」⇒ 自检判红。这里改成「候选列表 + 逐个试」：
-  // 每次点击后确认 `.hwb-concurrent-panel` 已消失，才算真的进了官方视图。
-  const candidates = await page.evaluate(() => {
-    const panel = document.querySelector('.hwb-concurrent-panel');
-    const skip = /^(新会话|插件|并发会话|任务板|设置|搜索|收起|展开)$/;
-    return Array.from(document.querySelectorAll('button, [role="button"], a[href], li, div[tabindex]'))
-      .filter((el) => {
-        if (panel && panel.contains(el)) return false;
-        const r = el.getBoundingClientRect();
-        if (r.width < 90 || r.height < 18 || r.x > 320 || r.y < 140) return false;
-        const t = String(el.textContent || '').trim();
-        return t.length > 1 && t.length < 40 && !skip.test(t) && !/^并发会话 · /.test(t);
-      })
-      .slice(0, 8)
-      .map((el) => {
-        const r = el.getBoundingClientRect();
-        return { text: String(el.textContent || '').trim().slice(0, 30), x: r.x + r.width / 2, y: r.y + r.height / 2 };
-      });
+  // 官方单会话入口：**用事实反推**——列里官方 hero 的工作区胶囊文字，就是左栏工作区行的文字。
+  // 先读出来，再按**精确文本**点左栏那一行。
+  // （上一版靠「扫左栏可疑控件」，扫到的是别的插件的控件：小鲸鱼 / 全局设置 / 按压泡泡设置 ——
+  //   实测读数在 parity-*.json 的 candidates 里，所以改成推导而不是猜。）
+  const wsName = await page.evaluate(() => {
+    const el = document.querySelector('.hwb-concurrent-panel [class*="workspace"]');
+    if (!el) return null;
+    return String(el.textContent || '').trim().split('\n')[0].trim().slice(0, 40) || null;
   });
+  const candidates = wsName ? [{ text: wsName }] : [];
   let official = null;
   let entered = null;
   for (const c of candidates) {
-    await page.mouse.click(c.x, c.y);
-    await page.waitForTimeout(3000);
+    // ⚠ 同名元素有两处：左栏的工作区行 **和** 我们列里的那个工作区胶囊（点它会开门户浮层，
+    //   人还留在面板里 —— 实测就是这样）。所以逐个筛掉「在 .hwb-concurrent-panel 里」的。
+    let clicked = false;
+    try {
+      const all = page.getByText(c.text, { exact: true });
+      const n = await all.count();
+      for (let i = 0; i < n; i += 1) {
+        const inside = await all.nth(i).evaluate((el) => !!el.closest('.hwb-concurrent-panel')).catch(() => true);
+        if (inside) continue;
+        await all.nth(i).click({ timeout: 8000 });
+        clicked = true;
+        break;
+      }
+    } catch (e) { /* 试下一个候选 */ }
+    if (!clicked) continue;
+    await page.waitForTimeout(3500);
     if ((await page.locator('.hwb-concurrent-panel').count()) === 0 && (await page.locator('[data-conversation-scroll]').count()) > 0) {
       entered = c;
       official = await page.evaluate(reading);
