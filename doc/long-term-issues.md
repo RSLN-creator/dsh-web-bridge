@@ -56,6 +56,7 @@
 | 43 | **deepseek 与 z.ai 的账号昵称在驱动页面上读不到**（2026-10-03 登记，本轮**不修**）——deepseek 昵称候选 **0 条**（账号区不可见；但头像照样读到，因为读取不判可见性）；z.ai 头像候选 `rect.x = -12`（侧栏在视口外，同为折叠态）且是 Svelte 哈希类名。两站**没有昵称节点的真机读数 ⇒ 不声明选择器**；出路见正文（展开侧栏后取证 / 改成以头像为锚的结构感知读取） | 中 | 否 | `lib/providers.js`（`accountProbe`）、`lib/browser-driver.js`（`readAccountIdentity`）、`test-mock/probe-account-identity-live.mjs`、`lib/account-candidates.js` |
 | 44 | **「检查更新」恒报「已是最新」：仓库没跟上 `package.json` 的 tag**（2026-10-04 登记，本轮**不修**）——最新 tag 是 **v0.19.55** 而 `package.json` 已是 0.19.60/0.19.61 ⇒ `latest < current` ⇒ 判据如实给出「已是最新」。真因是 `release.yml` 只在**打 tag** 时产出 tarball，而 0.19.56–0.19.61 几轮只改版本号没打 tag ⇒ Releases 上最后一个是 0.19.55。发版是对外不可逆动作，登记不代做；出路（用户点头后）= `git tag v0.19.61 && git push origin v0.19.61`，且 tag 必须打在 `package.json` 已是 0.19.61 的 commit 上 | 低 | 否 | `package/dsh-webcode-bridge/package.json`、`.github/workflows/release.yml`、`lib/update.js` |
 | 42 | **「网页桥接」设置分区的导航图标不可自定义**（2026-10-03 登记）——用户报「仍然是默认齿轮」；真因在**官方壳**里：`settings.section` 的注册契约只有 `id/order/label`（**没有 icon**），导航字形由官方 `dsh-client-ui-settings-general` 的 `navIcon(id)` **硬编码**（只认 `account` / `models` / `agent-presets` / `plugins` / `archived-sessions`，其余一律回落齿轮）。插件侧**结构上无解**，除非改官方包或占用一个 shipped id | 低 | 否 | `lib/client.cjs`（`settings.section` 注册处）、官方 `@deepseek-ai/dsh-client-ui-settings-general/lib/client.js`（`navIcon`）、`doc/progress.md`（2026-10-03） |
+| 45 | **桌面 profile 的声明与磁盘分叉：声明仍钉 0.19.61，磁盘已是 0.19.63**（2026-10-05 登记）——本轮靠官方 `client-hmr` 通道**原地热换** `lib/client.cjs` 让桌面端立刻用上修复（不改进程、不重启应用），但**没改 profile 声明**。风险：任何一次 pnpm 通道（装别的插件、启动期 reconcile）都可能把客户端静默换回声明里的旧版 ⇒ 缺陷复发。恢复「声明 == 磁盘」必须**完全退出桌面端**后走官方通道装一次（`dsh` CLI 拒绝管理 desktop profile，须用桌面端自己的 carrier），且宿主半边本来就要重启才换 | 中 | 否 | `~/.dsh/profiles/desktop/package.json`、`~/.dsh/profiles/desktop/node_modules/dsh-webcode-bridge/lib/client.cjs`、`doc/progress.md`（2026-10-05 §八）、`doc/research/2026-10-05-dsh-multi-session-and-client-hot-swap.md` §5 |
 
 > **一览表完整性（2026-09-16 修正；2026-09-26 补上闸门）**：本表此前**漏登记 #19 与 #20**（正文有、表里没有）。
 > 这两条都是可机检的登记错误，而当时没有任何闸门覆盖「正文条目 ↔ 表格条目」的一致性。
@@ -2778,3 +2779,63 @@ git tag v0.19.61 && git push origin v0.19.61
 ① 缓存里存判据且缺 `current` ⇒ 版本位渲染成空「v」（**已修**）；
 ② `profile` 名取成了浏览器数据目录名 ⇒ 安装命令指向不存在的 profile（**已修**）。
 本条是第三个、**纯仓库流程**的缺口。
+
+---
+
+## 45. **桌面 profile 的声明与磁盘分叉（0.19.63 客户端已热换，声明仍钉 0.19.61）**
+
+（2026-10-05 登记。与本文件其余「有意不修」的条目不同：**这一条是必须收口的欠账**，
+只是收口动作需要用户给一个「完全退出桌面端」的窗口，本轮不擅自触发。）
+
+### 现状与读数
+
+| 层 | 值 | 取证 |
+| --- | --- | --- |
+| 桌面 profile 声明 | `file:D:/9_Code_Workspace/dsh-webcode-bridge/package/dsh-webcode-bridge/dsh-webcode-bridge-0.19.61.tgz` | `~/.dsh/profiles/desktop/package.json` |
+| 桌面端磁盘上的客户端产物 | 0.19.63 的 `lib/client.cjs`（483,339 B / `B5ADC88A…`） | 文件实读 |
+| 桌面端磁盘上的宿主产物 | **仍是 0.19.61 的 `lib/index.js`**（本轮没换，也不需要换：修的是客户端） | 同上 |
+| 运行中宿主实读 | `build.version = 0.19.61`（`GET :8932/__webcode/status`） | 客户端热换不改宿主 |
+
+### 本轮为什么这样处理（而不是直接装）
+
+1. `dsh`（npm 全局 0.2.0-rc.2）**拒绝管理 desktop profile**：
+   `error: profile "desktop" is managed exclusively by the Electron application`；
+   官方说明要求**先把应用完全退出**再 `dsh plugin --profile desktop add <spec>`。
+2. 用户本轮明令「不要影响桌面端」——退出应用属于影响，故**不擅自做**。
+3. 客户端产物可以经官方 `client-hmr` 通道**原地覆盖热换**（§5.1 的姿势），
+   于是「立刻可用」与「不打扰用户」两件事可以同时成立。
+
+### 风险（不是理论，本仓库记过同族事故）
+
+声明与内容分叉时，**判据永远是声明**：任何一次走 pnpm 的通道
+（应用内插件管理器装/卸别的插件、启动期 reconcile）都会按声明重建 `node_modules`，
+把客户端**静默换回 0.19.61** ⇒ 用户重新看到「面板一片空白」，而磁盘上「明明是新版」。
+
+### 收口动作（等用户给窗口，一条命令 + 重开应用）
+
+```powershell
+# ① 用户完全退出 DeepSeek Harness（含托盘）；确认进程表里没有它
+Get-Process -Name 'DeepSeek Harness' -ErrorAction SilentlyContinue
+
+# ② 用**桌面端自己的 carrier** 装（它带 manageDesktopProfile=true 与自带 pnpm）
+$asar = 'D:\2_Download_Main\4_DeepSeek Harness_code\resources\app.asar'
+$env:ELECTRON_RUN_AS_NODE = '1'
+& 'D:\2_Download_Main\4_DeepSeek Harness_code\DeepSeek Harness.exe' --expose-internals `
+  "$asar\dsh\node_modules\@deepseek-ai\dsh-desktop-host\lib\cli.js" `
+  plugin --profile desktop add 'D:\9_Code_Workspace\dsh-webcode-bridge\package\dsh-webcode-bridge\dsh-webcode-bridge-0.19.63.tgz'
+
+# ③ 核对三层一致（声明 / lockfile / 磁盘版本）
+Select-String -Path "$env:USERPROFILE\.dsh\profiles\desktop\package.json" -Pattern 'dsh-webcode-bridge'
+(Get-Content "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\dsh-webcode-bridge\package.json" | ConvertFrom-Json).version
+
+# ④ 重开应用，核对：/plugins/events 的图 rev 已变，且 /__webcode/status 的
+#    build.version 也应变成 0.19.63（这次换了宿主半边所在的包目录，重启即生效）
+```
+
+### 边界
+
+- 只换客户端产物**不会**改 `build.version`——它**不是**「没生效」的判据；
+  判据是图 rev + 按该 rev 取回的字节与磁盘逐字节相同（见
+  [`research/2026-10-05-dsh-multi-session-and-client-hot-swap.md`](research/2026-10-05-dsh-multi-session-and-client-hot-swap.md) §5.1）。
+- 热换只许**原地覆盖**：`Move-Item -Force`（删除+改名）会让 `clientModules` 拒绝为新内容
+  重建响应（该 rev 及之后全部 404，实测）。恢复 = 把旧字节原地写回。

@@ -111,6 +111,23 @@ window.__ModuleLoader__.load({
     const FISH_LOGO_VIEWBOX = primitives.FISH_LOGO_VIEWBOX || { width: 23.16, height: 17.04 };
     const useDismissOnOutsidePointer = primitives.useDismissOnOutsidePointer || (() => {});
     const h = React.createElement;
+    /**
+     * 统一的降级告警出口（**工厂作用域**，不是 `apply()` 里）。
+     *
+     * 为什么强调作用域（0.19.63 真机事故）：`ConcurrentPanel`、`createPanelGuard` 等
+     * 组件与工具函数定义在 `apply()` **之外**（`function apply(ctx)` 从本文件后段才开始），
+     * 而被它们调用的 `warn` 原先声明在 `apply()` **内部** ⇒ 真机上这些 catch 分支一执行
+     * 就是 `ReferenceError: warn is not defined`。0.19.62 的守卫把 catch 写进面板 effect
+     * 之后，这个错在渲染/提交期被官方 `SlotErrorBoundary` 吞成空盒——**又一次「面板全白、
+     * 且看不到原因」**。所以 `warn` 只能有一份、且必须在所有调用者都看得见的最外层。
+     *
+     * 判据：`test/team-compare.test.mjs` 钉「`const warn` 必须在 `function apply(ctx)` 之前」
+     * ＋「全文件只有一处声明」；真机由 `test-mock/probe-concurrent-live.mjs` 收口。
+     *
+     * @param {string} what 失败的动作名
+     * @param {*} e 失败原因（打印 message 优先）
+     */
+    const warn = (what, e) => console.warn('[webcode-bridge] ' + what + ' failed:', e && e.message ? e.message : e);
     // 0.16.37：站点目录改成官方的**胶囊行**，因此要用官方三颗原语：
     //   · `Button`（variant:'ghost'）——官方 `TerminalGuide` 正是用它在胶囊里承载
     //     主区（图标+标题+说明）与右侧 44px 展开区。自己写 <button> 会丢掉官方
@@ -129,7 +146,17 @@ window.__ModuleLoader__.load({
     // 造一条真会话、再 `retain()` 拿引用交给官方 `SessionProvider`。不声明它，
     // `ctx.sessions` 在宿主里是 undefined —— 面板会如实显示「宿主没有提供 sessions 服务」
     // 而不是崩掉（降级不是崩溃），但并发会话也就无从谈起。
-    const inject = ['slots', 'sidebarRightTabs', 'sidebarRight', 'sessions'];
+    //
+    // `layout`（0.19.63 真机空白根因）：并发面板的「选中意图守卫」要读
+    // `ctx.layout.panelInfo`（见 createPanelGuard）。**cordis 的 reflect 代理对未声明
+    // inject 的服务读取是直接抛错**（`cannot get property "layout" without inject`），
+    // 不是给 undefined —— 0.19.62 把 `ctx.layout` 写在 `main` 条目的组件函数里，于是
+    // 组件一渲染就抛，被官方 `SlotErrorBoundary` 兜成 `<div data-slot-error>` 空盒：
+    // 真机现象就是「并发界面一片空白、连页签都没有」（侧栏行在、点得动，中央区全空）。
+    // 官方同款写法作依据：`dsh-client-ui-sidebar` 的 inject 同样列了 `"layout"`。
+    // 本文件的其余 `ctx.*` 读取（slots / sidebarRight / sidebarRightTabs / sessions）
+    // 都已在此声明，`ctx.effect`、`ctx.reflect` 是 cordis 自带、不需要声明。
+    const inject = ['slots', 'sidebarRightTabs', 'sidebarRight', 'sessions', 'layout'];
     const RELAY_PORT = 8931;
     const relayBase = 'http://127.0.0.1:' + RELAY_PORT;
     // 每个站点一个独立源：<siteId>.localhost:<port>。
@@ -3087,6 +3114,26 @@ window.__ModuleLoader__.load({
         && !!layout.panelInfo
         && typeof layout.panelInfo.getSnapshot === 'function'
         && typeof layout.panelInfo.subscribe === 'function';
+    }
+
+    /**
+     * 读 `ctx.layout` 的**唯一入口**（0.19.63 真机空白根因的收口）。
+     *
+     * 根因修法是**声明**：`inject` 里已补 `'layout'`（cordis 对未声明服务的读取直接抛
+     * `cannot get property "layout" without inject`，这一抛发生在渲染期就必然变成官方
+     * 空盒）。本函数只处理「服务确实缺席」的降级——旧宿主、测试桩、或 ui-layout 未装
+     * 的组合：返回 `undefined`，守卫整体关闭、面板照常渲染，符合本文件「降级不是崩溃」
+     * 的一贯口径。
+     *
+     * 它**不是** inject 漏声明的遮羞布：那种情况由 `test/team-compare.test.mjs` 的
+     * 「client.cjs 里每个 `ctx.<服务>` 读取都必须出现在 inject 列表里」判据当场变红，
+     * 不靠这层 try/catch 掩盖。
+     *
+     * @param {Object} ctx 客户端插件上下文
+     * @returns {Object|undefined} 布局服务面（缺席为 undefined）
+     */
+    function layoutFaceOf(ctx) {
+      try { return ctx.layout; } catch (e) { return undefined; }
     }
 
     /**
@@ -6068,7 +6115,8 @@ window.__ModuleLoader__.load({
       ].join('');
       document.head.appendChild(style);
       const disposers = [() => style.remove()];
-      const warn = (what, e) => console.warn('[webcode-bridge] ' + what + ' failed:', e && e.message ? e.message : e);
+      // `warn` 定义在本文件**工厂作用域**（见文件开头那一处）：`ConcurrentPanel` 等
+      // 定义在 `apply()` 之外的函数也要用它，声明在这里就会变成 ReferenceError。
       // ctx.effect 是 DSH 插件的规范生命周期：它把注销函数交给宿主统一回收
       //（重载/卸载都走同一条路）。下面的 disposers 数组保留作兜底——宿主没提供
       // effect 时（旧版本/单测桩）仍必须能干净卸载。
@@ -6553,13 +6601,19 @@ window.__ModuleLoader__.load({
               // 声明一个 **session 作用域**子槽，是本面板能拿到官方 `SessionProvider` 与
               // `renderSlot` 的唯一途径（dsh-client-ui-renderer/lib/client.js:732-739）。
               children: { [CONCURRENT_COLUMN_SLOT]: { kind: 'single', scope: 'session' } },
-            }, (props) => h(ConcurrentPanel, {
-              ...props,
-              sessions: ctx.sessions,
-              layout: ctx.layout,
-              slotName: CONCURRENT_COLUMN_SLOT,
-              groupKey: 'panel',
-            }));
+            // 整个条目**再包一层**插件自建边界（0.19.63）。0.19.62 的边界包在
+            // `ConcurrentPanel` 内部，而「构造 ConcurrentPanel 元素本身」抛错时它够不着
+            // ——真机空白正是这一种形态（组件函数里读 `ctx.layout` 即抛）。边界提到条目
+            // 注册处之后，**面板级崩溃也变成可读文本**，不再只能靠 F12。
+            }, (props) => h(HwbBoundary, { label: '并发会话面板' },
+              h(ConcurrentPanel, {
+                ...props,
+                sessions: ctx.sessions,
+                // 经 layoutFaceOf 读，缺席时降级为「没有守卫」（见该函数的注释）。
+                layout: layoutFaceOf(ctx),
+                slotName: CONCURRENT_COLUMN_SLOT,
+                groupKey: 'panel',
+              })));
             // 一列的正文（session 作用域）：渲染官方会话体，见 ConcurrentColumn 的注释。
             const offCol = ctx.slots.inject(CONCURRENT_COLUMN_SLOT, () => ctx.slots.register(
               { name: CONCURRENT_COLUMN_SLOT },

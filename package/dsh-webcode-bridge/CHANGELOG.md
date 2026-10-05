@@ -5,6 +5,89 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.63
+
+**并发会话真机排障：两个「跨作用域接线断裂」——`layout` 没进 inject、`warn` 声明在 `apply()` 里；
+并首次开出真页面探针（GUI 不再靠离线回放猜）。**
+
+### 用户报了什么（原话）
+
+> 「继续研究现在的多会话如何真实实现？现在还是不行！然后你不能够自己查看cli安装和问题排查吗？
+> 你的会话是在桌面端啊！」
+
+### 先查安装，再查代码（本轮最要紧的一条读数）
+
+桌面 profile 的声明钉的是 `dsh-webcode-bridge-0.19.61.tgz`，装的也是 0.19.61
+（`lib/client.cjs` 464,929 B / `CBF6A6…`），运行中宿主 `GET :8932/__webcode/status`
+实读 `build.version = "0.19.61"` ⇒ **0.19.62 的修复从未装上桌面端**，用户看到的空白是旧代码。
+
+### 真页面探针（此前认为做不到，其实做得到）
+
+`dsh web` 启动横幅里**就打印带 token 的 URL**（官方 `dsh-web-app` 的 `announceReady`：
+`console.log("dsh web: " + connection.authenticatedUrl(url))`）。此前「token 只在进程内存里 ⇒
+开不了真 GUI 页面」的判断只对了一半：token 确实只在内存里，但**我们自己启动那个进程就能拿到它**。
+新增 `test-mock/probe-concurrent-live.mjs`：开真页面 → 点左栏「并发会话」→ 建 3 列真会话 →
+**同时收错误读数与几何读数**（`pageerror`/console/`[data-slot-error]`/`[data-hwb-boundary]` +
+根节点与父链的 bounding box/computed style，用来区分「抛错空盒」与「塌高」两类空白）。
+
+### 两个真根因（都在渲染/提交期抛错 ⇒ 被官方 SlotErrorBoundary 兜成空 div）
+
+1. **`ctx.layout` 没进 inject**：`main` 条目的组件函数里写 `layout: ctx.layout`，
+   而 inject 列表是 `['slots','sidebarRightTabs','sidebarRight','sessions']`。
+   cordis 的 reflect 代理对**未声明 inject 的服务读取直接抛错**
+   （`cannot get property "layout" without inject`），不是给 undefined ⇒ 组件一渲染就抛。
+   官方 `dsh-client-ui-sidebar` 同样把 `"layout"` 列进 inject。
+2. **`warn` 声明在 `apply()` 里面**：`ConcurrentPanel` / `createPanelGuard` 定义在
+   `apply()` **之外**，而挂载 effect 的 catch 分支调用 `warn(...)` ⇒
+   `ReferenceError: warn is not defined`。0.19.62 的「守卫退出渲染路径」把 catch 写进
+   effect 之后才让它必然被触发。
+
+两条都是**跨作用域接线断裂**，而当轮三处源码正则护栏**全绿**——正则判据看不见作用域。
+
+### 修法
+
+- `inject` 补 `'layout'`；`ctx.layout` 改经 `layoutFaceOf()` 读（服务缺席降级为「没有守卫」）。
+- `warn` 提到**工厂作用域**（全文件唯一一处），并写清「为什么不能声明在 `apply()` 里」。
+- `HwbBoundary` **上提到条目注册处**：0.19.62 那两层边界都在 `ConcurrentPanel` 内部，
+  而本次崩溃发生在**构造 `ConcurrentPanel` 元素之前**——上提之后「面板级空白」也能变成
+  可读错误文本（本轮正是它把 `warn is not defined` 打出来的）。
+
+### 护栏
+
+- `test/team-compare.test.mjs` **25/25**：inject 字面量 + **通用判据**「源码里出现的每个
+  `ctx.<服务>` 读取都必须出现在 inject 列表里（cordis 自带成员除外）」+ 「`warn` 必须声明在
+  `function apply(ctx)` 之前且全文件只有一处」+ 注册处不得再直接读 `ctx.layout` + 条目级边界挂点。
+- `test/client-render.test.mjs` **71/71**。
+
+### 真机读数（web profile，`probe-concurrent-live.mjs`）
+
+面板 `1320×1000`、两页签「并发对话 / 并发轨迹」、3 列、**每列 1 个官方 composer**、
+无 `[data-hwb-boundary]` / `[data-slot-error]`、列内点击后主区**不跳走**；
+截图与 JSON 落在 `test-mock/out/concurrent-live-*.{png,json}`。
+
+### 桌面端怎么生效（不改应用、不重启进程）
+
+官方 `@deepseek-ai/dsh-client-hmr`（`dsh-web-app` 补丁里**无条件挂载**）每 500 ms
+stat 轮询插件的客户端产物，变化即经 `/plugins/events`（**免 token**）推 `rebuilt` 帧，
+打开着的页面随之拆除旧 fiber 并重新 import。因此**原地覆盖**（`writeFileSync`，绝不删除/改名）
+`~/.dsh/profiles/desktop/node_modules/dsh-webcode-bridge/lib/client.cjs` 即可热换；
+外部可用「宿主自己发布的 rev + 按该 rev 取回的字节」逐字节核对。
+
+⚠ **反例（本轮踩到并记下）**：先用「写临时文件 + `Move-Item -Force` 替换」的写法，
+删除+改名在轮询器眼里出现残缺窗口，`clientModules` 当场拒绝为新内容重建响应
+（该 rev 及后续所有 rev 一律 404）。**回滚与恢复**：把旧字节原地写回即恢复
+（已验证 200 且与磁盘逐字节相同）。结论：**热换只许原地覆盖**。
+
+⚠ **`build.version` 不会变**：只换客户端产物时宿主里跑的仍是 0.19.61 的服务端代码，
+`/__webcode/status` 继续读 `0.19.61`——它**不是**「没生效」的判据；判据是
+`/plugins/events` 的 rev 与 `/plugins/??dsh-webcode-bridge/client.js&rev=<新 rev>` 的字节。
+
+### 尚未收口（如实记）
+
+桌面 profile 的**声明仍钉 0.19.61**（磁盘已是 0.19.63）。要恢复「声明 == 磁盘」，需要
+**完全退出桌面端**后走官方通道安装一次（`doc/long-term-issues.md` 已登记，含现成命令）；
+在那之前，任何一次 pnpm 通道都可能把客户端静默换回旧版。
+
 ## 0.19.62
 
 **并发会话防跳走：列内点击不再把中央区换回单个会话（建列绑工作区 + 面板意图守卫）。**

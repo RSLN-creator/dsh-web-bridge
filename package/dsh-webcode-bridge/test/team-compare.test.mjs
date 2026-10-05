@@ -75,10 +75,45 @@ test('★ 0.19.55 并发：每列必须是一条**真官方会话**（create + r
   assert.ok(!/messages: \[/.test(body), '不得再把消息存在 React state 里（那正是「假会话」的定义）');
 });
 
-test('★ 0.19.55 并发：`inject` 必须声明 sessions（不声明 ctx.sessions 就是 undefined）', () => {
+test('★ 0.19.63 并发：inject 必须声明**每一个**被读的服务（真机空白根因的判据）', () => {
   const src = clientSrc();
-  assert.match(src, /const inject = \['slots', 'sidebarRightTabs', 'sidebarRight', 'sessions'\];/,
-    'sessions 必须进 inject 列表：并发会话的每一列都要 create/retain');
+  assert.match(src, /const inject = \['slots', 'sidebarRightTabs', 'sidebarRight', 'sessions', 'layout'\];/,
+    'inject 必须含 sessions（每列 create/retain）与 layout（守卫要读 ctx.layout.panelInfo）');
+
+  // 这一类缺陷的**通用判据**（0.19.63 真机事故后补，取而代之的是原来只钉死那一串字面量的写法）。
+  //
+  // 事故形状：cordis 的 reflect 代理对**未声明 inject 的服务读取是直接抛错**
+  // （`cannot get property "layout" without inject`），而不是给 undefined。0.19.62 把
+  // `ctx.layout` 写在 `main` 条目的组件函数里 ⇒ 组件一渲染就抛 ⇒ 官方
+  // SlotErrorBoundary 把它兜成 `<div data-slot-error>` 的**空 div** ⇒ 真机现象是
+  // 「并发界面一片空白、连页签都没有」，而当时三处源码正则护栏**全绿**。
+  // 只钉字面量的护栏锁住的是当时的形状（连缺陷一起锁死）；这里改成把两边对起来：
+  // 源码里出现的每个 `ctx.<名>` 读取，要么在 inject 列表里，要么是 cordis 自带成员。
+  const declared = new Set(
+    (/const inject = \[([^\]]*)\];/.exec(src)[1].match(/'[^']+'/g) || []).map(s => s.slice(1, -1)),
+  );
+  /** cordis 自带的上下文成员（不是服务，不需要 inject 声明）。 */
+  const BUILTIN = new Set([
+    'effect', 'reflect', 'on', 'get', 'set', 'inject', 'plugin', 'logger', 'scope', 'provide', 'evaluate', 'root',
+  ]);
+  const read = new Set(Array.from(src.matchAll(/ctx\.([A-Za-z_$][A-Za-z0-9_$]*)/g)).map(m => m[1]));
+  const missing = Array.from(read).filter(name => !declared.has(name) && !BUILTIN.has(name));
+  assert.deepEqual(missing, [],
+    '这些服务在源码里被读、却不在 inject 里：' + JSON.stringify(missing)
+    + '（未声明即抛错；抛在渲染期 = 官方空盒 = 面板全白）');
+});
+
+test('★ 0.19.63 并发：warn 必须声明在工厂作用域（apply() 之外的面板代码要看得见）', () => {
+  const src = clientSrc();
+  const decl = src.indexOf('const warn =');
+  const apply = src.indexOf('function apply(ctx) {');
+  assert.ok(decl > 0 && apply > 0, '找不到 warn 声明或 apply()（改名/移动则本判据失效，需同步）');
+  assert.ok(decl < apply,
+    'const warn 必须声明在 `function apply(ctx)` **之前**：ConcurrentPanel / createPanelGuard 定义在 '
+    + 'apply() 之外，warn 声明在 apply() 里面 ⇒ 真机 `ReferenceError: warn is not defined`，'
+    + '而它抛在挂载 effect/渲染提交期会被官方边界吞成空盒（又一次「面板全白且看不到原因」）');
+  assert.equal((src.match(/const warn =/g) || []).length, 1,
+    'warn 全文件只能有一处声明（两份会分叉：修了一处另一处照旧）');
 });
 
 test('★ 0.19.55 并发：引用必须成对释放（retain 不 release 会让会话作用域永远驻留）', () => {
@@ -370,8 +405,18 @@ test('★ 0.19.62 并发：面板意图守卫必须存在（panelInfo 订阅 + �
   assert.match(panel, /removeEventListener\('pointerdown', onDown, true\)/,
     '卸载必须 removeEventListener（与 addEventListener 成对）');
   assert.match(guard, /layout\.selectPanel\(panelId\)/, '回拉必须走官方 layout.selectPanel（不绕过宿主）');
-  // ctx.layout 必须从注册处传进面板（reflect 服务面，与 sessions 同口径）。
-  assert.match(src, /layout: ctx\.layout/, '注册处必须把 ctx.layout 传给 ConcurrentPanel');
+  // ctx.layout 必须从注册处传进面板（reflect 服务面，与 sessions 同口径），且必须
+  // **经 layoutFaceOf 读**——0.19.63 真机空白根因：直接写 `layout: ctx.layout` 时，
+  // inject 漏声明会让 cordis 在**渲染期**抛 `cannot get property "layout" without inject`，
+  // 组件还没构造出来就被官方 SlotErrorBoundary 兜成空 div。
+  assert.match(src, /layout: layoutFaceOf\(ctx\)/,
+    '注册处必须经 layoutFaceOf 把 layout 服务面传给 ConcurrentPanel（直接读 ctx.layout 会渲染期抛错）');
+  assert.ok(!/layout: ctx\.layout/.test(src),
+    '不得再直接读 ctx.layout：未声明 inject 时它是**抛错**而不是 undefined ⇒ 官方空盒 ⇒ 面板全白');
+  // 条目级边界（0.19.63）：`ConcurrentPanel` 元素**构造本身**抛错时，0.19.62 那两层
+  // 内部边界够不着，所以注册处还要再包一层 HwbBoundary。
+  assert.match(src, /\(props\) => h\(HwbBoundary, \{ label: '并发会话面板' \},\s*\n\s*h\(ConcurrentPanel,/,
+    'main 条目注册处必须再包一层 HwbBoundary（面板级崩溃要变成可读文本，不是空盒）');
 });
 
 // ── ⑩ 官方 agentTeams 读取本身保留（它仍是任务板的来源）──────────────────────
