@@ -5,6 +5,57 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.64
+
+**「还是会切回到官方工作区」的真根因：守卫从未生效（`CONCURRENT_PANEL_ID` 跨作用域）＋
+守卫看不见门户浮层里的那一下选择；另加每列「⧉ 开工」独立工作区指令。**
+
+### 用户报了什么（原话）
+
+> 「1.还是会切回到官方工作区，2.请你确保解决同一会话/工作区内的并行多任务和沙箱管理？
+>  3.我现在有想法就是能够通过git分支和最后旋转来进行并列多会话？如何官方流程？
+>  4.你确保修复好后不用动桌面端，打包推送git+npm发布，版本号0.19.x」
+
+### 真根因（真页面探针复现 + 页面内取证读数）
+
+1. **守卫从来没生效过**：`createPanelGuard(props.layout, CONCURRENT_PANEL_ID, …)` 写在
+   `ConcurrentPanel`（定义在 `apply()` **之外**）里，而 `CONCURRENT_PANEL_ID` 声明在 `apply()`
+   **内部** ⇒ 每次挂载都是 `ReferenceError: CONCURRENT_PANEL_ID is not defined`，被 effect 的
+   try/catch 吞成一句 warn（0.19.63 把 `warn` 修好之后才看得见这句）。与 `warn` 是同一族
+   **跨作用域接线断裂**，到 0.19.64 已经咬过两次。
+2. **原判据看不见门户（portal）**：官方 hero 工作区胶囊的浮层开在门户里，DOM **不在面板子树内**
+   （探针真机读数 `insidePanel=false`）⇒ 挂在面板根上的 `pointerdown` 永远收不到「选工作区」
+   那一下，`uiWorkspace.openWorkspace → replaceMain('reveal') → selectPanel(null)` 得逞。
+
+### 修法
+
+- 面板 id 与子槽名提到**工厂作用域**（并写明「为什么不能声明在 `apply()` 里」）；
+- 守卫改为在 **document 捕获** `pointerdown`，按落点分三类：**左栏**（放行——用户 2026-10-04
+  确认「左栏点会话可以跳」）/ **面板内**（原语义，`PANEL_GUARD_MS`）/ **门户链**（面板外、
+  左栏外，但刚点过面板内，`POPUP_CHAIN_MS = 15s`）⇒ 后两类都回拉；
+- 左栏子树**不钉官方哈希类名**：入口自打 `data-hwb-nav-entry`，从它往上取**第一个不含面板根**的
+  祖先——那就是左栏那一列；
+- 新增真机取证通道 `window.__hwbPanelGuard`（`available / pulls / lastClick / lastDecision`）：
+  守卫的决定能在页面里直接读。这是被第一版「源码看着对、真机拉不回来」逼出来的。
+
+### 每列「⧉ 开工」：独立工作区（git 分支 + 收尾轮转）
+
+用户第 3 点的想法落地成**一键可复制**的指令（worktree + 分支 + `merge --no-ff` 收尾），
+并**把官方口径写进指令文本**：沙箱按**会话**解析工作区根（`SessionHeader.cwd`）、官方 Agent Team
+是 **one shared checkout** 且**不带 worktree**（`dsh-experimental-agent-team` README 原文）。
+剪贴板不可用时文本摊在面板里，不静默失败。详见
+[`doc/research/2026-10-05-dsh-multi-session-and-client-hot-swap.md`](../../doc/research/2026-10-05-dsh-multi-session-and-client-hot-swap.md) §10。
+
+### 验证
+
+- 真页面探针（**默认判据**，含「在工作区浮层里选一项、且刻意等 2.5s 超过 900ms 窗口」）：
+  面板 `1320×1000`、两页签、3 列、每列 1 个官方 composer、无 `[data-hwb-boundary]` /
+  `[data-slot-error]` / `pageerror`、列内点击不跳走、`__hwbPanelGuard.pulls ≥ 1`；
+- `team-compare` **28/28**（新增两条：**标识符作用域扫描**——面板路径用到、却只在 `apply()` 里
+  声明的名字即红；门户守卫形态）、`client-render` **71/71**；
+- 桌面端**原地热换**客户端产物即时生效：图 rev `f1dbb1e962bd`，按该 rev 取回 493,990 B =
+  磁盘 493,915 + 75 B trailer，**逐字节相同**；**未重启桌面端、未改 profile 声明**。
+
 ## 0.19.63
 
 **并发会话真机排障：两个「跨作用域接线断裂」——`layout` 没进 inject、`warn` 声明在 `apply()` 里；

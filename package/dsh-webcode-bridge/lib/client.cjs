@@ -2584,6 +2584,20 @@ window.__ModuleLoader__.load({
     //   别的替身会抛 `Session reference is not active in this Controller`）。所以每列
     //   保存的是 retain 出来的引用对象本身，而不是 id。
 
+    /**
+     * 左栏入口 id / 中央面板 key / 列正文子槽名（三处必须成对：官方契约原文
+     * 「Each list id addresses the matching main panel」）。
+     *
+     * ⚠ 三个常量放在**工厂作用域**，不放注册它们的那段 `apply()` 里：`ConcurrentPanel`
+     * 与 `ConcurrentPanelIcon` 定义在 `apply()` **之外**，面板挂载 effect 要用面板 id
+     * （`createPanelGuard(props.layout, CONCURRENT_PANEL_ID, …)`）。0.19.62 把它声明在
+     * `apply()` 内 ⇒ 真机每次挂载都是 `ReferenceError: CONCURRENT_PANEL_ID is not defined`，
+     * 被 effect 的 try/catch 吞成一句 warn ⇒ **守卫从来没生效过**——这正是用户 2026-10-05
+     * 报「还是会切回到官方工作区」的直接原因。与 `warn` 同族：**跨作用域接线断裂**。
+     */
+    const CONCURRENT_PANEL_ID = 'webcode-concurrent-panel';
+    const CONCURRENT_COLUMN_SLOT = 'webcode-concurrent.column';
+
     /** 一组的列数上限。与旧实现一致：用户要的是「多列并排」，不是无限列。 */
     const CONCURRENT_MAX_COLS = 4;
 
@@ -2740,6 +2754,9 @@ window.__ModuleLoader__.load({
       const [ready, setReady] = React.useState(false);
       const [busy, setBusy] = React.useState(false);
       const [error, setError] = React.useState('');
+      // 「开工指令」面板（0.19.64）：复制成功与否的提示 + 剪贴板不可用时摊开的文本。
+      const [brief, setBrief] = React.useState('');
+      const [briefCopied, setBriefCopied] = React.useState(false);
       // sessionId → SessionReference。用 ref 而不是 state：引用对象不是渲染数据，
       // 它只在「建列 / 删列 / 卸载」三个时刻变化，而每次变化都伴随一次 setCols。
       const refsRef = React.useRef({});
@@ -2903,6 +2920,63 @@ window.__ModuleLoader__.load({
         return (row && (row.displayTitle || row.title)) || String(id || '').slice(0, 12);
       };
 
+      /**
+       * 一列的「独立工作区」开工/收尾指令（用户 2026-10-05 的想法：git 分支 + 最后轮转合并）。
+       *
+       * ## 为什么这件事必须由用户/列里的 agent 执行，而不是本插件代跑
+       * 官方沙箱是**按会话**解析工作区根（`dsh-sandbox-policy`：「One primary workspace root
+       * per session … policy resolves `SessionHeader.cwd`」，README §147），而官方 Agent Team
+       * 明确写着「**One process and one shared checkout** — members share cwd …; this package
+       * provides no worktree, remote member, merge, or filesystem lock」，并把 worktree 隔离列为
+       * **未承诺方向**。⇒ 官方流程里**没有** worktree 设施：并发列若共用同一个检出，文件写入
+       * 互相可见（只有「写作用域」这种咨询性约定 + Lead 收尾复核）。
+       *
+       * 所以本插件能做的最实在的一件事，就是把这套**用户自己的隔离流程**变成一键可复制：
+       * 每列一个分支 + 一个 git worktree，收尾时合并回主线（「最后旋转」）。插件不代跑 git
+       *（客户端没有 fs/子进程），也不假装官方有这个能力。
+       *
+       * @param {{sessionId: string}} col 列（真会话）
+       * @param {number} index 列序号（从 0 起）
+       * @returns {string} 可直接粘进该列会话的多行指令
+       */
+      const columnBrief = (col, index) => {
+        const n = index + 1;
+        const branch = 'hwb/col-' + n;
+        const wt = '.hwb/worktrees/col-' + n;
+        return [
+          '这一列（会话 ' + col.sessionId + '）请在**自己的** git 分支与工作区里干活，不要动主检出：',
+          '',
+          '  git worktree add -b ' + branch + ' ' + wt + ' HEAD',
+          '  cd ' + wt,
+          '',
+          '收尾（全部列跑完后，由主线那一列或你本人执行「轮转」）：',
+          '',
+          '  git -C <主检出> merge --no-ff ' + branch,
+          '',
+          '为什么这样：官方 DSH 的沙箱按**会话**解析工作区根（SessionHeader.cwd），并发列共用同一'
+            + '检出时文件写入互相可见；官方 Agent Team 同样是 one shared checkout、不带 worktree。'
+            + '隔离这一步因此落在分支/工作区上，本插件只负责把它变成可复制的指令。',
+        ].join('\n');
+      };
+
+      /** 复制一列的开工指令；剪贴板不可用时把文本摊在面板里（用户自己选中复制）。 */
+      const copyColumnBrief = (col, index) => {
+        let text = '';
+        try { text = columnBrief(col, index); } catch (e) { text = ''; }
+        if (!text) return;
+        try {
+          if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(
+              () => { setBrief(text); setBriefCopied(true); },
+              () => { setBrief(text); setBriefCopied(false); },
+            );
+            return;
+          }
+        } catch (e) { /* 剪贴板被策略挡住：走下面的摊开路径 */ }
+        setBrief(text);
+        setBriefCopied(false);
+      };
+
       if (!ready) return h('div', { className: 'hwb-concurrent' }, h('p', { className: 'hwb-hint' }, '正在读取并发会话…'));
 
       return h('div', {
@@ -2926,6 +3000,16 @@ window.__ModuleLoader__.load({
             ? (busy ? '正在新建…' : '新建并发会话（' + CONCURRENT_DEFAULT_COLS + ' 列）')
             : (busy ? '正在新建…' : '+ 加一列'))),
         error && h('p', { className: 'hwb-hint bad' }, error),
+        brief && h('div', { className: 'hwb-concurrent-brief' },
+          h('div', { className: 'hwb-concurrent-brief-head' },
+            h('span', null, briefCopied
+              ? '已复制到剪贴板：粘进对应列的输入框即可（收尾时按末尾那条合并回主线）'
+              : '剪贴板不可用：请手动选中下面的文本复制'),
+            h('button', {
+              type: 'button', className: 'hwb-concurrent-mini',
+              onClick: () => { setBrief(''); setBriefCopied(false); },
+            }, '收起')),
+          h('pre', { className: 'hwb-concurrent-brief-body' }, brief)),
         cols.length === 0 && h('p', { className: 'hwb-hint' },
           '每一列都是一条真的官方会话：各自有独立 sessionId，跑真实的 agent loop，'
           + '带官方原生的消息、模型选择与输入框。新建之后它们也会出现在左侧会话清单里，'
@@ -2947,6 +3031,11 @@ window.__ModuleLoader__.load({
           cols.map((col) => h('div', { key: col.key, className: 'hwb-concurrent-col' },
             h('div', { className: 'hwb-concurrent-col-head' },
               h('span', { className: 'hwb-concurrent-col-title', title: col.sessionId }, titleOf(col.sessionId)),
+              h('button', {
+                type: 'button', className: 'hwb-concurrent-mini',
+                title: '复制这一列的「独立工作区」指令（git worktree + 分支，收尾时合并回主线）',
+                onClick: () => copyColumnBrief(col, cols.indexOf(col)),
+              }, '⧉ 开工'),
               h('button', {
                 type: 'button', className: 'hwb-concurrent-mini',
                 title: '把这一列移出面板（不删那条会话）',
@@ -3038,11 +3127,16 @@ window.__ModuleLoader__.load({
       // 整个 effect 体 try/catch：守卫的任何失败都降级成「没有守卫」，面板照常渲染。
       // 清理走 effect 的返回函数（卸载时 removeEventListener + 注销订阅）。
       const rootRef = React.useRef(null);
+      // 守卫要的**唯一**外部事实：本面板根节点（用来判「点在面板内」与推算「左栏子树」）。
+      // 只放事实、不放状态——0.19.64 的第一版把会话 id 也塞进来，结果导航那一刻读到的
+      // 还是上一次渲染的旧值（真机拉不回来），所以改成纯 DOM 事实。
+      const factsRef = React.useRef({ rootEl: null });
       React.useEffect(() => {
         const el = rootRef.current;
         if (!el) return;
         let guard = null;
-        try { guard = createPanelGuard(props.layout, CONCURRENT_PANEL_ID); } catch (e) { warn('concurrent panel guard', e); }
+        factsRef.current.rootEl = el;
+        try { guard = createPanelGuard(props.layout, CONCURRENT_PANEL_ID, factsRef.current); } catch (e) { warn('concurrent panel guard', e); }
         const onDown = () => { try { guard?.onPointerDown(); } catch (e) { /* 指纹失败不影响面板 */ } };
         try { el.addEventListener('pointerdown', onDown, true); } catch (e) { warn('concurrent panel pointerdown', e); }
         return () => {
@@ -3107,6 +3201,13 @@ window.__ModuleLoader__.load({
      */
     const PANEL_GUARD_MS = 900;
 
+    /**
+     * 「门户链」窗口（0.19.64）：面板内点一下打开浮层 → 在浮层里再点一下，两次点击之间
+     * 隔多久由用户决定（挑工作区可能要看几秒）。取 15s：足够覆盖真实操作，又不至于把
+     * 「几分钟前点过面板」也算进链里。
+     */
+    const POPUP_CHAIN_MS = 15000;
+
     /** @returns {boolean} ctx.layout 服务面是否可用（旧宿主/测试桩缺席时守卫整体关闭）。 */
     function panelGuardAvailable(layout) {
       return !!layout
@@ -3139,6 +3240,35 @@ window.__ModuleLoader__.load({
     /**
      * 守卫的运行体（独立成函数以便护栏与复用；ConcurrentPanel 挂载 effect 里调用）。
      *
+     * ## 0.19.64 真机取证：0.19.62 的判据漏掉了**门户（portal）**这一整类
+     * 官方 hero 的工作区胶囊与 composer 的「工作区内修改」都把浮层开在**门户**里，其 DOM
+     * **不在面板子树内**（真页面探针读数 `insidePanel=false`）。链条因此变成：
+     *   点胶囊（面板内 pointerdown，记上了）→ 在浮层里选工作区（**面板外** pointerdown，
+     *   记不上）→ `uiWorkspace.openWorkspace → replaceMain('reveal') → selectPanel(null)`
+     * ⇒ 面板被换走，守卫因为「没有紧邻的面板内点击」而放行。用户报的
+     * 「还是会切回到官方工作区」就是这一条（`probe-concurrent-live.mjs --explore` 复现，
+     * 读数在 `test-mock/out/concurrent-live-*-broke-opt-*.png`）。原判据还有时间窗脆弱性：
+     * 用户在浮层里挑工作区超过 900ms，连那次面板内点击也过期。
+     *
+     * ## 现在怎么判（按落点分三类，覆盖门户）
+     * document 捕获每一次 `pointerdown`（门户里的点击也在捕获范围内）：
+     *   · **左栏子树内**（点会话 / 点「新会话」/ 点工作区）⇒ 一律放行——用户 2026-10-04
+     *     明确确认「左栏点会话可以跳，列内不跳就行」；
+     *   · **面板子树内** ⇒ 记「面板内点击」（原语义保留，窗口 `PANEL_GUARD_MS`）；
+     *   · **面板外且左栏外、但刚点过面板内**（`POPUP_CHAIN_MS` 内）⇒ 判为**面板打开的门户
+     *     浮层里那一下**（工作区选择、模型选择……），同样拉回。
+     *
+     * 三条都**不需要知道会话 id**：本条第一版曾用「跳去的会话是不是刚新建的」当判据，但
+     * React 闭包里的会话 id 在导航那一刻仍是**上一次渲染的旧值**（真机实测拉不回来），
+     * 而「这一下点在哪儿」是当下的事实、不受渲染时机影响。少一个状态就少一类失败。
+     *
+     * 左栏子树**不靠类名认**（官方类名是哈希的，`pXSMma_*` 之类，钉不住）：入口节点自己
+     * 打 `data-hwb-nav-entry`，从它往上走到**第一个不含本面板根节点**的祖先——那就是左栏
+     * 那一列；点击目标在该祖先内即视为「来自左栏」。
+     *
+     * 边界（如实写）：左栏子树算不出来时（入口未挂载 / 面板根未知）`inSidebar` 恒假，
+     * 于是「面板外 + 刚点过面板内」会被判成门户链——宁可多拉一次，也不放走用户报的那条。
+     *
      * 0.19.62 真机教训：本函数内部**任何**一步都可能因官方服务面的真实形状而抛
      * （subscribe 同步抛、getSnapshot 抛……）。调用方已把整个调用包进 try/catch
      *（降级 = 没有守卫），但本函数自身也不该让「后半段可降级的失败」变成「调用方
@@ -3147,26 +3277,116 @@ window.__ModuleLoader__.load({
      *
      * @param {Object} layout ctx.layout 服务（缺席时返回 no-op，守卫关闭）
      * @param {string} panelId 本面板的 main key
+     * @param {Object} [probe] 事实面（缺席时只剩「面板内点击」一条判据）
+     * @param {Element} [probe.rootEl] 本面板根节点（判「点在面板内」＋算「左栏子树」）
      * @returns {{ onPointerDown: () => void, dispose: () => void }}
-     *   onPointerDown 由挂载 effect 接到根节点 DOM；dispose 注销订阅。
+     *   onPointerDown 由挂载 effect 接到根节点 DOM；dispose 注销订阅与 document 监听。
      */
-    function createPanelGuard(layout, panelId) {
+    function createPanelGuard(layout, panelId, probe) {
       if (!panelGuardAvailable(layout)) {
         // 降级不是崩溃：没有服务面就等于没有守卫，行为与 0.19.61 相同。
+        try { if (typeof window !== 'undefined') window.__hwbPanelGuard = { available: false, reason: 'layout-face-missing' }; } catch (e) { /* 取证挂不上不影响面板 */ }
         return { onPointerDown: () => {}, dispose: () => {} };
       }
       let lastInsidePointerAt = 0;
+      let lastAnyPointerAt = 0;
+      let popupOwnedAt = 0;
+      let sidebarRoot; // 惰性求值：本插件入口挂载后再算官方左栏子树
       let suppress = false; // 自己 selectPanel 回拉触发的订阅回调不再处理，防自激
       let unsubscribe = () => {};
+
+      /**
+       * 真机取证通道（0.19.64）：把守卫**实际看到的事实与做出的决定**挂到 window 上。
+       *
+       * 为什么要它：守卫的判据是「点击落点 × 官方布局变化」的时序，只在测试里断言源码形状
+       * 证明不了真机上到底走了哪一支——0.19.64 的第一版判据就是「源码看着对、真机拉不回来」。
+       * 有了它，探针（或用户在 F12 里）一眼能看到 `lastDecision`，不必靠猜。
+       * 只写事实、不改行为，失败也不影响面板。
+       */
+      const forensics = { available: true, pulls: 0, lastActive: 'init', lastDecision: 'init', lastClick: 'init' };
+      try { if (typeof window !== 'undefined') window.__hwbPanelGuard = forensics; } catch (e) { /* 取证挂不上不影响守卫 */ }
+
+      /**
+       * 官方左栏那一列：从本插件入口节点（`data-hwb-nav-entry`）往上走，取**第一个不含本
+       * 面板根节点**的祖先——左栏与中央区在那一层分叉，所以它正好是左栏容器。不靠官方
+       * 哈希类名（`pXSMma_*` 之类钉不住）。算不出来返回 null。
+       */
+      const sidebarOf = () => {
+        if (sidebarRoot && sidebarRoot.isConnected !== false) return sidebarRoot;
+        sidebarRoot = null;
+        try {
+          const entry = typeof document !== 'undefined' && document.querySelector ? document.querySelector('[data-hwb-nav-entry]') : null;
+          const root = probe && probe.rootEl;
+          if (entry && root) {
+            let node = entry.parentElement;
+            for (let i = 0; node && i < 12; i += 1) {
+              if (!node.contains(root)) { sidebarRoot = node; break; }
+              node = node.parentElement;
+            }
+          }
+        } catch (e) { sidebarRoot = null; }
+        return sidebarRoot;
+      };
+      /** 点在面板根子树里？ */
+      const inPanel = (target) => {
+        const root = probe && probe.rootEl;
+        try { return !!(root && target && typeof root.contains === 'function' && root.contains(target)); } catch (e) { return false; }
+      };
+      /** 点在官方左栏子树里？（左栏的导航一律放行：用户 2026-10-04 确认的口径） */
+      const inSidebar = (target) => {
+        const side = sidebarOf();
+        try { return !!(side && target && typeof side.contains === 'function' && side.contains(target)); } catch (e) { return false; }
+      };
+      // document 捕获：**门户里的点击也算数**（0.19.64 修的就是这一类——官方工作区浮层
+      // 开在 portal 里，DOM 不在面板子树内，挂在面板根上的监听永远看不到那一下）。
+      const onDocumentPointerDown = (ev) => {
+        try {
+          const target = ev && ev.target;
+          const now = Date.now();
+          if (inSidebar(target)) {
+            // 左栏点击：这是一次**用户明确要离开面板**的导航（点会话 / 点「新会话」/ 点工作区），
+            // 清掉链式指纹，后面不看它。
+            lastInsidePointerAt = 0;
+            popupOwnedAt = 0;
+            lastAnyPointerAt = now;
+            forensics.lastClick = 'sidebar';
+            return;
+          }
+          if (inPanel(target)) {
+            lastInsidePointerAt = now;
+            lastAnyPointerAt = now;
+            forensics.lastClick = 'panel';
+            return;
+          }
+          // 面板外、左栏外：如果**刚点过面板内**，这一下极可能就是面板内那一下打开的
+          // 门户浮层（工作区选择、模型选择……）。记成「链上的一次点击」。
+          if (lastInsidePointerAt && now - lastInsidePointerAt <= POPUP_CHAIN_MS) popupOwnedAt = now;
+          lastAnyPointerAt = now;
+          forensics.lastClick = popupOwnedAt === now ? 'portal-chain' : 'outside';
+        } catch (e) { /* 指纹失败不影响面板 */ }
+      };
+      try {
+        if (typeof document !== 'undefined' && document.addEventListener) {
+          document.addEventListener('pointerdown', onDocumentPointerDown, true);
+        }
+      } catch (e) { warn('concurrent panel document pointerdown', e); }
       try {
         unsubscribe = layout.panelInfo.subscribe(() => {
           try {
             if (suppress) return;
             const active = layout.panelInfo.getSnapshot().activePanelId;
-            if (active === panelId) return;             // 别的面板被选中：放行（用户真实选择）
-            if (active !== null) return;                // 仍是某个全局面板：同样放行
-            // 面板被切回「单个会话」。看它是不是紧跟一次面板内点击：
-            if (Date.now() - lastInsidePointerAt <= PANEL_GUARD_MS) {
+            if (active === panelId) return;             // 仍是本面板：无事
+            if (active !== null) return;                // 别的全局面板被选中：放行（用户真实选择）
+            // 面板被切回「单个会话」：两类判据（机制见函数头注释）。
+            const now = Date.now();
+            const insideWindow = now - lastInsidePointerAt <= PANEL_GUARD_MS;
+            // 门户链：面板内那一下打开了浮层，随后在浮层里又点了一下（落点在面板外、
+            // 左栏外）。两次点击之间隔多久由用户决定（挑工作区可能看几秒），所以窗口给足。
+            const popupWindow = !!popupOwnedAt && now - popupOwnedAt <= POPUP_CHAIN_MS;
+            forensics.lastActive = active;
+            forensics.lastDecision = insideWindow ? 'pull:inside' : (popupWindow ? 'pull:popup' : 'allow');
+            if (insideWindow || popupWindow) {
+              forensics.pulls += 1;
               suppress = true;
               try { layout.selectPanel(panelId); } finally { suppress = false; }
             }
@@ -3179,7 +3399,14 @@ window.__ModuleLoader__.load({
       }
       return {
         onPointerDown: () => { lastInsidePointerAt = Date.now(); },
-        dispose: () => { try { unsubscribe(); } catch (e) { /* 注销失败不影响卸载 */ } },
+        dispose: () => {
+          try { unsubscribe(); } catch (e) { /* 注销失败不影响卸载 */ }
+          try {
+            if (typeof document !== 'undefined' && document.removeEventListener) {
+              document.removeEventListener('pointerdown', onDocumentPointerDown, true);
+            }
+          } catch (e) { /* 同上：document 监听注销失败不影响卸载 */ }
+        },
       };
     }
 
@@ -3197,6 +3424,9 @@ window.__ModuleLoader__.load({
     function ConcurrentPanelIcon(props) {
       const size = Number(props?.size) || 16;
       return h('svg', {
+        // 守卫靠这个标记认出「官方左栏子树」：从本入口往上走到第一个不含面板根的祖先。
+        // 不钉官方哈希类名——那种类名一次发版就换，钉了等于没钉。
+        'data-hwb-nav-entry': '1',
         viewBox: '0 0 16 16', width: size, height: size, fill: 'none',
         stroke: 'currentColor', strokeWidth: 1.3, strokeLinecap: 'round',
         strokeLinejoin: 'round', 'aria-hidden': 'true', focusable: 'false',
@@ -6111,6 +6341,11 @@ window.__ModuleLoader__.load({
         // 确定，并把**官方那一份**撑满本列（`>*` 只作用于直接子节点，不会串到别处）。
         ".hwb-concurrent-col-body{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}",
         ".hwb-concurrent-body{position:relative;display:flex;flex-direction:column;flex:1;min-height:0;width:100%;overflow:hidden}",
+        // 「开工指令」面板（0.19.64）：一列的独立工作区（git worktree + 分支）指令。
+        // 它属于**面板**而不是列：指令是给用户复制走的，摊在列里会把列挤变形。
+        ".hwb-concurrent-brief{margin:8px 12px 0;padding:8px 10px;border:.5px solid var(--dsw-alias-border-l3,#8884);border-radius:10px;background:var(--dsw-alias-bg-layer-1,#00000005)}",
+        ".hwb-concurrent-brief-head{display:flex;align-items:center;gap:8px;justify-content:space-between;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,inherit)}",
+        ".hwb-concurrent-brief-body{margin:6px 0 0;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:18px;color:var(--dsw-alias-label-primary,inherit)}",
         ".hwb-concurrent-body>*{flex:1 1 auto;min-height:0;min-width:0}",
       ].join('');
       document.head.appendChild(style);
@@ -6571,8 +6806,8 @@ window.__ModuleLoader__.load({
       //
       // 两半必须成对：官方契约原文是「Each list id addresses the matching main panel」，
       // 只注册侧栏那一半的话，用户点一下就会被 layout service 拒（main panel 未注册）。
-      const CONCURRENT_PANEL_ID = 'webcode-concurrent-panel';
-      const CONCURRENT_COLUMN_SLOT = 'webcode-concurrent.column';
+      // ⚠ 面板 id 与子槽名是**工厂作用域**的常量（见 ConcurrentColumns 上方那一段注释：
+      //   声明在这里会让面板挂载 effect 读不到 ⇒ `ReferenceError` 被吞成 warn ⇒ 守卫静默失效）。
       own(() => {
         try {
           return ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({

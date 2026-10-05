@@ -183,3 +183,45 @@ node package\dsh-webcode-bridge\test\client-render.test.mjs
   `renderFactorySlot('conversation.content')` 是否属**对外承诺**（机制无校验且有在产范例，
   但 README 只写 “an embedded occurrence can …”）。
 - 未做（需用户同意）：全量回归（121 个测试文件）。
+
+---
+
+## 10. 同一会话/工作区里的「并行多任务 + 沙箱」，以及 git 分支/工作区那套想法（2026-10-05 第 2 轮追加）
+
+> 用户原话：「2.请你确保解决同一会话/工作区内的并行多任务和沙箱管理？
+> 3.我现在有想法就是能够通过git分支和最后旋转来进行并列多会话？如何官方流程？」
+
+### 10.1 官方事实（asar 0.2.0-rc.2 实读，非推测）
+
+| 问题 | 官方答案 | 出处 |
+| --- | --- | --- |
+| 一个会话能同时跑几个任务？ | **一个会话一条 agent loop**，同会话轮次串行；同会话内的「并行」由官方**子代理**与 **Agent Team** 提供 | `dsh-tool-subagent`、`dsh-experimental-agent-team` |
+| 沙箱作用域？ | **按会话**：`One primary workspace root per session — policy resolves SessionHeader.cwd`；**额外可写根不在策略里** | `dsh-sandbox-policy/README.md:147` |
+| 是内核边界吗？ | **不是**：trusted code 里的 per-call 策略检查（读不受限），官方原文「a policy fence, not a kernel boundary」 | `dsh-fs-sandbox/README.md:28,64,123` |
+| 官方 Agent Team 怎么隔离写入？ | **不隔离**：`One process and one shared checkout — members share cwd and observe edits immediately; this package provides no worktree, remote member, merge, or filesystem lock`；只有**咨询性写作用域**，最终 diff 由 Lead 复核 | `dsh-experimental-agent-team/README.md:206-207` |
+| 官方有 worktree 吗？ | **没有**，且列为**未承诺方向**：`Undecided directions include … filesystem isolation via worktrees; none of these are committed.` | 同上 `:226` |
+| 客户端能指定会话目录吗？ | 能，但**与工作区二选一**：payload 是「给了 `workspaceId` 就不带 `cwd`，否则带 `cwd`」 | `dsh-api-session-controller/lib/client.js:2678-2687` |
+
+### 10.2 结论：「同一工作区内并行多任务 + 沙箱管理」的真话
+
+1. **并行多任务成立**：并发列已是 N 条**独立真会话**（各自 sessionId、各自 retain、各自 agent
+   loop、各自 composer）——它们并行，因为不共享会话。
+2. **文件隔离不成立（官方边界）**：共用同一个检出时，各列的写入**互相可见**。会话级沙箱只保证
+   「写入落在本会话的工作区根内」，不保证「不同会话写不到彼此」。这是设计边界，插件的职责是
+   **如实说明**，而不是假装能拦。
+3. **要真隔离，只有工作区/分支这一步**：每列一个 `git worktree` + 分支，收尾合并（用户第 3 点
+   的「最后旋转」）；或者照官方 Agent Team 的做法——一个检出 + 咨询性写作用域 + 人工复核。
+4. ⚠ `create({ cwd })` 与 `create({ workspaceId })` **二选一**：拿独立工作区根就得放弃工作区绑定
+   （composer 会退回「选择工作区」形态）。所以本插件把它做成**用户/列内 agent 执行的指令**，
+   不偷偷替用户切 cwd。
+
+### 10.3 0.19.64 实际做了什么（纯客户端，无需重启桌面端）
+
+- 每列列头多一颗 **「⧉ 开工」**：一键复制该列的独立工作区指令——
+  `git worktree add -b hwb/col-N .hwb/worktrees/col-N HEAD` → `cd` 进去 → 收尾轮转
+  `git -C <主检出> merge --no-ff hwb/col-N`；**并把上面两条官方口径写进指令文本**，
+  免得后来者以为官方自带 worktree 隔离。
+- 剪贴板不可用（浏览器策略/非安全上下文）时文本**摊在面板里**让用户自己选中复制，不静默失败。
+- 判据：`test/team-compare.test.mjs` 新增一条——指令生成器存在、worktree 与 merge 两条命令齐全、
+  列头有入口、官方口径必须出现在文本里。
+- **不做**：插件不代跑 `git`（客户端无 fs/子进程）、不替用户改会话 cwd、不声称拥有文件隔离能力。

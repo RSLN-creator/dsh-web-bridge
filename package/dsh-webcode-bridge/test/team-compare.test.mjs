@@ -381,7 +381,7 @@ test('★ 0.19.62 并发：面板意图守卫必须存在（panelInfo 订阅 + �
   // 守卫三件套：服务面可用性探测、时间窗、回拉。
   assert.match(src, /const PANEL_GUARD_MS = \d+;/, '回拉判别必须有明确的时间窗常量');
   assert.match(src, /function panelGuardAvailable\(layout\)/, '必须先探测 ctx.layout 服务面（缺席降级，不是崩溃）');
-  assert.match(src, /function createPanelGuard\(layout, panelId\)/, '必须有守卫运行体');
+  assert.match(src, /function createPanelGuard\(layout, panelId, probe\)/, '必须有守卫运行体（0.19.64 起带事实面参数）');
   const guard = src.slice(src.indexOf('function createPanelGuard'), src.indexOf('function ConcurrentPanelIcon'));
   assert.ok(guard.length > 0, '找不到 createPanelGuard 函数体（改名/移动需同步本判据）');
   assert.match(guard, /layout\.panelInfo\.subscribe\(/, '必须订阅 panelInfo（官方裸 observable：getSnapshot + subscribe）');
@@ -396,11 +396,11 @@ test('★ 0.19.62 并发：面板意图守卫必须存在（panelInfo 订阅 + �
   assert.ok(panel.length > 0, '找不到 ConcurrentPanel 函数体（改名/移动需同步本判据）');
   assert.ok(!/onPointerDown: guardRef/.test(panel),
     '渲染路径不得再同步建守卫/挂 onPointerDown prop（0.19.62 首版正是这个形态炸出空白面板）');
-  assert.match(panel, /createPanelGuard\(props\.layout, CONCURRENT_PANEL_ID\)/,
-    '守卫必须在挂载 effect 里创建');
+  assert.match(panel, /createPanelGuard\(props\.layout, CONCURRENT_PANEL_ID, factsRef\.current\)/,
+    '守卫必须在挂载 effect 里创建，并把面板根事实面传进去（0.19.64：判落点要用 rootEl）');
   assert.match(panel, /addEventListener\('pointerdown', onDown, true\)/,
     'pointerdown 指纹必须用 DOM addEventListener 接（渲染路径零守卫）');
-  assert.match(panel, /createPanelGuard\(props\.layout, CONCURRENT_PANEL_ID\); \} catch/,
+  assert.match(panel, /createPanelGuard\(props\.layout, CONCURRENT_PANEL_ID, factsRef\.current\); \} catch/,
     'effect 里 createPanelGuard 必须 try/catch（任何失败降级成没有守卫）');
   assert.match(panel, /removeEventListener\('pointerdown', onDown, true\)/,
     '卸载必须 removeEventListener（与 addEventListener 成对）');
@@ -417,6 +417,79 @@ test('★ 0.19.62 并发：面板意图守卫必须存在（panelInfo 订阅 + �
   // 内部边界够不着，所以注册处还要再包一层 HwbBoundary。
   assert.match(src, /\(props\) => h\(HwbBoundary, \{ label: '并发会话面板' \},\s*\n\s*h\(ConcurrentPanel,/,
     'main 条目注册处必须再包一层 HwbBoundary（面板级崩溃要变成可读文本，不是空盒）');
+});
+
+test('★ 0.19.64 并发：面板路径用到的标识符必须在工厂作用域可见（跨作用域接线断裂族）', () => {
+  const src = clientSrc();
+  // 这一族到 0.19.64 已经咬过两次：
+  //   ① `warn` 声明在 apply() 里，而 ConcurrentPanel/createPanelGuard 在 apply() 之外
+  //      ⇒ `ReferenceError: warn is not defined`（0.19.63 修）；
+  //   ② `CONCURRENT_PANEL_ID` 同样声明在 apply() 里 ⇒ 挂载 effect 里
+  //      `ReferenceError: CONCURRENT_PANEL_ID is not defined`，被 effect 的 try/catch
+  //      吞成一句 warn ⇒ **守卫从来没生效过**（用户 2026-10-05 报的「还是会切回到官方工作区」）。
+  // 正则判据看不见作用域，所以这里做一次**真扫描**：把面板路径那几个函数体里的标识符用法，
+  // 与「只在 apply() 内部声明过的名字」取交集；交集非空即红。
+  const applyAt = src.indexOf('function apply(ctx) {');
+  assert.ok(applyAt > 0, '找不到 function apply(ctx)（改名则本判据失效，需同步）');
+  const outer = src.slice(0, applyAt);
+  const inner = src.slice(applyAt);
+  const declared = (text) => new Set(Array.from(text.matchAll(/(?:const|let|var|function)\s+([A-Za-z_$][A-Za-z0-9_$]*)/g)).map(m => m[1]));
+  const outerNames = declared(outer);
+  const onlyInApply = new Set(Array.from(declared(inner)).filter(n => !outerNames.has(n)));
+  // 面板路径：定义在 apply() 之外的那几个函数（它们只能用工厂作用域里的名字）。
+  const PANEL_FNS = ['function ConcurrentPanel(', 'function ConcurrentColumns(', 'function ConcurrentColumn(',
+    'function createPanelGuard(', 'function ConcurrentPanelIcon(', 'const HwbBoundary'];
+  const used = new Set();
+  for (const marker of PANEL_FNS) {
+    const at = src.indexOf(marker);
+    if (at < 0) { assert.fail('找不到面板路径函数（改名则本判据失效，需同步）：' + marker); }
+    // 只取**这个函数自己**的函数体：到下一处顶层 `\n    function ` 为止，找不到就截 6000 字符。
+    const end = src.indexOf('\n    function ', at + 10);
+    const body = src.slice(at, end > at ? end : at + 6000);
+    // 只看「当值用」的标识符：排除属性访问（`.` 前导）、字符串/模板里的、以及对象字面量的
+    // 键（`style:` / `label:` 这种是键名，不是作用域引用——第一版扫描把它们误报成泄漏）。
+    for (const m of body.matchAll(/(?<![.\w$'"])([A-Za-z_$][A-Za-z0-9_$]*)(?!\s*:)/g)) used.add(m[1]);
+  }
+  const leaks = Array.from(used).filter(n => onlyInApply.has(n));
+  assert.deepEqual(leaks, [],
+    '这些名字只在 apply() 里声明，却被 apply() 之外的面板代码使用 ⇒ 真机 ReferenceError：'
+    + JSON.stringify(leaks) + '（照 `warn` / `CONCURRENT_PANEL_ID` 的先例提到工厂作用域）');
+});
+
+test('★ 0.19.64 并发：守卫必须覆盖门户浮层（document 捕获 + 面板内/左栏分类）', () => {
+  const src = clientSrc();
+  const guard = src.slice(src.indexOf('function createPanelGuard'), src.indexOf('function ConcurrentPanelIcon'));
+  assert.ok(guard.length > 0, '找不到 createPanelGuard 函数体（改名/移动需同步本判据）');
+  // 真机取证：官方工作区胶囊的浮层开在**门户**里，DOM 不在面板子树内，挂在面板根上的
+  // pointerdown 永远看不到那一下 ⇒ 必须用 document 捕获。
+  assert.match(guard, /document\.addEventListener\('pointerdown', onDocumentPointerDown, true\)/,
+    '守卫必须在 document 上捕获 pointerdown（门户浮层里的点击也要看见）');
+  assert.match(guard, /document\.removeEventListener\('pointerdown', onDocumentPointerDown, true\)/,
+    'document 监听必须与 addEventListener 成对注销');
+  assert.match(guard, /const inSidebar = \(target\) =>/, '必须有「落点在官方左栏子树」的判定');
+  assert.match(guard, /const inPanel = \(target\) =>/, '必须有「落点在面板内」的判定');
+  assert.match(guard, /popupOwnedAt = now/, '必须记「面板外 + 刚点过面板内」的门户链指纹');
+  assert.match(guard, /const popupWindow = !!popupOwnedAt && now - popupOwnedAt <= POPUP_CHAIN_MS/,
+    '门户链窗口必须独立于 PANEL_GUARD_MS（用户挑工作区可能超过 900ms）');
+  assert.match(src, /const POPUP_CHAIN_MS = \d+;/, '门户链窗口必须是具名常量');
+  assert.match(src, /'data-hwb-nav-entry': '1'/, '左栏入口必须自打 data-hwb-nav-entry 标记');
+  assert.match(guard, /data-hwb-nav-entry/, '左栏子树必须由该标记推算（官方类名是哈希的，钉不住）');
+  assert.match(guard, /if \(!node\.contains\(root\)\) \{ sidebarRoot = node; break; \}/,
+    '左栏子树 = 从入口往上第一个**不含面板根**的祖先');
+  assert.match(guard, /window\.__hwbPanelGuard = forensics/, '守卫必须暴露真机取证读数');
+});
+
+test('★ 0.19.64 并发：每列必须能一键取到「独立工作区」指令（git 分支 + 收尾轮转）', () => {
+  const body = compareBody(clientSrc());
+  assert.match(body, /const columnBrief = \(col, index\) =>/, '必须有可复制的开工指令生成器');
+  assert.match(body, /git worktree add -b ' \+ branch \+ ' ' \+ wt \+ ' HEAD/,
+    '指令必须给出 `git worktree add -b <分支> <目录> HEAD`（每列一个工作区）');
+  assert.match(body, /merge --no-ff ' \+ branch/, '必须给出收尾「轮转」：把该列分支合并回主线');
+  assert.match(body, /'⧉ 开工'/, '每列列头必须有一键复制入口');
+  // 口径不许漂：必须写明「官方沙箱按会话解析工作区根」「官方 Team 是 one shared checkout、不带 worktree」，
+  // 否则读者会以为官方自带这套隔离（真机取证见 doc/research/2026-10-05-…-hot-swap.md §10）。
+  assert.match(body, /SessionHeader\.cwd|dsh-sandbox-policy/, '指令里必须引官方沙箱口径（按会话解析工作区根）');
+  assert.match(body, /one shared checkout/i, '指令里必须写明官方 Agent Team 是一个共享检出、不带 worktree');
 });
 
 // ── ⑩ 官方 agentTeams 读取本身保留（它仍是任务板的来源）──────────────────────
