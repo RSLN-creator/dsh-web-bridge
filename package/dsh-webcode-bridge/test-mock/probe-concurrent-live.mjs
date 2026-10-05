@@ -439,6 +439,7 @@ try {
 }
 
 const report = {
+  railRegistration: railReading,
   url, at: new Date().toISOString(), headed,
   problems, consoleErrors, pageErrors, failedRequests,
   reading,
