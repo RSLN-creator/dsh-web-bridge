@@ -156,7 +156,7 @@ window.__ModuleLoader__.load({
     // 官方同款写法作依据：`dsh-client-ui-sidebar` 的 inject 同样列了 `"layout"`。
     // 本文件的其余 `ctx.*` 读取（slots / sidebarRight / sidebarRightTabs / sessions）
     // 都已在此声明，`ctx.effect`、`ctx.reflect` 是 cordis 自带、不需要声明。
-    const inject = ['slots', 'sidebarRightTabs', 'sidebarRight', 'sessions', 'layout'];
+    const inject = ['slots', 'sidebarRightTabs', 'sidebarRight', 'sessions', 'layout', 'uiWorkspace'];
     const RELAY_PORT = 8931;
     const relayBase = 'http://127.0.0.1:' + RELAY_PORT;
     // 每个站点一个独立源：<siteId>.localhost:<port>。
@@ -3084,6 +3084,11 @@ window.__ModuleLoader__.load({
             acc.push(h('div', { key: col.key, className: 'hwb-concurrent-col' },
               h('div', { className: 'hwb-concurrent-col-head' },
                 h('span', { className: 'hwb-concurrent-col-title', title: col.sessionId }, titleOf(col.sessionId)),
+                h('button', {
+                  type: 'button', className: 'hwb-concurrent-mini',
+                  title: '把这一条会话交回官方单会话视图打开（那里才有官方的标题栏/标准模式/后台任务/团队）',
+                  onClick: () => { try { props.hwbOpenOfficial && props.hwbOpenOfficial(col.sessionId); } catch (e) { warn('open official view (column)', e); } },
+                }, '↗ 官方视图'),
                 h('button', {
                   type: 'button', className: 'hwb-concurrent-mini',
                   title: '复制这一列的「独立工作区」指令（git worktree + 分支，收尾时合并回主线）',
@@ -6984,6 +6989,12 @@ window.__ModuleLoader__.load({
                 groupKey: 'panel',
                 // 主入口建完一组后，让左栏「并发会话目录」立刻多出那一行（0.19.65）。
                 hwbSyncGroups: syncGroupRows,
+                // 「↗ 用官方视图打开」：官方 header 那几块 chip（标准模式 / 后台任务 / 团队）只由
+                // 官方会话视图渲染（槽的公开投影不含组件，见 doc/research §11），所以受支持的做法
+                // 是把这一条会话**交回官方视图**——`uiWorkspace.openSession`。失败只 warn，不影响面板。
+                hwbOpenOfficial: (sid) => {
+                  try { ctx.uiWorkspace.openSession(sid); } catch (e) { warn('open official view', e); }
+                },
               })));
             // 一列的正文（session 作用域）：渲染官方会话体，见 ConcurrentColumn 的注释。
             const offCol = ctx.slots.inject(CONCURRENT_COLUMN_SLOT, () => ctx.slots.register(

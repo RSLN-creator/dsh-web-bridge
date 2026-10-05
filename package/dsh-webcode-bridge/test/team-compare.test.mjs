@@ -77,8 +77,10 @@ test('★ 0.19.55 并发：每列必须是一条**真官方会话**（create + r
 
 test('★ 0.19.63 并发：inject 必须声明**每一个**被读的服务（真机空白根因的判据）', () => {
   const src = clientSrc();
-  assert.match(src, /const inject = \['slots', 'sidebarRightTabs', 'sidebarRight', 'sessions', 'layout'\];/,
-    'inject 必须含 sessions（每列 create/retain）与 layout（守卫要读 ctx.layout.panelInfo）');
+  assert.match(src, /const inject = \['slots', 'sidebarRightTabs', 'sidebarRight', 'sessions', 'layout', 'uiWorkspace'\];/,
+    'inject 必须含 sessions / layout / uiWorkspace：会话（每列 create/retain）、布局（守卫）、'
+    + 'uiWorkspace（「↗ 用官方视图打开」——官方 header 那几块 chip 只由官方会话视图渲染，'
+    + '受支持的做法是把那一条会话交回官方视图）');
 
   // 这一类缺陷的**通用判据**（0.19.63 真机事故后补，取而代之的是原来只钉死那一串字面量的写法）。
   //

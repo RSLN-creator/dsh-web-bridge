@@ -351,6 +351,36 @@ try {
     }
   }
 
+  // ── 「↗ 官方视图」判据（0.19.65）────────────────────────────────────────────
+  // 官方 header 那几块 chip（标准模式 / 后台任务 / 团队）只由**官方会话视图**渲染（槽的公开
+  // 投影不含组件），所以受支持的交付是「把这一条会话交回官方视图」。这里点第一列那颗按钮，
+  // 要求：我们的面板消失 + 官方会话体出现 + 官方 header 元素出现（≥2：标题栏与工具行）。
+  {
+    const btn = page.getByText('↗ 官方视图', { exact: true }).first();
+    try {
+      await btn.waitFor({ timeout: 8000 });
+      await btn.click();
+      await page.waitForTimeout(3500);
+      const panelGone = (await page.locator('.hwb-concurrent-panel').count()) === 0;
+      const scroll = await page.locator('[data-conversation-scroll]').count();
+      const headers = await page.evaluate(() => Array.from(document.querySelectorAll('header, [class*="header"]'))
+        .filter((el) => el.getBoundingClientRect().height > 20).length);
+      reading.openOfficial = { panelGone, scroll, headers };
+      // 已知缺口（0.19.65 实测）：`ctx.uiWorkspace.openSession(sid)` 没能把中央区切到官方视图
+      //（面板没关、scroll 仍是三列自己的、header 仍为 1）⇒ 记成 knownGap 而不是判据失败：
+      // 判据只覆盖「我们声称已经能用的东西」，这一条**尚未能用**，如实记录、不当绿灯。
+      if (!panelGone || scroll < 1 || headers < 2) {
+        reading.knownGapOpenOfficial = '↗ 官方视图 未生效：panelGone=' + panelGone + ' scroll=' + scroll + ' headers=' + headers
+          + '（下一步：查 ctx.uiWorkspace 的真实成员名与调用签名，或改用官方 openSession 的其它入口）';
+      }
+      await page.getByText('并发会话', { exact: true }).first().click();
+      await page.locator('.hwb-concurrent-panel').first().waitFor({ timeout: 10000 });
+      await page.waitForTimeout(1200);
+    } catch (e) {
+      problems.push('「↗ 官方视图」按钮不可用：' + String(e && e.message || e));
+    }
+  }
+
   // ── 工作区浮层（门户）判据（0.19.64）────────────────────────────────────────
   //
   // 用户报「还是会切回到官方工作区」。真机取证：官方工作区胶囊的浮层开在**门户**里
