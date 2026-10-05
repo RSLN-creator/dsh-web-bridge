@@ -2620,6 +2620,47 @@ window.__ModuleLoader__.load({
      */
     const CONCURRENT_STORE_PREFIX = 'dsh-webcode-bridge.concurrent.';
 
+    // 「过去的并发会话」＝多组留痕（用户 2026-10-06：「否则怎么找回已过去的并发会话」）。
+    // 存**组**（{id, at, ids}）：主入口每次新建一组；历史组由左栏目录找回——每一组注册
+    // 一条 `sidebar.panellist` 行 + 一个**同名 main key**（官方契约原文
+    //「Each list id addresses the matching main panel」）。
+    const CONCURRENT_GROUPS_KEY = CONCURRENT_STORE_PREFIX + 'groups';
+    const CONCURRENT_MAX_GROUPS = 12;
+    const CONCURRENT_GROUP_PREFIX = 'webcode-concurrent-group-';
+
+    /** 读全部历史组；任何异常回空数组（降级不是崩溃）。 */
+    function readConcurrentGroups() {
+      try {
+        const arr = JSON.parse(window.localStorage.getItem(CONCURRENT_GROUPS_KEY) || '[]');
+        return Array.isArray(arr) ? arr.filter(g => g && typeof g.id === 'string' && Array.isArray(g.ids) && g.ids.length) : [];
+      } catch (e) { return []; }
+    }
+
+    /** 新建一组留痕，返回组 id（写不进去返回 null：降级为「这次找不回」）。 */
+    function createConcurrentGroup(ids) {
+      try {
+        const list = (ids || []).filter(id => typeof id === 'string' && id);
+        if (!list.length) return null;
+        const rest = readConcurrentGroups().filter(g => g.ids.join(',') !== list.join(','));
+        const group = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), at: Date.now(), ids: list };
+        rest.unshift(group);
+        window.localStorage.setItem(CONCURRENT_GROUPS_KEY, JSON.stringify(rest.slice(0, CONCURRENT_MAX_GROUPS)));
+        return group.id;
+      } catch (e) { return null; }
+    }
+
+    /** 往已有组追加一条会话（「+ 加一列」）；组不存在就新建一组。 */
+    function appendToConcurrentGroup(groupId, sessionId) {
+      try {
+        const all = readConcurrentGroups();
+        const hit = groupId ? all.find(g => g.id === groupId) : null;
+        if (!hit) return createConcurrentGroup([sessionId]);
+        if (!hit.ids.includes(sessionId)) hit.ids = hit.ids.concat(sessionId);
+        window.localStorage.setItem(CONCURRENT_GROUPS_KEY, JSON.stringify(all));
+        return hit.id;
+      } catch (e) { return null; }
+    }
+
     /**
      * 写回一组真会话 id。失败静默。
      *
@@ -2747,6 +2788,8 @@ window.__ModuleLoader__.load({
       const viewRef = React.useRef(null);
       // 打开面板只自动建一次组（0.19.65，用户第 7/8 条：点「并发会话」= 点「新会话」）。
       const createdRef = React.useRef(false);
+      // 这一列组在「历史组」里的 id（无 hwbGroup = 主入口新建的组）。
+      const groupRef = React.useRef(props.hwbGroup ? props.hwbGroup.id : null);
 
       // ── 挂载：把上次的组恢复回来；卸载：把所有引用成对释放 ────────────────────
       React.useEffect(() => {
@@ -2758,12 +2801,22 @@ window.__ModuleLoader__.load({
           setReady(true);
           return undefined;
         }
-        // 0.19.65（用户第 7/8 条）：点「并发会话」= 点「新会话」——**每次打开都新建一组**
-        // N 列真会话，而不是把上次那一组恢复回来。恢复的那一套（readConcurrentGroup）
-        // 因此不再参与挂载：旧组的那几条会话仍在左栏清单里，可以单独打开继续。
-        // 落盘照旧写（writeConcurrentGroup）：留给以后「切回历史组」用，也便于排障时核对。
-        setCols([]);
-        setReady(true);
+        // 主入口（无 hwbGroup）：每次打开都新建一组（用户第 7/8 条）。
+        // 历史组入口（有 hwbGroup）：把那一组的会话重新 retain 出来 ⇒ **找回过去的并发会话**。
+        const group = props.hwbGroup;
+        if (group && Array.isArray(group.ids)) {
+          const restored = [];
+          for (const id of group.ids) {
+            try {
+              refs[id] = sessions.retain(id, { source: 'webcodeConcurrent' });
+              restored.push({ key: 'c:' + id, sessionId: id });
+            } catch (e) { delete refs[id]; }
+          }
+          if (aliveRef.current) { setCols(restored); setReady(true); }
+        } else {
+          setCols([]);
+          setReady(true);
+        }
         return () => {
           aliveRef.current = false;
           for (const id of Object.keys(refs)) {
@@ -2774,8 +2827,9 @@ window.__ModuleLoader__.load({
       }, []);
 
       // 打开面板就建组（等挂载 effect 把 ready 置真之后再动手，避免与恢复逻辑抢时序）。
+      // 历史组面板（hwbGroup）不建：它的会话在上面那段恢复里已经 retain 好了。
       React.useEffect(() => {
-        if (!ready || createdRef.current) return;
+        if (!ready || createdRef.current || props.hwbGroup) return;
         createdRef.current = true;
         createColumns(CONCURRENT_DEFAULT_COLS);
       }, [ready]);
@@ -2879,6 +2933,13 @@ window.__ModuleLoader__.load({
               } catch (e) { /* 这一列拿不到引用：跳过，而不是留一条永远打不开的列 */ }
             }
             if (!added.length) { setError('新建会话成功但拿不到会话引用'); return; }
+            // 留痕 + 刷左栏目录（0.19.65）：这样「过去的并发会话」才有地方找回来。
+            try {
+              const fresh = added.map(a => a.sessionId);
+              if (groupRef.current) { for (const id of fresh) appendToConcurrentGroup(groupRef.current, id); }
+              else { groupRef.current = createConcurrentGroup(fresh); }
+              if (typeof props.hwbSyncGroups === 'function') props.hwbSyncGroups();
+            } catch (e) { warn('concurrent group record', e); }
             setCols(prev => [...prev, ...added].slice(0, CONCURRENT_MAX_COLS));
           })
           .catch((err) => {
@@ -6777,6 +6838,76 @@ window.__ModuleLoader__.load({
         } catch (e) { warn('tab menu item (window)', e); }
       });
 
+      // ---- 左栏「并发会话目录」：找回过去的组（0.19.65，用户 2026-10-06）------------
+      //
+      // 用户原话：「像是左侧新增同『工作区』面板视图并级的目录显示并发会话那样！
+      // 否则怎么找回已过去的并发会话！！！」。官方契约给了做法（`ui-cordis-client-runner`
+      // 对 sidebar.panellist 的说明原文：「**Each list id addresses the matching main panel**」）：
+      // 每一组 = 一条 `sidebar.panellist` 行 + 一个**同名 `main` key**；点行 → 打开那个面板。
+      // 主入口（并发会话）负责**新建**一组；这些历史行负责**找回**。
+      //
+      // 三个细节都是有理由的，别省：
+      //   · **幂等**：已登记的组直接跳过（面板建完新组后会再喊一次 `syncGroupRows`）；
+      //   · **子槽名每组唯一**：`conversation` 那类槽名全局唯一，重复声明会抛
+      //     `slot "X" is already declared`，所以列正文槽名带上组 id；
+      //   · **全程 try/catch**：目录里任何一处失败都只损失那一行，不影响主入口。
+      const groupRows = new Map();
+      const syncGroupRows = () => {
+        try {
+          for (const g of readConcurrentGroups()) {
+            const key = CONCURRENT_GROUP_PREFIX + g.id;
+            if (groupRows.has(key)) continue;
+            const colSlot = CONCURRENT_COLUMN_SLOT + ':' + g.id;
+            const offRow = (() => {
+              try {
+                return ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
+                  name: 'sidebar.panellist', id: key, order: 31,
+                  // 行文字带列数：一眼能看出那一组有几条会话（找回来时最要紧的信息）。
+                  label: () => '并发会话 · ' + g.ids.length + ' 列',
+                }, ConcurrentPanelIcon));
+              } catch (e) { warn('concurrent group row', e); return null; }
+            })();
+            const offPanel = (() => {
+              try {
+                return ctx.slots.inject('main', () => ctx.slots.register({
+                  name: 'main', key,
+                  children: { [colSlot]: { kind: 'single', scope: 'session' } },
+                }, (props) => h(HwbBoundary, { label: '并发会话（历史组）' },
+                  h(ConcurrentPanel, {
+                    ...props,
+                    sessions: ctx.sessions,
+                    layout: layoutFaceOf(ctx),
+                    slotName: colSlot,
+                    groupKey: 'group:' + g.id,
+                    hwbGroup: g,
+                    hwbSyncGroups: syncGroupRows,
+                  }))));
+              } catch (e) { warn('concurrent group panel', e); return null; }
+            })();
+            const offCol = (() => {
+              try {
+                return ctx.slots.inject(colSlot, () => ctx.slots.register(
+                  { name: colSlot },
+                  (props) => h(ConcurrentColumn, props),
+                ));
+              } catch (e) { warn('concurrent group column', e); return null; }
+            })();
+            groupRows.set(key, () => {
+              try { if (offCol) offCol(); } catch (e) { /* 卸载期失败不影响其余注销 */ }
+              try { if (offPanel) offPanel(); } catch (e) { /* 同上 */ }
+              try { if (offRow) offRow(); } catch (e) { /* 同上 */ }
+            });
+          }
+        } catch (e) { warn('concurrent group rows', e); }
+      };
+      own(() => {
+        syncGroupRows();
+        return () => {
+          for (const off of groupRows.values()) { try { off(); } catch (e) { /* 同上 */ } }
+          groupRows.clear();
+        };
+      });
+
       // 会话头角落席位让官方 dsh-client-ui-sidebar-right 持有（其 ExpandButton
       // 与本面板同 store、同 toggleExpanded 职责，重复声明反酿席位冲突）。
 
@@ -6845,6 +6976,8 @@ window.__ModuleLoader__.load({
                 layout: layoutFaceOf(ctx),
                 slotName: CONCURRENT_COLUMN_SLOT,
                 groupKey: 'panel',
+                // 主入口建完一组后，让左栏「并发会话目录」立刻多出那一行（0.19.65）。
+                hwbSyncGroups: syncGroupRows,
               })));
             // 一列的正文（session 作用域）：渲染官方会话体，见 ConcurrentColumn 的注释。
             const offCol = ctx.slots.inject(CONCURRENT_COLUMN_SLOT, () => ctx.slots.register(
