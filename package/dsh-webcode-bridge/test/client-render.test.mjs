@@ -1623,12 +1623,15 @@ test('★ 标签页：只注册 webcode-bridge（官方花名册 Team 标签页 
   // 这条比「不含某个 key」更强：它同时挡住「删过头」（座位少了 → 面板废了）与
   // 「删不干净」（还剩 team/tasks 座位）两种失败。值按**实测**写死，将来的改动者
   // 必须显式面对这条判据并同步更新它，而不是顺手让集合漂移。
+  // 0.19.67：新增第三个座位——「并发会话（右栏）」= `webcode-concurrent/rail`，它把并发列
+  // 做成**官方右栏页签**（用户：「右侧 tab 功能一并抄上」）。这条判据仍按实测写死：
+  // 座位集合再变就必须显式面对它。
   assert.deepEqual([...paneKeys].sort(),
-    ['dsh-webcode-bridge', 'dsh-webcode-bridge/site'],
-    '右栏正文座位集合变了（实测应为目录 + 网页镜像）：' + paneKeys.join(', '));
+    ['dsh-webcode-bridge', 'dsh-webcode-bridge/site', 'webcode-concurrent/rail'],
+    '右栏正文座位集合变了（实测应为目录 + 网页镜像 + 并发会话）：' + paneKeys.join(', '));
   assert.deepEqual([...tabDefinitions.keys()].sort(),
-    ['webcode-bridge', 'webcode-site'],
-    '右栏标签页类型集合变了（实测应为目录 webcode-bridge + 网页镜像 webcode-site）：'
+    ['webcode-bridge', 'webcode-concurrent/rail', 'webcode-site'],
+    '右栏标签页类型集合变了（实测应为目录 webcode-bridge + 并发会话 + 网页镜像 webcode-site）：'
     + [...tabDefinitions.keys()].join(', '));
 });
 

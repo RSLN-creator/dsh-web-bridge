@@ -7114,6 +7114,72 @@ window.__ModuleLoader__.load({
         } catch (e) { warn('main panel body (concurrent)', e); }
       });
 
+      // ---- 右栏页签版并发视图（0.19.67，用户：「右侧 tab 功能一并抄上」）------------
+      //
+      // ## 为什么必须走「官方右栏页签」这条路（而不是在自有面板里画右栏）
+      // 官方右栏可见性写死在两处：`usePanelInfo(info => info.activePanelId === null)`
+      //（`dsh-client-ui-sidebar-right:5874`）与 `:9062` —— 只要有 `main` 全局面板被选中，
+      // 右栏整条 track 归 0。第三方**不能在自有面板里渲染官方右栏内容**：`renderSlot` 授权
+      // 只属声明该槽的条目（`dsh-client-ui-renderer:330-333`），slots 的公开投影**不含组件**
+      //（`dsh-client-ui-slots/lib/index.js:313` 原文 without components or executable hooks）。
+      // ⇒ 受支持的做法是**两段式**（官方在产范例 `dsh-client-ui-sidebar-documentpreview:6811/6822`）：
+      //   ① `ctx.sidebarRightTabs.register({ id, kind, title, keepMounted })` 注册页签类型；
+      //   ② `ctx.slots.inject('sidebar.right.pane.tab', …)` 注册同名 key 的页签正文，
+      //      正文声明**自有的 session 作用域子槽** ⇒ renderer 照发 `SessionProvider`/`renderSlot`。
+      // 于是「并发会话」是一个**官方右栏页签**：壳与页签都是官方的，每列仍是显式绑定的真会话。
+      //
+      // ## 如实写明的限制
+      // 右栏常态宽 300px～45%、中列保底 400px（`dsh-client-ui-layout:38-45`）⇒ **3–4 列并排
+      // 只在全屏下实用**。本版与主面板版**并存**，用户按需选。
+      const RAIL_TAB_ID = 'webcode-concurrent/rail';
+      const RAIL_COL_SLOT = 'webcode-concurrent.rail.column';
+      /** 右栏版显示**最近一组**（左栏目录里最新那条）。 */
+      const latestGroup = () => { try { return readConcurrentGroups()[0] || null; } catch (e) { return null; } };
+      own(() => {
+        try {
+          return ctx.sidebarRightTabs.register({
+            id: RAIL_TAB_ID,
+            kind: 'webcode-concurrent',
+            title: () => '并发会话',
+            keepMounted: true,
+          });
+        } catch (e) { warn('concurrent rail tab register', e); }
+      });
+      own(() => {
+        try {
+          return ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
+            name: 'sidebar.right.pane.tab',
+            key: RAIL_TAB_ID,
+            children: { [RAIL_COL_SLOT]: { kind: 'single', scope: 'session' } },
+          }, (props) => h(HwbBoundary, { label: '并发会话（右栏）' },
+            h(ConcurrentColumns, {
+              ...props,
+              sessions: ctx.sessions,
+              layout: layoutFaceOf(ctx),
+              slotName: RAIL_COL_SLOT,
+              groupKey: 'rail',
+              hwbGroup: latestGroup(),
+              hwbSyncGroups: syncGroupRows,
+              hwbOpenOfficial: (sid) => { try { ctx.uiWorkspace.openSession(sid); } catch (e) { warn('open official view (rail)', e); } },
+            }))));
+        } catch (e) { warn('concurrent rail tab body', e); }
+      });
+      own(() => {
+        try {
+          return ctx.slots.inject(RAIL_COL_SLOT, () => ctx.slots.register(
+            {
+              name: RAIL_COL_SLOT,
+              // 与主入口同款：jobs 数据面经槽 inject 发给列组件（照 `ui-jobs:610-621`）。
+              inject: () => ({
+                hooks: { jobs: ctx.jobs.state },
+                watchRows: (sid) => ctx.jobs.watchRows(sid),
+              }),
+            },
+            (props) => h(ConcurrentColumn, props),
+          ));
+        } catch (e) { warn('concurrent rail column', e); }
+      });
+
       return () => disposers.reverse().forEach(d => { try { d(); } catch (_) {} });
     }
     const exports = { name: 'webcode-bridge-client', inject, apply };
