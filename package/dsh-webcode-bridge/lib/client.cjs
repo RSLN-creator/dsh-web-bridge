@@ -2729,7 +2729,7 @@ window.__ModuleLoader__.load({
       // ── 照抄官方 header 的三块 chip（0.19.66，用户 2026-10-06 选 A：自己复刻）────────
       //
       // 官方那三块由三个官方包注册进 `conversation.header` 槽（该槽的公开投影**不含组件**，
-      // 见 doc/research §11），受支持路径拿不到 ⇒ 按用户指令**自己复刻**。复刻的口径是
+      // 见 dsh-client-ui-slots/lib/index.js:313（公开投影「without components or executable hooks」）），受支持路径拿不到 ⇒ 按用户指令**自己复刻**。复刻的口径是
       // 「数据面抄官方、文案抄官方、拿不到就不显示」，绝不画一个假壳：
       //
       //   ① 模式：官方 `ui-agent-preset:357` 读 `state.byId[sessionId].projectionValues.agentPreset`；
@@ -2756,14 +2756,32 @@ window.__ModuleLoader__.load({
         try { if (typeof props.watchRows === 'function' && sessionId) props.watchRows(sessionId); } catch (e) { /* 订阅失败只是没有计数 */ }
       }, [sessionId]);
       const useSubagentsFace = typeof props.useSubagents === 'function' ? props.useSubagents : noSessions;
-      const subagentState = useSubagentsFace(s => s) || null;
-      const subagentCount = subagentState && Array.isArray(subagentState.rows) ? subagentState.rows.length : null;
+      // ③ 子智能体 / 智能体团队：**走 root 标准绑定**（官方 `ui-session:469-476`
+      // `provideRoot({ hooks: { sessions, sessionStatus } })` ⇒ 任意 root 槽都拿到
+      // `useSessions` / `useSessionStatus`）。数字来源与官方同键：
+      //   · 子智能体：`byId[id].projectionValues.subagentCatalog`（官方 `ui-subagent:358-362`），
+      //     运行中 = 逐个看 `sessionStatus`（官方 `:381-385` 的 runningCount 同义）；
+      //   · 团队：`projectionsBySession[leadId].values.agentTeam`（官方 team `:238-239`），
+      //     成员/任务数 = `team.members.length` / `team.tasks.length`。
+      // ⚠ 绝不能把 `useStatus` 放进 filter 回调里逐个调用（条件调用 hook = 违反 hooks 规则，
+      //    本文件上方 SiteAccounts 踩过这条红线）：这里**整表读一次**再过滤。
+      const subCatalog = useSessions(s => (s && sessionId && s.byId[sessionId] ? s.byId[sessionId].projectionValues?.subagentCatalog : null));
+      const subCount = Array.isArray(subCatalog) ? subCatalog.length : null;
+      const useStatusFace = typeof props.useSessionStatus === 'function' ? props.useSessionStatus : noSessions;
+      const statusMap = useStatusFace(x => x) || null;
+      const subRunning = subCount === null ? null : subCatalog.filter((c) => {
+        try { return !!(statusMap && typeof statusMap.get === 'function' && statusMap.get(c.id)?.running); } catch (e) { return false; }
+      }).length;
+      const team = useSessions(s => (s && sessionId && s.projectionsBySession ? s.projectionsBySession[sessionId]?.values?.agentTeam : null)) || null;
+      const teamMembers = team && Array.isArray(team.members) ? team.members.length : null;
+      const teamTasks = team && Array.isArray(team.tasks) ? team.tasks.length : null;
 
       return h('div', { className: 'hwb-concurrent-body' },
         h('div', { className: 'hwb-concurrent-chips' },
           presetLabel && h('span', { className: 'hwb-concurrent-chip', 'data-hwb-chip': 'mode', title: '当前模式（官方会话投影 agentPreset）' }, presetLabel),
           (liveJobs > 0 || (jobsRows && jobsRows.length > 0)) && h('span', { className: 'hwb-concurrent-chip', 'data-hwb-chip': 'jobs', title: '后台任务（照抄官方 ui-jobs 的口径与文案）' }, liveJobs > 0 ? liveJobs + ' 个后台任务运行中' : jobsRows.length + ' 个后台任务'),
-          subagentCount !== null && h('span', { className: 'hwb-concurrent-chip', 'data-hwb-chip': 'subagents', title: '子智能体（官方座位数据）' }, subagentCount + ' 个子智能体')),
+          subCount !== null && subCount > 0 && h('span', { className: 'hwb-concurrent-chip', 'data-hwb-chip': 'subagents', title: '子智能体（官方投影 subagentCatalog + sessionStatus）' }, subRunning ? subCount + ' 个子智能体，' + subRunning + ' 个正在运行' : subCount + ' 个子智能体'),
+          teamMembers !== null && teamMembers > 0 && h('span', { className: 'hwb-concurrent-chip', 'data-hwb-chip': 'team', title: '智能体团队（官方投影 agentTeam）' }, '智能体团队 ' + teamMembers + ' 成员' + (teamTasks ? ' · ' + teamTasks + ' 任务' : ''))),
         renderFactorySlot('conversation.content', {
           variant: 'embedded',
           phase: settling ? 'settling' : hero ? 'hero' : 'active',
@@ -6467,7 +6485,7 @@ window.__ModuleLoader__.load({
         // 去掉 0.19.29 那套「hover 才现形」；官方那三块 chip（标准模式 / 后台任务 / 团队）由
         // 三个官方包注册进 `conversation.header` 槽，而该槽的公开投影**不含组件**
         //（`dsh-client-ui-slots/lib/index.js:313`：exported **without components**）⇒ 受支持的
-        // 路径下拿不到，只能后续按「复刻」处理（见 doc/research §11）。
+        // 路径下拿不到，只能后续按「复刻」处理（见 dsh-client-ui-slots/lib/index.js:313（公开投影「without components or executable hooks」））。
         ".hwb-concurrent-col-head{display:flex;align-items:center;gap:8px;flex:none;padding:0 12px;height:44px;box-sizing:border-box}",
         ".hwb-concurrent-col-title{flex:1;min-width:0;font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary,inherit);opacity:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
         ".hwb-concurrent-col:hover .hwb-concurrent-col-title,.hwb-concurrent-col:focus-within .hwb-concurrent-col-title{opacity:1}",
@@ -7069,7 +7087,7 @@ window.__ModuleLoader__.load({
                 // 主入口建完一组后，让左栏「并发会话目录」立刻多出那一行（0.19.65）。
                 hwbSyncGroups: syncGroupRows,
                 // 「↗ 用官方视图打开」：官方 header 那几块 chip（标准模式 / 后台任务 / 团队）只由
-                // 官方会话视图渲染（槽的公开投影不含组件，见 doc/research §11），所以受支持的做法
+                // 官方会话视图渲染（槽的公开投影不含组件，见 dsh-client-ui-slots/lib/index.js:313（公开投影「without components or executable hooks」）），所以受支持的做法
                 // 是把这一条会话**交回官方视图**——`uiWorkspace.openSession`。失败只 warn，不影响面板。
                 hwbOpenOfficial: (sid) => {
                   try { ctx.uiWorkspace.openSession(sid); } catch (e) { warn('open official view', e); }
