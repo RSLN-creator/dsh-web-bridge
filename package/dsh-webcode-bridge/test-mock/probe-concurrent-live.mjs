@@ -304,7 +304,9 @@ try {
   if (!reading.panelRect || reading.panelRect.w < 40 || reading.panelRect.h < 40) {
     problems.push('面板根节点不可见或塌高：' + JSON.stringify(reading.panelRect));
   }
-  if (reading.tabs.length !== 2) problems.push('页签数 != 2：' + JSON.stringify(reading.tabs.map(t => t.text)));
+  if (reading.tabs.length !== 0) {
+    problems.push('顶部不得再有面板级页签（0.19.65 起视图交给每列自己）：' + JSON.stringify(reading.tabs.map(t => t.text)));
+  }
   if (reading.boundaryCount > 0) problems.push('插件错误边界被触发：' + JSON.stringify(reading.boundaryText));
   if (reading.slotErrorCount > 0) problems.push('官方 SlotErrorBoundary 被触发（空盒）：' + JSON.stringify(reading.slotErrorText));
   if (pageErrors.length > 0) problems.push('页面抛错 pageerror：' + JSON.stringify(pageErrors.slice(0, 3)));

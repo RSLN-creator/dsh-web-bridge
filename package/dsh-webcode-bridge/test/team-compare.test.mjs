@@ -155,14 +155,16 @@ test('★ 0.19.55 并发：每列必须渲染**官方**会话体（SessionProvid
   assert.match(src, /variant: 'embedded'/, '嵌入形态必须逐字是官方那个 variant 值');
 });
 
-test('★ 0.19.55 并发：官方 `views` 局部槽必须按页签钉死 chat / trajectory', () => {
+test('★ 0.19.65 并发：不得再覆盖官方 `views` 局部槽（视图交给会话自己记住的那一个）', () => {
   const src = clientSrc();
-  assert.match(src, /renderSlot\('conversation\.session', \{ view: 'chat' \}\)/,
-    '「并发对话」必须把视图钉死为官方的 chat');
-  assert.match(src, /renderSlot\('conversation\.session', \{ view: 'trajectory' \}\)/,
-    '「并发轨迹」必须把视图钉死为官方的 trajectory');
-  assert.match(src, /\{ slots: \{ views \} \}/,
-    'views 必须经 renderFactorySlot 的局部槽覆盖传入（官方的官方接法）');
+  // 用户 2026-10-06 原话：「移除顶部的并发对话和并发轨迹——反正都是界面内自行切换；
+  // 每列直接贯通一列」。⇒ 不再钉死视图：官方默认路径就是 `renderSlot("conversation.session", {})`
+  //（dsh-client-ui-conversation:16202），由**会话自己记住的视图**决定，正是官方的位置关系。
+  assert.ok(!/slots: \{ views \}/.test(src),
+    '不得再向官方 factory 覆盖 views 局部槽（那正是「面板级页签」的实现基础）');
+  assert.ok(!/const (ChatOnly|TrajectoryOnly)SessionView =/.test(src),
+    '两个「钉死视图」的替身必须删除（注释里提它们的历史是允许的）');
+  assert.ok(!/view: 'trajectory'/.test(src), '不得再把视图钉死为 trajectory');
 });
 
 test('★ 0.19.55 并发：会话体不是自绘 —— 不得再复刻 composer / 消息渲染', () => {
@@ -178,15 +180,18 @@ test('★ 0.19.55 并发：会话体不是自绘 —— 不得再复刻 composer
   assert.ok(!/hwb-col-composer-select/.test(src), '自绘的站点/模型选择器不得复活（模型由官方 composer 选）');
 });
 
-// ── ③ 两个页签：并发对话 / 并发轨迹 ─────────────────────────────────────────────
+// ── ③ 面板级页签：**已按用户要求移除**（0.19.65）────────────────────────────────
 
-test('★ 0.19.55 并发：页签必须逐字是「并发对话」「并发轨迹」（对齐官方对话/轨迹）', () => {
+test('★ 0.19.65 并发：顶部「并发对话 / 并发轨迹」页签必须删掉（每列贯通一列）', () => {
   const src = clientSrc();
-  assert.match(src, /name: '并发对话'/, '第一个页签必须叫「并发对话」');
-  assert.match(src, /name: '并发轨迹'/, '第二个页签必须叫「并发轨迹」');
-  assert.match(src, /const \[view, setView\] = React\.useState\('chat'\)/,
-    '页签必须有受控状态，默认落在 chat');
-  assert.match(src, /role: 'tab'/, '页签必须是真实的 tab 语义（读屏与键盘都要能识别）');
+  assert.ok(!/name: '并发对话'/.test(src), '面板级页签「并发对话」必须删除');
+  assert.ok(!/name: '并发轨迹'/.test(src), '面板级页签「并发轨迹」必须删除');
+  // 注意：`role: 'tab'` 在**设置页**里是合法的另一处（与本面板无关），所以这里只判
+  // 并发面板自己的那段渲染代码里不再有 tablist。
+  const panelBody = src.slice(src.indexOf('function ConcurrentPanel(props)'), src.indexOf('function createPanelGuard'));
+  assert.ok(!/role: 'tab'|tablist/.test(panelBody), '并发面板的渲染路径里不得再有自绘 tablist');
+  assert.ok(!/hwb-concurrent-tabs\{/.test(src), '页签的样式规则必须随对象一起删除');
+  assert.ok(!/const \[view, setView\]/.test(src), '页签的受控状态必须删除');
 });
 
 // ── ④ 位置：左栏行 + 中央 main 面板（会话语义上做不到，见下）───────────────────
@@ -223,8 +228,10 @@ test('★ 0.19.55 并发：列正文必须注册进自有的 session 子槽（�
   const src = clientSrc();
   assert.match(src, /inject\(CONCURRENT_COLUMN_SLOT/, '列正文必须注册进自有子槽');
   assert.match(src, /function ConcurrentColumn\(props\)/, '必须存在列正文组件 ConcurrentColumn');
-  assert.match(src, /renderFactorySlot\('conversation\.content'[\s\S]{0,400}?slots: \{ views \}/,
-    '列正文必须把视图覆盖传进官方 factory');
+  // 0.19.65：列正文只调官方 factory，**不覆盖 views**（视图由会话自己记住的那个决定），
+  // 三个相位参数仍是官方 ui-subagent 的同源算法。
+  assert.match(src, /renderFactorySlot\('conversation\.content', \{[\s\S]{0,300}?variant: 'embedded'/,
+    '列正文必须渲染官方 conversation.content factory（embedded 形态）');
   // 顺序必须是**结构性**的：子槽注册嵌在 `main` 的 inject 回调里（先声明、后注册）。
   // 靠两条并列 inject 的调度顺序会在宿主换实现时静默炸（SlotCore 拒绝向未声明的槽注册）。
   const mainInject = src.slice(src.indexOf("ctx.slots.inject('main'"));

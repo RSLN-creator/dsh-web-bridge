@@ -2641,29 +2641,25 @@ window.__ModuleLoader__.load({
      * 「并发对话」里要看对话、在「并发轨迹」里要看轨迹，是两个并列面板，不共享一个选择。
      * 所以这里显式钉死视图 id（官方 id 就是 `chat` 与 `trajectory`）。
      */
-    const ChatOnlySessionView = (props) => props.renderSlot('conversation.session', { view: 'chat' });
-    const TrajectoryOnlySessionView = (props) => props.renderSlot('conversation.session', { view: 'trajectory' });
+    // 0.19.65：`ChatOnlySessionView` / `TrajectoryOnlySessionView` 两个「钉死视图」的替身
+    // **已删**——它们正是「面板级页签」的实现基础，用户 2026-10-06 要求移除页签、按官方
+    // 默认（会话自己记住的视图）渲染。
 
     /**
-     * **一列 = 一条真官方会话**（用户：「确保每一列都有完整的官方会话所有能力」）。
+     * 一列 = 一条真官方会话（用户：「确保每一列都有完整的官方会话所有能力」）。
      *
-     * 这里渲染的是官方自己的会话体，没有一处自绘：`conversation.content` factory 会带出
-     * 官方的消息列表、思考块、工具调用、附件，以及**官方 composer**（模型选择 / 权限 /
-     * Plan / 发送）。所以「完整官方能力」不是靠复刻得到的，而是**本来那一份**。
+     * 0.19.65（用户 2026-10-06）：「**移除顶部的并发对话和并发轨迹**——反正都是界面内自行切换；
+     * 每列直接贯通一列」。⇒ 不再覆盖 `conversation.content` 的 `views` 局部槽，让官方按它自己
+     * 的默认路径走：`renderSlot("conversation.session", {})`（`dsh-client-ui-conversation:16202`），
+     * 也就是**这条会话自己记住的那个视图**（对话 / 轨迹由官方 `conversation.view` 那两个条目提供，
+     * 注册处 `ui-chat:12390` / `ui-trajectory:8736`，渲染点 `:16415`）。
+     * 我们因此不再需要 `hwbView` / `data-concurrent-view` / 面板级页签——少一层自绘，多一分
+     * 「与官方同一份渲染」。
      *
-     * 相位（phase / hero）的算法与官方 `ui-subagent` 的 ConversationSlotPanel 逐字同源：
-     * 官方用它把一条会话嵌进侧栏，我们用它把一个面板里嵌 N 条。抄它而不是自己发明，
-     * 是因为这几个取值直接决定官方会话体按哪种形态渲染（空白 / 开场 / 进行中），
-     * 猜错会得到一个「看起来像会话、行为却不是会话」的东西。
-     *
-     * @param {Object} props 官方 session 作用域标准 props + 本槽的 ownerProps
+     * @param {Object} props 官方 session 作用域标准 props
      */
     function ConcurrentColumn(props) {
       const renderFactorySlot = props.renderFactorySlot;
-      // ownerProps 上的字段名刻意不叫 `view`：ownerProps 会与宿主发下来的标准 props
-      // 一起摊进同一个对象，而渲染器对两者做**重名检查**（`assertNoPropOverlap`）——
-      // 撞名会在真机上直接抛错。用自有前缀把「我们传的」和「宿主给的」分开。
-      const view = props.hwbView === 'trajectory' ? 'trajectory' : 'chat';
       // 三个 hook 都可能缺席（旧宿主 / 测试桩）。缺席时用空实现而不是条件调用——
       // 条件调用 hook 正是本文件上方 SiteAccounts 踩过的那条红线。
       const useSession = typeof props.useSession === 'function' ? props.useSession : noSessions;
@@ -2680,13 +2676,12 @@ window.__ModuleLoader__.load({
         : session.promptAttempted ? 'engaging' : 'blank';
       const settling = shellPhase === 'blank' && session.openState === 'loading' && summaryBlank !== true;
       const hero = shellPhase === 'blank' && (session.openState === 'open' || summaryBlank === true);
-      const views = view === 'trajectory' ? TrajectoryOnlySessionView : ChatOnlySessionView;
-      return h('div', { className: 'hwb-concurrent-body', 'data-concurrent-view': view },
+      return h('div', { className: 'hwb-concurrent-body' },
         renderFactorySlot('conversation.content', {
           variant: 'embedded',
           phase: settling ? 'settling' : hero ? 'hero' : 'active',
           hero,
-        }, { slots: { views } }));
+        }));
     }
 
     /**
@@ -2698,7 +2693,6 @@ window.__ModuleLoader__.load({
      * @param {Object} props 面板座位标准 props + `{ sessions, slotName, groupKey, view }`
      */
     function ConcurrentColumns(props) {
-      const view = props.view === 'trajectory' ? 'trajectory' : 'chat';
       const sessions = props.sessions;
       const SessionProvider = props.SessionProvider;
       const renderSlot = props.renderSlot;
@@ -2975,7 +2969,6 @@ window.__ModuleLoader__.load({
       return h('div', {
         className: 'hwb-concurrent',
         ref: viewRef,
-        'data-concurrent-view': view,
         // 列宽是一个**算出来的像素值**，交给 CSS 用（三列同一个值 ⇒ 宽度同步）。
         style: { '--hwb-col-width': colWidth + 'px' },
       },
@@ -3044,7 +3037,7 @@ window.__ModuleLoader__.load({
                 SessionProvider && refsRef.current[col.sessionId]
                   ? h(HwbBoundary, { label: '并发列 ' + titleOf(col.sessionId) },
                     h(SessionProvider, { session: refsRef.current[col.sessionId] },
-                      renderSlot(slotName, { hwbView: view })))
+                      renderSlot(slotName, {})))
                   : h('p', { className: 'hwb-hint' }, '这一列的会话引用不可用（换 profile 或会话被删）'))));
             return acc;
           }, []))),
@@ -3110,11 +3103,9 @@ window.__ModuleLoader__.load({
      * 所以这一页的页签必然是自有的（它的**内容**仍然是官方那一份）。
      */
     function ConcurrentPanel(props) {
-      const [view, setView] = React.useState('chat');
-      const tabs = [
-        { id: 'chat', name: '并发对话' },
-        { id: 'trajectory', name: '并发轨迹' },
-      ];
+      // 0.19.65：面板级页签（并发对话 / 并发轨迹）**已删**（用户 2026-10-06：「移除顶部的
+      // 并发对话和并发轨迹——反正都是界面内自行切换」）。视图由每条会话自己记住的那一个决定，
+      // 走官方默认路径（见 ConcurrentColumn）。
       // 意图守卫：机理与降级口径见 createPanelGuard 的注释。
       //
       // 0.19.62 真机教训（「并发界面打开是一片空白」）：守卫绝不能进**渲染路径**。
@@ -3146,17 +3137,10 @@ window.__ModuleLoader__.load({
         };
       }, []);
       return h('div', { className: 'hwb-concurrent-panel', ref: rootRef },
-        h('div', { className: 'hwb-concurrent-tabs', role: 'tablist' },
-          tabs.map(t => h('button', {
-            key: t.id, type: 'button', role: 'tab',
-            className: 'hwb-concurrent-tab' + (view === t.id ? ' active' : ''),
-            'aria-selected': view === t.id ? 'true' : 'false',
-            onClick: () => setView(t.id),
-          }, t.name))),
-        // 列区整体再包一层边界：ConcurrentColumns 自身（restore/create 等逻辑）
-        // 抛错时不再把整个 main 条目炸成官方空 div，而是显示可读错误。
+        // 列区整体再包一层边界：ConcurrentColumns 自身（create/加列等逻辑）抛错时不再把
+        // 整个 main 条目炸成官方空 div，而是显示可读错误。
         h(HwbBoundary, { label: '并发会话面板' },
-          h(ConcurrentColumns, { ...props, view })));
+          h(ConcurrentColumns, { ...props })));
     }
 
     /**
@@ -6308,10 +6292,6 @@ window.__ModuleLoader__.load({
         // 『对话』和『轨迹』」，所以它必须读起来与官方那一行是同一类东西，而不是另一套
         // 自创的胶囊。**用浅色胶囊表达选中**，不画下划线：本仓库 0.19.31 已记过——
         // 深色主题下品牌色的 2px 下划线看起来就是「底面一条白色底线」（用户原话）。
-        ".hwb-concurrent-tabs{display:flex;align-items:center;gap:2px;flex:none;padding:8px 12px 10px;border-bottom:.5px solid var(--dsw-alias-border-l3,#8884)}",
-        ".hwb-concurrent-tab{appearance:none;border:none;background:transparent;font:inherit;font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary,#666);padding:6px 12px;border-radius:999px;cursor:pointer}",
-        ".hwb-concurrent-tab:hover{background:var(--dsw-alias-interactive-bg-hover,#00000008)}",
-        ".hwb-concurrent-tab.active{background:var(--dsw-alias-interactive-bg-active,#00000010);color:var(--dsw-alias-label-primary);font-weight:600}",
         // 面板正文：撑满剩余高度并**自己滚动**。`min-height:0` 是 flex 子项能真正滚动的
         // 必要条件——没有它，flex 项的最小高度是内容高度，`overflow:hidden` 会把长会话裁掉。
         ".hwb-concurrent{position:relative;display:flex;flex-direction:column;gap:8px;width:100%;flex:1 1 auto;min-height:0;overflow:hidden;padding:12px 12px 0;box-sizing:border-box}",
