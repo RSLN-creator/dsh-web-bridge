@@ -58,6 +58,7 @@
 | 42 | **「网页桥接」设置分区的导航图标不可自定义**（2026-10-03 登记）——用户报「仍然是默认齿轮」；真因在**官方壳**里：`settings.section` 的注册契约只有 `id/order/label`（**没有 icon**），导航字形由官方 `dsh-client-ui-settings-general` 的 `navIcon(id)` **硬编码**（只认 `account` / `models` / `agent-presets` / `plugins` / `archived-sessions`，其余一律回落齿轮）。插件侧**结构上无解**，除非改官方包或占用一个 shipped id | 低 | 否 | `lib/client.cjs`（`settings.section` 注册处）、官方 `@deepseek-ai/dsh-client-ui-settings-general/lib/client.js`（`navIcon`）、`doc/progress.md`（2026-10-03） |
 | 45 | **桌面 profile 的声明与磁盘分叉：声明仍钉 0.19.61，磁盘已是 0.19.64**（2026-10-05 登记）——本轮靠官方 `client-hmr` 通道**原地热换** `lib/client.cjs` 让桌面端立刻用上修复（不改进程、不重启应用），但**没改 profile 声明**。风险：任何一次 pnpm 通道（装别的插件、启动期 reconcile）都可能把客户端静默换回声明里的旧版 ⇒ 缺陷复发。恢复「声明 == 磁盘」必须**完全退出桌面端**后走官方通道装一次（`dsh` CLI 拒绝管理 desktop profile，须用桌面端自己的 carrier），且宿主半边本来就要重启才换 | 中 | 否 | `~/.dsh/profiles/desktop/package.json`、`~/.dsh/profiles/desktop/node_modules/dsh-webcode-bridge/lib/client.cjs`、`doc/progress.md`（2026-10-05 §八）、`doc/research/2026-10-05-dsh-multi-session-and-client-hot-swap.md` §5 |
 | 46 | **npm 发布被账号安全策略挡在「staged 待批」**（2026-10-05 登记，**同日已解决**）——`npm publish` 报成功但 registry 上 `latest` 仍是 0.19.51（`E409 Cannot publish over previously staged version "0.19.64"`）；根因是 npm 收紧「绕过 2FA 的 token 直接发布」，本机 token 属该类 ⇒ 发布被暂存，需账号主人 2FA 批准。**用户本人批准后已上线**：`latest = 0.19.64`、61 files、shasum `8a7aa56f…` 与本地打包 tarball **逐字节相同**（`published 2026-10-05T15:56:43Z`）。留档价值 = 「命令行打印 `+ pkg@ver` 不等于 registry 上线」这条判据（必须直连 registry 读 `dist-tags`） | 中 | 否 | `~/.npmrc`（token）、npm registry `dsh-webcode-bridge`、`package/dsh-webcode-bridge/dsh-webcode-bridge-0.19.64.tgz` |
+| 47 | **官方会话 chrome 在第三方面板内不可达：三块 chip 只能自行复刻、右侧 tab 靠官方页签承载**（2026-10-06 登记）——① 官方 header 三块 chip 注册进 `conversation.header` 槽，该槽只由官方会话视图渲染（`ui-conversation:16021`），且 slots 公开投影**不含组件**（`dsh-client-ui-slots/lib/index.js:313` 原文 without components or executable hooks）⇒ 受支持路径下无法原样挂载；② 官方右栏可见性写死 `activePanelId === null`（`ui-sidebar-right:5874`/`:9062`）⇒ 面板开着必无右栏，第三方也不能在自有面板里渲染官方右栏内容（`renderer:330-333` 归属校验）；③ **出路已落地**：chip 自行复刻（用户 2026-10-06 选 A），右栏改用官方**页签**承载并发列（`sidebarRightTabs.register` + `sidebar.right.pane.tab`，真机 `window.__hwbRail={registered:true}`）；④ 残留：「↗ 官方视图」（`ctx.uiWorkspace.openSession` 交回官方视图）两轮实测未生效，标记为 **knownGap、暂不修**（右栏页签已覆盖该需求），修通则需再查官方 `openSession` 的调用前提；⑤ 右栏受官方布局所限（常态 300px～45%、中列保底 400px），3–4 列并排只在全屏下实用 | 中 | 否 | `package/dsh-webcode-bridge/lib/client.cjs`、`test-mock/probe-concurrent-live.mjs`、`scripts/check-official-drift.mjs` |
 
 > **一览表完整性（2026-09-16 修正；2026-09-26 补上闸门）**：本表此前**漏登记 #19 与 #20**（正文有、表里没有）。
 > 这两条都是可机检的登记错误，而当时没有任何闸门覆盖「正文条目 ↔ 表格条目」的一致性。
@@ -2889,3 +2890,39 @@ npm notice Your package is being processed and may take a few minutes to become 
   （`release.yml` 在 tag 上产出 GitHub Release 资产 ⇒ 顺带修掉 #44 的「Releases 没跟上」）。
 - **桌面端**：客户端产物经官方 `client-hmr` **原地热换**（rev `4447ff0c7431`，
   按该 rev 取回 499,303 B = 磁盘 499,228 + 75 B trailer，逐字节相同），**未重启应用**。
+
+---
+
+## 47. **官方会话 chrome 在第三方面板内不可达：三块 chip 只能自行复刻、右侧 tab 靠官方页签承载**（2026-10-06 登记）
+
+**现象**：并发列没有官方那一行 header（标题 / 子智能体 / 团队 / 标准模式 / 后台任务）；
+面板开着时右侧 tab 打不开。
+
+**根因（逐条取证，非推测）**：
+
+1. 三块 chip 由三个官方包注册进 `conversation.header` 槽，该槽**只由官方会话视图渲染**
+   （`dsh-client-ui-conversation:16021`）。
+2. slots 包公开投影**不含组件**——`dsh-client-ui-slots/lib/index.js:313` 原文
+   *Export the current declaration topology **without components or executable hooks***。
+3. 右栏可见性写死在 `activePanelId === null`（`dsh-client-ui-sidebar-right:5874`、`:9062`），
+   官方未留钩子；第三方也不能在自有面板里渲染官方右栏内容（`renderer:330-333` 的
+   `SlotOwnershipError` 授权只属声明者）。
+
+**出路（已落地）**：
+
+- 三块 chip **自行复刻**（用户 2026-10-06 选 A）：模式走 `byId[id].projectionValues.agentPreset`
+  （`ui-agent-preset:357`）+ 官方 i18n 文案；后台任务走 `ctx.jobs` 服务与槽 `inject`
+  （照 `ui-jobs:596-621`）并调 `watchRows(sessionId)`；子智能体/团队走 root 标准绑定
+  `useSessions` 的 `subagentCatalog` / `agentTeam` 投影（照 `ui-subagent:358-386`、team `:238-239`）。
+  真机可见「标准模式」「智能体团队 1 成员」。
+- 右栏改用**官方页签**承载并发列：`ctx.sidebarRightTabs.register({id,kind,title,keepMounted})`
+  + `ctx.slots.inject('sidebar.right.pane.tab', …)` 并声明自有 session 子槽
+  （照官方在产范例 `dsh-client-ui-sidebar-documentpreview:6811/6822`）；
+  真机读数 `window.__hwbRail = {registered:true}`。
+
+**残留（如实记）**：
+
+- 「↗ 官方视图」（`ctx.uiWorkspace.openSession` 交回官方视图）**两轮实测未生效**
+  （`panelGone=false, scroll=3, headers=1`），探针记为 `knownGapOpenOfficial`；
+  **暂不修**——右栏页签已覆盖该需求，修通则需再查官方 `openSession` 的调用前提。
+- 右栏受官方布局所限（常态 300px～45%、中列保底 400px）⇒ 3–4 列并排只在全屏下实用。
