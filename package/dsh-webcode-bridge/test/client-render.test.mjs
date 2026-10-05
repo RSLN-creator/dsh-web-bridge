@@ -1630,8 +1630,8 @@ test('★ 标签页：只注册 webcode-bridge（官方花名册 Team 标签页 
     ['dsh-webcode-bridge', 'dsh-webcode-bridge/site', 'webcode-concurrent/rail'],
     '右栏正文座位集合变了（实测应为目录 + 网页镜像 + 并发会话）：' + paneKeys.join(', '));
   assert.deepEqual([...tabDefinitions.keys()].sort(),
-    ['webcode-bridge', 'webcode-concurrent/rail', 'webcode-site'],
-    '右栏标签页类型集合变了（实测应为目录 webcode-bridge + 并发会话 + 网页镜像 webcode-site）：'
+    ['webcode-bridge', 'webcode-concurrent', 'webcode-site'],
+    '右栏标签页类型集合变了（实测应为目录 webcode-bridge + 并发会话 webcode-concurrent + 网页镜像 webcode-site）：'
     + [...tabDefinitions.keys()].join(', '));
 });
 
