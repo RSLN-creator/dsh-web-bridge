@@ -273,7 +273,7 @@ test('★ 0.19.55 并发：列宽上下限取自官方常量，放不下时左�
     '夹取顺序必须是 min(上限, max(下限, 默认))');
   assert.match(body, /Math\.min\(OFFICIAL_CONTENT_MAX, Math\.max\(680, Math\.round\(viewportW \* 0\.64\)\)\)/,
     '默认列宽必须用官方那条 clamp(680, column*0.64, 920)');
-  assert.match(src, /\.hwb-concurrent-columns\{[^}]*grid-auto-columns:var\(--hwb-col-width/,
+  assert.match(src, /\.hwb-concurrent-col\{[^}]*flex:0 0 var\(--hwb-col-width/,
     '列宽必须由 --hwb-col-width 统一给（三列同一个值 ⇒ 宽度同步）');
   assert.match(body, /'--hwb-col-width': colWidth \+ 'px'/, '列宽是算出来的像素值，挂在 style 上');
   assert.match(body, /cols\.length > visible && h\('button'/, '放不下才出现切换按钮');
@@ -323,18 +323,38 @@ test('★ 0.19.55 并发：左栏那一行必须画「3 个重叠标签页」（
 
 // ── ⑦ 组的持久化（「能够查看」：重开面板要能看到同一组会话）───────────────────
 
-test('★ 0.19.55 并发：必须是同一个会话一条列、组可恢复（不是每次打开都新建一批）', () => {
+test('★ 0.19.65 并发：点「并发会话」= 点「新会话」——每次打开都新建一组（0.19.55 的「恢复旧组」按用户口径反转）', () => {
   const src = clientSrc();
+  // 用户 2026-10-06 原话：「7.点击并发会话不会每次左侧出现一行记录会话让点击后回到原来选择
+  // 工作区/模式/模型/对话」「8.没有做到点击并发会话和点击新会话一样的新建会话」。
+  // ⇒ 口径**反转**：每次打开都新建一组真会话；旧组那几条会话仍在左栏清单里，可单独打开继续。
   assert.match(src, /const CONCURRENT_STORE_PREFIX = 'dsh-webcode-bridge\.concurrent\.';/,
     '组必须有稳定的存储键前缀');
-  assert.match(src, /function readConcurrentGroup\(key\)/, '必须有读回函数');
-  assert.match(src, /function writeConcurrentGroup\(key, ids\)/, '必须有写回函数');
+  assert.match(src, /function writeConcurrentGroup\(key, ids\)/, '必须有写回函数（留痕）');
+  assert.ok(!/function readConcurrentGroup\(/.test(src),
+    '读回**函数**已按用户新口径撤销：不得再恢复旧组（每次打开都新建一组；注释里提它是允许的）');
   const body = compareBody(src);
-  assert.match(body, /readConcurrentGroup\(groupKey\)/, '挂载时必须读回上次的组');
+  assert.match(body, /createdRef\.current = true;[\s\S]{0,80}?createColumns\(CONCURRENT_DEFAULT_COLS\)/,
+    '挂载后必须自动新建一组（点入口 = 点新会话）');
   assert.match(body, /writeConcurrentGroup\(groupKey, cols\.map\(c => c\.sessionId\)\)/,
-    '组变化必须落盘（只有一处写法，不会漏）');
-  assert.match(body, /catch \(e\)[\s\S]{0,120}?delete refs\[id\]/,
-    '读回来的会话若已不存在，必须从组里去掉而不是留一条打不开的列');
+    '组变化仍要落盘留痕（排障时可核对上一次那一组是哪几条会话）');
+});
+
+test('★ 0.19.65 并发：删掉顶部工具条 + 悬浮加列钮 + 列间 16px「hover 才画线」', () => {
+  const src = clientSrc();
+  // 用户 2026-10-06 第 3/4 条：① 顶部「N 列 / + 加一列」那行不占高度；② 加列钮悬浮右上角；
+  // ③ 列与列只留左右间隔、上下不画框；④ 间隔线平时隐藏、鼠标移上去才画出来。
+  assert.ok(!/hwb-concurrent-bar/.test(src), '顶部工具条（.hwb-concurrent-bar）必须删掉，不再占高度');
+  assert.ok(!/hwb-concurrent-action/.test(src), '旧的内联加列按钮必须删掉（改成悬浮钮）');
+  assert.match(src, /className: 'hwb-concurrent-fab'/, '「+ 加一列」必须是悬浮置顶按钮');
+  assert.match(src, /\.hwb-concurrent-fab\{position:absolute;top:\d+px;right:\d+px/,
+    '悬浮钮必须绝对定位在右上角');
+  assert.match(src, /className: 'hwb-concurrent-gap'/, '列间必须有独立的间隔元素（可 hover）');
+  assert.match(src, /\.hwb-concurrent-gap\{flex:0 0 16px/, '间隔必须是 16px（与平移步长 COL_GAP 一致）');
+  assert.match(src, /\.hwb-concurrent-gap-line\{[^}]*opacity:0/, '间隔线平时必须完全隐藏');
+  assert.match(src, /\.hwb-concurrent-gap:hover \.hwb-concurrent-gap-line\{opacity:1\}/,
+    '鼠标移到间隔上才画出那条 1px 竖线');
+  assert.ok(!/\.hwb-concurrent-col\{[^}]*border:[^0]/.test(src), '列本身不得画框（用户：上下不用框）');
 });
 
 // ── ⑧ 官方花名册 Team 面板不得复活（0.19.0 的用户裁定）───────────────────────
@@ -474,8 +494,10 @@ test('★ 0.19.64 并发：守卫必须覆盖门户浮层（document 捕获 + �
   assert.match(src, /const POPUP_CHAIN_MS = \d+;/, '门户链窗口必须是具名常量');
   assert.match(src, /'data-hwb-nav-entry': '1'/, '左栏入口必须自打 data-hwb-nav-entry 标记');
   assert.match(guard, /data-hwb-nav-entry/, '左栏子树必须由该标记推算（官方类名是哈希的，钉不住）');
-  assert.match(guard, /if \(!node\.contains\(root\)\) \{ sidebarRoot = node; break; \}/,
-    '左栏子树 = 从入口往上第一个**不含面板根**的祖先');
+  assert.match(guard, /if \(!node\.contains\(root\)\) last = node; else break;/,
+    '左栏子树 = 从入口往上**最后**一个不含面板根的祖先（第一个常是 0×0 包裹层：真机实测，'
+    + '拿它当左栏会让「点左栏单会话」被误判成门户链而拉回 —— 报障第 6 条）');
+  assert.match(guard, /sidebarRoot = last;/, '左栏子树必须由 last（而非第一个命中）赋值');
   assert.match(guard, /window\.__hwbPanelGuard = forensics/, '守卫必须暴露真机取证读数');
 });
 

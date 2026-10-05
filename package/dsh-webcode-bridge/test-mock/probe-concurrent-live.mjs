@@ -146,19 +146,21 @@ try {
   await page.getByText('并发会话', { exact: true }).first().click();
   await page.locator('.hwb-concurrent-panel').first().waitFor({ state: 'visible', timeout: 15000 });
 
-  // 建 3 列真会话（走官方 sessions.create；这是用户真实路径的第一步）。
-  const createBtn = page.locator('.hwb-concurrent-action').first();
+  // 0.19.65：点入口 = 点「新会话」，面板挂载后**自动**新建一组（不再需要点按钮）。
+  // 老选择器 `.hwb-concurrent-action` 已改名 `.hwb-concurrent-fab`（悬浮右上角）。
+  const createBtn = page.locator('.hwb-concurrent-fab').first();
   if (await createBtn.count()) {
-    await createBtn.click();
     try {
       await page.waitForFunction(() => document.querySelectorAll('.hwb-concurrent-col').length > 0, null, { timeout: 30000 });
     } catch (e) {
-      problems.push('建列后 30s 内没有出现任何 .hwb-concurrent-col');
+      // 没自动建（旧版）就点一次悬浮钮，保证后续判据仍能跑。
+      await createBtn.click();
+      await page.waitForFunction(() => document.querySelectorAll('.hwb-concurrent-col').length > 0, null, { timeout: 30000 });
     }
     // 列出现后再等一拍，让官方会话体挂载（它要开真会话）。
     await page.waitForTimeout(2500);
   } else {
-    problems.push('面板里找不到「新建并发会话」按钮（.hwb-concurrent-action）');
+    problems.push('面板里找不到「+ 加一列」悬浮钮（.hwb-concurrent-fab）');
   }
 
   // ── --explore：穷举「面板内哪一下会切回官方会话/工作区」 ────────────────────

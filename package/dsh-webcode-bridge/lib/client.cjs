@@ -2621,22 +2621,11 @@ window.__ModuleLoader__.load({
     const CONCURRENT_STORE_PREFIX = 'dsh-webcode-bridge.concurrent.';
 
     /**
-     * 读回一组真会话 id。任何异常一律回空数组。
-     *
-     * 降级不是崩溃：存储被禁用（隐私模式）时面板应当「像是第一次打开」，而不是白屏。
-     */
-    function readConcurrentGroup(key) {
-      try {
-        const raw = window.localStorage.getItem(CONCURRENT_STORE_PREFIX + key);
-        const parsed = raw ? JSON.parse(raw) : [];
-        return Array.isArray(parsed) ? parsed.filter(id => typeof id === 'string' && id) : [];
-      } catch (e) { return []; }
-    }
-
-    /**
      * 写回一组真会话 id。失败静默。
      *
-     * 同上：写不进去只意味着下次要重新建组，不该让整个面板报错。
+     * 0.19.65 起**只写不读**：用户第 7/8 条要求「点并发会话 = 点新会话」，每次打开都新建
+     * 一组，所以挂载不再恢复旧组。留着写是因为它仍是这条组的唯一留痕（排障时能核对
+     * 「上一次那一组是哪几条会话」），也是将来做「切回历史组」时的现成数据源。
      */
     function writeConcurrentGroup(key, ids) {
       try {
@@ -2762,6 +2751,8 @@ window.__ModuleLoader__.load({
       const refsRef = React.useRef({});
       const aliveRef = React.useRef(true);
       const viewRef = React.useRef(null);
+      // 打开面板只自动建一次组（0.19.65，用户第 7/8 条：点「并发会话」= 点「新会话」）。
+      const createdRef = React.useRef(false);
 
       // ── 挂载：把上次的组恢复回来；卸载：把所有引用成对释放 ────────────────────
       React.useEffect(() => {
@@ -2771,19 +2762,14 @@ window.__ModuleLoader__.load({
           // 旧宿主没有 sessions 服务：如实说明不可用，而不是画一个点了没反应的按钮。
           setError('宿主没有提供 sessions 服务，并发会话不可用');
           setReady(true);
-        } else {
-          const restored = [];
-          for (const id of readConcurrentGroup(groupKey)) {
-            try {
-              refs[id] = sessions.retain(id, { source: 'webcodeConcurrent' });
-              restored.push({ key: 'c:' + id, sessionId: id });
-            } catch (e) {
-              // 会话已不存在（被删/换了 profile）：从组里去掉，而不是留一条打不开的列。
-              delete refs[id];
-            }
-          }
-          if (aliveRef.current) { setCols(restored); setReady(true); }
+          return undefined;
         }
+        // 0.19.65（用户第 7/8 条）：点「并发会话」= 点「新会话」——**每次打开都新建一组**
+        // N 列真会话，而不是把上次那一组恢复回来。恢复的那一套（readConcurrentGroup）
+        // 因此不再参与挂载：旧组的那几条会话仍在左栏清单里，可以单独打开继续。
+        // 落盘照旧写（writeConcurrentGroup）：留给以后「切回历史组」用，也便于排障时核对。
+        setCols([]);
+        setReady(true);
         return () => {
           aliveRef.current = false;
           for (const id of Object.keys(refs)) {
@@ -2792,6 +2778,13 @@ window.__ModuleLoader__.load({
           }
         };
       }, []);
+
+      // 打开面板就建组（等挂载 effect 把 ready 置真之后再动手，避免与恢复逻辑抢时序）。
+      React.useEffect(() => {
+        if (!ready || createdRef.current) return;
+        createdRef.current = true;
+        createColumns(CONCURRENT_DEFAULT_COLS);
+      }, [ready]);
 
       // 组变了就落盘。放在 effect 而不是每个动作里：只有一处写法，不会漏。
       React.useEffect(() => {
@@ -2986,19 +2979,17 @@ window.__ModuleLoader__.load({
         // 列宽是一个**算出来的像素值**，交给 CSS 用（三列同一个值 ⇒ 宽度同步）。
         style: { '--hwb-col-width': colWidth + 'px' },
       },
-        h('div', { className: 'hwb-concurrent-bar' },
-          h('span', { className: 'hwb-concurrent-count' }, cols.length ? cols.length + ' 列' : '还没有列'),
-          h('button', {
-            type: 'button',
-            className: 'hwb-concurrent-action',
-            disabled: busy || cols.length >= CONCURRENT_MAX_COLS,
-            title: cols.length >= CONCURRENT_MAX_COLS
-              ? '最多 ' + CONCURRENT_MAX_COLS + ' 列'
-              : (cols.length ? '再加一条真会话' : '新建一组（' + CONCURRENT_DEFAULT_COLS + ' 条真会话）'),
-            onClick: () => createColumns(cols.length === 0 ? CONCURRENT_DEFAULT_COLS : 1),
-          }, cols.length === 0
-            ? (busy ? '正在新建…' : '新建并发会话（' + CONCURRENT_DEFAULT_COLS + ' 列）')
-            : (busy ? '正在新建…' : '+ 加一列'))),
+        // 0.19.65（用户第 3 条）：**删掉顶部那一行工具条**（「N 列 / + 加一列」不再占高度，
+        // 会话框因此能完整上下铺满），「+ 加一列」改成右上角**悬浮置顶**的圆钮。
+        h('button', {
+          type: 'button',
+          className: 'hwb-concurrent-fab',
+          disabled: busy || cols.length >= CONCURRENT_MAX_COLS,
+          title: cols.length >= CONCURRENT_MAX_COLS
+            ? '最多 ' + CONCURRENT_MAX_COLS + ' 列'
+            : (cols.length ? '再加一条真会话' : '新建一组（' + CONCURRENT_DEFAULT_COLS + ' 条真会话）'),
+          onClick: () => createColumns(cols.length === 0 ? CONCURRENT_DEFAULT_COLS : 1),
+        }, busy ? '…' : (cols.length === 0 ? '新建并发会话' : '+ 加一列')),
         error && h('p', { className: 'hwb-hint bad' }, error),
         brief && h('div', { className: 'hwb-concurrent-brief' },
           h('div', { className: 'hwb-concurrent-brief-head' },
@@ -3028,25 +3019,35 @@ window.__ModuleLoader__.load({
             'data-cols': String(cols.length),
             style: { transform: 'translateX(' + (-first * (colWidth + COL_GAP)) + 'px)' },
           },
-          cols.map((col) => h('div', { key: col.key, className: 'hwb-concurrent-col' },
-            h('div', { className: 'hwb-concurrent-col-head' },
-              h('span', { className: 'hwb-concurrent-col-title', title: col.sessionId }, titleOf(col.sessionId)),
-              h('button', {
-                type: 'button', className: 'hwb-concurrent-mini',
-                title: '复制这一列的「独立工作区」指令（git worktree + 分支，收尾时合并回主线）',
-                onClick: () => copyColumnBrief(col, cols.indexOf(col)),
-              }, '⧉ 开工'),
-              h('button', {
-                type: 'button', className: 'hwb-concurrent-mini',
-                title: '把这一列移出面板（不删那条会话）',
-                onClick: () => releaseColumn(col.key),
-              }, '✕')),
-            h('div', { className: 'hwb-concurrent-col-body' },
-              SessionProvider && refsRef.current[col.sessionId]
-                ? h(HwbBoundary, { label: '并发列 ' + titleOf(col.sessionId) },
-                  h(SessionProvider, { session: refsRef.current[col.sessionId] },
-                    renderSlot(slotName, { hwbView: view })))
-                : h('p', { className: 'hwb-hint' }, '这一列的会话引用不可用（换 profile 或会话被删）')))))),
+          // 0.19.65（用户第 4 条）：**列与列之间只留左右间隔**（16px，与平移步长同值），
+          // 间隔本身是一个真元素——鼠标移上去才画出 1px 竖线，平时完全隐藏。
+          // 「上下不用框」：列不画边框、不画分隔线，列头平时隐形（既有行为）。
+          cols.reduce((acc, col, i) => {
+            if (i > 0) {
+              acc.push(h('div', { key: 'gap:' + col.key, className: 'hwb-concurrent-gap', 'aria-hidden': 'true' },
+                h('span', { className: 'hwb-concurrent-gap-line' })));
+            }
+            acc.push(h('div', { key: col.key, className: 'hwb-concurrent-col' },
+              h('div', { className: 'hwb-concurrent-col-head' },
+                h('span', { className: 'hwb-concurrent-col-title', title: col.sessionId }, titleOf(col.sessionId)),
+                h('button', {
+                  type: 'button', className: 'hwb-concurrent-mini',
+                  title: '复制这一列的「独立工作区」指令（git worktree + 分支，收尾时合并回主线）',
+                  onClick: () => copyColumnBrief(col, cols.indexOf(col)),
+                }, '⧉ 开工'),
+                h('button', {
+                  type: 'button', className: 'hwb-concurrent-mini',
+                  title: '把这一列移出面板（不删那条会话）',
+                  onClick: () => releaseColumn(col.key),
+                }, '✕')),
+              h('div', { className: 'hwb-concurrent-col-body' },
+                SessionProvider && refsRef.current[col.sessionId]
+                  ? h(HwbBoundary, { label: '并发列 ' + titleOf(col.sessionId) },
+                    h(SessionProvider, { session: refsRef.current[col.sessionId] },
+                      renderSlot(slotName, { hwbView: view })))
+                  : h('p', { className: 'hwb-hint' }, '这一列的会话引用不可用（换 profile 或会话被删）'))));
+            return acc;
+          }, []))),
       );
     }
 
@@ -3307,9 +3308,14 @@ window.__ModuleLoader__.load({
       try { if (typeof window !== 'undefined') window.__hwbPanelGuard = forensics; } catch (e) { /* 取证挂不上不影响守卫 */ }
 
       /**
-       * 官方左栏那一列：从本插件入口节点（`data-hwb-nav-entry`）往上走，取**第一个不含本
+       * 官方左栏那一列：从本插件入口节点（`data-hwb-nav-entry`）往上走，取**最后一个不含本
        * 面板根节点**的祖先——左栏与中央区在那一层分叉，所以它正好是左栏容器。不靠官方
        * 哈希类名（`pXSMma_*` 之类钉不住）。算不出来返回 null。
+       *
+       * ⚠ 必须是「**最后**一个」而不是「第一个」（0.19.65 真机教训）：入口外面常套着一层
+       * 0×0 的包裹 DIV，第一个不含面板根的祖先就是它 ⇒ 拿 0×0 当左栏，左栏豁免整体失效，
+       * 用户点左栏单会话会被当成门户链拉回面板（报障第 6 条）。实测最后一个才是
+       * `pI_x6G_sidebarCol`（280×1000 的左栏列）。
        */
       const sidebarOf = () => {
         if (sidebarRoot && sidebarRoot.isConnected !== false) return sidebarRoot;
@@ -3318,11 +3324,17 @@ window.__ModuleLoader__.load({
           const entry = typeof document !== 'undefined' && document.querySelector ? document.querySelector('[data-hwb-nav-entry]') : null;
           const root = probe && probe.rootEl;
           if (entry && root) {
+            // 取**最后一个**不含面板根的祖先，而不是第一个：真机实测（0.19.65）第一个常常是
+            // 一个 0×0 的包裹 DIV，拿它当左栏 ⇒ 左栏豁免整体失效 ⇒ 用户点左栏单会话回不去
+            // （第 6 条报障）。最后一个才是 `pI_x6G_sidebarCol`（280×1000 的左栏列）。
             let node = entry.parentElement;
-            for (let i = 0; node && i < 12; i += 1) {
-              if (!node.contains(root)) { sidebarRoot = node; break; }
+            let last = null;
+            for (let i = 0; node && i < 15; i += 1) {
+              if (!node.contains(root)) last = node; else break;
               node = node.parentElement;
             }
+            sidebarRoot = last;
+            try { forensics.sidebar = last ? Math.round(last.getBoundingClientRect().width) : null; } catch (e) { forensics.sidebar = null; }
           }
         } catch (e) { sidebarRoot = null; }
         return sidebarRoot;
@@ -6302,19 +6314,24 @@ window.__ModuleLoader__.load({
         ".hwb-concurrent-tab.active{background:var(--dsw-alias-interactive-bg-active,#00000010);color:var(--dsw-alias-label-primary);font-weight:600}",
         // 面板正文：撑满剩余高度并**自己滚动**。`min-height:0` 是 flex 子项能真正滚动的
         // 必要条件——没有它，flex 项的最小高度是内容高度，`overflow:hidden` 会把长会话裁掉。
-        ".hwb-concurrent{display:flex;flex-direction:column;gap:12px;width:100%;flex:1 1 auto;min-height:0;overflow:hidden;padding:12px 12px 0;box-sizing:border-box}",
-        ".hwb-concurrent-bar{display:flex;align-items:center;gap:12px;flex:none}",
-        ".hwb-concurrent-count{font-size:12px;line-height:20px;color:var(--dsw-alias-label-caption,#888)}",
-        ".hwb-concurrent-action{margin-left:auto;height:28px;padding:0 12px;font:inherit;font-size:13px;line-height:20px;border:none;border-radius:8px;background:var(--dsw-alias-interactive-bg-hover-solid,#00000012);color:var(--dsw-alias-label-primary);cursor:pointer}",
-        ".hwb-concurrent-action:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-solid,#00000012)}",
-        ".hwb-concurrent-action:disabled{opacity:.5;cursor:default}",
+        ".hwb-concurrent{position:relative;display:flex;flex-direction:column;gap:8px;width:100%;flex:1 1 auto;min-height:0;overflow:hidden;padding:12px 12px 0;box-sizing:border-box}",
+        // 「+ 加一列」：右上角悬浮置顶（用户第 3 条：删掉顶部那一行工具条，让会话框完整上下）。
+        // 它压在列内容之上，所以给 z-index 与半透明底，避免被官方会话体的滚动内容盖住。
+        ".hwb-concurrent-fab{position:absolute;top:14px;right:18px;z-index:14;height:28px;padding:0 12px;font:inherit;font-size:13px;line-height:20px;border:.5px solid var(--dsw-alias-border-l3,#8884);border-radius:14px;background:var(--dsw-alias-bg-layer-1,#ffffffd9);color:var(--dsw-alias-label-primary);cursor:pointer;backdrop-filter:blur(8px)}",
+        ".hwb-concurrent-fab:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-solid,#00000012)}",
+        ".hwb-concurrent-fab:disabled{opacity:.5;cursor:default}",
         // ── 固定列宽 + 观察窗平移（用户 0.19.29 第 3 点）─────────────────────────
         //
         // 不用 grid 等分：那是「列数越多列越窄」，正是用户不要的。这里每列都有**确定的
         // 宽度**（`--hwb-col-width`，由组件按官方常量算出来、三列同一个值），放不下就靠
         // 左右切换看列——所以「3 个会话宽度同步」在结构上成立。
         ".hwb-concurrent-viewport{position:relative;flex:1;min-height:0;overflow:hidden;display:flex}",
-        ".hwb-concurrent-columns{display:grid;grid-auto-flow:column;grid-auto-columns:var(--hwb-col-width,420px);gap:16px;min-height:0;flex:none;transition:transform .18s ease}",
+        ".hwb-concurrent-columns{display:flex;gap:0;min-height:0;flex:none;transition:transform .18s ease}",
+        // 列间「左右间隔」：一个真元素（16px，与平移步长 COL_GAP 同值），平时隐形；
+        // 鼠标移到间隔上才画出 1px 竖线（用户第 4 条）。上下不画任何框线。
+        ".hwb-concurrent-gap{flex:0 0 16px;position:relative;align-self:stretch}",
+        ".hwb-concurrent-gap-line{position:absolute;left:50%;top:10px;bottom:10px;width:1px;margin-left:-.5px;background:var(--dsw-alias-border-l3,#8886);opacity:0;transition:opacity .12s ease}",
+        ".hwb-concurrent-gap:hover .hwb-concurrent-gap-line{opacity:1}",
         // 尊重「减少动态效果」偏好：平移是纯装饰性的。
         "@media (prefers-reduced-motion:reduce){.hwb-concurrent-columns{transition:none}}",
         // 左右切换按钮：绝对定位在中间区左右边缘、垂直居中；底色与毛玻璃取自官方胶囊
@@ -6327,7 +6344,7 @@ window.__ModuleLoader__.load({
         // 列：**平时隐形、hover 才浮起一点光**（用户 0.19.29 第 1 点原话：「去除每列对话的
         // 对话框分界，用官方现在的隐形加上鼠标移到后显示一点光线的结构，完全照抄 dsh」）。
         // 本轮改的是「列里装什么」，外观判据没变，因此这一对的取值逐字保留。
-        ".hwb-concurrent-col{background:transparent;border:0;border-radius:12px;display:flex;flex-direction:column;min-height:0;overflow:hidden;transition:background-color .12s ease,box-shadow .12s ease}",
+        ".hwb-concurrent-col{flex:0 0 var(--hwb-col-width,420px);width:var(--hwb-col-width,420px);background:transparent;border:0;border-radius:12px;display:flex;flex-direction:column;min-height:0;overflow:hidden;transition:background-color .12s ease,box-shadow .12s ease}",
         ".hwb-concurrent-col:hover,.hwb-concurrent-col:focus-within{background:var(--dsw-alias-interactive-bg-hover,#00000008);box-shadow:inset 0 0 0 .5px var(--dsw-alias-border-l3,#8884)}",
         // 列头只放「这是哪条会话」与一个移出按钮，并且平时隐形：用户第 1 点要求上方不占位。
         // 会话身份仍然可见（hover / 键盘进入本列才随那点光一起现形），用户要能核对。
