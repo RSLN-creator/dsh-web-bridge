@@ -57,7 +57,7 @@
 | 44 | **「检查更新」恒报「已是最新」：仓库没跟上 `package.json` 的 tag**（2026-10-04 登记，本轮**不修**）——最新 tag 是 **v0.19.55** 而 `package.json` 已是 0.19.60/0.19.61 ⇒ `latest < current` ⇒ 判据如实给出「已是最新」。真因是 `release.yml` 只在**打 tag** 时产出 tarball，而 0.19.56–0.19.61 几轮只改版本号没打 tag ⇒ Releases 上最后一个是 0.19.55。发版是对外不可逆动作，登记不代做；出路（用户点头后）= `git tag v0.19.61 && git push origin v0.19.61`，且 tag 必须打在 `package.json` 已是 0.19.61 的 commit 上 | 低 | 否 | `package/dsh-webcode-bridge/package.json`、`.github/workflows/release.yml`、`lib/update.js` |
 | 42 | **「网页桥接」设置分区的导航图标不可自定义**（2026-10-03 登记）——用户报「仍然是默认齿轮」；真因在**官方壳**里：`settings.section` 的注册契约只有 `id/order/label`（**没有 icon**），导航字形由官方 `dsh-client-ui-settings-general` 的 `navIcon(id)` **硬编码**（只认 `account` / `models` / `agent-presets` / `plugins` / `archived-sessions`，其余一律回落齿轮）。插件侧**结构上无解**，除非改官方包或占用一个 shipped id | 低 | 否 | `lib/client.cjs`（`settings.section` 注册处）、官方 `@deepseek-ai/dsh-client-ui-settings-general/lib/client.js`（`navIcon`）、`doc/progress.md`（2026-10-03） |
 | 45 | **桌面 profile 的声明与磁盘分叉：声明仍钉 0.19.61，磁盘已是 0.19.64**（2026-10-05 登记）——本轮靠官方 `client-hmr` 通道**原地热换** `lib/client.cjs` 让桌面端立刻用上修复（不改进程、不重启应用），但**没改 profile 声明**。风险：任何一次 pnpm 通道（装别的插件、启动期 reconcile）都可能把客户端静默换回声明里的旧版 ⇒ 缺陷复发。恢复「声明 == 磁盘」必须**完全退出桌面端**后走官方通道装一次（`dsh` CLI 拒绝管理 desktop profile，须用桌面端自己的 carrier），且宿主半边本来就要重启才换 | 中 | 否 | `~/.dsh/profiles/desktop/package.json`、`~/.dsh/profiles/desktop/node_modules/dsh-webcode-bridge/lib/client.cjs`、`doc/progress.md`（2026-10-05 §八）、`doc/research/2026-10-05-dsh-multi-session-and-client-hot-swap.md` §5 |
-| 46 | **npm 发布被账号安全策略挡在「staged 待批」**（2026-10-05 登记，**需要用户本人 2FA 一下**）——`npm publish dsh-webcode-bridge-0.19.64.tgz --access public` 报成功（`+ dsh-webcode-bridge@0.19.64`，61 files，shasum `8a7aa56f…`），但 registry 上 `dist-tags.latest` 仍是 **0.19.51**、`versions` 里没有 0.19.64；再发同版本报 `E409 … Cannot publish over previously staged version "0.19.64"`。根因是 npm 正在收紧「绕过 2FA 的 token 用于**直接发布**」，本机 token 属于该类 ⇒ 发布被**暂存**，且该 token 连 `npm profile get`（403）与 `npm stage list`（返回空）都读不到，**必须由用户带着 2FA 批准**。出路见正文 §46 | 中 | 否 | `~/.npmrc`（token）、npm registry `dsh-webcode-bridge`、`package/dsh-webcode-bridge/dsh-webcode-bridge-0.19.64.tgz` |
+| 46 | **npm 发布被账号安全策略挡在「staged 待批」**（2026-10-05 登记，**同日已解决**）——`npm publish` 报成功但 registry 上 `latest` 仍是 0.19.51（`E409 Cannot publish over previously staged version "0.19.64"`）；根因是 npm 收紧「绕过 2FA 的 token 直接发布」，本机 token 属该类 ⇒ 发布被暂存，需账号主人 2FA 批准。**用户本人批准后已上线**：`latest = 0.19.64`、61 files、shasum `8a7aa56f…` 与本地打包 tarball **逐字节相同**（`published 2026-10-05T15:56:43Z`）。留档价值 = 「命令行打印 `+ pkg@ver` 不等于 registry 上线」这条判据（必须直连 registry 读 `dist-tags`） | 中 | 否 | `~/.npmrc`（token）、npm registry `dsh-webcode-bridge`、`package/dsh-webcode-bridge/dsh-webcode-bridge-0.19.64.tgz` |
 
 > **一览表完整性（2026-09-16 修正；2026-09-26 补上闸门）**：本表此前**漏登记 #19 与 #20**（正文有、表里没有）。
 > 这两条都是可机检的登记错误，而当时没有任何闸门覆盖「正文条目 ↔ 表格条目」的一致性。
@@ -2843,9 +2843,23 @@ Select-String -Path "$env:USERPROFILE\.dsh\profiles\desktop\package.json" -Patte
 
 ---
 
-## 46. **npm 发布被账号安全策略挡在「staged 待批」**（2026-10-05 登记）
+## 46. **npm 发布被账号安全策略挡在「staged 待批」**（2026-10-05 登记，同日已解决）
 
-### 现象与读数
+### 结果（先写结论）
+
+用户本人完成 2FA 批准后，**0.19.64 已正式上线**：
+
+| 读数 | 值 |
+| --- | --- |
+| `dist-tags.latest` | **0.19.64** |
+| `versions` | 0.19.26 / 0.19.27 / 0.19.51 / **0.19.64** |
+| `versions.0.19.64.dist.shasum` | `8a7aa56ffaea9caec5396ffeab0b1baf9289904a` |
+| 本地打包 tarball 的 sha1 | `8a7aa56ffaea9caec5396ffeab0b1baf9289904a`（**逐字节相同**） |
+| `fileCount` / 发布时间 | 61 / `2026-10-05T15:56:43Z` |
+
+⇒ 发布物与我 `pnpm pack` → `verify-pack` 逐字相同 61/61 的那一份**完全一致**。
+
+### 过程中的真读数（留档价值在这里）
 
 ```
 $ npm publish dsh-webcode-bridge-0.19.64.tgz --access public
@@ -2853,56 +2867,25 @@ npm notice Publishing to https://registry.npmjs.org/ with tag latest and public 
 npm notice Your package is being processed and may take a few minutes to become available.
 + dsh-webcode-bridge@0.19.64          ← 看起来成功，退出码 0
 ```
-但 registry 实读（直连 `https://registry.npmjs.org/dsh-webcode-bridge`）：
-`dist-tags.latest = 0.19.51`，`versions = [0.19.26, 0.19.27, 0.19.51]` —— **没有 0.19.64**。
-再发同版本得到决定性读数：
+但直连 registry 实读：`dist-tags.latest = 0.19.51`、`versions` 里**没有** 0.19.64。
+再发同版本得到决定性读数：`E409 Conflict … Cannot publish over previously staged version "0.19.64"`。
 
-```
-npm error code E409
-npm error 409 Conflict - PUT https://registry.npmjs.org/dsh-webcode-bridge
-npm error Cannot publish over previously staged version "0.19.64".
-```
+**真因**：npm 收紧「绕过 2FA 的 token 用于直接发布」（命令自己打印了那条通知），
+本机 `~/.npmrc` 的 token 属该类 ⇒ 发布被**暂存**；同一 token 连读都读不到暂存记录
+（`npm profile get` → 403；`npm stage list` → 空；直连 `/-/stage` API 也是空）。
+**账号安全策略不该被绕过**，所以正确处置就是交给账号主人 2FA 一下。
 
-### 真因
+### 判据（写给下一次发版的人）
 
-npm 正在收紧「**绕过 2FA 的 token 用于直接发布**」（本次命令自己也打出了那条通知：
-`npm tokens that bypass 2FA are being restricted for account changes and direct publishing`）。
-本机 `~/.npmrc` 的 token 属于该类 ⇒ 发布被**暂存（staged）**而不是直接上线；
-而同一个 token 连读都读不到暂存记录：`npm profile get` → **403 Forbidden**，
-`npm stage list dsh-webcode-bridge` → `items: []`（直连 `/-/stage` API 用该 token 也是空）。
+- **命令行打印 `+ pkg@ver` 不等于上线**。上线判据只有直连 registry 读 `dist-tags`：
+  ```powershell
+  (Invoke-RestMethod 'https://registry.npmjs.org/dsh-webcode-bridge').'dist-tags'.latest
+  ```
+- 以及 `shasum` 必须等于本地 `pnpm pack` 产物（SHA1）——本次两者相同。
 
-⇒ **这不是代码或打包问题**（tarball 已验证：61 files、`verify-pack` 逐字相同 61/61、
-shasum `8a7aa56ffaea9caec5396ffeab0b1baf9289904a`）。缺的是**账号侧的 2FA 那一下**，
-而那一步只能由账号主人完成（本仓库的纪律：不绕过任何账号安全控制）。
+### 其它发布面（同一轮，均已核对）
 
-### 出路（用户本人，任选一条）
-
-1. **网站批准暂存版本**：登 npm → 该包/账号的 staged 页面 → 批准 `0.19.64`。
-2. **带 OTP 直接发**（推荐，一次到位）：
-   ```powershell
-   cd D:\9_Code_Workspace\dsh-webcode-bridge\package\dsh-webcode-bridge
-   npm login --auth-type=web        # 浏览器登录（会建立可用的 2FA 会话）
-   npm publish dsh-webcode-bridge-0.19.64.tgz --access public   # 提示时输入 6 位 OTP
-   ```
-3. **若 0.19.64 卡在暂存里发不出去**：改版本号重打包（0.19.65）后走第 2 条——
-   staged 记录不阻塞新版本号。
-
-发完后核对（一条命令，别只看命令行的 `+`）：
-```powershell
-(Invoke-RestMethod 'https://registry.npmjs.org/dsh-webcode-bridge').'dist-tags'.latest   # 期望 0.19.64
-```
-
-### 已完成的发布面（对照）
-
-- **git 已推**：`main` → `25e7fbe`/`add918a`（`090adf6..add918a`），并打了 **`v0.19.64`** 标签
-  （`release.yml` 会在 tag 上产出 GitHub Release 资产 ⇒ 也修掉 #44 的「Releases 没跟上」）。
-- **桌面端已生效**：客户端产物经官方 `client-hmr` **原地热换**（rev `4447ff0c7431`，
-  按 rev 取回 499,303 B = 磁盘 499,228 + 75 B，逐字节相同），未重启应用。
-- **npm 未上线**：就是本条。
-
-### 边界
-
-- 本条目**不**建议把 token 换成更宽的权限，也不建议 `--force`（npm 没有这个开关）；
-  账号安全策略不该被绕过。
-- 版本号 0.19.64 的 tarball 已就绪且已发过暂存；若最终改用 0.19.65，需同步
-  `package.json` / `doc/progress.md` 台账格 / `CHANGELOG.md`（`check-ledger.mjs` 会验）。
+- **git**：`main` 推到 `77399d1`（`090adf6..77399d1`），标签 **`v0.19.64`** 已推
+  （`release.yml` 在 tag 上产出 GitHub Release 资产 ⇒ 顺带修掉 #44 的「Releases 没跟上」）。
+- **桌面端**：客户端产物经官方 `client-hmr` **原地热换**（rev `4447ff0c7431`，
+  按该 rev 取回 499,303 B = 磁盘 499,228 + 75 B trailer，逐字节相同），**未重启应用**。
