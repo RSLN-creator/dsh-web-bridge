@@ -6389,8 +6389,14 @@ window.__ModuleLoader__.load({
         ".hwb-concurrent-col:hover,.hwb-concurrent-col:focus-within{background:var(--dsw-alias-interactive-bg-hover,#00000008);box-shadow:inset 0 0 0 .5px var(--dsw-alias-border-l3,#8884)}",
         // 列头只放「这是哪条会话」与一个移出按钮，并且平时隐形：用户第 1 点要求上方不占位。
         // 会话身份仍然可见（hover / 键盘进入本列才随那点光一起现形），用户要能核对。
-        ".hwb-concurrent-col-head{display:flex;align-items:center;gap:6px;flex:none;padding:0 12px 4px}",
-        ".hwb-concurrent-col-title{flex:1;min-width:0;font-size:11px;line-height:16px;color:var(--dsw-alias-label-caption,#888);opacity:0;transition:opacity .12s ease;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
+        // 列头 = 官方 header 的**第一段**（0.19.65，用户 2026-10-06：「顶部对应单会话的名称…
+        // 那一行的显示」+「你可以做到一摸一样吗」）。官方 header 的标题是**常显**的，所以这里
+        // 去掉 0.19.29 那套「hover 才现形」；官方那三块 chip（标准模式 / 后台任务 / 团队）由
+        // 三个官方包注册进 `conversation.header` 槽，而该槽的公开投影**不含组件**
+        //（`dsh-client-ui-slots/lib/index.js:313`：exported **without components**）⇒ 受支持的
+        // 路径下拿不到，只能后续按「复刻」处理（见 doc/research §11）。
+        ".hwb-concurrent-col-head{display:flex;align-items:center;gap:8px;flex:none;padding:0 12px;height:44px;box-sizing:border-box}",
+        ".hwb-concurrent-col-title{flex:1;min-width:0;font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary,inherit);opacity:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
         ".hwb-concurrent-col:hover .hwb-concurrent-col-title,.hwb-concurrent-col:focus-within .hwb-concurrent-col-title{opacity:1}",
         ".hwb-concurrent-mini{flex:none;height:24px;padding:0 8px;font:inherit;font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary,#666);cursor:pointer;background:transparent;border:none;border-radius:8px;opacity:0;transition:opacity .12s,background-color .1s}",
         ".hwb-concurrent-col:hover .hwb-concurrent-mini,.hwb-concurrent-col:focus-within .hwb-concurrent-mini{opacity:1}",
