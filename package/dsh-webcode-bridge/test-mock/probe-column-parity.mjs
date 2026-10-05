@@ -93,7 +93,19 @@ try {
     if (!el) return null;
     return String(el.textContent || '').trim().split('\n')[0].trim().slice(0, 40) || null;
   });
-  const candidates = wsName ? [{ text: wsName }] : [];
+  // 官方单会话入口：**官方自己的入口「新会话」**——它一定把中央区切到官方单会话视图，
+  // 不用去猜哪一行是工作区（前两版分别扫到宠物挂件、以及点到我们列里的胶囊，都因此判红）。
+  let officialEarly = null;
+  try {
+    await page.getByText('新会话', { exact: true }).first().click({ timeout: 10000 });
+    await page.waitForTimeout(4000);
+    if ((await page.locator('.hwb-concurrent-panel').count()) === 0 && (await page.locator('[data-conversation-scroll]').count()) > 0) {
+      officialEarly = await page.evaluate(reading);
+    }
+  } catch (e) { /* 落到下面的候选行兜底 */ }
+  const candidates = officialEarly ? [] : (wsName ? [{ text: wsName }] : []);
+  /** 入口记录（给报告用）：优先官方「新会话」，兜底才用推导出来的工作区名。 */
+  const ws = { text: officialEarly ? '新会话（官方入口）' : (wsName || '(没找到入口)') };
   let official = null;
   let entered = null;
   for (const c of candidates) {
@@ -125,6 +137,7 @@ try {
       await page.waitForTimeout(1200);
     } catch (e) { /* 复原失败就继续试下一个 */ }
   }
+  if (!official && officialEarly) official = officialEarly;
   if (!official) {
     // 失败也要出读数：静默退出等于黑盒（第一版就是那样，跑出来「无输出 + 退 1」，没法排查）。
     console.log('=== probe-column-parity ===');
@@ -158,6 +171,11 @@ try {
   }
 } catch (e) {
   problems.push('探针流程异常：' + String(e && e.message || e));
+}
+// 兜底输出：任何提前抛错也要留下读数（静默退出 = 黑盒，本探针已经因此浪费过两轮）。
+if (problems.length && !problems.__printed) {
+  console.log('=== probe-column-parity（异常路径） ===');
+  problems.forEach((p) => console.log('  - ' + p));
 }
 await browser.close().catch(() => {});
 process.exitCode = problems.length ? 1 : 0;
