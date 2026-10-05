@@ -5,6 +5,28 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.67
+
+**右栏页签版并发视图 + 官方 header 三块 chip 全部接线（用户选 A：自己复刻）。**
+
+### 右栏页签（用户：「右侧 tab 功能一并抄上」）
+
+按官方两段式（在产范例 dsh-client-ui-sidebar-documentpreview:6811/6822）：ctx.sidebarRightTabs.register({id,kind,title,keepMounted}) + ctx.slots.inject(sidebar.right.pane.tab) 并声明自有的 session 作用域子槽 ⇒ renderer 照发 SessionProvider/renderSlot，每列仍是显式绑定的真会话。真机读数：window.__hwbRail = {registered:true}（探针在打开主面板之前断言）。限制如实写在代码注释里：右栏常态 300px~45%、中列保底 400px ⇒ 3-4 列并排只在全屏下实用。
+
+### 三块 chip（照抄官方数据面 + 官方文案）
+
+| chip | 数据面 | 真机 |
+| --- | --- | --- |
+| 模式 | 会话清单投影 byId[id].projectionValues.agentPreset（ui-agent-preset:357）+ 官方 i18n 文案 | 可见「标准模式」 |
+| 后台任务 | ctx.jobs 服务 + 槽 inject（照 ui-jobs:596-621），并调 watchRows(sessionId)；口径 running/stopping | 已接线（无任务时不显示） |
+| 子智能体/团队 | root 标准绑定 useSessions：subagentCatalog / agentTeam 投影 | 可见「智能体团队 1 成员」 |
+
+### 其它
+
+- 官方漂移闸门扩到 11 段并接提交前钩子；
+- 清掉 3 处悬空引用（此前注释引用的 doc/research §11 在仓库里不存在，已改成真实出处 dsh-client-ui-slots/lib/index.js:313）；
+- 残留：「↗ 官方视图」仍 knownGap（探针如实记录，不放假绿灯）。
+
 ## 0.19.66
 
 **照抄官方 header：模式 chip 落地（官方投影路径 + 官方文案）；官方漂移闸门 11 段并接提交前钩子；
