@@ -1,0 +1,22 @@
+#!/bin/sh
+# post-commit — 每次提交后**自动查云端 CI**，红了当场说（用户 2026-10-06 明令：
+# 「ci每次fail都要我提醒？你自己加上每次提交检云端ci!」）。
+#
+# 安装：node scripts/install-git-hooks.mjs
+# 口径：查不到（gh 缺失/未登录/无网）只提示，**不拦提交**；查到红则醒目打印 run 链接。
+#       推送后想等本轮 run 落定：node scripts/check-cloud-ci.mjs --wait
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
+if [ ! -f "$repo_root/scripts/check-cloud-ci.mjs" ]; then
+  exit 0
+fi
+if ! command -v node >/dev/null 2>&1; then
+  exit 0
+fi
+echo "[post-commit] 查云端 CI…（node scripts/check-cloud-ci.mjs）"
+node "$repo_root/scripts/check-cloud-ci.mjs"
+code=$?
+if [ "$code" -eq 1 ]; then
+  echo "[post-commit] ✖ 云端 CI 有失败 run —— 上面给了 run 链接，先看再决定是否继续。"
+fi
+# post-commit 不改变提交结果：一律退 0（红已经在上面醒目打印）。
+exit 0
