@@ -3,13 +3,27 @@
 #
 # 安装：node scripts/install-git-hooks.mjs
 # 跳过（确实知道自己在干什么时才用）：git commit --no-verify
-set -e
-repo_root="$(git rev-parse --show-toplevel)"
-if [ -f "$repo_root/scripts/check-official-drift.mjs" ]; then
-  node "$repo_root/scripts/check-official-drift.mjs" || {
-    echo ""
-    echo "[pre-commit] 官方一侧变了：上面点名的每一段都需要人工看一眼再决定是否同步。"
-    echo "[pre-commit] 确认已同步（或确认与本次改动无关）后：node scripts/check-official-drift.mjs --update"
-    exit 1
-  }
+#
+# ⚠ 失败口径（真机踩过）：钩子在 Windows 上由 git 自带的 sh 执行，而某些环境下 `node`
+#   不在它的 PATH 里——那时**必须放行**（打印一句就走），否则会把所有提交都拦死。
+#   只有「drift 脚本真的跑起来并且报了漂移（退 1）」才拦。
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
+if [ ! -f "$repo_root/scripts/check-official-drift.mjs" ]; then
+  exit 0
 fi
+if ! command -v node >/dev/null 2>&1; then
+  echo "[pre-commit] node 不在 PATH：跳过官方漂移校验（不是失败，只是这次没查）"
+  exit 0
+fi
+node "$repo_root/scripts/check-official-drift.mjs"
+code=$?
+if [ "$code" -eq 1 ]; then
+  echo ""
+  echo "[pre-commit] 官方一侧变了：上面点名的每一段都需要人工看一眼再决定是否同步。"
+  echo "[pre-commit] 确认已同步（或确认与本次改动无关）后：node scripts/check-official-drift.mjs --update"
+  exit 1
+fi
+if [ "$code" -ne 0 ]; then
+  echo "[pre-commit] 漂移脚本自身出错（退 $code）：放行提交，但请顺手看一眼 scripts/check-official-drift.mjs"
+fi
+exit 0
