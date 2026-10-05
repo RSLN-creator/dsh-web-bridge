@@ -329,6 +329,28 @@ try {
     }
   }
 
+  // ── 左栏「并发会话目录」判据（0.19.65）──────────────────────────────────────
+  // 用户原话：「否则怎么找回已过去的并发会话！！！」⇒ 建完组后左栏必须多出一行
+  // `并发会话 · N 列`，点它要能**把那一组重新打开**（列数与组内会话数一致）。
+  {
+    const groupRow = page.getByText(/^并发会话 · \d+ 列$/).first();
+    try {
+      await groupRow.waitFor({ timeout: 8000 });
+      reading.groupRow = (await groupRow.textContent()) || '';
+      await groupRow.click();
+      await page.waitForTimeout(2000);
+      const cols = await page.locator('.hwb-concurrent-col').count();
+      reading.groupRowCols = cols;
+      if (cols < 1) problems.push('点左栏历史组行后面板一列都没有（那一组没被找回）');
+      // 回主入口，后面的判据仍在主入口上跑
+      await page.getByText('并发会话', { exact: true }).first().click();
+      await page.locator('.hwb-concurrent-panel').first().waitFor({ timeout: 10000 });
+      await page.waitForTimeout(1500);
+    } catch (e) {
+      problems.push('左栏没有出现历史组行（「并发会话 · N 列」）——并发目录没登记上');
+    }
+  }
+
   // ── 工作区浮层（门户）判据（0.19.64）────────────────────────────────────────
   //
   // 用户报「还是会切回到官方工作区」。真机取证：官方工作区胶囊的浮层开在**门户**里
