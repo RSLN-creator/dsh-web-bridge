@@ -1,5 +1,5 @@
 {
-  "at": "2026-10-05T17:55:51.855Z",
+  "at": "2026-10-05T18:33:31.286Z",
   "asar": "D:/2_Download_Main/4_DeepSeek Harness_code/resources/app.asar",
   "segments": {
     "conversation-view-switcher": {
@@ -127,6 +127,42 @@
         {
           "pattern": "/is not declared by this Factory/",
           "hits": 2
+        }
+      ]
+    },
+    "agent-preset-labels": {
+      "file": "dsh-client-ui-agent-preset/lib/client.js",
+      "why": "列头「模式」chip 复刻的官方文案与投影键（标准模式 / PTC 模式 / projectionValues.agentPreset）——官方改名或改键就必须同步我们的 PRESET_LABELS 与取值路径",
+      "sha256": "359a7584d220b11a",
+      "lines": 4,
+      "perPattern": [
+        {
+          "pattern": "/presetStandardName: \"标准模式\"/",
+          "hits": 1
+        },
+        {
+          "pattern": "/presetPtcName: \"PTC 模式\"/",
+          "hits": 1
+        },
+        {
+          "pattern": "/projectionValues\\?\\.agentPreset/",
+          "hits": 2
+        }
+      ]
+    },
+    "jobs-count-label": {
+      "file": "dsh-client-ui-jobs/lib/client.js",
+      "why": "列头「后台任务」chip 复刻的官方计数口径与文案（liveRows.length + count.live.one）",
+      "sha256": "b067666065788713",
+      "lines": 10,
+      "perPattern": [
+        {
+          "pattern": "/count\\.live\\.one/",
+          "hits": 3
+        },
+        {
+          "pattern": "/liveRows\\.length/",
+          "hits": 7
         }
       ]
     },

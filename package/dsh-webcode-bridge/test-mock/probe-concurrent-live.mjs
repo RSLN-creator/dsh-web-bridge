@@ -304,6 +304,14 @@ try {
   if (!reading.panelRect || reading.panelRect.w < 40 || reading.panelRect.h < 40) {
     problems.push('面板根节点不可见或塌高：' + JSON.stringify(reading.panelRect));
   }
+  // 0.19.66（用户选 A：自己复刻官方 header 三块 chip）：模式 chip 必须按官方数据面渲染出来。
+  // 后台任务 / 子智能体两块依赖官方各自的 hook（`props.useJobs` / `props.useSubagents`），
+  // 宿主没发就不画——所以这里只硬性要求「模式」那一块，另两块记为可选读数。
+  if (!/标准模式|PTC 模式/.test(reading.panelText || '')) {
+    problems.push('列头缺少「模式」chip（照抄官方 ui-agent-preset 的那一块；数据面 = 会话清单投影 projectionValues.agentPreset）');
+  }
+  reading.chipsSeen = ['标准模式', 'PTC 模式', '个后台任务', '个子智能体']
+    .filter((t) => (reading.panelText || '').includes(t));
   if (reading.tabs.length !== 0) {
     problems.push('顶部不得再有面板级页签（0.19.65 起视图交给每列自己）：' + JSON.stringify(reading.tabs.map(t => t.text)));
   }

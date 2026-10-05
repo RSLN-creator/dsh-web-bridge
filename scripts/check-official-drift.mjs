@@ -100,6 +100,18 @@ const SEGMENTS = [
     patterns: [/is not declared by this entry's children/, /is not declared by this Factory/],
   },
   {
+    id: 'agent-preset-labels',
+    file: 'dsh-client-ui-agent-preset/lib/client.js',
+    why: '列头「模式」chip 复刻的官方文案与投影键（标准模式 / PTC 模式 / projectionValues.agentPreset）——官方改名或改键就必须同步我们的 PRESET_LABELS 与取值路径',
+    patterns: [/presetStandardName: "标准模式"/, /presetPtcName: "PTC 模式"/, /projectionValues\?\.agentPreset/],
+  },
+  {
+    id: 'jobs-count-label',
+    file: 'dsh-client-ui-jobs/lib/client.js',
+    why: '列头「后台任务」chip 复刻的官方计数口径与文案（liveRows.length + count.live.one）',
+    patterns: [/count\.live\.one/, /liveRows\.length/],
+  },
+  {
     id: 'client-hmr-reload',
     file: 'dsh-client-hmr/lib/index.js',
     why: '客户端热换链（mtime/ctime/size → rebuilt 帧）——桌面端「不重启就生效」的全部依据',

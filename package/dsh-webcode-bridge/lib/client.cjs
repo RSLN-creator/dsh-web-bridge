@@ -2598,6 +2598,14 @@ window.__ModuleLoader__.load({
     const CONCURRENT_PANEL_ID = 'webcode-concurrent-panel';
     const CONCURRENT_COLUMN_SLOT = 'webcode-concurrent.column';
 
+    /**
+     * 模式 chip 的文案表：**逐字抄官方 i18n**（`dsh-client-ui-agent-preset/lib/client.js:309/311`
+     * 的 `presetStandardName` / `presetPtcName`）。抄的是「官方怎么说」，不是我们另起名字。
+     * 官方改文案 → `scripts/check-official-drift.mjs` 的 `agent-preset-labels` 段会变红，
+     * 提交前就会被点名「去同步」。
+     */
+    const PRESET_LABELS = { standard: '标准模式', ptc: 'PTC 模式' };
+
     /** 一组的列数上限。与旧实现一致：用户要的是「多列并排」，不是无限列。 */
     const CONCURRENT_MAX_COLS = 4;
 
@@ -2717,7 +2725,39 @@ window.__ModuleLoader__.load({
         : session.promptAttempted ? 'engaging' : 'blank';
       const settling = shellPhase === 'blank' && session.openState === 'loading' && summaryBlank !== true;
       const hero = shellPhase === 'blank' && (session.openState === 'open' || summaryBlank === true);
+
+      // ── 照抄官方 header 的三块 chip（0.19.66，用户 2026-10-06 选 A：自己复刻）────────
+      //
+      // 官方那三块由三个官方包注册进 `conversation.header` 槽（该槽的公开投影**不含组件**，
+      // 见 doc/research §11），受支持路径拿不到 ⇒ 按用户指令**自己复刻**。复刻的口径是
+      // 「数据面抄官方、文案抄官方、拿不到就不显示」，绝不画一个假壳：
+      //
+      //   ① 模式：官方 `ui-agent-preset:357` 读 `state.byId[sessionId].projectionValues.agentPreset`；
+      //      默认两档的名字在官方 i18n（`:309` presetStandardName「标准模式」/ `:311`「PTC 模式」）。
+      //   ② 后台任务：官方 `ui-jobs:411` 用自己 store 的 `liveRows.length` 配 i18n
+      //      `count.live.one`「{count} 个后台任务运行中」（`:511`）。
+      //   ③ 子智能体/团队：官方 `ui-subagent` / `experimental-client-ui-agent-team` 的座位数据。
+      // ②③ 的数据面要官方各自的 hook（`props.useJobs` / `props.useSubagents`）；**宿主没发就不画**。
+      // 漂移闸门已把 ① 的官方文案与投影键登记成段（`check-official-drift.mjs`）。
+      // ① 模式：**逐字照官方的取值路径**——`ui-agent-preset:357` 读的是会话清单投影
+      //    `state.byId[sessionId].projectionValues.agentPreset`（不是打开态的 session 对象；
+      //    0.19.66 第一版就读错了这一处，真机读数里 chip 一个字都没有）。
+      const presetRaw = useSessions(s => (s && sessionId && s.byId[sessionId] ? s.byId[sessionId].projectionValues?.agentPreset : null));
+      const presetLabel = presetRaw ? (PRESET_LABELS[String(presetRaw)] || String(presetRaw)) : '';
+      const useJobsFace = typeof props.useJobs === 'function' ? props.useJobs : noSessions;
+      const jobsState = useJobsFace(s => s) || null;
+      const liveJobs = jobsState && Array.isArray(jobsState.rows)
+        ? jobsState.rows.filter(r => r && (r.status === 'running' || r.status === 'stopping')).length
+        : null;
+      const useSubagentsFace = typeof props.useSubagents === 'function' ? props.useSubagents : noSessions;
+      const subagentState = useSubagentsFace(s => s) || null;
+      const subagentCount = subagentState && Array.isArray(subagentState.rows) ? subagentState.rows.length : null;
+
       return h('div', { className: 'hwb-concurrent-body' },
+        h('div', { className: 'hwb-concurrent-chips' },
+          presetLabel && h('span', { className: 'hwb-concurrent-chip', 'data-hwb-chip': 'mode', title: '当前模式（官方会话投影 agentPreset）' }, presetLabel),
+          liveJobs !== null && h('span', { className: 'hwb-concurrent-chip', 'data-hwb-chip': 'jobs', title: '后台任务（官方 jobs 座位）' }, liveJobs + ' 个后台任务' + (liveJobs > 0 ? '运行中' : '')),
+          subagentCount !== null && h('span', { className: 'hwb-concurrent-chip', 'data-hwb-chip': 'subagents', title: '子智能体（官方座位数据）' }, subagentCount + ' 个子智能体')),
         renderFactorySlot('conversation.content', {
           variant: 'embedded',
           phase: settling ? 'settling' : hero ? 'hero' : 'active',
@@ -6432,6 +6472,10 @@ window.__ModuleLoader__.load({
         // 确定，并把**官方那一份**撑满本列（`>*` 只作用于直接子节点，不会串到别处）。
         ".hwb-concurrent-col-body{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}",
         ".hwb-concurrent-body{position:relative;display:flex;flex-direction:column;flex:1;min-height:0;width:100%;overflow:hidden}",
+        // 列头的三块 chip（照抄官方 header）：形态与官方一致（小圆角胶囊 / 12px / 次要色），
+        // 拿不到数据的那块**不渲染**（宁可少一块，也不摆一个假壳）。
+        ".hwb-concurrent-chips{display:flex;align-items:center;gap:6px;flex:none;padding:0 12px 6px;flex-wrap:wrap}",
+        ".hwb-concurrent-chip{font-size:12px;line-height:20px;padding:1px 8px;border-radius:9px;border:.5px solid var(--dsw-alias-border-l3,#8885);color:var(--dsw-alias-label-secondary,inherit);white-space:nowrap}",
         // 「开工指令」面板（0.19.64）：一列的独立工作区（git worktree + 分支）指令。
         // 它属于**面板**而不是列：指令是给用户复制走的，摊在列里会把列挤变形。
         ".hwb-concurrent-brief{margin:8px 12px 0;padding:8px 10px;border:.5px solid var(--dsw-alias-border-l3,#8884);border-radius:10px;background:var(--dsw-alias-bg-layer-1,#00000005)}",
