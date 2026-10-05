@@ -7137,13 +7137,20 @@ window.__ModuleLoader__.load({
       const latestGroup = () => { try { return readConcurrentGroups()[0] || null; } catch (e) { return null; } };
       own(() => {
         try {
-          return ctx.sidebarRightTabs.register({
+          const off = ctx.sidebarRightTabs.register({
             id: RAIL_TAB_ID,
             kind: 'webcode-concurrent',
             title: () => '并发会话',
             keepMounted: true,
           });
-        } catch (e) { warn('concurrent rail tab register', e); }
+          // 真机取证读数（0.19.67）：注册成功与否**只有真机知道**（服务面缺席时上面会抛），
+          // 所以把结果挂到 window 上，探针/用户 F12 一眼可查——避免「我说接上了」而无从验证。
+          try { if (typeof window !== 'undefined') window.__hwbRail = { tabId: RAIL_TAB_ID, kind: 'webcode-concurrent', registered: true }; } catch (e) { /* 取证挂不上不影响注册 */ }
+          return off;
+        } catch (e) {
+          try { if (typeof window !== 'undefined') window.__hwbRail = { tabId: RAIL_TAB_ID, registered: false, error: String(e && e.message || e) }; } catch (e2) { /* 同上 */ }
+          warn('concurrent rail tab register', e);
+        }
       });
       own(() => {
         try {

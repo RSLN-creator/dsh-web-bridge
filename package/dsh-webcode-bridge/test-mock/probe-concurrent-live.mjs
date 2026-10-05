@@ -139,10 +139,17 @@ page.on('pageerror', (e) => pageErrors.push(String(e && e.message || e).slice(0,
 page.on('requestfailed', (r) => failedRequests.push(r.url() + ' :: ' + String(r.failure() && r.failure().errorText)));
 
 let reading = null;
+/** 右栏页签注册读数（0.19.67）：必须在**点开主面板之前**读——面板一开官方就把右栏收走。 */
+let railReading = null;
 try {
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
   // 等到左栏出现本插件的入口（官方 shell 自己画的按钮）。
   await page.getByText('并发会话', { exact: true }).first().waitFor({ timeout: 45000 });
+  // 先读右栏页签的注册读数（此刻还没有全局面板，右栏理论上在）。
+  railReading = await page.evaluate(() => window.__hwbRail || null);
+  if (!railReading || railReading.registered !== true) {
+    problems.push('右栏「并发会话」页签没注册上：' + JSON.stringify(railReading));
+  }
   await page.getByText('并发会话', { exact: true }).first().click();
   await page.locator('.hwb-concurrent-panel').first().waitFor({ state: 'visible', timeout: 15000 });
 
