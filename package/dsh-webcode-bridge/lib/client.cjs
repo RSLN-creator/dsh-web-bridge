@@ -156,7 +156,7 @@ window.__ModuleLoader__.load({
     // 官方同款写法作依据：`dsh-client-ui-sidebar` 的 inject 同样列了 `"layout"`。
     // 本文件的其余 `ctx.*` 读取（slots / sidebarRight / sidebarRightTabs / sessions）
     // 都已在此声明，`ctx.effect`、`ctx.reflect` 是 cordis 自带、不需要声明。
-    const inject = ['slots', 'sidebarRightTabs', 'sidebarRight', 'sessions', 'layout', 'uiWorkspace'];
+    const inject = ['slots', 'sidebarRightTabs', 'sidebarRight', 'sessions', 'layout', 'uiWorkspace', 'jobs'];
     const RELAY_PORT = 8931;
     const relayBase = 'http://127.0.0.1:' + RELAY_PORT;
     // 每个站点一个独立源：<siteId>.localhost:<port>。
@@ -2745,10 +2745,16 @@ window.__ModuleLoader__.load({
       const presetRaw = useSessions(s => (s && sessionId && s.byId[sessionId] ? s.byId[sessionId].projectionValues?.agentPreset : null));
       const presetLabel = presetRaw ? (PRESET_LABELS[String(presetRaw)] || String(presetRaw)) : '';
       const useJobsFace = typeof props.useJobs === 'function' ? props.useJobs : noSessions;
-      const jobsState = useJobsFace(s => s) || null;
-      const liveJobs = jobsState && Array.isArray(jobsState.rows)
-        ? jobsState.rows.filter(r => r && (r.status === 'running' || r.status === 'stopping')).length
-        : null;
+      // 照抄官方 `ui-jobs` 的取值与口径：`useJobs(s => s.rows[sessionId])`（`ui-jobs:312`），
+      // 活跃行 = `status running/stopping`（其 `isLive` 同义），文案用官方 i18n
+      // `count.live.one`「{count} 个后台任务运行中」/ `count.idle.one`「{count} 个后台任务」。
+      // `watchRows(sessionId)` 由槽的 inject 声明发下来（官方座位同款，`ui-jobs:617`）；
+      // 宿主没发 `useJobs` 时本块整体不渲染（宁可少一块，不摆假壳）。
+      const jobsRows = useJobsFace(s => (s && s.rows ? s.rows[sessionId] : null)) || null;
+      const liveJobs = Array.isArray(jobsRows) ? jobsRows.filter(r => r && (r.status === 'running' || r.status === 'stopping')).length : null;
+      React.useEffect(() => {
+        try { if (typeof props.watchRows === 'function' && sessionId) props.watchRows(sessionId); } catch (e) { /* 订阅失败只是没有计数 */ }
+      }, [sessionId]);
       const useSubagentsFace = typeof props.useSubagents === 'function' ? props.useSubagents : noSessions;
       const subagentState = useSubagentsFace(s => s) || null;
       const subagentCount = subagentState && Array.isArray(subagentState.rows) ? subagentState.rows.length : null;
@@ -2756,7 +2762,7 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'hwb-concurrent-body' },
         h('div', { className: 'hwb-concurrent-chips' },
           presetLabel && h('span', { className: 'hwb-concurrent-chip', 'data-hwb-chip': 'mode', title: '当前模式（官方会话投影 agentPreset）' }, presetLabel),
-          liveJobs !== null && h('span', { className: 'hwb-concurrent-chip', 'data-hwb-chip': 'jobs', title: '后台任务（官方 jobs 座位）' }, liveJobs + ' 个后台任务' + (liveJobs > 0 ? '运行中' : '')),
+          (liveJobs > 0 || (jobsRows && jobsRows.length > 0)) && h('span', { className: 'hwb-concurrent-chip', 'data-hwb-chip': 'jobs', title: '后台任务（照抄官方 ui-jobs 的口径与文案）' }, liveJobs > 0 ? liveJobs + ' 个后台任务运行中' : jobsRows.length + ' 个后台任务'),
           subagentCount !== null && h('span', { className: 'hwb-concurrent-chip', 'data-hwb-chip': 'subagents', title: '子智能体（官方座位数据）' }, subagentCount + ' 个子智能体')),
         renderFactorySlot('conversation.content', {
           variant: 'embedded',
@@ -6964,7 +6970,14 @@ window.__ModuleLoader__.load({
             const offCol = (() => {
               try {
                 return ctx.slots.inject(colSlot, () => ctx.slots.register(
-                  { name: colSlot },
+                  {
+                    name: colSlot,
+                    // 与主入口同一套：jobs 的 store + watchRows 经槽 inject 发给列组件（照抄 ui-jobs）。
+                    inject: () => ({
+                      hooks: { jobs: ctx.jobs.state },
+                      watchRows: (sid) => ctx.jobs.watchRows(sid),
+                    }),
+                  },
                   (props) => h(ConcurrentColumn, props),
                 ));
               } catch (e) { warn('concurrent group column', e); return null; }
@@ -7064,7 +7077,15 @@ window.__ModuleLoader__.load({
               })));
             // 一列的正文（session 作用域）：渲染官方会话体，见 ConcurrentColumn 的注释。
             const offCol = ctx.slots.inject(CONCURRENT_COLUMN_SLOT, () => ctx.slots.register(
-              { name: CONCURRENT_COLUMN_SLOT },
+              {
+                name: CONCURRENT_COLUMN_SLOT,
+                // 照抄官方 `ui-jobs` 的座位声明（`ui-jobs:610-621`）：把 jobs 的 store 与
+                // `watchRows` 通过槽的 inject 发给我们的列组件 ⇒ 列头能显示「N 个后台任务运行中」。
+                inject: () => ({
+                  hooks: { jobs: ctx.jobs.state },
+                  watchRows: (sid) => ctx.jobs.watchRows(sid),
+                }),
+              },
               (props) => h(ConcurrentColumn, props),
             ));
             return () => {
