@@ -3087,7 +3087,13 @@ window.__ModuleLoader__.load({
                 h('button', {
                   type: 'button', className: 'hwb-concurrent-mini',
                   title: '把这一条会话交回官方单会话视图打开（那里才有官方的标题栏/标准模式/后台任务/团队）',
-                  onClick: () => { try { props.hwbOpenOfficial && props.hwbOpenOfficial(col.sessionId); } catch (e) { warn('open official view (column)', e); } },
+                  onClick: () => {
+                    try {
+                      // 先放行（见守卫里的 allowLeave），再交回官方视图；否则守卫会把我们拉回来。
+                      if (props.hwbAllowLeave) props.hwbAllowLeave();
+                      if (props.hwbOpenOfficial) props.hwbOpenOfficial(col.sessionId);
+                    } catch (e) { warn('open official view (column)', e); }
+                  },
                 }, '↗ 官方视图'),
                 h('button', {
                   type: 'button', className: 'hwb-concurrent-mini',
@@ -3206,7 +3212,12 @@ window.__ModuleLoader__.load({
         // 列区整体再包一层边界：ConcurrentColumns 自身（create/加列等逻辑）抛错时不再把
         // 整个 main 条目炸成官方空 div，而是显示可读错误。
         h(HwbBoundary, { label: '并发会话面板' },
-          h(ConcurrentColumns, { ...props })));
+          h(ConcurrentColumns, {
+            ...props,
+            // 「本面板主动放行」的接线（0.19.65）：列头那颗「↗ 官方视图」用它告诉守卫
+            // 「这一下是用户明确要离开」，否则守卫会把面板拉回来（真机实测过）。
+            hwbAllowLeave: () => { try { factsRef.current.allowLeave = true; } catch (e) { /* 放行标记失败不影响面板 */ } },
+          })));
     }
 
     /**
@@ -3403,6 +3414,17 @@ window.__ModuleLoader__.load({
       // 开在 portal 里，DOM 不在面板子树内，挂在面板根上的监听永远看不到那一下）。
       const onDocumentPointerDown = (ev) => {
         try {
+          // 「本面板主动放行」（0.19.65）：列头的「↗ 官方视图」是**用户明确要离开**的按钮，
+          // 但它在面板内点击 ⇒ 会被判成「面板内点击/门户链」而拉回来（真机实测就是这条把
+          // 官方视图挡住的）。所以放行标记优先于一切指纹。
+          if (probe && probe.allowLeave) {
+            probe.allowLeave = false;
+            lastInsidePointerAt = 0;
+            popupOwnedAt = 0;
+            lastAnyPointerAt = 0;
+            forensics.lastClick = 'allow-leave';
+            return;
+          }
           const target = ev && ev.target;
           const now = Date.now();
           if (inSidebar(target)) {
