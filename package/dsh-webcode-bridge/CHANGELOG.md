@@ -5,6 +5,80 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.68
+
+**并发会话「一组一行」收口（long-term-issues #40 结论反转 + 落地）。**
+
+### 用户选了什么
+
+> 「做不到你就自己新建不行吗？？」
+
+⇒ 自己给每一组**新建一个真工作区**。选型由用户拍板为 **git worktree**：`git worktree add -b hwb/concurrent/<组id> <repo>-hwb-<组id>` —— 同项目的**完整副本 + 自己的分支**，列里的 agent 看得见全部代码，而各组真隔离（这正是用户早先提的「git 分支 + 最后旋转」）。
+
+### #40 的原判只对了一半（本条登记已更正）
+
+原判是「官方清单条目是 shell 私有代码（`SessionNodeItem`），插件只能装饰既有行、不能分组」。2026-10-06 实读官方 0.2.0-rc.2 后更正：**缺的不是分组渲染器，而是「一组一个真目录」这个前置**——
+
+- 官方左栏**本来就**按工作区一行、折叠时不投影会话行（`dsh-client-ui-workspace/lib/client.js:661` `groupBy:"workspace"`；`:492/:502` `sessions: expanded ? … : []`）；
+- 会话归属是**宿主硬判据**：`SessionHeader.cwd` 经 `realpath` 必须**逐字等于** `workspace.path`（`dsh-workspace/lib/index.js:122`；README:172 *a session from another directory cannot be moved in*）⇒ 打不了虚拟分组标签；
+- `workspaces.create(path)` 要求目录**已存在**（`dsh-workspace/lib/index.js:406-409` `realpath` + `stat`）⇒ 先建目录是**前置**，不是优化。
+
+### 两半接线
+
+| 半边 | 做法 | 出处 |
+| --- | --- | --- |
+| 建目录 | `POST concurrent-workspace` → 绝对路径（客户端没有 fs/子进程） | `lib/concurrent-workspace.js`（新增）、`lib/web-control.js` |
+| 注册工作区 | `ctx.workspaces.create({path})` + `rename`（线上契约只收 `path`） | `lib/client.cjs`（`provisionGroupWorkspace`） |
+
+三个挂载点（主面板 / 历史组 / 右栏页签）都把 `hwbWorkspaces` 传下去；历史组重开时服务端回 `reused` ⇒ 复用已建的 worktree，不重复改标题。
+
+### 如实写明的边界
+
+- **降级不是崩溃**：不是 git 仓库 / 服务面缺席 ⇒ 回落旧行为（绑当前工作区）并把原因**上屏**，绝不假装建好；
+- **不代做破坏性 git 操作**：不自动 `merge`、不自动 `worktree remove`，只回 `recipe` 三条可复制命令（合并是主线列/用户的「最后旋转」）；
+- 用户在 `groupBy` 选「单列表」时**没有**分组行——那是用户偏好，不是缺陷；
+- worktree 建在**仓库外的兄弟目录**（进仓库内会让 `git status` 变脏、被别的列误检）。
+
+### 判据
+
+`test/team-compare.test.mjs` 两条新用例（⑩ 段），并做过**反向验证**：删掉绑定优先级 / 删掉建目录调用 / 跳过真注册，三种变异都让判据变红，还原后复绿。契约闸门的「死路由」判据还当场点出只读诊断与客户端动作同名的问题，故改名 `GET concurrent-worktrees`（而不是放宽判据）。
+
+### 真机验收（本版**已装上 web profile 并用真实 `dsh` cli 重启**）
+
+| 步骤 | 读数 |
+| --- | --- |
+| `pnpm pack` → `scripts/verify-pack.mjs` | tarball **920,092 B**；与工作树**逐字相同 62/62** |
+| `dsh plugin --profile web add <tgz>` | 声明/磁盘/工作树三处一致（三个文件 SHA256 逐个相同） |
+| 真实 `dsh --profile web` 重启 | `GET /__webcode/status` ⇒ `build.version = **0.19.68**` |
+| `probe-concurrent-live.mjs` | ✔ 3 列 / 每列官方 composer / `slotErrorCount=0` / 守卫 `pulls=2` |
+| **`probe-workspace-group.mjs`（新增，#40 判据）** | ✔ 官方左栏**每组恰好一行**（`并发会话组 1/2`，都在「工作区」标题之下）；每个 worktree 各含 **3 条会话** |
+| **`probe-jobs-chip-live.mjs`（新增，④）** | ✔ chip = `1 个后台任务运行中`；独立旁证：真有 `node -e setTimeout(…)` 进程（模型真起的后台任务，非假数据） |
+
+> **④ 为什么要「造 live job」**：jobs chip 的数据面是官方 `ctx.jobs`，**空态下「写死不渲染」与「从未订阅成功」长得一模一样**。本轮走真链路（官方 composer → 适配器 → 模型 `mcp_action` → harness → 官方 jobs → chip），无一处是探针塞的假数据。
+
+### 真机验收中抓到的第二个缺陷（**本轮已修**）
+
+真机读数（`~/.dsh/storages/workspace.json`）显示 6 个组里 **4 个没被改名**（停在 worktree 目录名）：
+
+```
+title="并发会话组 1" / "并发会话组 2"                        ← 恰好对
+title="dsh-webcode-bridge-hwb-muw1enzkiovq" 等 4 条          ← 没改名
+```
+
+**根因**：官方 `rename` 有**重名闸**（`dsh-api-workspace-controller/lib/index.js:239-241`，同名抛 `workspace/name-conflict`），
+而我的编号取的是 `readConcurrentGroups().length`——组留痕写在后面的 `.then` 里，探针又每次都是**全新浏览器**（localStorage 空）
+⇒ 该数恒为 0 ⇒ 每组都取「并发会话组 1」⇒ 撞名被拒、被 `catch` 静默吞掉。**前两组「看起来对」只是因为它们恰好是 1 和 2。**
+
+**修法**：编号改为从**官方工作区清单现读**（`wsFace.list().items` 里 `并发会话组 N` 的最大 N + 1），并在撞名时递增重试。
+判据钉住三点（**先去注释 + 先归一 CRLF** 再匹配——本判据连踩两次：没剥注释、剥了又被 `\r` 挡住 `$`）；反向变异 ⇒ 1 红，还原复绿。
+**真机复验**：在**已有 6 个旧组残留**的 store 上再建一组 ⇒ 拿到 **`并发会话组 3`**（从 max=2 推出），`sessions=4`。
+
+### 顺带复核（不改产品行为）
+
+- #44「检查更新恒报已是最新」**已解决并复核**：tag `v0.19.67` 与 `package.json` 一致、Release 带 tarball 资产，`updateDecision` 以 0.19.61 为 current 的实跑读数 = `outdated → 0.19.67`；
+- 修掉 `doc/long-term-issues.md` 表里一处**既有格式缺陷**：#40 那一行被复制了一份粘在 #39 行尾（缺换行），一并清掉；
+- 真机造 job 时撞到一条**既有缺陷**（**本轮未修，已登记 #48**）：用户设置 `promptTransport: inline` 时，44,202 字符提示词灌进 deepseek 输入框，**两次尝试都恰好丢 126 字符**（常量，非长度上限）⇒ `PROMPT_TRUNCATED`、该轮失败；切到 `attach`（本插件默认值）后同一轮立刻成功。`SITE_COMPOSER_HARD_LIMIT` 目前**只有 kimi**，deepseek 无底线兜底。两个修法都动到用户设置的语义，留给用户拍板；验收时临时切换的设置**已逐字还原**。
+
 ## 0.19.67
 
 **右栏页签版并发视图 + 官方 header 三块 chip 全部接线（用户选 A：自己复刻）。**

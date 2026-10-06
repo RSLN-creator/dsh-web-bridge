@@ -50,15 +50,16 @@
 | 36 | **`ref-index` 既有红**（2026-09-29 复核：**已解决**）——登记的是「曾被记为欠账、实测已不在」这次更正本身 | 低 | 否 | `reference/README.md`、`scripts/gen-reference-index.mjs` |
 | 37 | **两条既有常红是同一条行为：网页会话丢失 → 整段重放**（2026-09-30 复核归因：**已修——根因是测试隔离缺陷，不是重放分支**；2026-09-30 晚登记）——`regression` 53/1 与 `aux-delta-compact` 4/1 的 60s 压线来自裸测试读到真实 profile 的发送间隔与基准 | 高 | 否 | `lib/index.js`（profile 落盘守卫）、`test/profile-isolation.test.mjs`、`doc/progress.md`（2026-09-30 段） |
 | 38 | **`NODE_TEST_CONTEXT` 守卫在裸跑形态的残余洞：prompt store 读写通道**（2026-10-02 登记；regression 用例本轮已补隔离）——同族于 #37 的第二条通道；且由此暴露**生产缺陷候选：真实轮重放读回首轮正本会丢后续增量（红线二形状）**，见正文 §38 | 高 | 否 | `lib/index.js`（`readSessionPrompt`、executor 重建分支）、`lib/prompt-store.js`、`test/regression.test.mjs` |
-| 39 | **错误码在 harness 边界全部退化成 `UNKNOWN`**（2026-10-02 登记；**同轮已修，0.19.54**）——本插件给普通 `Error` 挂 `.code`，而官方 `normalizeLlmFailure` 只认 `instanceof HarnessError`；实测 284 份会话里归因本插件的 **137/137** 条 error finishes 全是 `code:"UNKNOWN"`（官方 provider 丢码 0 条）。后果：官方 `llm-retry` 自动重试与 `compaction-basic` 超限自动压缩修复**对本插件从未生效且不报错**；UI 一律显示 `UNKNOWN`。另含 `RATE_LIMITED` ≠ 官方 `RATE_LIMIT` 的码名不符 | 高 | 否 | `lib/error-codes.js`（新增，错误码真源）、`lib/index.js`、`lib/browser-driver.js`、`lib/think-effort.js`、`lib/upstream.js`、`lib/zero-progress.js`、`test/error-codes.test.mjs`、`scripts/scan-error-codes.mjs`、`doc/research/2026-10-02-dsh-official-error-and-repair.md` || 40 | **并发会话的「一组一行」在官方会话清单里做不到**（2026-10-03 登记）——用户要「明显的一行是3个重叠标签页形状一行区分与普通会话」；真会话会各自成行，而官方清单条目是 **shell 私有代码**（`SessionNodeItem`），插件只能**装饰既有行**（4 个槽），不能新增行、不能分组。本轮已在**左栏面板行**上用「三个重叠标签页」图标表达「这是会话组」，清单内部分组未做 | 低 | 否 | `lib/client.cjs`（`ConcurrentPanelIcon`）、`doc/progress.md`（2026-10-03） |
-| 40 | **并发会话的「一组一行」在官方会话清单里做不到**（2026-10-03 登记）——用户要「明显的一行是3个重叠标签页形状一行区分与普通会话」；真会话会各自成行，而官方清单条目是 **shell 私有代码**（`SessionNodeItem`），插件只能**装饰既有行**（4 个槽），不能新增行、不能分组。本轮已在**左栏面板行**上用「三个重叠标签页」图标表达「这是会话组」，清单内部分组未做 | 低 | 否 | `lib/client.cjs`（`ConcurrentPanelIcon`）、`doc/progress.md`（2026-10-03） |
+| 39 | **错误码在 harness 边界全部退化成 `UNKNOWN`**（2026-10-02 登记；**同轮已修，0.19.54**）——本插件给普通 `Error` 挂 `.code`，而官方 `normalizeLlmFailure` 只认 `instanceof HarnessError`；实测 284 份会话里归因本插件的 **137/137** 条 error finishes 全是 `code:"UNKNOWN"`（官方 provider 丢码 0 条）。后果：官方 `llm-retry` 自动重试与 `compaction-basic` 超限自动压缩修复**对本插件从未生效且不报错**；UI 一律显示 `UNKNOWN`。另含 `RATE_LIMITED` ≠ 官方 `RATE_LIMIT` 的码名不符 | 高 | 否 | `lib/error-codes.js`（新增，错误码真源）、`lib/index.js`、`lib/browser-driver.js`、`lib/think-effort.js`、`lib/upstream.js`、`lib/zero-progress.js`、`test/error-codes.test.mjs`、`scripts/scan-error-codes.mjs`、`doc/research/2026-10-02-dsh-official-error-and-repair.md` |
+| 40 | **并发会话的「一组一行」在官方会话清单里做不到**（2026-10-03 登记；**2026-10-06 结论反转并已修 0.19.68**）——原判「官方清单条目是 shell 私有代码（`SessionNodeItem`），插件只能装饰既有行、不能分组」**只对了一半**：真正缺的不是「分组渲染器」，而是**「一组一个真目录」这个前置**。官方左栏本来就按工作区一行、折叠时不投影会话行（`ui-workspace:661` / `:492/:502`），而会话归属是宿主硬判据 `SessionHeader.cwd === workspace.path`（`dsh-workspace:122`）⇒ 只要**为每组新建一个真工作区**，官方默认渲染就是「一行」。0.19.68 落地：服务端 `POST concurrent-workspace` 建 git worktree（用户选 B：同项目完整副本 + 自己的分支），客户端 `ctx.workspaces.create({path})` + `rename` 注册，每列绑该 workspaceId。**注意**：用户 `groupBy` 设为「单列表」时无分组行（那是用户偏好，不是缺陷） | 低 | 否 | `lib/concurrent-workspace.js`（新增）、`lib/web-control.js`、`lib/client.cjs`、`test/team-compare.test.mjs`、`doc/progress.md`（2026-10-06） |
 | 41 | **CI 在 `main` 上长期恒红（2026-09-26 起）**（2026-10-03 登记，**同轮已修**）——每条都是**判据/环境**问题、与产品行为无关：① `site-prompt-transport.test.mjs` 把 profile 建在**被 gitignore 的** `.tmp/` 下，干净 clone 里不存在 ⇒ `ENOENT ...\.tmp\siteprompt-cp-XXXXXX`（④/⑥a/⑥b/session-import 四条一起红）；② `column-fs.test.mjs` 拿**未规范化**的 `columnRootOf()` 去比**已规范化**的写入返回值，在「临时目录带 8.3 短名」的机器（CI `C:\Users\RUNNER~1\…`）必然为假；③ `pre-deliver-window.test.mjs` ①b 用「两轮墙钟之差」量间隔，而 `end-to-start` 基准下该差值恒 = gap − 上一轮稳态收尾（CI 实测 `4302 vs 1514`）；④ `column-fs.test.mjs` 另一条用例用 `new URL(import.meta.url).pathname.slice(1)` 拼源码路径，在 POSIX 上把 `/home/…` 削成 `home/…`（相对路径）⇒ ubuntu 腿 `ENOENT: open 'home/runner/…'`；⑤ `site-mount.test.mjs` 那条「白名单内 + 存在」的断言用 `path.join(os.homedir(),'.dsh')`，而 CI runner 上**没装 DSH** ⇒ 先撞「目录不存在」（两条腿都红）。修完前三条推上去 CI 又红，才暴露出④⑤——被前三条的噪声盖住了 | 中 | 否 | `test/site-prompt-transport.test.mjs`、`test/column-fs.test.mjs`、`test/pre-deliver-window.test.mjs`、`test/site-mount.test.mjs`、`doc/progress.md`（2026-10-03） |
 | 43 | **deepseek 与 z.ai 的账号昵称在驱动页面上读不到**（2026-10-03 登记，本轮**不修**）——deepseek 昵称候选 **0 条**（账号区不可见；但头像照样读到，因为读取不判可见性）；z.ai 头像候选 `rect.x = -12`（侧栏在视口外，同为折叠态）且是 Svelte 哈希类名。两站**没有昵称节点的真机读数 ⇒ 不声明选择器**；出路见正文（展开侧栏后取证 / 改成以头像为锚的结构感知读取） | 中 | 否 | `lib/providers.js`（`accountProbe`）、`lib/browser-driver.js`（`readAccountIdentity`）、`test-mock/probe-account-identity-live.mjs`、`lib/account-candidates.js` |
-| 44 | **「检查更新」恒报「已是最新」：仓库没跟上 `package.json` 的 tag**（2026-10-04 登记，本轮**不修**）——最新 tag 是 **v0.19.55** 而 `package.json` 已是 0.19.60/0.19.61 ⇒ `latest < current` ⇒ 判据如实给出「已是最新」。真因是 `release.yml` 只在**打 tag** 时产出 tarball，而 0.19.56–0.19.61 几轮只改版本号没打 tag ⇒ Releases 上最后一个是 0.19.55。发版是对外不可逆动作，登记不代做；出路（用户点头后）= `git tag v0.19.61 && git push origin v0.19.61`，且 tag 必须打在 `package.json` 已是 0.19.61 的 commit 上 | 低 | 否 | `package/dsh-webcode-bridge/package.json`、`.github/workflows/release.yml`、`lib/update.js` |
+| 44 | **「检查更新」恒报「已是最新」：仓库没跟上 `package.json` 的 tag**（2026-10-04 登记；**2026-10-06 已解决并复核**）——最新 tag 是 **v0.19.55** 而 `package.json` 已是 0.19.60/0.19.61 ⇒ `latest < current` ⇒ 判据如实给出「已是最新」。真因是 `release.yml` 只在**打 tag** 时产出 tarball，而 0.19.56–0.19.61 几轮只改版本号没打 tag ⇒ Releases 上最后一个是 0.19.55。发版是对外不可逆动作，登记不代做；出路 = `git tag v0.19.x && git push origin v0.19.x`，且 tag 必须打在 `package.json` 已是同版本的 commit 上。**2026-10-06 复核收口**：tag `v0.19.67` 已存在且指向的 `package.json` 就是 `"version": "0.19.67"`（`git show v0.19.67:package/dsh-webcode-bridge/package.json` 实读），Release 带 tarball 资产 905,459 字节；`fetchReleases` → `updateDecision` 以 0.19.61 为 current 的实跑读数 = `{status:"outdated", latest:"0.19.67", asset:{…releases/download/v0.19.67/…tgz}}` ⇒ 「恒报已是最新」不再成立。**留档判据**：只有 `updateDecision` 返回 `outdated` 才算修好，「命令行打印 +pkg@ver」不算（见 #46） | 低 | 否 | `package/dsh-webcode-bridge/package.json`、`.github/workflows/release.yml`、`lib/update.js` |
 | 42 | **「网页桥接」设置分区的导航图标不可自定义**（2026-10-03 登记）——用户报「仍然是默认齿轮」；真因在**官方壳**里：`settings.section` 的注册契约只有 `id/order/label`（**没有 icon**），导航字形由官方 `dsh-client-ui-settings-general` 的 `navIcon(id)` **硬编码**（只认 `account` / `models` / `agent-presets` / `plugins` / `archived-sessions`，其余一律回落齿轮）。插件侧**结构上无解**，除非改官方包或占用一个 shipped id | 低 | 否 | `lib/client.cjs`（`settings.section` 注册处）、官方 `@deepseek-ai/dsh-client-ui-settings-general/lib/client.js`（`navIcon`）、`doc/progress.md`（2026-10-03） |
 | 45 | **桌面 profile 的声明与磁盘分叉：声明仍钉 0.19.61，磁盘已是 0.19.64**（2026-10-05 登记）——本轮靠官方 `client-hmr` 通道**原地热换** `lib/client.cjs` 让桌面端立刻用上修复（不改进程、不重启应用），但**没改 profile 声明**。风险：任何一次 pnpm 通道（装别的插件、启动期 reconcile）都可能把客户端静默换回声明里的旧版 ⇒ 缺陷复发。恢复「声明 == 磁盘」必须**完全退出桌面端**后走官方通道装一次（`dsh` CLI 拒绝管理 desktop profile，须用桌面端自己的 carrier），且宿主半边本来就要重启才换 | 中 | 否 | `~/.dsh/profiles/desktop/package.json`、`~/.dsh/profiles/desktop/node_modules/dsh-webcode-bridge/lib/client.cjs`、`doc/progress.md`（2026-10-05 §八）、`doc/research/2026-10-05-dsh-multi-session-and-client-hot-swap.md` §5 |
 | 46 | **npm 发布被账号安全策略挡在「staged 待批」**（2026-10-05 登记，**同日已解决**）——`npm publish` 报成功但 registry 上 `latest` 仍是 0.19.51（`E409 Cannot publish over previously staged version "0.19.64"`）；根因是 npm 收紧「绕过 2FA 的 token 直接发布」，本机 token 属该类 ⇒ 发布被暂存，需账号主人 2FA 批准。**用户本人批准后已上线**：`latest = 0.19.64`、61 files、shasum `8a7aa56f…` 与本地打包 tarball **逐字节相同**（`published 2026-10-05T15:56:43Z`）。留档价值 = 「命令行打印 `+ pkg@ver` 不等于 registry 上线」这条判据（必须直连 registry 读 `dist-tags`） | 中 | 否 | `~/.npmrc`（token）、npm registry `dsh-webcode-bridge`、`package/dsh-webcode-bridge/dsh-webcode-bridge-0.19.64.tgz` |
 | 47 | **官方会话 chrome 在第三方面板内不可达：三块 chip 只能自行复刻、右侧 tab 靠官方页签承载**（2026-10-06 登记）——① 官方 header 三块 chip 注册进 `conversation.header` 槽，该槽只由官方会话视图渲染（`ui-conversation:16021`），且 slots 公开投影**不含组件**（`dsh-client-ui-slots/lib/index.js:313` 原文 without components or executable hooks）⇒ 受支持路径下无法原样挂载；② 官方右栏可见性写死 `activePanelId === null`（`ui-sidebar-right:5874`/`:9062`）⇒ 面板开着必无右栏，第三方也不能在自有面板里渲染官方右栏内容（`renderer:330-333` 归属校验）；③ **出路已落地**：chip 自行复刻（用户 2026-10-06 选 A），右栏改用官方**页签**承载并发列（`sidebarRightTabs.register` + `sidebar.right.pane.tab`，真机 `window.__hwbRail={registered:true}`）；④ 残留：「↗ 官方视图」（`ctx.uiWorkspace.openSession` 交回官方视图）两轮实测未生效，标记为 **knownGap、暂不修**（右栏页签已覆盖该需求），修通则需再查官方 `openSession` 的调用前提；⑤ 右栏受官方布局所限（常态 300px～45%、中列保底 400px），3–4 列并排只在全屏下实用 | 中 | 否 | `package/dsh-webcode-bridge/lib/client.cjs`、`test-mock/probe-concurrent-live.mjs`、`scripts/check-official-drift.mjs` |
+| 48 | **「提示词投递 = 纯文本」档在长会话上必然发不完整（`PROMPT_TRUNCATED`）**（2026-10-06 登记，本轮**未修**）——真机造 jobs 时撞到：用户设置 `promptTransport: inline`（全局），44,202 字符提示词灌进 deepseek 输入框，**两次尝试都恰好丢 126 个字符**（44,202→44,076；压缩重试后 36,253→36,127），`PROMPT_TRUNCATED` 回读校验如实拦下、**该轮直接失败**；同一轮把投递形态切到 `attach`（插件默认值）后立刻成功。读数还显示 `SITE_COMPOSER_HARD_LIMIT` 目前**只有 kimi: 200,000**，deepseek **不在表里** ⇒ 选了 `inline` 的 deepseek 长会话没有任何底线兜底。**126 是常量**（两次差值相同）⇒ 更像写入通道丢一段固定前缀/后缀，而不是「输入框长度上限」；`native composer write` 两次都如实报了「falling back to chunked write」。**未修的理由**：这是**既有**缺陷（非本轮引入），而修法有两个方向且影响用户设置语义（① 把 deepseek 写进 `SITE_COMPOSER_HARD_LIMIT` 强制改走附件；② 查清这 126 字符为何恒定丢失）——属「用户拍板」范围，不擅自改产品行为 | 中 | 否 | `lib/browser-driver.js`（`SITE_COMPOSER_HARD_LIMIT` / `fillComposer` / 回读校验）、`doc/progress.md`（2026-10-06 真机验收节） |
 
 > **一览表完整性（2026-09-16 修正；2026-09-26 补上闸门）**：本表此前**漏登记 #19 与 #20**（正文有、表里没有）。
 > 这两条都是可机检的登记错误，而当时没有任何闸门覆盖「正文条目 ↔ 表格条目」的一致性。
@@ -2926,3 +2927,71 @@ npm notice Your package is being processed and may take a few minutes to become 
   （`panelGone=false, scroll=3, headers=1`），探针记为 `knownGapOpenOfficial`；
   **暂不修**——右栏页签已覆盖该需求，修通则需再查官方 `openSession` 的调用前提。
 - 右栏受官方布局所限（常态 300px～45%、中列保底 400px）⇒ 3–4 列并排只在全屏下实用。
+
+
+## 48. **「提示词投递 = 纯文本」档在长会话上必然发不完整**（2026-10-06 登记，本轮**未修**）
+
+### 现象（真机，非推测）
+
+0.19.68 验收轮要「造一条真的 live job」来验 jobs chip。在真页面（web profile，deepseek）上
+往列里的官方 composer 发一条指令，模型**始终没有起来** —— 轮次在**投递阶段**就失败了：
+
+```
+[webcode-driver:deepseek] prompt transport forced inline by settings (promptTransport=inline), chars=44202
+[webcode-driver:deepseek] native composer write returned 44076/44202 chars — falling back to chunked write
+[webcode-bridge] PROMPT_TRUNCATED — 一次性压缩重试（44202 → 36253 字符，目标 ≤ 42028）
+[webcode-driver:deepseek] prompt transport forced inline by settings (promptTransport=inline), chars=36253
+[webcode-driver:deepseek] native composer write returned 36127/36253 chars — falling back to chunked write
+[webcode-bridge] turn failed with PROMPT_TRUNCATED — 保留发送游标，下一轮继续发增量
+```
+
+### 关键读数：丢的字符数是**常量 126**，不是长度上限
+
+| 尝试 | 应写 | 回读 | 丢失 |
+| --- | --- | --- | --- |
+| 第一次 | 44,202 | 44,076 | **126** |
+| 压缩重试后 | 36,253 | 36,127 | **126** |
+
+两次的**差值逐字相同（126）** ⇒ 形状更像「写入通道恒丢一段固定长度」，
+而不是「输入框到某个长度就截断」。`native composer write` 两次都如实报了
+`falling back to chunked write`（说明原生单次写入没写全、走了分块），分块后仍丢同样的 126。
+
+### 为什么 `inline` 档在 deepseek 上没有兜底
+
+`SITE_COMPOSER_HARD_LIMIT` 目前**只有 kimi**：
+
+```js
+export const SITE_COMPOSER_HARD_LIMIT = Object.freeze({ kimi: 200_000 });
+```
+
+该表的设计意图正是「**即便用户选了纯文本，超过它也必须改走附件**」（因为纯文本在这一长度上
+已被证明发不完整）。但 deepseek **不在表里** ⇒ `composerHardLimitFor('deepseek')` 返回 `null`
+⇒ 不设底线 ⇒ 用户一旦选 `inline`，长会话就**没有任何机制**把它推向附件，只能在
+`PROMPT_TRUNCATED` 上撞墙。全局 `promptTransport: inline` 下，**每一轮**都撞。
+
+### 反证（同一轮，只改了这一个变量）
+
+把投递形态临时切到 `attach`（插件默认值，`POST /__webcode/settings {promptTransport:'attach'}`）后
+**同一轮立刻成功**：读数变成
+
+```
+attachTransport: {transport:'attach', reason:'over-limit', chars:44202, truncated:false, evidence:'text:webcode-context.md'}
+```
+
+模型随后真的回了 `mcp_action`、真的起了后台任务（独立旁证：任务管理器里的
+`node -e setTimeout(()=>{},180000)` 进程），jobs chip 也如实报出
+`1 个后台任务运行中`。⇒ **不是模型/协议的问题，是投递通道在 `inline` 档的问题**。
+
+### 未修的理由（留给用户拍板，不擅自改产品行为）
+
+两个修法方向，都动到**用户设置的语义**，不是纯内部重构：
+
+1. **把 deepseek 写进 `SITE_COMPOSER_HARD_LIMIT`**（例如取实测能用的那一档）⇒ 用户选
+   `inline` 也会被强制改走附件。代价：**用户的显式选择被推翻**，而这条表当初就是为「宁可
+   可预期地改道、也不静默丢字符」而存在的——但要先有 deepseek 的**实测上限读数**才能填数，
+   「没有读数的余量就是猜」（本仓库对 kimi 那条的同一纪律）。
+2. **查清这 126 字符为何恒定丢失** ⇒ 更可能是 `fillComposer` 分块写入的真缺陷，修它比加阈值
+   更治本，但需要额外取证（写不同长度、看丢的是头部还是尾部）。
+
+本轮**只做验收、不改行为**：临时切换的设置已逐字还原
+（`promptTransport=inline`、`promptTransportBySite={"glm":"inline"}`，与验收前快照一致）。

@@ -77,9 +77,10 @@ test('★ 0.19.55 并发：每列必须是一条**真官方会话**（create + r
 
 test('★ 0.19.63 并发：inject 必须声明**每一个**被读的服务（真机空白根因的判据）', () => {
   const src = clientSrc();
-  assert.match(src, /const inject = \['slots', 'sidebarRightTabs', 'sidebarRight', 'sessions', 'layout', 'uiWorkspace', 'jobs'\];/,
-    'inject 必须含 sessions / layout / uiWorkspace / jobs：会话（每列 create/retain）、布局（守卫）、'
-    + 'uiWorkspace（「↗ 官方视图」）、jobs（照抄官方后台任务 chip 的数据面，ui-jobs:596）');
+  assert.match(src, /const inject = \['slots', 'sidebarRightTabs', 'sidebarRight', 'sessions', 'layout', 'uiWorkspace', 'jobs', 'workspaces'\];/,
+    'inject 必须含 sessions / layout / uiWorkspace / jobs / workspaces：会话（每列 create/retain）、'
+    + '布局（守卫）、uiWorkspace（「↗ 官方视图」）、jobs（照抄官方后台任务 chip 的数据面，ui-jobs:596）、'
+    + 'workspaces（0.19.68 本组专属工作区：官方数据面 create/rename，long-term-issues #40）');
 
   // 这一类缺陷的**通用判据**（0.19.63 真机事故后补，取而代之的是原来只钉死那一串字面量的写法）。
   //
@@ -388,8 +389,13 @@ test('★ 0.19.62 并发：新建列必须尝试绑定当前工作区（「选�
   const src = clientSrc();
   const body = compareBody(src);
   // 建列取工作区 id，且 create 的参数随有无 workspaceId 分叉（缺工作区时保持旧行为）。
-  assert.match(body, /const workspaceId = currentWorkspaceId\(\);/,
-    'createColumns 必须先取 currentWorkspaceId()');
+  // 0.19.68 起绑定来源多了一层：**先**试本组专属工作区（provisionGroupWorkspace），
+  // 取不到才回落 currentWorkspaceId()。旧判据钉的是「必须先取 currentWorkspaceId()」，
+  // 那条在新设计下**已经过时**（顺序反了），所以一并更新——判据跟着设计走，不是设计跟判据走。
+  assert.match(body, /return provisioned\.ok \? provisioned\.workspaceId : currentWorkspaceId\(\);/,
+    '绑定优先级必须是「本组专属工作区 → currentWorkspaceId()」（0.19.68）');
+  assert.match(body, /const workspaceId = currentWorkspaceId\(\);|currentWorkspaceId\(\);/,
+    'currentWorkspaceId 仍必须作为回落链被调用（缺它就没有「当前工作区」这一级）');
   assert.match(body, /workspaceId\s*\?\s*sessions\.create\(\{ workspaceId \}\)\.catch\(\(\) => sessions\.create\(\{\}\)\)\s*:\s*sessions\.create\(\{\}\)/,
     '有 workspaceId 必须传给 sessions.create（官方 reuseOrCreateBlank 同款参数）；'
     + '被宿主拒时必须回落不绑重试（最坏退回 0.19.61 行为），而不是整组建不出来');
@@ -402,6 +408,121 @@ test('★ 0.19.62 并发：新建列必须尝试绑定当前工作区（「选�
   // useWorkspaces 必须进面板（root 作用域标准 hook，官方 materializeStandardBinding 提供）。
   assert.match(body, /const useWorkspaces = typeof props\.useWorkspaces === 'function' \? props\.useWorkspaces : noSessions;/,
     'useWorkspaces 必须经标准 prop 取、缺席降级为 noSessions（绝不条件调用 hook）');
+});
+
+// ── ⑩ 0.19.68：「一组一行」——为并发组新建专属工作区（long-term-issues #40 收口）──
+//
+// 用户 2026-10-06 原话：「做不到你就自己新建不行吗？？」。官方机制（实读 0.2.0-rc.2）：
+//   · 左栏默认按工作区分组（ui-workspace:661 groupBy:"workspace"），折叠时**不投影会话行**
+//     （:492/:502 sessions: expanded ? … : []）⇒ 一个真工作区天然就是「一行」；
+//   · 会话归属是**宿主硬判据**：header.cwd 经 realpath 必须逐字等于 workspace.path
+//     （dsh-workspace:122；README:172「a session from another directory cannot be moved in」）
+//     ⇒ 不能打虚拟标签，只能给这一组一个**真目录**；
+//   · 目录必须**先存在**（dsh-workspace:406-409 realpath + stat 判目录）⇒ 服务端先建。
+// 选型由用户拍板 B：git worktree + 自己的分支（完整项目副本、真隔离）。
+test('★ 0.19.68 并发：必须为每一组新建专属工作区（官方左栏才收成一行）', () => {
+  const src = clientSrc();
+  const body = compareBody(src);
+
+  // ① 两步都在，且顺序是「服务端建目录 → 官方数据面注册」。
+  assert.match(body, /const provisionGroupWorkspace = async \(group, groupId\) =>/,
+    '必须有 provisionGroupWorkspace 助手（#40 的收口实现，收 groupId 参数）');
+  // ⚠ 判据必须钉**代码行**，不能钉「出现过这个字符串」——注释里也写着
+  // `api('concurrent-workspace', …)` 作为说明，用 indexOf 会被注释满足，
+  // 于是把这一行删掉判据照样全绿（本判据第一版就踩了这个坑，反向验证时暴露）。
+  const iApi = body.search(/await api\('concurrent-workspace', \{ groupId: gid \}\);/);
+  const iCreate = body.search(/view = await wsFace\.create\(\{ path: String\(made\.path\) \}\);/);
+  assert.ok(iApi > 0, '必须先调控制面 POST concurrent-workspace 拿目录（客户端没有 fs/子进程）');
+  assert.ok(iCreate > iApi, '必须**先建目录再注册工作区**（官方 create 要求目录已存在，dsh-workspace:406-409）');
+
+  // ①b 组 id 必须**一处生成、两处共用**（真缺陷判据，0.19.68 自查抓到）：
+  // 若建 worktree 用的 id 与落痕用的 id 不同，历史组重开时服务端 `reused` 永不成立
+  // ⇒ 每开一次就多建一个 worktree。这条把「同一个 id」钉死在源码形状上。
+  assert.match(body, /const pendingGroupId = groupRef\.current \|\| newConcurrentGroupId\(\);/,
+    '组 id 必须在 createColumns 里先定下来（pendingGroupId）');
+  assert.match(body, /provisionGroupWorkspace\(existingGroup, pendingGroupId\)/,
+    '建 worktree 必须用 pendingGroupId');
+  assert.match(body, /createConcurrentGroup\(fresh, pendingGroupId\)/,
+    '落痕必须用**同一个** pendingGroupId（否则历史组重开会重复建 worktree）');
+
+  // ② 注册走官方数据面，且标题经 rename 补（线上契约 create 只收 path）。
+  assert.match(body, /view = await wsFace\.create\(\{ path: String\(made\.path\) \}\)/,
+    '必须调官方 ctx.workspaces.create({path})（服务名逐字 "workspaces"，dsh-api-workspace-controller:389）');
+  assert.match(body, /await wsFace\.rename\(workspaceId, /,
+    'create 的线上契约只收 path（typert.remote-client.js:40-42）⇒ 标题必须另走 rename');
+
+  // ②b 改名编号必须**从官方工作区清单现读**（真缺陷判据，2026-10-06 真机抓到）：
+  //
+  // 官方 `rename` 有**重名闸**（`dsh-api-workspace-controller/lib/index.js:239-241`：
+  // 同名即抛 `workspace/name-conflict`）。而组留痕 `createConcurrentGroup` 写在后面的
+  // `.then` 里、探针每次又是全新浏览器 ⇒ 用 `readConcurrentGroups().length` 当编号时
+  // **恒为 0** ⇒ 每组都取「并发会话组 1」⇒ 撞名被拒、静默 catch ⇒ 6 个组里 4 个永远
+  // 停在 worktree 目录名（真机读数：store 里只有两组拿到 `并发会话组 N`）。
+  // 这条判据钉住「编号真源是官方清单 + 撞名要递增重试」。
+  //
+  // ⚠ 判据必须**去掉注释**再匹配：本文件读者（与人）在注释里写出了那条错写法的原文
+  //（`readConcurrentGroups().length`）作为说明，若连注释一起匹配就会**自己把自己判红**
+  //（本判据第一版正是如此）。去注释后匹配的才是**代码**。
+  // ⚠⚠ 去注释前必须**先把 CRLF 归一成 LF**：`lib/client.cjs` 在工作树里是 CRLF，
+// 而行注释的正则用 `$` 收尾——在 `\r\n` 上 `$` 匹配不到 `\r` 之前的位置，
+// 于是整条注释**不会被剥掉**，判据就被自己的注释判红（本判据连踩两次的坑：
+// 第一次是没剥注释，第二次是剥了但被 `\r` 挡住）。
+  const bodyCode = body
+    .replace(/\r\n?/g, '\n')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .map((l) => l.replace(/^\s*\/\/.*$/, '').replace(/\s\/\/.*$/, ''))
+    .join('\n');
+  assert.ok(!/readConcurrentGroups\(\)\.length/.test(bodyCode),
+    '改名编号**绝不能**用 readConcurrentGroups().length（恒 0 ⇒ 必然撞名被官方拒绝）');
+  assert.match(bodyCode, /wsFace\.list\(\)/, '改名编号必须从官方工作区清单现读（wsFace.list()）');
+  assert.match(bodyCode, /并发会话组\\s\*\(\\d\+\)\$/, '必须解析官方清单里已有的「并发会话组 N」求最大 N');
+  assert.match(bodyCode, /catch \(e\) \{ if \(i === 20\) throw e; \}/,
+    '撞名必须递增重试（并发建组时两组可能算出同一个 N）');
+
+  // ③ 绑定优先级：本组专属工作区优先，回落链保留。
+  assert.match(body, /provisioned\.ok \? provisioned\.workspaceId : currentWorkspaceId\(\)/,
+    '绑定必须是「本组专属 → 当前工作区」两级，缺一不可');
+
+  // ④ 降级不是崩溃：任何失败都回报原因并回落，**绝不假装建好**。
+  assert.match(body, /return \{ ok: false, reason: '宿主没有提供 workspaces 服务' \};/,
+    '服务面缺席必须如实回 reason（不是抛，也不是静默）');
+  assert.match(body, /setError\('独立工作区未建立（' \+ provisioned\.reason \+ '），已回落为当前工作区'\)/,
+    '建失败必须把原因上屏并明说「已回落」——不许静默降级成「看起来成功了」');
+
+  // ⑤ 三个挂载点都要把服务面传下去（主面板 / 历史组 / 右栏页签）。
+  const passed = (src.match(/hwbWorkspaces: ctx\.workspaces/g) || []).length;
+  assert.equal(passed, 3, '主面板 / 历史组 / 右栏页签三个挂载点都必须传 hwbWorkspaces（实际 ' + passed + ' 处）');
+  // 反面：不得用官方 renderer 会映射成 useWorkspaces 的那个名字当裸 prop（会造成「谁覆盖谁」歧义）。
+  assert.ok(!/props\.workspaces\b/.test(src),
+    '不得读 props.workspaces：官方 standardHookPropName 会把 hooks.workspaces 映射成 useWorkspaces，'
+    + '裸同名 prop 有覆盖歧义，故用显式的 hwbWorkspaces');
+});
+
+test('★ 0.19.68 并发：专属工作区服务端必须真建目录且不代做破坏性 git 操作', () => {
+  const modSrc = fs.readFileSync(path.join(root, 'lib', 'concurrent-workspace.js'), 'utf8');
+
+  // ① worktree 建在仓库**之外**的兄弟目录，且分支名有明确前缀。
+  assert.match(modSrc, /export const CONCURRENT_BRANCH_PREFIX = 'hwb\/concurrent\/';/,
+    '分支前缀必须显式声明（用户要的「git 分支 + 最后旋转」）');
+  assert.match(modSrc, /path\.join\(path\.dirname\(path\.resolve\(repoRoot\)\), base \+ '-hwb-' \+ groupId\)/,
+    'worktree 必须建在仓库外的兄弟目录（放进仓库内会让 git status 变脏、被别的列误检）');
+
+  // ② 注入防护：groupId 会被拼进目录名与分支名，必须先净化。
+  assert.match(modSrc, /export function safeGroupId\(raw\)/,
+    '必须有 safeGroupId 净化（groupId 来自请求体，`../` 能让 worktree 建到任意位置）');
+  assert.match(modSrc, /replace\(\/\[\^A-Za-z0-9_-\]\/g, '_'\)/,
+    '净化必须是白名单式（只留字母数字 _ -）');
+
+  // ③ 参数不经 shell（杜绝拼接注入）。
+  assert.match(modSrc, /spawnSync\('git', args, \{/,
+    'git 必须用参数数组调用（不经 shell），不得把请求体拼进命令行字符串');
+
+  // ④ 破坏性动作**只给指令、不代做**——这是本模块最重要的边界。
+  assert.ok(!/['"]merge['"]\s*\]/.test(modSrc) && !/worktree', 'remove'/.test(modSrc),
+    '绝不代跑 merge / worktree remove：合并与清理是用户/主线列的决定（只回 recipe 文本）');
+  assert.match(modSrc, /export function recipeFor\(repoRoot, worktree, branch\)/,
+    '必须给出可复制的收尾指令（merge / remove / list）');
 });
 
 test('★ 0.19.62 并发：面板意图守卫必须存在（panelInfo 订阅 + 面板内 pointerdown 判别）', () => {

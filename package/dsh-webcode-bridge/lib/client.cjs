@@ -156,7 +156,14 @@ window.__ModuleLoader__.load({
     // 官方同款写法作依据：`dsh-client-ui-sidebar` 的 inject 同样列了 `"layout"`。
     // 本文件的其余 `ctx.*` 读取（slots / sidebarRight / sidebarRightTabs / sessions）
     // 都已在此声明，`ctx.effect`、`ctx.reflect` 是 cordis 自带、不需要声明。
-    const inject = ['slots', 'sidebarRightTabs', 'sidebarRight', 'sessions', 'layout', 'uiWorkspace', 'jobs'];
+    // `workspaces`（0.19.68，用户「做不到你就自己新建不行吗？」）：并发组**自己新建一个真
+    // 工作区**，官方左栏就按官方默认分组（`deriveGroups`）把这一组收成一行可折叠的
+    // workspace 行——这是唯一能在官方清单里做到「一组一行」的路（详见
+    // `doc/long-term-issues.md` #40）。官方服务名逐字是 `"workspaces"`
+    //（`dsh-api-workspace-controller/lib/client.js:389` `super(ctx, "workspaces")`），
+    // 与 `uiWorkspace` **不同域**：前者是数据面（create/rename/…），后者是导航与目录面
+    //（`createDirectory` 在 `dsh-client-ui-workspace/lib/types/client/navigation.d.ts:89`）。
+    const inject = ['slots', 'sidebarRightTabs', 'sidebarRight', 'sessions', 'layout', 'uiWorkspace', 'jobs', 'workspaces'];
     const RELAY_PORT = 8931;
     const relayBase = 'http://127.0.0.1:' + RELAY_PORT;
     // 每个站点一个独立源：<siteId>.localhost:<port>。
@@ -2644,13 +2651,22 @@ window.__ModuleLoader__.load({
       } catch (e) { return []; }
     }
 
-    /** 新建一组留痕，返回组 id（写不进去返回 null：降级为「这次找不回」）。 */
-    function createConcurrentGroup(ids) {
+    /** 新建一组留痕，返回组 id（写不进去返回 null：降级为「这次找不回」）。
+     *
+     * `explicitId`（0.19.68）：调用方**先**要了一个 id 去建本组专属工作区，就必须用**同一个**
+     * id 落痕。否则「重开历史组」时拿到的 id 与当初建 worktree 用的 id 不同 ⇒ 服务端
+     * `reused` 永远不成立，每开一次就多建一个 worktree（真缺陷，不是洁癖）。
+     */
+    function newConcurrentGroupId() {
+      return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    }
+
+    function createConcurrentGroup(ids, explicitId) {
       try {
         const list = (ids || []).filter(id => typeof id === 'string' && id);
         if (!list.length) return null;
         const rest = readConcurrentGroups().filter(g => g.ids.join(',') !== list.join(','));
-        const group = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), at: Date.now(), ids: list };
+        const group = { id: String(explicitId || newConcurrentGroupId()), at: Date.now(), ids: list };
         rest.unshift(group);
         window.localStorage.setItem(CONCURRENT_GROUPS_KEY, JSON.stringify(rest.slice(0, CONCURRENT_MAX_GROUPS)));
         return group.id;
@@ -2854,6 +2870,9 @@ window.__ModuleLoader__.load({
       const createdRef = React.useRef(false);
       // 这一列组在「历史组」里的 id（无 hwbGroup = 主入口新建的组）。
       const groupRef = React.useRef(props.hwbGroup ? props.hwbGroup.id : null);
+      // 本组独立工作区的提示（0.19.68）：建成功时显示分支名，让用户一眼知道
+      // 「这一组跑在自己的 worktree / 分支上」；失败时的原因走 setError（更显眼）。
+      const [workspaceNote, setWorkspaceNote] = React.useState('');
 
       // ── 挂载：把上次的组恢复回来；卸载：把所有引用成对释放 ────────────────────
       React.useEffect(() => {
@@ -2974,21 +2993,142 @@ window.__ModuleLoader__.load({
        *   ③ 都取不到（极端：宿主还没就绪）才允许不绑，此时守卫（createPanelGuard）
        *      兜住「选择工作区」跳走的那一下。
        */
+      /**
+       * 给**这一组并发**准备专属工作区（0.19.68，long-term-issues #40 的收口）。
+       *
+       * ## 官方机制（实读，不是推测）
+       * 官方左栏默认按**工作区**分组（`dsh-client-ui-workspace/lib/client.js:661`
+       * `groupBy: "workspace"`），每个工作区一行，**折叠时不投影会话行**
+       *（`:492/:502` `sessions: expanded ? … : []`）⇒ 这就是用户要的「一组一行」。
+       * 而「会话属于哪个工作区」是**宿主硬判据**：会话 header 的 `cwd` 经 realpath 后必须
+       * **逐字等于**工作区的 canonical path（`dsh-workspace/lib/index.js:122`；README:172
+       * 原文 *a session from another directory cannot be moved in*）。
+       * ⇒ **不能**给会话打虚拟分组标签；想让 N 条会话同组，它们必须真跑在同一目录。
+       *
+       * ## 两步（都是官方公开入口）
+       *   ① 服务端建目录：`api('concurrent-workspace', { groupId })` → 绝对路径。
+       *      用 **git worktree + 自己的分支**（用户 2026-10-06 选 B）：列里的 agent 看得见
+       *      整个项目（与现状一致），而各组真隔离。目录**必须真实存在**——官方
+       *      `workspaces.create` 要求 `realpath` + `stat` 通过（`dsh-workspace/lib/index.js:406-409`）。
+       *   ② 官方数据面注册：`ctx.workspaces.create({ path })` → `{workspaceId,…}`，
+       *      再用 `rename` 补一个可读标题（`create` 的线上契约只收 `path`，不收标题）。
+       *
+       * ## 降级口径（「降级不是崩溃」，本文件一贯做法）
+       * 任何一步失败（不是 git 仓库、group 过滤后为空、服务面缺席……）**都不抛**：
+       * 返回 `{ ok:false, reason }`，调用方回落到旧行为（绑当前工作区），并把这句
+       * 原因如实显示在面板上。**绝不假装建好了**——那会让「一组一行」变成一句空话。
+       *
+       * @param {{id?: string}|null} group 组留痕对象（为 null 时现编一个临时 id）
+       * @returns {Promise<{ok: boolean, workspaceId?: string, path?: string, branch?: string, recipe?: object, reason?: string}>}
+       */
+      const provisionGroupWorkspace = async (group, groupId) => {
+        // ⚠ 用 `hwbWorkspaces` 这个**显式 prop**（照 `sessions: ctx.sessions` 的做法），
+        // **不叫 `workspaces`**：官方 renderer 会把槽 inject 的 `hooks:{workspaces}` 映射成
+        // `useWorkspaces`（`standardHookPropName`），而 root 标准绑定里已经有一个
+        // `workspaces` 概念；另起一个同名裸 prop 等于给自己埋一个「谁覆盖谁」的歧义。
+        const wsFace = props.hwbWorkspaces;
+        if (!wsFace || typeof wsFace.create !== 'function') return { ok: false, reason: '宿主没有提供 workspaces 服务' };
+        // 组 id 只用于**目录名/分支名**，服务端还会再净化一次（`safeGroupId`）。
+        // 必须与稍后 `createConcurrentGroup` 落痕用的 id **逐字相同**，否则「重开历史组」
+        // 拿到的 id 不同 ⇒ 服务端 `reused` 永不成立 ⇒ 每开一次就多建一个 worktree。
+        const gid = String(groupId || (group && group.id) || newConcurrentGroupId());
+        let made;
+        try {
+          made = await api('concurrent-workspace', { groupId: gid });
+        } catch (e) {
+          return { ok: false, reason: '建独立工作区目录失败：' + String(e?.message || e) };
+        }
+        if (!made || made.ok !== true || !made.path) {
+          return { ok: false, reason: (made && made.error) || '建独立工作区目录失败' };
+        }
+        let view;
+        try {
+          view = await wsFace.create({ path: String(made.path) });
+        } catch (e) {
+          return { ok: false, reason: '注册工作区失败：' + String(e?.message || e) };
+        }
+        const workspaceId = view && (view.workspaceId || view.id);
+        if (!workspaceId) return { ok: false, reason: '注册工作区成功但没有 workspaceId' };
+        // 标题:标题：`create` 收不到 title（线上契约只有 path）⇒ 单独 rename 一次。
+        // `reused=true` 是历史组重开，标题已经设过，不再覆盖用户可能的改名。
+        if (made.reused !== true && typeof wsFace.rename === 'function') {
+          try {
+            // ⚠ 编号必须从**官方工作区清单**现读，不能用 localStorage 的组数。
+            //
+            // 真机实测（2026-10-06，6 个组里 4 个没被改名）：官方 `rename` 有**重名闸**——
+            // `dsh-api-workspace-controller/lib/index.js:239-241` 在标题与既有工作区重名时
+            // 抛 `workspace/name-conflict` 并**拒改**。而本插件的组留痕写在**后面的 `.then`**
+            // 里（`createConcurrentGroup`），探针每次又是**全新浏览器**（localStorage 为空）
+            // ⇒ `readConcurrentGroups().length` 恒为 0 ⇒ 每一组都取「并发会话组 1」
+            // ⇒ 与上一组撞名 ⇒ 官方拒改、被静默 catch 吞掉 ⇒ 该组永远停在 worktree 目录名。
+            // **不是余量问题，是真缺陷**：未改名的组改成 1 还是 3 取决于浏览器里恰好有几个留痕。
+            //
+            // ⇒ 取「官方清单里已有的 `并发会话组 N` 的最大 N + 1」，并在撞名时递增重试。
+            // 不改用户已改过的名（`reused` 已在上面挡掉）。
+            const existing = typeof wsFace.list === 'function'
+              ? ((wsFace.list() || {}).items || [])
+              : [];
+            let n = 0;
+            for (const w of existing) {
+              const m = /^并发会话组\s*(\d+)$/.exec(String(w && (w.title || w.name) || ''));
+              if (m) n = Math.max(n, Number(m[1]));
+            }
+            // 撞名重试：并发建组时两个组可能算出同一个 N，官方闸会拒第二次。
+            let named = false;
+            for (let i = 1; i <= 20 && !named; i++) {
+              const want = '并发会话组 ' + (n + i);
+              if (existing.some(w => String(w && (w.title || w.name) || '') === want)) continue;
+              try { await wsFace.rename(workspaceId, want); named = true; }
+              catch (e) { if (i === 20) throw e; }
+            }
+          } catch (e) { /* 改名失败不影响归属：分组靠 cwd，不靠标题 */ }
+        }
+        return {
+          ok: true, workspaceId: String(workspaceId), path: String(made.path),
+          branch: made.branch, recipe: made.recipe, reused: made.reused === true,
+        };
+      };
+
       const createColumns = (n) => {
         if (!sessions || typeof sessions.create !== 'function' || busy) return;
         setBusy(true);
         setError('');
         const want = Math.max(1, Math.min(Number(n) || 1, CONCURRENT_MAX_COLS));
-        const workspaceId = currentWorkspaceId();
-        // 0.19.62 真机韧性：带 workspaceId 的 create 若被宿主拒（工作区参数形状漂移、
-        // workspace 未连接、writer-held……），**回落到不绑**重试一次——最坏退回
-        // 0.19.61 的行为（有守卫兜住「选择工作区」那一下），而不是整组建不出来。
-        const make = () => (workspaceId
-          ? sessions.create({ workspaceId }).catch(() => sessions.create({}))
-          : sessions.create({}));
-        Promise.all(Array.from({ length: want }, make))
-          .then((ids) => {
+        // 0.19.68（用户：「做不到你就自己新建不行吗？？」）：先给**这一组**开一个专属
+        // 工作区（git worktree + 自己的分支），再让每一列都绑到它 —— 官方左栏于是按官方
+        // 默认分组把这一组收成**一行可折叠的 workspace 行**（long-term-issues #40 的收口）。
+        // 取不到（不是 git 仓库 / 服务面缺席）⇒ 回落旧行为（绑当前工作区），原因如实上屏。
+        //
+        // ⚠ 组 id 在**这里**就定下来（`newConcurrentGroupId()`），随后同时交给
+        // `provisionGroupWorkspace` 与 `createConcurrentGroup(…, gid)`：
+        // 两处用同一个 id，历史组重开时服务端才会回 `reused` 而**复用**已建的 worktree。
+        const pendingGroupId = groupRef.current || newConcurrentGroupId();
+        const existingGroup = groupRef.current
+          ? readConcurrentGroups().find(g => g.id === groupRef.current) || null
+          : null;
+        provisionGroupWorkspace(existingGroup, pendingGroupId)
+          .then((provisioned) => {
             if (!aliveRef.current) return;
+            if (!provisioned.ok) {
+              setError('独立工作区未建立（' + provisioned.reason + '），已回落为当前工作区');
+            } else if (provisioned.branch) {
+              setWorkspaceNote('本组独立工作区：' + provisioned.branch);
+            }
+            // 绑定优先级：本组专属工作区 → 当前会话的工作区（0.19.62 的回落链）。
+            return provisioned.ok ? provisioned.workspaceId : currentWorkspaceId();
+          })
+          .then((workspaceId) => {
+            if (!aliveRef.current) return;
+            // 0.19.62 真机韧性：带 workspaceId 的 create 若被宿主拒（工作区参数形状漂移、
+            // workspace 未连接、writer-held……），**回落到不绑**重试一次——最坏退回
+            // 0.19.61 的行为（有守卫兜住「选择工作区」那一下），而不是整组建不出来。
+            const make = () => (workspaceId
+              ? sessions.create({ workspaceId }).catch(() => sessions.create({}))
+              : sessions.create({}));
+            return Promise.all(Array.from({ length: want }, make));
+          })
+          .then((ids) => {
+            if (!aliveRef.current || !ids) return;
             const added = [];
             for (const id of ids) {
               try {
@@ -2998,10 +3138,11 @@ window.__ModuleLoader__.load({
             }
             if (!added.length) { setError('新建会话成功但拿不到会话引用'); return; }
             // 留痕 + 刷左栏目录（0.19.65）：这样「过去的并发会话」才有地方找回来。
+            // 用 `pendingGroupId`（与建 worktree 时同一个 id）——见上面的 ⚠ 说明。
             try {
               const fresh = added.map(a => a.sessionId);
               if (groupRef.current) { for (const id of fresh) appendToConcurrentGroup(groupRef.current, id); }
-              else { groupRef.current = createConcurrentGroup(fresh); }
+              else { groupRef.current = createConcurrentGroup(fresh, pendingGroupId); }
               if (typeof props.hwbSyncGroups === 'function') props.hwbSyncGroups();
             } catch (e) { warn('concurrent group record', e); }
             setCols(prev => [...prev, ...added].slice(0, CONCURRENT_MAX_COLS));
@@ -3109,6 +3250,9 @@ window.__ModuleLoader__.load({
           onClick: () => createColumns(cols.length === 0 ? CONCURRENT_DEFAULT_COLS : 1),
         }, busy ? '…' : (cols.length === 0 ? '新建并发会话' : '+ 加一列')),
         error && h('p', { className: 'hwb-hint bad' }, error),
+        // 本组独立工作区（0.19.68）：让用户一眼知道这一组跑在自己的 worktree/分支上，
+        // 以及收尾时怎么合并回来（「最后旋转」）。**只报事实**：路径/分支来自服务端读数。
+        workspaceNote && h('p', { className: 'hwb-hint', 'data-hwb-workspace-note': '1' }, workspaceNote),
         brief && h('div', { className: 'hwb-concurrent-brief' },
           h('div', { className: 'hwb-concurrent-brief-head' },
             h('span', null, briefCopied
@@ -6982,6 +7126,9 @@ window.__ModuleLoader__.load({
                     groupKey: 'group:' + g.id,
                     hwbGroup: g,
                     hwbSyncGroups: syncGroupRows,
+                    // 本组专属工作区（0.19.68）：历史组重开时**复用**已建的那个
+                    //（目录已在 ⇒ 服务端回 reused，不重复 rename），见 provisionGroupWorkspace。
+                    hwbWorkspaces: ctx.workspaces,
                   }))));
               } catch (e) { warn('concurrent group panel', e); return null; }
             })();
@@ -7086,6 +7233,9 @@ window.__ModuleLoader__.load({
                 groupKey: 'panel',
                 // 主入口建完一组后，让左栏「并发会话目录」立刻多出那一行（0.19.65）。
                 hwbSyncGroups: syncGroupRows,
+                // 本组专属工作区（0.19.68）：主入口点「并发会话」= 新建一组 ⇒ 也为它
+                // 新开一个 git worktree 工作区，官方左栏于是把这一组收成一行。
+                hwbWorkspaces: ctx.workspaces,
                 // 「↗ 用官方视图打开」：官方 header 那几块 chip（标准模式 / 后台任务 / 团队）只由
                 // 官方会话视图渲染（槽的公开投影不含组件，见 dsh-client-ui-slots/lib/index.js:313（公开投影「without components or executable hooks」）），所以受支持的做法
                 // 是把这一条会话**交回官方视图**——`uiWorkspace.openSession`。失败只 warn，不影响面板。
@@ -7167,6 +7317,7 @@ window.__ModuleLoader__.load({
               groupKey: 'rail',
               hwbGroup: latestGroup(),
               hwbSyncGroups: syncGroupRows,
+              hwbWorkspaces: ctx.workspaces,
               hwbOpenOfficial: (sid) => { try { ctx.uiWorkspace.openSession(sid); } catch (e) { warn('open official view (rail)', e); } },
             }))));
         } catch (e) { warn('concurrent rail tab body', e); }
