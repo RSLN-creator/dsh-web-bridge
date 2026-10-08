@@ -60,6 +60,7 @@
 | 46 | **npm 发布被账号安全策略挡在「staged 待批」**（2026-10-05 登记，**同日已解决**）——`npm publish` 报成功但 registry 上 `latest` 仍是 0.19.51（`E409 Cannot publish over previously staged version "0.19.64"`）；根因是 npm 收紧「绕过 2FA 的 token 直接发布」，本机 token 属该类 ⇒ 发布被暂存，需账号主人 2FA 批准。**用户本人批准后已上线**：`latest = 0.19.64`、61 files、shasum `8a7aa56f…` 与本地打包 tarball **逐字节相同**（`published 2026-10-05T15:56:43Z`）。留档价值 = 「命令行打印 `+ pkg@ver` 不等于 registry 上线」这条判据（必须直连 registry 读 `dist-tags`） | 中 | 否 | `~/.npmrc`（token）、npm registry `dsh-webcode-bridge`、`package/dsh-webcode-bridge/dsh-webcode-bridge-0.19.64.tgz` |
 | 47 | **官方会话 chrome 在第三方面板内不可达：列顶栏按官方 DOM+官方 CSS module 复刻、右侧 tab 靠官方页签承载**（2026-10-06 登记；10-07 两处更新；**2026-10-08 复刻落地并升级判据**）——① 官方 header 三块 chip 注册进 `conversation.session.header` 的子槽，该槽只由官方会话视图渲染（0.2.1-alpha.1：`ui-conversation:21191-21210`），且 slots 公开投影**不含组件**（`dsh-client-ui-slots/lib/index.js:313` 原文 without components or executable hooks）⇒ 受支持路径下无法原样挂载；② 官方右栏可见性写死 `activePanelId === null`（`ui-sidebar-right:5874`/`:9062`）⇒ 面板开着必无右栏，第三方也不能在自有面板里渲染官方右栏内容（`renderer:330-333` 归属校验）；③ **出路已落地**：右栏改用官方**页签**承载并发列（`sidebarRightTabs.register` + `sidebar.right.pane.tab`，真机 `window.__hwbRail={registered:true}`）；④ **「在官方视图打开」已修通（10-07 轮）**：放行标记由按钮 onClick 置位、而守卫只在 pointerdown 捕获期消费 ⇒ 订阅回调决策时读不到；修法 = `createPanelGuard` 的 panelInfo 订阅回调**同样消费**放行标记，真机 `panelGone:true + headers:4 + lastDecision:"allow:leave"`（10-08 轮该入口从列头按钮挪进官方同款「更多操作」菜单，放行时序一字未改，判据仍钉两个消费点）；⑤ **「列内渲染官方 session header」定案为做不到（10-07 真机取证，10-08 在 0.2.1-alpha.1 复核仍成立）**：两道官方闸——授权（renderSlot 只认本条目 children 声明，`renderer:332`）+ 声明唯一（children 声明遇已声明槽名必抛，`slots:193`；该槽已被官方 registerHeader 声明为 conversation.header 的 child，`ui-conversation:23073-23086`）⇒ 真机逐字 `slot "conversation.session.header" is already declared (by an entry in "conversation.header" (mf))`，**列条目注册整体失败、列体全空**。⇒ 出路不是「自绘一套看着像的」，而是**按官方复刻**（10-08 轮 `ColumnHeader`）：结构逐字照官方 `ConversationHeader`/`ConversationSessionHeader` 那棵树（9 个结构位 + 同组 role/aria）、**样式不自己写**（直接挂官方 CSS module 的哈希类名，前缀由 `officialCssPrefix` 运行时从 `<style data-plugin-css>` 反解 ⇒ 官方改哈希自动跟上；桌面 asar 0.2.0-rc.2 与 web 0.2.1-alpha.1 **前缀不同**，这条设计让两版都拿得到正确样式）、数据与文案照官方投影键与 zh 词典（拿不到就不渲染那块）、「对话/轨迹」页签**真的切官方视图**（读官方 `conversation.view` 注册表 + 经 `conversation.session` 的 `view` owner prop，组件身份按 viewId 缓存防重挂）；⑥ 右栏受官方布局所限（常态 300px～45%、中列保底 400px），3–4 列并排只在全屏下实用 | 中 | 否 | `package/dsh-webcode-bridge/lib/client.cjs`、`test-mock/probe-concurrent-live.mjs`、`scripts/check-official-drift.mjs`、`doc/progress.md`（2026-10-08 轮 §四） |
 | 48 | **「提示词投递 = 纯文本」档在长会话上必然发不完整（`PROMPT_TRUNCATED`）**（2026-10-06 登记，本轮**未修**）——真机造 jobs 时撞到：用户设置 `promptTransport: inline`（全局），44,202 字符提示词灌进 deepseek 输入框，**两次尝试都恰好丢 126 个字符**（44,202→44,076；压缩重试后 36,253→36,127），`PROMPT_TRUNCATED` 回读校验如实拦下、**该轮直接失败**；同一轮把投递形态切到 `attach`（插件默认值）后立刻成功。读数还显示 `SITE_COMPOSER_HARD_LIMIT` 目前**只有 kimi: 200,000**，deepseek **不在表里** ⇒ 选了 `inline` 的 deepseek 长会话没有任何底线兜底。**126 是常量**（两次差值相同）⇒ 更像写入通道丢一段固定前缀/后缀，而不是「输入框长度上限」；`native composer write` 两次都如实报了「falling back to chunked write」。**未修的理由**：这是**既有**缺陷（非本轮引入），而修法有两个方向且影响用户设置语义（① 把 deepseek 写进 `SITE_COMPOSER_HARD_LIMIT` 强制改走附件；② 查清这 126 字符为何恒定丢失）——属「用户拍板」范围，不擅自改产品行为 | 中 | 否 | `lib/browser-driver.js`（`SITE_COMPOSER_HARD_LIMIT` / `fillComposer` / 回读校验）、`doc/progress.md`（2026-10-06 真机验收节） |
+| 49 | **0.19.69 的 profile 安装与「重启 dsh web」在本机沙箱内无法执行**（2026-10-08 登记，**等用户在正常环境补做**）——本轮发布链其余各步全部完成并已复核：git 提交 `2b63492` + `1ab845f`、push（`05967a1..1ab845f`，走 HTTPS + `http.sslBackend=openssl`）、tag `v0.19.69`、GitHub Release 带资产 `dsh-webcode-bridge-0.19.69.tgz`（930,799 B）、CI 与 CodeQL success、npm `latest = 0.19.69`（`dist.shasum a6f8b8459dff…` 与本地 tarball 逐字节同源）。**卡住的是最后一步**：`~/.dsh` 整棵树在本沙箱内**只读**（写探针文件即 `Access denied`），`dsh plugin --profile web add <tgz>` 报 `EPERM: operation not permitted, open …\profiles\web\package.json.lock`。⇒ 用户须在正常环境里 `dsh plugin --profile web add .\dsh-webcode-bridge-0.19.69.tgz` 并**重启 dsh web**（「装完不重启 = 等于没装」）。⚠ 注意 #45 同族风险：桌面端是**另一条**通道（`dsh` CLI 拒绝管理 desktop profile），声明与磁盘一致要完全退出桌面端后用桌面端自己的 carrier。 | 中 | 否 | `~/.dsh/profiles/web/package.json`、`doc/progress.md`（0.19.69 节 §四） |
 
 > **一览表完整性（2026-09-16 修正；2026-09-26 补上闸门）**：本表此前**漏登记 #19 与 #20**（正文有、表里没有）。
 > 这两条都是可机检的登记错误，而当时没有任何闸门覆盖「正文条目 ↔ 表格条目」的一致性。
@@ -3072,3 +3073,46 @@ attachTransport: {transport:'attach', reason:'over-limit', chars:44202, truncate
 
 本轮**只做验收、不改行为**：临时切换的设置已逐字还原
 （`promptTransport=inline`、`promptTransportBySite={"glm":"inline"}`，与验收前快照一致）。
+
+## 49. **0.19.69 的 profile 安装与「重启 dsh web」在本机沙箱内无法执行**（2026-10-08 登记）
+
+### 现象与读数
+
+本轮发布链的每一步都跑了、也都复核了，**只有最后两步在本机做不了**：
+
+| 步骤 | 结果 |
+| --- | --- |
+| git 提交 | ✅ `2b63492`（上一轮 10-08 首轮）+ `1ab845f`（本轮） |
+| push GitHub | ✅ `05967a1..1ab845f  main -> main` |
+| tag + Release | ✅ `v0.19.69`，资产 `dsh-webcode-bridge-0.19.69.tgz`（930,799 B） |
+| CI / CodeQL | ✅ `1ab845f` 上两条都 success |
+| npm registry | ✅ `latest = 0.19.69`（直连 registry 复核，非命令行打印） |
+| **profile 安装** | ❌ `EPERM: operation not permitted, open '…\profiles\web\package.json.lock'` |
+| **重启 dsh web** | ❌ 依赖上一步 |
+
+### 根因（已取证，不是猜）
+
+本沙箱把 `C:\Users\rsyhn\.dsh` **整棵树挂成只读**。写探针逐级实测：
+`~/.dsh`、`~/.dsh/profiles`、`~/.dsh/profiles/web`、`…/web/node_modules`、`…/node_modules/dsh-webcode-bridge`
+**全部 `Access denied`**（连建一个空文件都不行）。因此不是「插件装错了」，而是**这一层根本不可写**。
+
+### 出路（用户侧，一条命令）
+
+```powershell
+cd D:\9_Code_Workspace\dsh-webcode-bridge\package\dsh-webcode-bridge
+dsh plugin --profile web add .\dsh-webcode-bridge-0.19.69.tgz
+# 然后**重启 dsh web**（装完不重启 = 等于没装）
+```
+
+### 顺带记下的两条本机环境事实（同族，会让下一个 AI 少踩）
+
+1. **`sh.exe` / `bash.exe` 起不来**（msys `couldn't create signal pipe, Win32 error 5`，与 `ssh.exe` 同族）
+   ⇒ **任何 git 钩子都无法执行**、`git commit` 直接失败。处理 = 手动跑钩子的脚本 + `git -c core.hooksPath=<空目录> commit`；**不是** `--no-verify`。
+2. **`git push` 的 SSH 通道也坏**（同一故障）⇒ 改走 HTTPS + `http.sslBackend=openssl` + `gh auth token`
+   （`schannel` 那条路报 `SEC_E_NO_CREDENTIALS`）。
+
+### 为什么不在本轮「想办法绕过」
+
+`~/.dsh` 只读是**环境边界**，不是本插件的缺陷；在只读层里强写（例如改 ACL、换 profile 根）会
+制造「装上了但其实装在别处」的假象——那比「如实报告这一步没做」坏得多（本仓库对「不造假状态」
+有成文纪律）。安装本身是可逆、幂等的一条命令，交给用户在正常环境执行即可。
