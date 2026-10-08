@@ -51,14 +51,14 @@
 | 37 | **两条既有常红是同一条行为：网页会话丢失 → 整段重放**（2026-09-30 复核归因：**已修——根因是测试隔离缺陷，不是重放分支**；2026-09-30 晚登记）——`regression` 53/1 与 `aux-delta-compact` 4/1 的 60s 压线来自裸测试读到真实 profile 的发送间隔与基准 | 高 | 否 | `lib/index.js`（profile 落盘守卫）、`test/profile-isolation.test.mjs`、`doc/progress.md`（2026-09-30 段） |
 | 38 | **`NODE_TEST_CONTEXT` 守卫在裸跑形态的残余洞：prompt store 读写通道**（2026-10-02 登记；regression 用例本轮已补隔离）——同族于 #37 的第二条通道；且由此暴露**生产缺陷候选：真实轮重放读回首轮正本会丢后续增量（红线二形状）**，见正文 §38 | 高 | 否 | `lib/index.js`（`readSessionPrompt`、executor 重建分支）、`lib/prompt-store.js`、`test/regression.test.mjs` |
 | 39 | **错误码在 harness 边界全部退化成 `UNKNOWN`**（2026-10-02 登记；**同轮已修，0.19.54**）——本插件给普通 `Error` 挂 `.code`，而官方 `normalizeLlmFailure` 只认 `instanceof HarnessError`；实测 284 份会话里归因本插件的 **137/137** 条 error finishes 全是 `code:"UNKNOWN"`（官方 provider 丢码 0 条）。后果：官方 `llm-retry` 自动重试与 `compaction-basic` 超限自动压缩修复**对本插件从未生效且不报错**；UI 一律显示 `UNKNOWN`。另含 `RATE_LIMITED` ≠ 官方 `RATE_LIMIT` 的码名不符 | 高 | 否 | `lib/error-codes.js`（新增，错误码真源）、`lib/index.js`、`lib/browser-driver.js`、`lib/think-effort.js`、`lib/upstream.js`、`lib/zero-progress.js`、`test/error-codes.test.mjs`、`scripts/scan-error-codes.mjs`、`doc/research/2026-10-02-dsh-official-error-and-repair.md` |
-| 40 | **并发会话的「一组一行」在官方会话清单里做不到**（2026-10-03 登记；**2026-10-06 结论反转并已修 0.19.68**）——原判「官方清单条目是 shell 私有代码（`SessionNodeItem`），插件只能装饰既有行、不能分组」**只对了一半**：真正缺的不是「分组渲染器」，而是**「一组一个真目录」这个前置**。官方左栏本来就按工作区一行、折叠时不投影会话行（`ui-workspace:661` / `:492/:502`），而会话归属是宿主硬判据 `SessionHeader.cwd === workspace.path`（`dsh-workspace:122`）⇒ 只要**为每组新建一个真工作区**，官方默认渲染就是「一行」。0.19.68 落地：服务端 `POST concurrent-workspace` 建 git worktree（用户选 B：同项目完整副本 + 自己的分支），客户端 `ctx.workspaces.create({path})` + `rename` 注册，每列绑该 workspaceId。**注意**：用户 `groupBy` 设为「单列表」时无分组行（那是用户偏好，不是缺陷） | 低 | 否 | `lib/concurrent-workspace.js`（新增）、`lib/web-control.js`、`lib/client.cjs`、`test/team-compare.test.mjs`、`doc/progress.md`（2026-10-06） |
+| 40 | **并发会话的「一组一行」：三轮结论反转，终局 = 不自建工作区**（2026-10-03 登记；10-06 反转一次「为每组建 git worktree」；**2026-10-08 再反转并删除该机制**）——10-06 的「反转」当时以为找到了正解（官方左栏按工作区一行、折叠时不投影会话行 `ui-workspace:661`/`:492/:502`，会话归属是宿主硬判据 `SessionHeader.cwd === workspace.path` `dsh-workspace:122` ⇒ 给每组一个真目录就能「一行」）。**真机否掉了它**：每组一个 `<repo>-hwb-<组id>` 完整检出，跑几轮就在磁盘上堆出 **41 个**重复 worktree 目录（本轮清理：37 个 `dsh-webcode-bridge-hwb-*` + 4 个 `A0-Robocup-hwb-*` + 51 个孤儿会话目录），官方左栏把它们当**独立工作区**各占一行，会话标题还被目录名污染成 `A0-Robocup-hwb-muym5osw00v6`——与用户要的恰好相反（原话「看好官方怎么管理工作区的！！文件夹内一个会话一行！！不是每个会话一个文件夹！」）。⇒ **终局**：并发列就在**当前工作区**里普通新建会话（`sessions.create({ workspaceId: currentWorkspaceId() })`，与官方「新会话」同路径），官方左栏天然呈现「一个文件夹内一条会话一行」；`lib/concurrent-workspace.js`、两条服务端路由、`provisionGroupWorkspace`、`inject` 的 `'workspaces'` 全部删除。**教训**：「能做到」不等于「该做」——一个机制即使用户拍过板，若真机副作用与用户的根本意图相反，就该撤，而不是继续在上面加东西 | 低 | 否 | `lib/client.cjs`、`lib/web-control.js`、`test/team-compare.test.mjs`、`doc/progress.md`（2026-10-08 轮 §二/§三） |
 | 41 | **CI 在 `main` 上长期恒红（2026-09-26 起）**（2026-10-03 登记，**同轮已修**）——每条都是**判据/环境**问题、与产品行为无关：① `site-prompt-transport.test.mjs` 把 profile 建在**被 gitignore 的** `.tmp/` 下，干净 clone 里不存在 ⇒ `ENOENT ...\.tmp\siteprompt-cp-XXXXXX`（④/⑥a/⑥b/session-import 四条一起红）；② `column-fs.test.mjs` 拿**未规范化**的 `columnRootOf()` 去比**已规范化**的写入返回值，在「临时目录带 8.3 短名」的机器（CI `C:\Users\RUNNER~1\…`）必然为假；③ `pre-deliver-window.test.mjs` ①b 用「两轮墙钟之差」量间隔，而 `end-to-start` 基准下该差值恒 = gap − 上一轮稳态收尾（CI 实测 `4302 vs 1514`）；④ `column-fs.test.mjs` 另一条用例用 `new URL(import.meta.url).pathname.slice(1)` 拼源码路径，在 POSIX 上把 `/home/…` 削成 `home/…`（相对路径）⇒ ubuntu 腿 `ENOENT: open 'home/runner/…'`；⑤ `site-mount.test.mjs` 那条「白名单内 + 存在」的断言用 `path.join(os.homedir(),'.dsh')`，而 CI runner 上**没装 DSH** ⇒ 先撞「目录不存在」（两条腿都红）。修完前三条推上去 CI 又红，才暴露出④⑤——被前三条的噪声盖住了 | 中 | 否 | `test/site-prompt-transport.test.mjs`、`test/column-fs.test.mjs`、`test/pre-deliver-window.test.mjs`、`test/site-mount.test.mjs`、`doc/progress.md`（2026-10-03） |
 | 43 | **deepseek 与 z.ai 的账号昵称在驱动页面上读不到**（2026-10-03 登记，本轮**不修**）——deepseek 昵称候选 **0 条**（账号区不可见；但头像照样读到，因为读取不判可见性）；z.ai 头像候选 `rect.x = -12`（侧栏在视口外，同为折叠态）且是 Svelte 哈希类名。两站**没有昵称节点的真机读数 ⇒ 不声明选择器**；出路见正文（展开侧栏后取证 / 改成以头像为锚的结构感知读取） | 中 | 否 | `lib/providers.js`（`accountProbe`）、`lib/browser-driver.js`（`readAccountIdentity`）、`test-mock/probe-account-identity-live.mjs`、`lib/account-candidates.js` |
 | 44 | **「检查更新」恒报「已是最新」：仓库没跟上 `package.json` 的 tag**（2026-10-04 登记；**2026-10-06 已解决并复核**）——最新 tag 是 **v0.19.55** 而 `package.json` 已是 0.19.60/0.19.61 ⇒ `latest < current` ⇒ 判据如实给出「已是最新」。真因是 `release.yml` 只在**打 tag** 时产出 tarball，而 0.19.56–0.19.61 几轮只改版本号没打 tag ⇒ Releases 上最后一个是 0.19.55。发版是对外不可逆动作，登记不代做；出路 = `git tag v0.19.x && git push origin v0.19.x`，且 tag 必须打在 `package.json` 已是同版本的 commit 上。**2026-10-06 复核收口**：tag `v0.19.67` 已存在且指向的 `package.json` 就是 `"version": "0.19.67"`（`git show v0.19.67:package/dsh-webcode-bridge/package.json` 实读），Release 带 tarball 资产 905,459 字节；`fetchReleases` → `updateDecision` 以 0.19.61 为 current 的实跑读数 = `{status:"outdated", latest:"0.19.67", asset:{…releases/download/v0.19.67/…tgz}}` ⇒ 「恒报已是最新」不再成立。**留档判据**：只有 `updateDecision` 返回 `outdated` 才算修好，「命令行打印 +pkg@ver」不算（见 #46） | 低 | 否 | `package/dsh-webcode-bridge/package.json`、`.github/workflows/release.yml`、`lib/update.js` |
 | 42 | **「网页桥接」设置分区的导航图标不可自定义**（2026-10-03 登记）——用户报「仍然是默认齿轮」；真因在**官方壳**里：`settings.section` 的注册契约只有 `id/order/label`（**没有 icon**），导航字形由官方 `dsh-client-ui-settings-general` 的 `navIcon(id)` **硬编码**（只认 `account` / `models` / `agent-presets` / `plugins` / `archived-sessions`，其余一律回落齿轮）。插件侧**结构上无解**，除非改官方包或占用一个 shipped id | 低 | 否 | `lib/client.cjs`（`settings.section` 注册处）、官方 `@deepseek-ai/dsh-client-ui-settings-general/lib/client.js`（`navIcon`）、`doc/progress.md`（2026-10-03） |
 | 45 | **桌面 profile 的声明与磁盘分叉：声明仍钉 0.19.61，磁盘已是 0.19.64**（2026-10-05 登记）——本轮靠官方 `client-hmr` 通道**原地热换** `lib/client.cjs` 让桌面端立刻用上修复（不改进程、不重启应用），但**没改 profile 声明**。风险：任何一次 pnpm 通道（装别的插件、启动期 reconcile）都可能把客户端静默换回声明里的旧版 ⇒ 缺陷复发。恢复「声明 == 磁盘」必须**完全退出桌面端**后走官方通道装一次（`dsh` CLI 拒绝管理 desktop profile，须用桌面端自己的 carrier），且宿主半边本来就要重启才换 | 中 | 否 | `~/.dsh/profiles/desktop/package.json`、`~/.dsh/profiles/desktop/node_modules/dsh-webcode-bridge/lib/client.cjs`、`doc/progress.md`（2026-10-05 §八）、`doc/research/2026-10-05-dsh-multi-session-and-client-hot-swap.md` §5 |
 | 46 | **npm 发布被账号安全策略挡在「staged 待批」**（2026-10-05 登记，**同日已解决**）——`npm publish` 报成功但 registry 上 `latest` 仍是 0.19.51（`E409 Cannot publish over previously staged version "0.19.64"`）；根因是 npm 收紧「绕过 2FA 的 token 直接发布」，本机 token 属该类 ⇒ 发布被暂存，需账号主人 2FA 批准。**用户本人批准后已上线**：`latest = 0.19.64`、61 files、shasum `8a7aa56f…` 与本地打包 tarball **逐字节相同**（`published 2026-10-05T15:56:43Z`）。留档价值 = 「命令行打印 `+ pkg@ver` 不等于 registry 上线」这条判据（必须直连 registry 读 `dist-tags`） | 中 | 否 | `~/.npmrc`（token）、npm registry `dsh-webcode-bridge`、`package/dsh-webcode-bridge/dsh-webcode-bridge-0.19.64.tgz` |
-| 47 | **官方会话 chrome 在第三方面板内不可达：三块 chip 只能自行复刻、右侧 tab 靠官方页签承载**（2026-10-06 登记）——① 官方 header 三块 chip 注册进 `conversation.header` 槽，该槽只由官方会话视图渲染（`ui-conversation:16021`），且 slots 公开投影**不含组件**（`dsh-client-ui-slots/lib/index.js:313` 原文 without components or executable hooks）⇒ 受支持路径下无法原样挂载；② 官方右栏可见性写死 `activePanelId === null`（`ui-sidebar-right:5874`/`:9062`）⇒ 面板开着必无右栏，第三方也不能在自有面板里渲染官方右栏内容（`renderer:330-333` 归属校验）；③ **出路已落地**：chip 自行复刻（用户 2026-10-06 选 A），右栏改用官方**页签**承载并发列（`sidebarRightTabs.register` + `sidebar.right.pane.tab`，真机 `window.__hwbRail={registered:true}`）；④ 残留：「↗ 官方视图」（`ctx.uiWorkspace.openSession` 交回官方视图）两轮实测未生效，标记为 **knownGap、暂不修**（右栏页签已覆盖该需求），修通则需再查官方 `openSession` 的调用前提；⑤ 右栏受官方布局所限（常态 300px～45%、中列保底 400px），3–4 列并排只在全屏下实用 | 中 | 否 | `package/dsh-webcode-bridge/lib/client.cjs`、`test-mock/probe-concurrent-live.mjs`、`scripts/check-official-drift.mjs` |
+| 47 | **官方会话 chrome 在第三方面板内不可达：列顶栏按官方 DOM+官方 CSS module 复刻、右侧 tab 靠官方页签承载**（2026-10-06 登记；10-07 两处更新；**2026-10-08 复刻落地并升级判据**）——① 官方 header 三块 chip 注册进 `conversation.session.header` 的子槽，该槽只由官方会话视图渲染（0.2.1-alpha.1：`ui-conversation:21191-21210`），且 slots 公开投影**不含组件**（`dsh-client-ui-slots/lib/index.js:313` 原文 without components or executable hooks）⇒ 受支持路径下无法原样挂载；② 官方右栏可见性写死 `activePanelId === null`（`ui-sidebar-right:5874`/`:9062`）⇒ 面板开着必无右栏，第三方也不能在自有面板里渲染官方右栏内容（`renderer:330-333` 归属校验）；③ **出路已落地**：右栏改用官方**页签**承载并发列（`sidebarRightTabs.register` + `sidebar.right.pane.tab`，真机 `window.__hwbRail={registered:true}`）；④ **「在官方视图打开」已修通（10-07 轮）**：放行标记由按钮 onClick 置位、而守卫只在 pointerdown 捕获期消费 ⇒ 订阅回调决策时读不到；修法 = `createPanelGuard` 的 panelInfo 订阅回调**同样消费**放行标记，真机 `panelGone:true + headers:4 + lastDecision:"allow:leave"`（10-08 轮该入口从列头按钮挪进官方同款「更多操作」菜单，放行时序一字未改，判据仍钉两个消费点）；⑤ **「列内渲染官方 session header」定案为做不到（10-07 真机取证，10-08 在 0.2.1-alpha.1 复核仍成立）**：两道官方闸——授权（renderSlot 只认本条目 children 声明，`renderer:332`）+ 声明唯一（children 声明遇已声明槽名必抛，`slots:193`；该槽已被官方 registerHeader 声明为 conversation.header 的 child，`ui-conversation:23073-23086`）⇒ 真机逐字 `slot "conversation.session.header" is already declared (by an entry in "conversation.header" (mf))`，**列条目注册整体失败、列体全空**。⇒ 出路不是「自绘一套看着像的」，而是**按官方复刻**（10-08 轮 `ColumnHeader`）：结构逐字照官方 `ConversationHeader`/`ConversationSessionHeader` 那棵树（9 个结构位 + 同组 role/aria）、**样式不自己写**（直接挂官方 CSS module 的哈希类名，前缀由 `officialCssPrefix` 运行时从 `<style data-plugin-css>` 反解 ⇒ 官方改哈希自动跟上；桌面 asar 0.2.0-rc.2 与 web 0.2.1-alpha.1 **前缀不同**，这条设计让两版都拿得到正确样式）、数据与文案照官方投影键与 zh 词典（拿不到就不渲染那块）、「对话/轨迹」页签**真的切官方视图**（读官方 `conversation.view` 注册表 + 经 `conversation.session` 的 `view` owner prop，组件身份按 viewId 缓存防重挂）；⑥ 右栏受官方布局所限（常态 300px～45%、中列保底 400px），3–4 列并排只在全屏下实用 | 中 | 否 | `package/dsh-webcode-bridge/lib/client.cjs`、`test-mock/probe-concurrent-live.mjs`、`scripts/check-official-drift.mjs`、`doc/progress.md`（2026-10-08 轮 §四） |
 | 48 | **「提示词投递 = 纯文本」档在长会话上必然发不完整（`PROMPT_TRUNCATED`）**（2026-10-06 登记，本轮**未修**）——真机造 jobs 时撞到：用户设置 `promptTransport: inline`（全局），44,202 字符提示词灌进 deepseek 输入框，**两次尝试都恰好丢 126 个字符**（44,202→44,076；压缩重试后 36,253→36,127），`PROMPT_TRUNCATED` 回读校验如实拦下、**该轮直接失败**；同一轮把投递形态切到 `attach`（插件默认值）后立刻成功。读数还显示 `SITE_COMPOSER_HARD_LIMIT` 目前**只有 kimi: 200,000**，deepseek **不在表里** ⇒ 选了 `inline` 的 deepseek 长会话没有任何底线兜底。**126 是常量**（两次差值相同）⇒ 更像写入通道丢一段固定前缀/后缀，而不是「输入框长度上限」；`native composer write` 两次都如实报了「falling back to chunked write」。**未修的理由**：这是**既有**缺陷（非本轮引入），而修法有两个方向且影响用户设置语义（① 把 deepseek 写进 `SITE_COMPOSER_HARD_LIMIT` 强制改走附件；② 查清这 126 字符为何恒定丢失）——属「用户拍板」范围，不擅自改产品行为 | 中 | 否 | `lib/browser-driver.js`（`SITE_COMPOSER_HARD_LIMIT` / `fillComposer` / 回读校验）、`doc/progress.md`（2026-10-06 真机验收节） |
 
 > **一览表完整性（2026-09-16 修正；2026-09-26 补上闸门）**：本表此前**漏登记 #19 与 #20**（正文有、表里没有）。
@@ -2543,9 +2543,50 @@ function harnessErrorCode(error) {
 **验收判据（唯一可证伪的）**：`node scripts/scan-error-codes.mjs` 的
 「本插件错误码存活率」从 **0.0%** 上升。改前改后各跑一次对照。
 
-## 40. **并发会话的「一组一行」在官方会话清单里做不到**（2026-10-03 登记）
+## 40. **并发会话的「一组一行」：三轮结论反转，终局 = 不自建工作区**（2026-10-03 登记）
 
-### 现象
+### 终局（2026-10-08 轮，读这一段就够；下面是历史）
+
+**并发列就在当前工作区里普通新建会话**（`sessions.create({ workspaceId: currentWorkspaceId() })`），
+与官方「新会话」完全同路径 ⇒ 官方左栏天然呈现用户要的形态：**一个文件夹内一条会话一行**。
+10-06 那套「为每组 `git worktree add` 一个专属工作区」的机制**整体删除**：
+`lib/concurrent-workspace.js` 模块、服务端两条路由（`POST concurrent-workspace` /
+`GET concurrent-worktrees`）、客户端 `provisionGroupWorkspace`、`inject` 的 `'workspaces'`、
+以及配套的「⧉ 开工」指令按钮与摊开面板。
+
+**为什么把一次「用户拍板过的方案」撤掉**（这是本条真正的教训）：10-06 用户选 B（git worktree）
+是在「做不到你就自己新建不行吗？？」的语境下拍的板，选的是**分组的技术路径**；跑了两轮之后真机副作用
+与用户的**根本意图**正面冲突——
+
+| 副作用 | 读数 |
+| --- | --- |
+| 磁盘上重复检出堆积 | **41 个** `<repo>-hwb-<组id>` worktree 目录（37 个 dsh-webcode-bridge + 4 个 A0-Robocup），每个都是一份完整项目副本 |
+| 官方左栏反而更乱 | 这些 worktree 被官方当成**独立工作区**各占一行（正是用户第 1 条骂的形状：「不是每个会话一个文件夹！」） |
+| 会话标题被污染 | 真机读数 `A0-Robocup-hwb-muym5osw00v6`——worktree 目录名进了标题 |
+
+⇒ 用户 10-08 原话「请你看好官方怎么管理工作区的！！文件夹内一个会话一行！！不是每个会话一个文件夹！」
+把这件事彻底钉死。**教训写在这里**：一个机制即使用户拍过板，若真机副作用与用户的根本意图相反就该撤，
+而不是继续往上叠东西；「技术上能做到」从来不是「该做」的充分条件。
+
+**清理留痕（不可逆动作的取证口径）**：删之前每个 worktree 都跑 `git status --porcelain` 确认无未提交改动、
+每条分支都跑 `git rev-list --count main..<branch>` 确认 `ahead=0`（无独有提交）⇒ 删除不丢任何提交；
+删完三处 `-Depth 2` 复核 `*-hwb-*` 残留 0。**没有**动宿主账本 `~/.dsh/storages/workspace.json`：
+实读发现「并发会话组 N」**从来不在里面**（10 个工作区全是用户自己的目录）⇒ 那些行是插件在浏览器里
+现算的，删代码即消失。
+
+### 历史：三轮结论
+
+1. **10-03 原判**：「官方清单条目是 shell 私有代码（`SessionNodeItem`），插件只能装饰既有行、不能分组」
+   —— 只对了一半（缺的不是分组渲染器，见下）；
+2. **10-06 反转**：官方左栏**本来就**按工作区一行、折叠时不投影会话行
+   （`ui-workspace:661` `groupBy:"workspace"`；`:492/:502` `sessions: expanded ? … : []`），
+   而会话归属是宿主硬判据 `SessionHeader.cwd` realpath 后逐字等于 `workspace.path`
+   （`dsh-workspace:122`）⇒ 「一组一行」只能靠**真目录**，于是建了 worktree 那套；
+3. **10-08 再反转（终局）**：真目录这个前置**代价大于收益**（上表三条副作用），而用户根本要的
+   「一行」在官方默认形态下**本来就有**——同一个工作区里的多条会话就是同一个文件夹下的多行，
+   用户要的是**这个**，不是「把三条会话藏成一行」。⇒ 撤机制。
+
+### 现象（10-03 原始记录，保留）
 
 用户 2026-10-02 原话（逐字）：
 
@@ -2572,11 +2613,10 @@ function harnessErrorCode(error) {
 
 ### 若要继续，从哪下手
 
-1. 先确认 `ctx.workspaces.archiveSession()` 是不是唯一杠杆、归档会不会影响会话可用性；
-2. 若可接受，可在建组时归档成员会话，让清单只剩一条「并发会话」面板行——
-   **但那会把「能够查看」变成「只能从面板查看」**，与用户上一句「并发必须能够保留真实会话！
-   能够查看！」存在张力，须由用户拍板，不能替用户决定；
-3. 另一条路是给清单行加装饰（第一行显示「+2」、hover 展开），但它不改变「占三行」这个事实。
+1. ~~先确认 `ctx.workspaces.archiveSession()` 是不是唯一杠杆~~ —— 10-08 定案：**不再继续**。
+   归档会把「能够查看」变成「只能从面板查看」，与用户「并发必须能够保留真实会话！能够查看！」冲突；
+2. ~~给每组一个真目录（worktree）~~ —— 10-06 做过、10-08 删了，理由见上「终局」；
+3. 若将来官方给出「会话分组」的公开入口，直接用它；**不要**再造第四种自造机制。
 
 
 ## 41. **CI 在 `main` 上长期恒红**（2026-09-26 起；2026-10-03 登记，**同轮已修**）
@@ -2894,7 +2934,7 @@ npm notice Your package is being processed and may take a few minutes to become 
 
 ---
 
-## 47. **官方会话 chrome 在第三方面板内不可达：三块 chip 只能自行复刻、右侧 tab 靠官方页签承载**（2026-10-06 登记）
+## 47. **官方会话 chrome 在第三方面板内不可达：列顶栏按官方 DOM+官方 CSS module 复刻、右侧 tab 靠官方页签承载**（2026-10-06 登记；2026-10-08 复刻落地）
 
 **现象**：并发列没有官方那一行 header（标题 / 子智能体 / 团队 / 标准模式 / 后台任务）；
 面板开着时右侧 tab 打不开。
@@ -2902,31 +2942,68 @@ npm notice Your package is being processed and may take a few minutes to become 
 **根因（逐条取证，非推测）**：
 
 1. 三块 chip 由三个官方包注册进 `conversation.header` 槽，该槽**只由官方会话视图渲染**
-   （`dsh-client-ui-conversation:16021`）。
+   （0.2.1-alpha.1：`dsh-client-ui-conversation:21191-21210`）。
 2. slots 包公开投影**不含组件**——`dsh-client-ui-slots/lib/index.js:313` 原文
    *Export the current declaration topology **without components or executable hooks***。
 3. 右栏可见性写死在 `activePanelId === null`（`dsh-client-ui-sidebar-right:5874`、`:9062`），
    官方未留钩子；第三方也不能在自有面板里渲染官方右栏内容（`renderer:330-333` 的
    `SlotOwnershipError` 授权只属声明者）。
 
-**出路（已落地）**：
+**出路（10-08 终局：`ColumnHeader` 按官方复刻，不是「自绘一套看着像的」）**：
 
-- 三块 chip **自行复刻**（用户 2026-10-06 选 A）：模式走 `byId[id].projectionValues.agentPreset`
-  （`ui-agent-preset:357`）+ 官方 i18n 文案；后台任务走 `ctx.jobs` 服务与槽 `inject`
-  （照 `ui-jobs:596-621`）并调 `watchRows(sessionId)`；子智能体/团队走 root 标准绑定
-  `useSessions` 的 `subagentCatalog` / `agentTeam` 投影（照 `ui-subagent:358-386`、team `:238-239`）。
-  真机可见「标准模式」「智能体团队 1 成员」。
-- 右栏改用**官方页签**承载并发列：`ctx.sidebarRightTabs.register({id,kind,title,keepMounted})`
-  + `ctx.slots.inject('sidebar.right.pane.tab', …)` 并声明自有 session 子槽
-  （照官方在产范例 `dsh-client-ui-sidebar-documentpreview:6811/6822`）；
-  真机读数 `window.__hwbRail = {registered:true}`。
+用户 10-08 原话「将并列会话里面非官方UI都去除！！…应该改为和官方一致顶部…只应该在比官方多隔开3列！！」。
+既然两道闸（见下「残留⑤」）决定了**不能 renderSlot 官方那一份**，出路就只能是**按官方复刻**，
+而复刻的四条口径每一条都对应一个可核对维度（不是「看着像」）：
 
-**残留（如实记）**：
+| 口径 | 做法 | 真机判据（`probe-concurrent-live`） |
+| --- | --- | --- |
+| ① 结构逐字照官方 | `header > (headerLeading, titleRow > (titleCluster > (crumbs, headerActions), headerUtilities), headerCorner) + tabs`，同组 `role`/`aria` | 9 个结构位全 true |
+| ② 样式不自己写 | 直接挂**官方 CSS module 的哈希类名**（`wSkVaW_header`…）；前缀由 `officialCssPrefix` **运行时**从 `<style data-plugin-css>` 反解，解不出才用 `fallback` | `headerUsesOfficialClass=true class=wSkVaW_header` |
+| ③ 数据与文案照官方 | 模式 `projectionValues.agentPreset`、团队 `projectionsBySession[lead].values.agentTeam`、子智能体 `subagentCatalog`+`sessionStatus`、后台任务 `jobs.rows[sessionId]`(running/stopping)；文案逐字抄官方 zh 词典；**拿不到就不渲染那块** | `chipsSeen:["标准模式","智能体团队"]` |
+| ④ 能点的都是真功能 | 「用 X 打开/更多打开方式」走官方 `open-in-app` 路由；「下载 Session 日志」走官方 `api/session.export`（HEAD 探路）；菜单用官方 `primitives.Menu` | `moreMenu` 三项、`removeCol 3→2`、`openOffic allow:leave` |
 
-- 「↗ 官方视图」（`ctx.uiWorkspace.openSession` 交回官方视图）**两轮实测未生效**
-  （`panelGone=false, scroll=3, headers=1`），探针记为 `knownGapOpenOfficial`；
-  **暂不修**——右栏页签已覆盖该需求，修通则需再查官方 `openSession` 的调用前提。
-- 右栏受官方布局所限（常态 300px～45%、中列保底 400px）⇒ 3–4 列并排只在全屏下实用。
+**「对话 / 轨迹」页签真的切官方视图**：读官方 `conversation.view` 注册表（`hwbSlots.entries`）取 id+label，
+并照抄官方那条「开发者工具关闭时隐藏 trajectory」（`ui-conversation:22803`，为此 `inject` 新增 `'configForms'`）。
+点击经 `renderSlot(slotName, { hwbView })` owner prop 传进会话作用域，`ConcurrentColumn` 交给
+`conversation.content` 的 `views` 局部槽 ⇒ `renderSlot('conversation.session', { view })` ⇒ 官方
+`DefaultConversationViews` 的 `viewId = view ?? active?.id` ⇒ 官方 `renderSlot('conversation.view', …, { only })`。
+**切的是官方视图注册表里的条目，不是另画一份**。`views` 组件按 viewId 缓存身份（`SESSION_VIEWS_BY_ID`），
+否则每次渲染新建函数会让 React 视作不同组件类型 ⇒ 整棵会话子树重挂载（滚动/焦点全丢）。
+
+**「标准模式」刻意只读**：官方那块本来就是只读标签——`AgentPresetLabel` 渲染 `<span>` 而非按钮，
+源码注释原文 *Read-only by construction*（`ui-agent-preset:1001-1021`）；官方 zh `headerHint`
+「本任务的 Agent 预设，在任务开始时确定」。复刻成只读正是照官方。
+
+**哈希前缀运行时发现为什么是硬要求（不是洁癖）**：本会话中 npm `dsh` 升到 0.2.1-alpha.1，而桌面 asar
+仍是 0.2.0-rc.2——**两版 CSS module 前缀不同**（`wSkVaW`/`VoX2oq` 只在 0.2.1 里有）。写死前缀等于
+「官方一升级，复刻顶栏立刻掉样式」。`fallback` 只兜「style 标签还没注入」的瞬时，由漂移闸门盯着。
+
+**右栏（10-06 落地，10-08 保留）**：改用**官方页签**承载并发列——`ctx.sidebarRightTabs.register({id,kind,title,keepMounted})`
++ `ctx.slots.inject('sidebar.right.pane.tab', …)` 并声明自有 session 子槽
+（照官方在产范例 `dsh-client-ui-sidebar-documentpreview:6811/6822`）；真机读数 `window.__hwbRail = {registered:true}`。
+
+**残留**：
+
+- ④ ~~「↗ 官方视图」两轮实测未生效~~ → **0.19.68（10-07 轮）已修通**。真根因：
+  放行标记 `probe.allowLeave` 由按钮的 **onClick** 置位，而 onClick 发生在 pointerdown
+  **之后**——守卫在 pointerdown 捕获期的那个消费点永远读到 false；真正做拉回决策的
+  `layout.panelInfo` 订阅回调又不看标记 ⇒ 每次都被 `selectPanel(面板id)` 拉回
+  （修前真机读数 `lastDecision:"pull:inside", panelGone:false`）。修法 = 订阅回调在
+  决策前**同样消费**放行标记（`lib/client.cjs` `createPanelGuard`）。修后真机：
+  `panelGone:true`、`officialHeaders:1`、`pulls:0`、`lastDecision:"allow:leave"`。
+  **10-08 轮**：那颗按钮本身被用户点名为「非官方 UI」删除，入口挪进官方同款「更多操作」菜单，
+  **放行时序一字未改**，判据仍钉「两个消费点缺一不可」。
+- ⑤ **「列内渲染官方 session header」定案为做不到**（10-07 真机取证，**10-08 在 0.2.1-alpha.1 复核仍成立**）：
+  ① 授权闸——`renderSlot` 只允许渲染本条目 children 里声明的槽（`renderer:332`）；
+  ② 声明唯一闸——children 声明遇已声明槽名必抛（`slots:193`），而
+  `conversation.session.header` 已被官方 `registerHeader` 声明为 `conversation.header`
+  的 child（`ui-conversation:23073-23086`）。真机逐字报错：
+  `slot "conversation.session.header" is already declared (by an entry in "conversation.header" (mf))`
+  ⇒ **列条目注册整体失败、列体全空**（children 声明失败 = 注册事务失败，不是局部降级）。
+  **10-08 更新**：0.19.66 的「自绘 chips」不再是定案——它被 `ColumnHeader` 的**官方复刻**取代
+  （用户不接受任何自绘 chrome）；两道闸的反向判据仍在（`team-compare` ⑩ 段第 ⑦ 组），
+  新增的复刻判据钉的是「结构/类名/数据/文案四条口径逐项成立」。
+- ⑥ 右栏受官方布局所限（常态 300px～45%、中列保底 400px）⇒ 3–4 列并排只在全屏下实用。
 
 
 ## 48. **「提示词投递 = 纯文本」档在长会话上必然发不完整**（2026-10-06 登记，本轮**未修**）

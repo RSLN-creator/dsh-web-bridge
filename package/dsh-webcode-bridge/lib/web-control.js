@@ -38,12 +38,10 @@ import {
 // 并列多会话的列身份 → 提示词（0.19.21，用户 Q5 的沙箱适配）。
 import { withColumnGuidance, normalizeColumnContext } from './column-context.js';
 import { writeColumnArtifact, fencedBlocks, ColumnFsDenied } from './column-fs.js';
-// 并发组的**专属 git worktree**（0.19.68，long-term-issues #40 的收口）：
-// 官方左栏按工作区分组渲染，而「会话属于哪个工作区」的硬判据是
-// `SessionHeader.cwd === workspace.path`（`dsh-workspace/lib/index.js:122`）
-// ⇒ 想让一组并发在官方清单里收成一行，就必须给这一组一个**真目录**。
-// 目录选型由用户拍板为「git worktree + 自己的分支」（完整项目副本、真隔离）。
-import { prepareConcurrentWorkspace, listConcurrentWorkspaces } from './concurrent-workspace.js';
+// 并发组的「专属 git worktree」导入（0.19.68）**已删除**（0.19.68（10-08 轮））：
+// 用户明令「文件夹内一个会话一行！！不是每个会话一个文件夹！」⇒ 并发列不再自建目录，
+// 就在当前工作区里普通新建会话（官方「新会话」同路径）。`lib/concurrent-workspace.js`
+// 与两条路由（POST concurrent-workspace / GET concurrent-worktrees）一并删除，不留死代码。
 import {
   readLedger, writeLedger, applyCreate, applyUpdate, applyDelete,
   applyAddComment, applyResolveComment, rowsOf,
@@ -1667,57 +1665,18 @@ export function createWebControl(deps = {}) {
         workspaceId: String(body?.workspaceId || ''),
       });
     },
-    // ── 并发组的专属工作区目录（0.19.68，long-term-issues #40）────────────────────
+    // ── 并发组的专属工作区目录：**已删除**（0.19.68（10-08 轮），用户明令）──────────────
     //
-    // ## 为什么必须是「服务端建目录」这一半
-    // 客户端**没有 fs、没有子进程**，而 `git worktree add` 两者都要。客户端能做的是
-    // 官方数据面那一步（`ctx.workspaces.create({path})` + `rename`）。
-    // 因此这条路由只回**绝对路径**，由客户端拿去注册成工作区——职责边界干净。
-    //
-    // ## 为什么目录必须真的存在（不是可选优化）
-    // `dsh-workspace/lib/index.js:406-409` 的 `create(path)` 先 `realpathNormalize`
-    // 再 `stat` 判目录，**不存在即拒**（相对路径也拒）。所以「先建出来」是前置条件。
-    //
-    // ## 为什么用 git worktree（用户 2026-10-06 选 B）
-    // 目录落在哪里决定列里的 agent 能看见什么：项目内子目录 `/.hwb/...` 会让 agent
-    // **看不到项目其余文件**（功能比现状弱）。git worktree 给的是**同项目完整副本 +
-    // 自己的分支**：既看得见全部代码，又真隔离——正是用户提的「git 分支 + 最后旋转」。
-    //
-    // ## 破坏性动作一律不代做
-    // 不自动 merge、不自动删 worktree：合并是主线列/用户的决定（「最后旋转」）。
-    // 本路由只回 `recipe`（三条**可复制**的命令），绝不替用户执行。
-    'POST concurrent-workspace': async (body) => {
-      const root = resolveWorkspaceRoot?.() || null;
-      const res = prepareConcurrentWorkspace({
-        repoRoot: root || undefined,
-        groupId: body?.groupId,
-        baseRef: body?.baseRef,
-      });
-      if (!res.ok) return { ok: false, error: res.error };
-      return {
-        ok: true,
-        // 客户端拿这个绝对路径去 `ctx.workspaces.create({path})`。
-        path: res.path,
-        branch: res.branch,
-        repoRoot: res.repoRoot,
-        // reused=true ⇒ 这是历史组重开（目录已在），客户端不该再 rename 一次。
-        reused: res.reused === true,
-        recipe: res.recipe,
-      };
-    },
-    // 只读诊断：本插件建过的并发 worktree（判据 = 目录名前缀，见模块注释）。
-    //
-    // ⚠ 名字**刻意与上面那条不同**（`concurrent-worktrees` 而不是 `concurrent-workspace`）：
-    // `test/client-server-contract.test.mjs` 的「死路由」判据要求——**客户端用过的动作名，
-    // 它的每一种注册方法都必须被客户端用到**，否则视为「方法写错」（真机 405）。这条只读
-    // 诊断是给探针/外部脚本的（客户端不调），挂在同名下会被如实判成可疑。换个名字之后，
-    // 「同名不同方法」这个可疑形状**根本不存在**，而不是把判据放宽。
-    // 这条路由的存在价值：真机排障时能一次问出「本仓库有哪些并发 worktree、各自什么分支」，
-    // 不必去翻 git worktree list 再自己过滤。
-    'GET concurrent-worktrees': async () => {
-      const root = resolveWorkspaceRoot?.() || null;
-      return listConcurrentWorkspaces(root || undefined);
-    },
+    // 用户原话：「请你看好官方怎么管理工作区的！！文件夹内一个会话一行！！不是每个会话一个
+    // 文件夹！」。旧实现在有两条路由（`POST concurrent-workspace` 建 git worktree、
+    // `GET concurrent-worktrees` 只读诊断），配合 `lib/concurrent-workspace.js` 与客户端的
+    // `provisionGroupWorkspace`，为**每一组并发**在仓库旁建一个 `<repo>-hwb-<组id>` 完整检出，
+    // 再注册成「并发会话组 N」工作区。真机后果：磁盘上堆了 41 个重复 worktree 目录
+    // （本轮已全部 `git worktree remove` + 删分支 + 清孤儿会话目录），官方左栏还把它们当独立
+    // 工作区、会话标题被目录名污染成 `A0-Robocup-hwb-muym5osw00v6`。
+    // ⇒ 路由与模块一并删除（**不留死代码**）；并发列现在就在**当前工作区**里普通新建会话，
+    //   与官方「新会话」同路径，官方左栏自然呈现「一个文件夹内一条会话一行」。
+    //   `test/concurrent-workspace.test.mjs` 同步删除，`client-server-contract` 判据同步。
     // ── 任务看板独立数据层与控制面动作（0.17.3，对齐 dsh-task-board 与 Notion 式批注）──
     //
     // 台账存储根走**同一个**解析器 `taskRootOf`（0.19.0 收口），理由见它自己的注释。

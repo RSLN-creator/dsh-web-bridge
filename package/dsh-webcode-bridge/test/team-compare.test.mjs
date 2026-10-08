@@ -59,6 +59,25 @@ function compareBody(src) {
   return src.slice(a, b === -1 ? a + 20000 : b);
 }
 
+/**
+ * 剥掉注释后的**代码**（CRLF 先归一成 LF）。
+ *
+ * 为什么每条「某机制必须删除」的判据都要先过这一层：本文件的注释里**逐字写着**被删机制的
+ * 名字与形状（那是留给读者的「为什么删」说明），直接对全文做 `!/name/.test(src)` 会被自己的
+ * 注释判红——本仓库踩过两次（见 ⑩ 段旧判据的 ⚠ 注记）。剥注释后匹配的才是代码。
+ *
+ * ⚠ CRLF 必须先归一：行注释正则用 `$` 收尾，在 `\r\n` 上 `$` 匹配不到 `\r` 之前的位置，
+ * 整条注释就剥不掉（同一个坑的第二种形态）。
+ */
+function stripComments(src) {
+  return src
+    .replace(/\r\n?/g, '\n')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .map((l) => l.replace(/^\s*\/\/.*$/, '').replace(/\s\/\/.*$/, ''))
+    .join('\n');
+}
+
 // ── ① 真会话：造、拿引用、成对释放 ──────────────────────────────────────────────
 
 test('★ 0.19.55 并发：每列必须是一条**真官方会话**（create + retain，不是自绘消息）', () => {
@@ -77,10 +96,14 @@ test('★ 0.19.55 并发：每列必须是一条**真官方会话**（create + r
 
 test('★ 0.19.63 并发：inject 必须声明**每一个**被读的服务（真机空白根因的判据）', () => {
   const src = clientSrc();
-  assert.match(src, /const inject = \['slots', 'sidebarRightTabs', 'sidebarRight', 'sessions', 'layout', 'uiWorkspace', 'jobs', 'workspaces'\];/,
-    'inject 必须含 sessions / layout / uiWorkspace / jobs / workspaces：会话（每列 create/retain）、'
-    + '布局（守卫）、uiWorkspace（「↗ 官方视图」）、jobs（照抄官方后台任务 chip 的数据面，ui-jobs:596）、'
-    + 'workspaces（0.19.68 本组专属工作区：官方数据面 create/rename，long-term-issues #40）');
+  // 0.19.68（10-08 轮）：`workspaces` 与 `conversation` 两个 inject **已移除**（自建 worktree
+  // 工作区与跨列引用「⇥ 引用」都按用户口径删除），新增 `configForms`——列顶栏的「对话 / 轨迹」
+  // 页签要与官方同条件显示「轨迹」（官方 `viewTabs()` 读
+  // `ctx.configForms.developerTools.enabled.getSnapshot()`，ui-conversation:22803）。
+  assert.match(src, /const inject = \['slots', 'sidebarRightTabs', 'sidebarRight', 'sessions', 'layout', 'uiWorkspace', 'jobs', 'configForms'\];/,
+    'inject 必须含 sessions / layout / uiWorkspace / jobs / configForms：会话（每列 create/retain）、'
+    + '布局（守卫）、uiWorkspace（更多操作菜单里的「在官方视图打开」）、jobs（列顶栏后台任务 chip 的数据面）、'
+    + 'configForms（0.19.68（10-08 轮）：开发者工具开关决定「轨迹」页签是否出现，与官方逐字同条件）');
 
   // 这一类缺陷的**通用判据**（0.19.63 真机事故后补，取而代之的是原来只钉死那一串字面量的写法）。
   //
@@ -253,7 +276,7 @@ test('★ 0.19.55 并发：列数由数组驱动，上限 4（不得再硬编码
   assert.ok(!/columns\[0\]|columns\[1\]|columns\[2\]/.test(body), '不得再按下标取列');
   assert.match(body, /const \[cols, setCols\] = React\.useState/, '列状态必须是数组');
   assert.match(src, /const CONCURRENT_MAX_COLS = 4;/, '必须有上限常量 —— 用户要的是 2~4 列');
-  assert.match(body, /cols\.map\(/, '渲染必须由 cols.map 驱动');
+  assert.match(body, /cols\.reduce\(/, '渲染必须由 cols 数组驱动（reduce 是为了在列之间插入拖拽把手）');
   assert.match(body, /const createColumns = \(n\) =>/, '必须有加列操作');
   assert.match(body, /const releaseColumn = \(key\) =>/, '必须有移出列操作');
 });
@@ -278,8 +301,17 @@ test('★ 0.19.55 并发：列宽上下限取自官方常量，放不下时左�
   assert.match(body, /viewportW - SIDEBAR_MAX - Math\.round\(viewportW \* RIGHTBAR_MAX_RATIO\)/,
     '下限 = 中间区最窄（左右栏都拉到最宽）');
   assert.match(body, /viewportW - SIDEBAR_MIN - RIGHTBAR_MIN/, '上限不得超过中间区最宽');
-  assert.match(body, /Math\.min\(colWidthMax, Math\.max\(colWidthMin, officialDefault\)\)/,
-    '夹取顺序必须是 min(上限, max(下限, 默认))');
+  // 0.19.68（10-08 轮）：夹取顺序不变，但**被夹的值**多了一层「用户拖出来的偏好优先」
+  // （用户第 5 条「像官方那样调整会话宽度」）。官方 `resolveContentWidth` 同口径：
+  // 有偏好就夹偏好，没偏好就用默认公式（ui-conversation:20682-20686）。
+  // 0.19.68（10-08 轮）真机修正：上限分**两层**——默认值受可视宽度约束（不拖时不该宽到看不见），
+  // 用户拖出来的偏好只受**绝对上限**（官方内容最宽 920 + 卡片余量 32）约束。旧写法把偏好也夹进
+  // 可视宽度 ⇒ 1320px 视口默认已顶到 756px，向右拖 +90px 列宽与偏好都不动（真机读数），
+  // 用户第 5 条要的「像官方那样调整宽度」直接失效。可平移设计下，列比可视区宽是合法形态。
+  assert.match(body, /const colWidthAbsoluteMax = OFFICIAL_CONTENT_MAX \+ OFFICIAL_CARD_PAD;/,
+    '必须有绝对上限（官方会话自身的完整最宽，与视口无关）');
+  assert.match(body, /const colWidth = Math\.round\(colWidthPref === null\s*\n?\s*\? Math\.min\(colWidthMax, Math\.max\(colWidthMin, officialDefault\)\)\s*\n?\s*: Math\.min\(colWidthAbsoluteMax, Math\.max\(colWidthMin, colWidthPref\)\)\)/,
+    '偏好必须走绝对上限、默认值走可视上限（两层，缺一不可）');
   assert.match(body, /Math\.min\(OFFICIAL_CONTENT_MAX, Math\.max\(680, Math\.round\(viewportW \* 0\.64\)\)\)/,
     '默认列宽必须用官方那条 clamp(680, column*0.64, 920)');
   assert.match(src, /\.hwb-concurrent-col\{[^}]*flex:0 0 var\(--hwb-col-width/,
@@ -332,21 +364,30 @@ test('★ 0.19.55 并发：左栏那一行必须画「3 个重叠标签页」（
 
 // ── ⑦ 组的持久化（「能够查看」：重开面板要能看到同一组会话）───────────────────
 
-test('★ 0.19.65 并发：点「并发会话」= 点「新会话」——每次打开都新建一组（0.19.55 的「恢复旧组」按用户口径反转）', () => {
+test('★ 0.19.68（10-08 轮） 并发：点「并发会话」= 点「新会话」——每次打开都新建一组，且不再留组痕', () => {
   const src = clientSrc();
-  // 用户 2026-10-06 原话：「7.点击并发会话不会每次左侧出现一行记录会话让点击后回到原来选择
-  // 工作区/模式/模型/对话」「8.没有做到点击并发会话和点击新会话一样的新建会话」。
-  // ⇒ 口径**反转**：每次打开都新建一组真会话；旧组那几条会话仍在左栏清单里，可单独打开继续。
-  assert.match(src, /const CONCURRENT_STORE_PREFIX = 'dsh-webcode-bridge\.concurrent\.';/,
-    '组必须有稳定的存储键前缀');
-  assert.match(src, /function writeConcurrentGroup\(key, ids\)/, '必须有写回函数（留痕）');
-  assert.ok(!/function readConcurrentGroup\(/.test(src),
-    '读回**函数**已按用户新口径撤销：不得再恢复旧组（每次打开都新建一组；注释里提它是允许的）');
+  // 用户 2026-10-06 原话：「8.没有做到点击并发会话和点击新会话一样的新建会话」。
+  // 用户 2026-10-08 原话：「『并发会话』在插件栏目怎么会出现什么『并发会话.3列』？？？？？？？？
+  // 不要这个」⇒ 左栏只剩**一条**入口，组留痕存储族整套删除。
   const body = compareBody(src);
   assert.match(body, /createdRef\.current = true;[\s\S]{0,80}?createColumns\(CONCURRENT_DEFAULT_COLS\)/,
     '挂载后必须自动新建一组（点入口 = 点新会话）');
-  assert.match(body, /writeConcurrentGroup\(groupKey, cols\.map\(c => c\.sessionId\)\)/,
-    '组变化仍要落盘留痕（排障时可核对上一次那一组是哪几条会话）');
+  // 组留痕存储族必须**整套不在**（不是留着不用）：留着就等于「左栏会长出 N 行」这件事
+  // 只差一次调用就复活。判据钉在源码全文上，注释里提名字是允许的。
+  const code = stripComments(src);
+  for (const dead of ['CONCURRENT_STORE_PREFIX', 'CONCURRENT_GROUPS_KEY', 'CONCURRENT_MAX_GROUPS',
+    'CONCURRENT_GROUP_PREFIX', 'readConcurrentGroups', 'createConcurrentGroup',
+    'appendToConcurrentGroup', 'writeConcurrentGroup', 'newConcurrentGroupId', 'latestGroup']) {
+    assert.ok(!new RegExp('\\b' + dead + '\\b').test(code),
+      '组留痕机制必须整体删除（' + dead + ' 仍在代码里 ⇒ 「并发会话 · N 列」那些左栏行会复活）');
+  }
+  assert.ok(!/syncGroupRows|groupRows/.test(code),
+    '左栏「历史组目录」的注册机制必须删除（用户点名不要「并发会话.3列」那些行）');
+  assert.ok(!/'并发会话 · '/.test(code) && !/并发会话 · " /.test(code),
+    '左栏不得再出现「并发会话 · N 列」行标签');
+  // 左栏入口必须**只有一条**（order 30 那条主入口）。
+  const rows = (src.match(/name: 'sidebar\.panellist'/g) || []).length;
+  assert.equal(rows, 2, 'sidebar.panellist 只剩「并发会话」与「任务板」两条（实际 ' + rows + ' 处）');
 });
 
 test('★ 0.19.65 并发：删掉顶部工具条 + 悬浮加列钮 + 列间 16px「hover 才画线」', () => {
@@ -361,8 +402,10 @@ test('★ 0.19.65 并发：删掉顶部工具条 + 悬浮加列钮 + 列间 16px
   assert.match(src, /className: 'hwb-concurrent-gap'/, '列间必须有独立的间隔元素（可 hover）');
   assert.match(src, /\.hwb-concurrent-gap\{flex:0 0 16px/, '间隔必须是 16px（与平移步长 COL_GAP 一致）');
   assert.match(src, /\.hwb-concurrent-gap-line\{[^}]*opacity:0/, '间隔线平时必须完全隐藏');
-  assert.match(src, /\.hwb-concurrent-gap:hover \.hwb-concurrent-gap-line\{opacity:1\}/,
-    '鼠标移到间隔上才画出那条 1px 竖线');
+  // 0.19.68（10-08 轮）：间隔升级成拖拽把手后，竖线在 **hover 与拖动中**都要现形
+  // （官方 widthHandle 的 `:hover:after` 与 `[data-dragging]:after` 同款反馈）。
+  assert.match(src, /\.hwb-concurrent-gap:hover \.hwb-concurrent-gap-line,\.hwb-concurrent-gap\[data-dragging\] \.hwb-concurrent-gap-line\{opacity:1\}/,
+    '鼠标移到间隔上**或拖动中**才画出那条 1px 竖线（平时完全隐藏）');
   assert.ok(!/\.hwb-concurrent-col\{[^}]*border:[^0]/.test(src), '列本身不得画框（用户：上下不用框）');
 });
 
@@ -385,17 +428,17 @@ test('★ 0.19.0 Team：官方 agentTeams 花名册面板不得复活（用户�
 // selectWorkspace → openWorkspace 那条链。修法两半：①建列带 workspaceId（治本）；
 // ②panelInfo 订阅 + 面板内 pointerdown 意图判别（兜住其余官方导航入口）。
 
-test('★ 0.19.62 并发：新建列必须尝试绑定当前工作区（「选择工作区」卡不该在列里出现）', () => {
+test('★ 0.19.68（10-08 轮） 并发：新建列必须绑**当前工作区**（不再自建 worktree 工作区）', () => {
   const src = clientSrc();
   const body = compareBody(src);
-  // 建列取工作区 id，且 create 的参数随有无 workspaceId 分叉（缺工作区时保持旧行为）。
-  // 0.19.68 起绑定来源多了一层：**先**试本组专属工作区（provisionGroupWorkspace），
-  // 取不到才回落 currentWorkspaceId()。旧判据钉的是「必须先取 currentWorkspaceId()」，
-  // 那条在新设计下**已经过时**（顺序反了），所以一并更新——判据跟着设计走，不是设计跟判据走。
-  assert.match(body, /return provisioned\.ok \? provisioned\.workspaceId : currentWorkspaceId\(\);/,
-    '绑定优先级必须是「本组专属工作区 → currentWorkspaceId()」（0.19.68）');
-  assert.match(body, /const workspaceId = currentWorkspaceId\(\);|currentWorkspaceId\(\);/,
-    'currentWorkspaceId 仍必须作为回落链被调用（缺它就没有「当前工作区」这一级）');
+  // 用户 2026-10-08 原话：「请你看好官方怎么管理工作区的！！文件夹内一个会话一行！！
+  // 不是每个会话一个文件夹！」⇒ 建列不再有「本组专属工作区」那一层（provisionGroupWorkspace
+  // 已删），直接绑**当前工作区**：新会话于是作为当前文件夹下的一行出现在官方左栏，
+  // 与官方「新会话」完全同路径。
+  assert.match(body, /const workspaceId = currentWorkspaceId\(\);/,
+    '绑定来源必须只有「当前工作区」一级（本组专属 worktree 那级已按用户口径删除）');
+  assert.ok(!/provisionGroupWorkspace/.test(stripComments(body)),
+    'provisionGroupWorkspace 必须整体删除（留着就等于「每组一个文件夹」只差一次调用就复活）');
   assert.match(body, /workspaceId\s*\?\s*sessions\.create\(\{ workspaceId \}\)\.catch\(\(\) => sessions\.create\(\{\}\)\)\s*:\s*sessions\.create\(\{\}\)/,
     '有 workspaceId 必须传给 sessions.create（官方 reuseOrCreateBlank 同款参数）；'
     + '被宿主拒时必须回落不绑重试（最坏退回 0.19.61 行为），而不是整组建不出来');
@@ -408,121 +451,198 @@ test('★ 0.19.62 并发：新建列必须尝试绑定当前工作区（「选�
   // useWorkspaces 必须进面板（root 作用域标准 hook，官方 materializeStandardBinding 提供）。
   assert.match(body, /const useWorkspaces = typeof props\.useWorkspaces === 'function' \? props\.useWorkspaces : noSessions;/,
     'useWorkspaces 必须经标准 prop 取、缺席降级为 noSessions（绝不条件调用 hook）');
+  // workspaces 服务面不再经 inject 声明（数据面 create/rename 已不需要）。
+  assert.ok(!/'workspaces'/.test(src.slice(src.indexOf('const inject = ['), src.indexOf('];', src.indexOf('const inject = [')))),
+    'inject 列表不得再含 \'workspaces\'（并发不再注册工作区；useWorkspaces 走 root 标准 prop）');
+  assert.ok(!/hwbWorkspaces/.test(stripComments(src)),
+    '三处挂载点的 hwbWorkspaces prop 必须删除（provisionGroupWorkspace 已删，传下去没人用）');
 });
 
-// ── ⑩ 0.19.68：「一组一行」——为并发组新建专属工作区（long-term-issues #40 收口）──
+// ── ⑩ 0.19.68（10-08 轮）：不得再为并发组自建 git worktree 工作区 ──────────────────
 //
-// 用户 2026-10-06 原话：「做不到你就自己新建不行吗？？」。官方机制（实读 0.2.0-rc.2）：
-//   · 左栏默认按工作区分组（ui-workspace:661 groupBy:"workspace"），折叠时**不投影会话行**
-//     （:492/:502 sessions: expanded ? … : []）⇒ 一个真工作区天然就是「一行」；
-//   · 会话归属是**宿主硬判据**：header.cwd 经 realpath 必须逐字等于 workspace.path
-//     （dsh-workspace:122；README:172「a session from another directory cannot be moved in」）
-//     ⇒ 不能打虚拟标签，只能给这一组一个**真目录**；
-//   · 目录必须**先存在**（dsh-workspace:406-409 realpath + stat 判目录）⇒ 服务端先建。
-// 选型由用户拍板 B：git worktree + 自己的分支（完整项目副本、真隔离）。
-test('★ 0.19.68 并发：必须为每一组新建专属工作区（官方左栏才收成一行）', () => {
+// 用户 2026-10-08 原话：「请你看好官方怎么管理工作区的！！文件夹内一个会话一行！！不是每个
+// 会话一个文件夹！删除多出来web的dwb+并行会话文件夹」。
+//
+// 旧实现（0.19.68 的 10-06/10-07 两轮）为**每一组并发**在仓库旁 `git worktree add` 一个
+// `<repo>-hwb-<组id>` 完整检出、注册成「并发会话组 N」工作区。真机后果（本轮实测）：
+//   · 磁盘上 41 个重复 worktree 目录（dsh-webcode-bridge 37 个 + A0-Robocup 4 个）；
+//   · 官方左栏把它们当**独立工作区**各占一行（用户要的恰恰相反：一个文件夹内一条会话一行）；
+//   · 会话标题被 worktree 目录名污染（真机读数 `A0-Robocup-hwb-muym5osw00v6`）。
+// ⇒ 机制整体删除：客户端 `provisionGroupWorkspace`、服务端两条路由、`lib/concurrent-workspace.js`
+//   模块本身，以及 `inject` 里的 `'workspaces'`。判据全部取**反向**（存在即红）。
+test('★ 0.19.68（10-08 轮） 并发：不得再自建 git worktree 工作区（模块 / 路由 / 客户端助手全删）', () => {
   const src = clientSrc();
-  const body = compareBody(src);
+  const code = stripComments(src);
 
-  // ① 两步都在，且顺序是「服务端建目录 → 官方数据面注册」。
-  assert.match(body, /const provisionGroupWorkspace = async \(group, groupId\) =>/,
-    '必须有 provisionGroupWorkspace 助手（#40 的收口实现，收 groupId 参数）');
-  // ⚠ 判据必须钉**代码行**，不能钉「出现过这个字符串」——注释里也写着
-  // `api('concurrent-workspace', …)` 作为说明，用 indexOf 会被注释满足，
-  // 于是把这一行删掉判据照样全绿（本判据第一版就踩了这个坑，反向验证时暴露）。
-  const iApi = body.search(/await api\('concurrent-workspace', \{ groupId: gid \}\);/);
-  const iCreate = body.search(/view = await wsFace\.create\(\{ path: String\(made\.path\) \}\);/);
-  assert.ok(iApi > 0, '必须先调控制面 POST concurrent-workspace 拿目录（客户端没有 fs/子进程）');
-  assert.ok(iCreate > iApi, '必须**先建目录再注册工作区**（官方 create 要求目录已存在，dsh-workspace:406-409）');
+  // ① 模块文件必须不存在（不是「存在但没人用」——留着就会被下一次改动顺手接回去）。
+  assert.ok(!fs.existsSync(path.join(root, 'lib', 'concurrent-workspace.js')),
+    'lib/concurrent-workspace.js 必须删除（并发不再自建工作区目录）');
 
-  // ①b 组 id 必须**一处生成、两处共用**（真缺陷判据，0.19.68 自查抓到）：
-  // 若建 worktree 用的 id 与落痕用的 id 不同，历史组重开时服务端 `reused` 永不成立
-  // ⇒ 每开一次就多建一个 worktree。这条把「同一个 id」钉死在源码形状上。
-  assert.match(body, /const pendingGroupId = groupRef\.current \|\| newConcurrentGroupId\(\);/,
-    '组 id 必须在 createColumns 里先定下来（pendingGroupId）');
-  assert.match(body, /provisionGroupWorkspace\(existingGroup, pendingGroupId\)/,
-    '建 worktree 必须用 pendingGroupId');
-  assert.match(body, /createConcurrentGroup\(fresh, pendingGroupId\)/,
-    '落痕必须用**同一个** pendingGroupId（否则历史组重开会重复建 worktree）');
+  // ② 服务端两条路由必须不在（客户端没有 fs/子进程，建目录那一半在服务端）。
+  const wc = fs.readFileSync(path.join(root, 'lib', 'web-control.js'), 'utf8');
+  const wcCode = stripComments(wc);
+  assert.ok(!/concurrent-workspace/.test(wcCode),
+    "'POST concurrent-workspace' 路由必须删除");
+  assert.ok(!/concurrent-worktrees/.test(wcCode),
+    "'GET concurrent-worktrees' 只读诊断路由必须删除（诊断对象已不存在）");
+  assert.ok(!/prepareConcurrentWorkspace|listConcurrentWorkspaces/.test(wcCode),
+    '服务端不得再 import worktree 助手（导入未用 = 死代码）');
+  assert.ok(!/worktree/.test(wcCode), '服务端不得再出现任何 worktree 动作');
 
-  // ② 注册走官方数据面，且标题经 rename 补（线上契约 create 只收 path）。
-  assert.match(body, /view = await wsFace\.create\(\{ path: String\(made\.path\) \}\)/,
-    '必须调官方 ctx.workspaces.create({path})（服务名逐字 "workspaces"，dsh-api-workspace-controller:389）');
-  assert.match(body, /await wsFace\.rename\(workspaceId, /,
-    'create 的线上契约只收 path（typert.remote-client.js:40-42）⇒ 标题必须另走 rename');
+  // ③ 客户端：不得再建目录、不得再注册/改名工作区。
+  // ⚠ 判据钉的是**并发那套** worktree 形状，不是「worktree」这个词——任务板里有一句
+  // 如实说明「官方 Agent Team 没有 worktree、成员共享同一个 checkout」（那是**事实陈述**，
+  // 与并发供地无关，删掉它反而丢了口径）。所以这里钉分支前缀 / git 命令 / 目录名后缀。
+  assert.ok(!/hwb\/concurrent/.test(code), '客户端不得再出现并发 worktree 的分支前缀 hwb/concurrent/*');
+  assert.ok(!/git worktree/.test(code), '客户端不得再产 git worktree 指令');
+  assert.ok(!/'-hwb-'|"-hwb-"/.test(code), '客户端不得再拼 worktree 目录名后缀 -hwb-');
+  assert.ok(!/wsFace\.(create|rename|list)\(/.test(code),
+    '客户端不得再调 workspaces 数据面（create/rename/list）——那正是「并发会话组 N」的来源');
+  assert.ok(!/并发会话组/.test(code), '不得再生成「并发会话组 N」标题（用户点名不要的那种行）');
 
-  // ②b 改名编号必须**从官方工作区清单现读**（真缺陷判据，2026-10-06 真机抓到）：
-  //
-  // 官方 `rename` 有**重名闸**（`dsh-api-workspace-controller/lib/index.js:239-241`：
-  // 同名即抛 `workspace/name-conflict`）。而组留痕 `createConcurrentGroup` 写在后面的
-  // `.then` 里、探针每次又是全新浏览器 ⇒ 用 `readConcurrentGroups().length` 当编号时
-  // **恒为 0** ⇒ 每组都取「并发会话组 1」⇒ 撞名被拒、静默 catch ⇒ 6 个组里 4 个永远
-  // 停在 worktree 目录名（真机读数：store 里只有两组拿到 `并发会话组 N`）。
-  // 这条判据钉住「编号真源是官方清单 + 撞名要递增重试」。
-  //
-  // ⚠ 判据必须**去掉注释**再匹配：本文件读者（与人）在注释里写出了那条错写法的原文
-  //（`readConcurrentGroups().length`）作为说明，若连注释一起匹配就会**自己把自己判红**
-  //（本判据第一版正是如此）。去注释后匹配的才是**代码**。
-  // ⚠⚠ 去注释前必须**先把 CRLF 归一成 LF**：`lib/client.cjs` 在工作树里是 CRLF，
-// 而行注释的正则用 `$` 收尾——在 `\r\n` 上 `$` 匹配不到 `\r` 之前的位置，
-// 于是整条注释**不会被剥掉**，判据就被自己的注释判红（本判据连踩两次的坑：
-// 第一次是没剥注释，第二次是剥了但被 `\r` 挡住）。
-  const bodyCode = body
-    .replace(/\r\n?/g, '\n')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .split('\n')
-    .map((l) => l.replace(/^\s*\/\/.*$/, '').replace(/\s\/\/.*$/, ''))
-    .join('\n');
-  assert.ok(!/readConcurrentGroups\(\)\.length/.test(bodyCode),
-    '改名编号**绝不能**用 readConcurrentGroups().length（恒 0 ⇒ 必然撞名被官方拒绝）');
-  assert.match(bodyCode, /wsFace\.list\(\)/, '改名编号必须从官方工作区清单现读（wsFace.list()）');
-  assert.match(bodyCode, /并发会话组\\s\*\(\\d\+\)\$/, '必须解析官方清单里已有的「并发会话组 N」求最大 N');
-  assert.match(bodyCode, /catch \(e\) \{ if \(i === 20\) throw e; \}/,
-    '撞名必须递增重试（并发建组时两组可能算出同一个 N）');
+  // ④ 「开工指令」那一行（用户第 2 条：「并发会话的『开工』那一行去除！！！」）。
+  assert.ok(!/columnBrief|copyColumnBrief/.test(code),
+    'columnBrief / copyColumnBrief 必须删除（它们产的就是 worktree 开工指令）');
+  assert.ok(!/'⧉ 开工'/.test(src), '列头不得再有「⧉ 开工」按钮');
+  // ⚠ 这三条查**代码**（stripComments）而不是全文：client.cjs 的注释里逐字写着这些类名
+  // 作为「为什么删」的说明（`briefCopied` 状态与 `.hwb-concurrent-brief*` 样式全部删除），
+  // 查全文会被自己的注释判红——与本文件其余「必须删除」判据同一个坑。
+  assert.ok(!/hwb-concurrent-brief/.test(code), '「开工指令」摊开面板的类名与样式必须删除');
+  assert.ok(!/setBrief\(|briefCopied/.test(code), '开工指令的 React 状态必须删除（不留死状态）');
 
-  // ③ 绑定优先级：本组专属工作区优先，回落链保留。
-  assert.match(body, /provisioned\.ok \? provisioned\.workspaceId : currentWorkspaceId\(\)/,
-    '绑定必须是「本组专属 → 当前工作区」两级，缺一不可');
+  // ⑤ 跨列引用「⇥ 引用」（用户第 3 条点名的非官方 UI）整套删除，但**能力说明**保留在注释里。
+  assert.ok(!/'⇥ 引用'/.test(src), '列头不得再有「⇥ 引用」按钮');
+  for (const dead of ['sessionMentionOf', 'sessionMentionLabelEscape', 'appendToSessionDraft',
+    'copySessionMention', 'conversationFaceOf', 'SESSION_MENTION']) {
+    assert.ok(!new RegExp('\\b' + dead + '\\b').test(code),
+      '跨列引用工具 ' + dead + ' 必须删除（按钮已删，工具留着就是死代码）');
+  }
+  assert.ok(!/'conversation'/.test(src.slice(src.indexOf('const inject = ['), src.indexOf('];', src.indexOf('const inject = [')))),
+    "inject 列表不得再含 'conversation'（跨列引用已删，不再需要那个服务面）");
+  assert.ok(!/hwbConversation/.test(code), '三处挂载点的 hwbConversation prop 必须删除');
 
-  // ④ 降级不是崩溃：任何失败都回报原因并回落，**绝不假装建好**。
-  assert.match(body, /return \{ ok: false, reason: '宿主没有提供 workspaces 服务' \};/,
-    '服务面缺席必须如实回 reason（不是抛，也不是静默）');
-  assert.match(body, /setError\('独立工作区未建立（' \+ provisioned\.reason \+ '），已回落为当前工作区'\)/,
-    '建失败必须把原因上屏并明说「已回落」——不许静默降级成「看起来成功了」');
-
-  // ⑤ 三个挂载点都要把服务面传下去（主面板 / 历史组 / 右栏页签）。
-  const passed = (src.match(/hwbWorkspaces: ctx\.workspaces/g) || []).length;
-  assert.equal(passed, 3, '主面板 / 历史组 / 右栏页签三个挂载点都必须传 hwbWorkspaces（实际 ' + passed + ' 处）');
-  // 反面：不得用官方 renderer 会映射成 useWorkspaces 的那个名字当裸 prop（会造成「谁覆盖谁」歧义）。
-  assert.ok(!/props\.workspaces\b/.test(src),
-    '不得读 props.workspaces：官方 standardHookPropName 会把 hooks.workspaces 映射成 useWorkspaces，'
-    + '裸同名 prop 有覆盖歧义，故用显式的 hwbWorkspaces');
+  // ⑥ 用户点名的其余非官方 UI 一律不在（「↗ 官方视图」改由「更多操作」菜单承担）。
+  assert.ok(!/'↗ 官方视图'/.test(src), '列头不得再有「↗ 官方视图」按钮（改由更多操作菜单承担）');
+  assert.ok(!/hwb-concurrent-mini/.test(src), '自绘小按钮的类名与样式必须删除（已无使用者）');
+  assert.ok(!/hwb-concurrent-col-head|hwb-concurrent-col-title/.test(src),
+    '自绘列头（标题 + 一排小按钮）必须删除，改成官方 header 复刻');
+  assert.ok(!/hwb-concurrent-chip/.test(src),
+    '自绘 chips 胶囊必须删除（改成官方 CSS module 类名的复刻 chips）');
 });
 
-test('★ 0.19.68 并发：专属工作区服务端必须真建目录且不代做破坏性 git 操作', () => {
-  const modSrc = fs.readFileSync(path.join(root, 'lib', 'concurrent-workspace.js'), 'utf8');
+test('★ 0.19.68（10-08 轮） 并发：列顶栏必须是官方 header 的复刻（结构/类名/数据/文案四条口径）', () => {
+  const src = clientSrc();
+  const a = src.indexOf('function ColumnHeader(p)');
+  const b = src.indexOf('function ConcurrentColumn(props)');
+  assert.ok(a > 0 && b > a, '找不到 ColumnHeader / ConcurrentColumn 边界（改名则本判据失效，需同步）');
+  const head = src.slice(a, b);
 
-  // ① worktree 建在仓库**之外**的兄弟目录，且分支名有明确前缀。
-  assert.match(modSrc, /export const CONCURRENT_BRANCH_PREFIX = 'hwb\/concurrent\/';/,
-    '分支前缀必须显式声明（用户要的「git 分支 + 最后旋转」）');
-  assert.match(modSrc, /path\.join\(path\.dirname\(path\.resolve\(repoRoot\)\), base \+ '-hwb-' \+ groupId\)/,
-    'worktree 必须建在仓库外的兄弟目录（放进仓库内会让 git status 变脏、被别的列误检）');
+  // ① 结构：官方 ConversationHeader / ConversationSessionHeader 的同一棵 DOM 树。
+  for (const cls of ['header', 'headerLeading', 'titleRow', 'titleCluster', 'crumbs', 'crumbSeg',
+    'crumb', 'crumbCurrent', 'headerActions', 'headerUtilities', 'headerCorner', 'tabs', 'tab', 'tabActive']) {
+    assert.ok(head.includes("oc('conversation', '" + cls + "')"),
+      '列顶栏必须挂官方类名 ' + cls + '（wSkVaW_' + cls + '，结构逐字照官方）');
+  }
+  assert.match(head, /'data-conversation-header-leading': ''/, '必须保留官方的 data 属性（官方 CSS/脚本按它定位）');
+  assert.match(head, /'data-conversation-header-corner': ''/, '同上：headerCorner 的 data 属性');
+  assert.match(head, /role: 'tablist'/, '页签行必须是 role=tablist（官方同款）');
+  assert.match(head, /role: 'tab'/, '每个页签必须是 role=tab（官方同款）');
+  assert.match(head, /'aria-selected': tab\.id === viewId/, '页签必须报 aria-selected（官方同款）');
 
-  // ② 注入防护：groupId 会被拼进目录名与分支名，必须先净化。
-  assert.match(modSrc, /export function safeGroupId\(raw\)/,
-    '必须有 safeGroupId 净化（groupId 来自请求体，`../` 能让 worktree 建到任意位置）');
-  assert.match(modSrc, /replace\(\/\[\^A-Za-z0-9_-\]\/g, '_'\)/,
-    '净化必须是白名单式（只留字母数字 _ -）');
+  // ② 样式不自己写：类名哈希前缀**运行时发现**，官方改哈希自动跟上；解不出才用 fallback。
+  assert.match(src, /function officialCssPrefix\(key\)/, '必须有 officialCssPrefix（运行时发现官方 CSS module 前缀）');
+  assert.match(src, /style\[data-plugin-css=/, '发现方式必须是查官方注入的 <style data-plugin-css=…>');
+  assert.match(src, /const CSS_PREFIX_CACHE = new Map\(\);/, '发现结果要缓存（每列每帧都做正则太贵）');
+  assert.match(src, /if \(prefix\) CSS_PREFIX_CACHE\.set\(key, resolved\);/,
+    '只在**发现成功**时缓存：style 可能晚于插件注入，缓存 fallback 会把「暂时没找到」钉成永久错误');
+  for (const key of ['conversation', 'team', 'subagent', 'jobs', 'presetLabel', 'openTarget', 'headerAction']) {
+    assert.ok(src.includes("OFFICIAL_CSS") && new RegExp(key + ": \\{ tag: '@deepseek-ai/").test(src),
+      'OFFICIAL_CSS 必须登记 ' + key + ' 的官方 tagId（fallback 哈希由漂移闸门盯着）');
+  }
+  assert.ok(!/\.hwb-col-header|\.hwb-header-/.test(src),
+    '列顶栏不得自带一套视觉类（视觉必须来自官方 CSS module；本地只允许两条布局适配）');
 
-  // ③ 参数不经 shell（杜绝拼接注入）。
-  assert.match(modSrc, /spawnSync\('git', args, \{/,
-    'git 必须用参数数组调用（不经 shell），不得把请求体拼进命令行字符串');
+  // ③ 数据面照官方投影键（拿不到就不渲染那一块，绝不摆假壳）。
+  assert.match(head, /projectionValues\.agentPreset/, '模式必须读官方投影键 agentPreset（ui-agent-preset 同键）');
+  assert.match(head, /projectionsBySession\[leadId\]/, '团队必须读官方 projectionsBySession[lead].values.agentTeam');
+  assert.match(head, /values\.agentTeam/, '同上：agentTeam 投影键');
+  assert.match(head, /projectionValues\.subagentCatalog/, '子智能体必须读官方 subagentCatalog 投影');
+  assert.match(head, /s\.rows\[sessionId\]/, '后台任务必须读官方 jobs store 的 rows[sessionId]（ui-jobs:312 同键）');
+  assert.match(head, /r\.status === 'running' \|\| r\.status === 'stopping'/,
+    '「运行中」判据必须与官方 isLive 同义（running/stopping）');
+  assert.match(head, /if \(subCount > 0 && !isSubagentChild\)/,
+    '子智能体块的可见性必须与官方一致（无子会话不渲染；子会话自己那块由 lineage 槽负责）');
+  assert.match(head, /if \(jobsAll\.length > 0\)/, '后台任务块必须在无任务时不渲染（官方 visibleCount===0 同款）');
+  assert.match(head, /if \(presetLabel\)/, '模式块必须在投影缺席时不渲染（官方 preset===undefined → null 同款）');
 
-  // ④ 破坏性动作**只给指令、不代做**——这是本模块最重要的边界。
-  assert.ok(!/['"]merge['"]\s*\]/.test(modSrc) && !/worktree', 'remove'/.test(modSrc),
-    '绝不代跑 merge / worktree remove：合并与清理是用户/主线列的决定（只回 recipe 文本）');
-  assert.match(modSrc, /export function recipeFor\(repoRoot, worktree, branch\)/,
-    '必须给出可复制的收尾指令（merge / remove / list）');
+  // ④ 文案逐字抄官方 zh 词典（漂移闸门盯官方原文，官方改字这里先红）。
+  assert.match(src, /teamTrigger: '智能体团队'/, '团队文案必须逐字抄官方 agent-team zh `trigger`');
+  assert.match(src, /jobsLive: '\{count\} 个后台任务运行中'/, '后台任务文案必须逐字抄官方 job zh `count.live.one`');
+  assert.match(src, /jobsIdle: '\{count\} 个后台任务'/, '同上：`count.idle.one`');
+  assert.match(src, /subagents: '\{count\} 个子智能体'/, '子智能体文案必须逐字抄官方 subagent zh `count.total.one`');
+  assert.match(src, /presetStandard: '标准模式'/, '模式文案必须逐字抄官方 settings.agentPreset zh `presetStandardName`');
+  assert.match(src, /moreActions: '更多操作'/, '「更多操作」必须逐字抄官方 session-log-export zh `header.more`');
+  assert.match(src, /downloadLog: '下载 Session 日志'/, '菜单项必须逐字抄官方 zh `menu.download`');
+  assert.match(src, /moreWaysToOpen: '更多打开方式'/, '必须逐字抄官方 open-in-app zh `path.more`');
+  assert.match(src, /appExplorer: '文件资源管理器'/, '必须逐字抄官方 open-in-app zh `app.explorer`');
+
+  // ⑤ 能点的地方都是真功能：官方公开路由，不是摆设。
+  assert.match(src, /apps: 'open-in-app\/apps'/, '「用 X 打开」必须走官方 open-in-app 的 apps 路由');
+  assert.match(src, /open: 'open-in-app\/open'/, '启动必须走官方 open-in-app 的 open 路由（POST {app,path}）');
+  assert.match(src, /method: 'POST'/, '同上：open 是 POST');
+  assert.match(src, /body: JSON\.stringify\(\{ app: appId, path \}\)/, '请求体形状必须与官方 launch 逐字一致');
+  assert.match(src, /SESSION_EXPORT_ROUTE = 'api\/session\.export'/,
+    '「下载 Session 日志」必须走官方 session-log-export 的路由');
+  assert.match(src, /method: 'HEAD'/, '下载前必须先 HEAD 探路（官方 controller.run 同款，失败如实报错不假装下载）');
+  assert.match(src, /includeDescendants: 'true'/, '导出参数必须与官方一致（含子会话）');
+  assert.match(src, /'dsh-session-' \+ String\(sessionId\)\.replace\(\/\[\^A-Za-z0-9_-\]\/g, '_'\)/,
+    'zip 文件名必须逐字照官方 sessionLogZipFilename');
+  assert.match(head, /if \(preferredApp && cwd\)/,
+    '「用 X 打开」必须只在**桌面宿主给了应用清单且会话有 cwd** 时渲染（web profile 上路由 404 ⇒ 不渲染，官方同款 null）');
+
+  // ⑥ 页签必须真的切官方视图（经 conversation.session 的 view owner prop），不是画着好看。
+  assert.match(src, /props\.hwbSlots\.entries\('conversation\.view'\)/,
+    '页签清单必须读官方 conversation.view 注册表（不许写死「对话/轨迹」两项）');
+  assert.match(src, /if \(!devTools && id === 'trajectory'\) continue;/,
+    '「轨迹」页签必须与官方同条件隐藏（开发者工具关闭时不出现，ui-conversation:22803）');
+  assert.match(src, /function devToolsFaceOf\(ctx\)/, '必须有 devToolsFaceOf（读官方 configForms.developerTools.enabled）');
+  assert.match(src, /return ctx\.configForms\.developerTools\.enabled;/, '同上：取值路径逐字照官方');
+  assert.match(src, /props\.renderSlot\('conversation\.session', \{ view: key \}\)/,
+    '切视图必须经官方 conversation.session 的 view owner prop（官方 DefaultConversationViews 认它）');
+  assert.match(src, /const SESSION_VIEWS_BY_ID = new Map\(\);/,
+    'views 局部槽组件必须按 viewId 缓存（每次新建函数会让整棵会话子树重挂载：滚动位置与焦点全丢）');
+  assert.match(src, /renderSlot\(slotName, \{ hwbView: viewsByCol\[col\.key\] \|\| '' \}\)/,
+    '选中的视图必须由外层经 owner prop 传进会话作用域的列正文');
+
+  // ⑦ 两道闸的反向判据仍然有效（0.19.68（10-07 轮）真机取证，0.2.1-alpha.1 复核仍成立）。
+  assert.ok(!/children: \{ 'conversation\.session\.header'/.test(src),
+    '不得把 conversation.session.header 声明为任何条目的 child（官方已声明 ⇒ 重复声明 = 列条目注册整体失败 = 列体全空）');
+  assert.ok(!/renderSlot\('conversation\.session\.header'/.test(src),
+    '不得 renderSlot 官方 session header（没有授权会抛 SlotOwnershipError）');
+
+  // ⑧ 列宽可拖拽（用户第 5 条）：把手 + 持久化 + 双击复位 + 官方同口径的上下限。
+  const colsBody = compareBody(src);
+  assert.match(colsBody, /const onGapPointerDown = \(e\) =>/, '列间把手必须有 pointerdown 处理');
+  assert.match(colsBody, /setPointerCapture\(e\.pointerId\)/, '必须用 pointer capture（官方 WidthHandle 同款，拖出元素也不丢事件）');
+  assert.match(colsBody, /requestAnimationFrame\(apply\)/, '拖动必须 rAF 节流（官方同款）');
+  assert.match(colsBody, /root\.style\.setProperty\('--hwb-col-width', clamp\(startW \+ dx\) \+ 'px'\)/,
+    '拖动期直接写 CSS 变量、不触发 React 重排，且夹到绝对上限（clamp 见 ⑤ 段的两层上限）');
+  assert.match(colsBody, /window\.localStorage\.setItem\(HWB_COL_WIDTH_KEY, String\(next\)\)/,
+    '抬手才 commit 并持久化（官方 onCommit 同款）');
+  // ⚠ 三个 pointer 监听器必须**具名注册 + 具名注销**：`removeEventListener` 只认同一个函数引用。
+  // 旧写法把 pointerup 注册成匿名箭头、却去注销 `finish` ⇒ 引用不匹配，每拖一次泄漏一个
+  // pointerup 监听器（旧闭包下次仍会跑，读到过期的 latest/startW）。
+  assert.match(colsBody, /el\.addEventListener\('pointerup', onUp\);/, 'pointerup 必须具名注册');
+  assert.match(colsBody, /el\.removeEventListener\('pointerup', onUp\);/, 'pointerup 必须注销同一个引用');
+  assert.match(colsBody, /el\.addEventListener\('pointercancel', onCancel\);/, 'pointercancel 必须具名注册');
+  assert.match(colsBody, /el\.removeEventListener\('pointercancel', onCancel\);/, 'pointercancel 必须注销同一个引用');
+  assert.match(colsBody, /const resetColWidth = \(\) =>/, '必须有双击复位');
+  assert.match(colsBody, /window\.localStorage\.removeItem\(HWB_COL_WIDTH_KEY\)/, '复位必须清掉持久化偏好');
+  assert.match(colsBody, /onDoubleClick: resetColWidth/, '把手必须接上双击复位');
+  assert.match(src, /\.hwb-concurrent-gap\{[^}]*cursor:col-resize/, '把手光标必须与官方 widthHandle 同值（col-resize）');
+  assert.match(src, /\.hwb-concurrent-gap\{[^}]*touch-action:none/, '把手必须 touch-action:none（否则触屏上拖动会被滚动手势抢走）');
+  assert.match(src, /\.hwb-concurrent-gap\[data-dragging\] \.hwb-concurrent-gap-line\{opacity:1\}/,
+    '拖动中那条竖线必须常亮（官方 widthHandle[data-dragging]:after 同款反馈）');
 });
 
 test('★ 0.19.62 并发：面板意图守卫必须存在（panelInfo 订阅 + 面板内 pointerdown 判别）', () => {
@@ -586,8 +706,12 @@ test('★ 0.19.64 并发：面板路径用到的标识符必须在工厂作用�
   const outerNames = declared(outer);
   const onlyInApply = new Set(Array.from(declared(inner)).filter(n => !outerNames.has(n)));
   // 面板路径：定义在 apply() 之外的那几个函数（它们只能用工厂作用域里的名字）。
+  // 0.19.68（10-08 轮）补 `ColumnHeader`：它是列顶栏（官方 header 复刻），由 ConcurrentColumns
+  // 渲染，用到的 oc / HEADER_TEXT / headerMenu / downloadSessionLog / PRESET_LABELS 等全部
+  // 声明在工厂作用域（apply() 之前）——纳入扫描，防的是「顺手引用了只在 apply() 里的名字」
+  // 这一族真机 ReferenceError（warn / CONCURRENT_PANEL_ID 各咬过一次）。
   const PANEL_FNS = ['function ConcurrentPanel(', 'function ConcurrentColumns(', 'function ConcurrentColumn(',
-    'function createPanelGuard(', 'function ConcurrentPanelIcon(', 'const HwbBoundary'];
+    'function ColumnHeader(', 'function createPanelGuard(', 'function ConcurrentPanelIcon(', 'const HwbBoundary'];
   const used = new Set();
   for (const marker of PANEL_FNS) {
     const at = src.indexOf(marker);
@@ -630,18 +754,12 @@ test('★ 0.19.64 并发：守卫必须覆盖门户浮层（document 捕获 + �
   assert.match(guard, /window\.__hwbPanelGuard = forensics/, '守卫必须暴露真机取证读数');
 });
 
-test('★ 0.19.64 并发：每列必须能一键取到「独立工作区」指令（git 分支 + 收尾轮转）', () => {
-  const body = compareBody(clientSrc());
-  assert.match(body, /const columnBrief = \(col, index\) =>/, '必须有可复制的开工指令生成器');
-  assert.match(body, /git worktree add -b ' \+ branch \+ ' ' \+ wt \+ ' HEAD/,
-    '指令必须给出 `git worktree add -b <分支> <目录> HEAD`（每列一个工作区）');
-  assert.match(body, /merge --no-ff ' \+ branch/, '必须给出收尾「轮转」：把该列分支合并回主线');
-  assert.match(body, /'⧉ 开工'/, '每列列头必须有一键复制入口');
-  // 口径不许漂：必须写明「官方沙箱按会话解析工作区根」「官方 Team 是 one shared checkout、不带 worktree」，
-  // 否则读者会以为官方自带这套隔离（真机取证见 doc/research/2026-10-05-…-hot-swap.md §10）。
-  assert.match(body, /SessionHeader\.cwd|dsh-sandbox-policy/, '指令里必须引官方沙箱口径（按会话解析工作区根）');
-  assert.match(body, /one shared checkout/i, '指令里必须写明官方 Agent Team 是一个共享检出、不带 worktree');
-});
+// 「每列一键取到独立工作区指令（⧉ 开工）」的判据**已删除**（0.19.68（10-08 轮））：
+// 用户第 2 条「并发会话的『开工』那一行去除！！！」+ 第 1 条「不是每个会话一个文件夹！」
+// ⇒ 那套 git worktree 隔离流程整体撤掉，判据随之撤销（改由上面 ⑩ 段的反向判据钉住
+// 「columnBrief / copyColumnBrief / ⧉ 开工 / hwb-concurrent-brief 都不得复活」）。
+// 官方口径的事实陈述仍保留在任务板那句提示里（「官方 Agent Team 是 one shared checkout、
+// 不带 worktree」），由 ⑩ 段的 worktree 判据**刻意放行**（见其 ⚠ 注记）。
 
 // ── ⑩ 官方 agentTeams 读取本身保留（它仍是任务板的来源）──────────────────────
 /**
@@ -705,4 +823,33 @@ test('★ 0.19.0 排期：本地时间回显不得用 toISOString（会把时间
   assert.ok(helper.length > 0, 'toLocalInputValue 必须存在');
   assert.ok(!/toISOString/.test(helper), '本地时间字符串不得由 toISOString 派生（那是 UTC）');
   assert.ok(/getFullYear\(\)/.test(helper) && /getMonth\(\)/.test(helper), '必须按本地时区字段手工拼');
+});
+
+// ── ⑪ 0.19.68（10-07 轮）：官方视图放行时序（10-08 轮保留）────────────────────────────────
+//
+// 本段原有三条判据，10-08 轮按用户口径处置如下：
+//   · 「官方 session header 不可在列内渲染（两道闸）」→ **保留**，但它的正面部分（自绘 chips
+//     必须存在）已随「列顶栏改成官方 header 复刻」撤销；两道闸的反向判据移到上面 ⑩ 段第 ⑦ 组，
+//     与复刻判据放在一起（同一段代码、同一个理由，读者不必跨段拼）。
+//   · 「跨列引用必须走官方 mention + 官方草稿通道」→ **删除**：用户第 3 条把「⇥ 引用」列为
+//     要去除的非官方 UI，整套机制（sessionMentionOf / appendToSessionDraft / conversationFaceOf /
+//     inject 'conversation' / hwbConversation）已删，反向判据在 ⑩ 段第 ⑤ 组。
+//     能力本身没有丢：`@[标题](dsh-session:<base64url(JSON(id))>)` 是**宿主原生语法**，
+//     手打即生效（dsh-session-reference/lib/index.js）。
+//   · 「↗ 官方视图」的放行时序 → **保留**（下面这条）：按钮本身已收进「更多操作」菜单，
+//     但「先放行再交回官方视图」这个时序要求一字不变，守卫的两个消费点缺一不可。
+
+test('★ 0.19.68（10-07 轮） 并发：「↗ 官方视图」的放行必须同时存在于 pointerdown 与订阅回调两个消费点', () => {
+  const src = clientSrc();
+  const guard = src.slice(src.indexOf('function createPanelGuard'), src.indexOf('function ConcurrentPanelIcon'));
+  assert.ok(guard.length > 0, '找不到 createPanelGuard 函数体（改名/移动需同步本判据）');
+  // 0.19.68（10-07 轮） 根因（#47④ knownGap）：allowLeave 由按钮 onClick 置位，而 onClick 发生在
+  // pointerdown **之后**——pointerdown 捕获期那个消费点永远读到 false。订阅回调才是
+  // 「跳走那一刻」做决策的地方，两个消费点缺一不可。
+  const consumption = guard.match(/if \(probe && probe\.allowLeave\) \{/g) || [];
+  assert.equal(consumption.length, 2,
+    'allowLeave 必须有两个消费点（pointerdown 捕获期 + panelInfo 订阅回调）——'
+    + '只有 pointerdown 一个时，onClick 置位永远赶不上，官方视图必被拉回（#47④ 真机两轮实测）');
+  assert.match(guard, /forensics\.lastDecision = 'allow:leave'/,
+    '订阅回调里的放行必须记入取证读数（探针可查，不再是无从验证的 knownGap）');
 });

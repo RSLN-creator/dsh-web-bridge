@@ -1,5 +1,5 @@
 {
-  "at": "2026-10-05T18:33:31.286Z",
+  "at": "2026-10-08T00:46:40.344Z",
   "asar": "D:/2_Download_Main/4_DeepSeek Harness_code/resources/app.asar",
   "segments": {
     "conversation-view-switcher": {
@@ -183,6 +183,146 @@
         {
           "pattern": "/pollIntervalMs/",
           "hits": 3
+        }
+      ]
+    },
+    "session-mention-encoding": {
+      "file": "dsh-session-reference/lib/index.js",
+      "why": "会话引用的官方编码（@[label](dsh-session:<base64url(JSON(id))>)）——跨列引用「⇥ 引用」按钮已按用户 10-08 口径删除，但**宿主原生语法仍在**（用户可手打），官方改形状则手打的引用也会失效，故保留监控",
+      "sha256": "0b4bfdeec8a4c96e",
+      "lines": 3,
+      "perPattern": [
+        {
+          "pattern": "/function encodeSessionReferenceUri/",
+          "hits": 1
+        },
+        {
+          "pattern": "/function formatSessionReferenceMention/",
+          "hits": 1
+        },
+        {
+          "pattern": "/function escapeLabel/",
+          "hits": 1
+        }
+      ]
+    },
+    "session-header-children": {
+      "file": "dsh-client-ui-conversation/lib/client.js",
+      "why": "列顶栏复刻的官方 header 子槽结构（registerSessionHeader 声明 lineage/actions/utilities/corner）——0.19.68（10-08 轮）ColumnHeader 按这棵树逐字复刻 DOM，官方增删子槽则复刻失同步",
+      "sha256": "7001ad38bc79c056",
+      "lines": 7,
+      "perPattern": [
+        {
+          "pattern": "/name: \"conversation\\.session\\.header\"/",
+          "hits": 1
+        },
+        {
+          "pattern": "/\"conversation\\.session\\.header\\.actions\"/",
+          "hits": 2
+        },
+        {
+          "pattern": "/\"conversation\\.session\\.header\\.utilities\"/",
+          "hits": 2
+        },
+        {
+          "pattern": "/\"conversation\\.session\\.header\\.corner\"/",
+          "hits": 2
+        }
+      ]
+    },
+    "preset-readonly-label": {
+      "file": "dsh-client-ui-agent-preset/lib/client.js",
+      "why": "列顶栏「模式」chip 的只读形态（AgentPresetLabel 渲染 span 而非按钮 + Read-only by construction）——复刻成只读标签的依据，官方改成可点则复刻失同步",
+      "sha256": "9fb80930847ee7d4",
+      "lines": 2,
+      "perPattern": [
+        {
+          "pattern": "/function AgentPresetLabel/",
+          "hits": 1
+        },
+        {
+          "pattern": "/Read-only by construction/",
+          "hits": 1
+        }
+      ]
+    },
+    "subagent-count-i18n": {
+      "file": "dsh-client-ui-subagent/lib/client.js",
+      "why": "列顶栏「子智能体」chip 复刻的官方文案（count.total.one「{count} 个子智能体」）——官方改字则 HEADER_TEXT.subagents 失同步",
+      "sha256": "1e401e7138838a95",
+      "lines": 1,
+      "perPattern": [
+        {
+          "pattern": "/\"count\\.total\\.one\": \"\\{count\\} 个子智能体\"/",
+          "hits": 1
+        }
+      ]
+    },
+    "team-action-i18n": {
+      "file": "dsh-experimental-client-ui-agent-team/lib/client.js",
+      "why": "列顶栏「团队」chip 复刻的官方文案（trigger「智能体团队」）与投影键（projectionsBySession[lead].values.agentTeam）——官方改字/改键则复刻失同步",
+      "sha256": "4fb660f695a7131b",
+      "lines": 2,
+      "perPattern": [
+        {
+          "pattern": "/trigger: \"智能体团队\"/",
+          "hits": 1
+        },
+        {
+          "pattern": "/projectionsBySession\\[leadSessionId\\]/",
+          "hits": 1
+        }
+      ]
+    },
+    "open-in-app-routes": {
+      "file": "dsh-client-ui-open-in-app/lib/client.js",
+      "why": "列顶栏「用 X 打开 / 更多打开方式」走的官方公开路由（apps/open/icon）——官方改路由则复刻的按钮 404",
+      "sha256": "696281cf0ff81dbf",
+      "lines": 3,
+      "perPattern": [
+        {
+          "pattern": "/OPEN_IN_APP_APPS_ROUTE = \"\\/open-in-app\\/apps\"/",
+          "hits": 1
+        },
+        {
+          "pattern": "/OPEN_IN_APP_OPEN_ROUTE = \"\\/open-in-app\\/open\"/",
+          "hits": 1
+        },
+        {
+          "pattern": "/OPEN_IN_APP_ICON_PREFIX_ROUTE = \"\\/open-in-app\\/icon\"/",
+          "hits": 1
+        }
+      ]
+    },
+    "session-export-route": {
+      "file": "dsh-session-log-export/lib/client.js",
+      "why": "列顶栏「更多操作 → 下载 Session 日志」走的官方路由（api/session.export）与 zip 文件名口径——官方改路由/文件名则复刻的下载失效",
+      "sha256": "3a939b618553e590",
+      "lines": 2,
+      "perPattern": [
+        {
+          "pattern": "/SESSION_LOG_EXPORT_ROUTE = \"\\/api\\/session\\.export\"/",
+          "hits": 1
+        },
+        {
+          "pattern": "/function sessionLogZipFilename/",
+          "hits": 1
+        }
+      ]
+    },
+    "jobs-live-status": {
+      "file": "dsh-client-ui-jobs/lib/client.js",
+      "why": "列顶栏「后台任务」chip 的「运行中」判据（status running/stopping，与官方 isLive 同义）——官方改状态字面量则计数失同步",
+      "sha256": "88e0068e7b59f8fa",
+      "lines": 4,
+      "perPattern": [
+        {
+          "pattern": "/status === \"running\"/",
+          "hits": 3
+        },
+        {
+          "pattern": "/status === \"stopping\"/",
+          "hits": 1
         }
       ]
     }

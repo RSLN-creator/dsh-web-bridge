@@ -7,6 +7,80 @@ this file is the package-facing release history.
 
 ## 0.19.68
 
+**并发会话按官方口径重构（2026-10-08 轮，版本号不变）：删三套自造机制 + 列顶栏改官方 header 高保真复刻 + 列宽可拖拽。**
+
+### 用户指令（五条，逐字）
+
+①「请你看好官方怎么管理工作区的！！文件夹内一个会话一行！！不是每个会话一个文件夹！删除多出来web的dwb+并行会话文件夹+『并发会话』在插件栏目怎么会出现什么『并发会话.3列』？？？不要这个」；②「并发会话的『开工』那一行去除！！！」；③「将并列会话里面非官方UI都去除！！特别指的是：…⇥ 引用 /  官方视图 / ⧉ 开工 / ✕ / 标准模式 / 智能体团队…应该改为和官方一致顶部…只应该在比官方多隔开3列！！」；⑤「现状是中间想要做到官方那样的会话调整宽度不行！」。
+
+### 删掉的三套自造机制（不留死代码）
+
+- **每组一个 git worktree 专属工作区**（10-06/10-07 引入）：删客户端 `provisionGroupWorkspace`、服务端两条路由（`POST concurrent-workspace` / `GET concurrent-worktrees`）、整个 `lib/concurrent-workspace.js` 模块、`inject` 里的 `'workspaces'`。新列改绑**当前工作区**（`currentWorkspaceId()`），与官方「新会话」完全同路径 ⇒ 官方左栏自然「一个文件夹内一条会话一行」。
+- **左栏「并发会话 · N 列」历史组目录 + 组留痕存储族**：删 `syncGroupRows`/`groupRows` 与 `readConcurrentGroups`/`createConcurrentGroup`/`appendToConcurrentGroup`/`writeConcurrentGroup`/`newConcurrentGroupId` 等 11 个名字。找回过去的会话不需要插件另立目录——官方左栏的会话清单就是它们的家。
+- **跨列引用「⇥ 引用」**（10-07 引入）：删 `sessionMentionOf`/`appendToSessionDraft`/`conversationFaceOf` 等 6 个工具 + `inject` 的 `'conversation'` + 三处 `hwbConversation`。**能力没丢**：`@[标题](dsh-session:<base64url(JSON(id))>)` 是宿主原生语法，手打进任意输入框即生效（宿主 `sessionReferenceResolver` 在 `agent/pre-step` 把目标会话上下文带进来）。
+
+### 列顶栏 = 官方 header 的高保真复刻（`ColumnHeader`）
+
+两道官方闸（授权 `renderer:332` + 声明唯一 `slots:193`，`conversation.session.header` 已被官方 `registerHeader` 声明）在 **0.2.1-alpha.1** 复核仍成立 ⇒ 不能 renderSlot 官方那一份（官方侧栏自己也不渲染，只渲染 `conversation.content`）。复刻四条口径：① 结构逐字照官方（9 个结构位 + `role`/`aria`）；② 样式**不自己写**——挂官方 CSS module 的哈希类名，前缀**运行时发现**（查 `<style data-plugin-css>` 反解），官方改哈希自动跟上；③ 数据与文案照官方投影键 + zh 词典，拿不到就不渲染那块；④ 能点的都是真功能（「用 X 打开」走官方 `open-in-app` 路由、「下载 Session 日志」走官方 `api/session.export`、「更多操作」用官方 `primitives.Menu`）。「对话 / 轨迹」页签读官方 `conversation.view` 注册表、照抄「开发者工具关闭时隐藏 trajectory」（`inject` 新增 `'configForms'`），点击真的切官方视图（经 `hwbView` owner prop → `views` 局部槽 → 官方 `renderSlot('conversation.view', { only })`，组件身份按 viewId 缓存防重挂）。「标准模式」刻意只读——官方那块本来就是只读标签（`AgentPresetLabel` 渲染 `<span>`）。
+
+### 列宽可拖拽（用户第 5 条）
+
+列间 16px 间隔升级为拖拽把手（官方 `WidthHandle` 同款 pointer capture + rAF 节流 + 拖动期只写 CSS 变量 + 抬手才 commit 并持久化 + **双击复位**）。真机顺带抓出**两个既有布局缺陷**：① ResizeObserver 的 effect 依赖是 `[]`，而首帧 `ready=false` 走早返回 ⇒ 观察器**从未接上**、`viewportW` 停在 `window.innerWidth`（面板 1320 读成 1600、列宽错算）；修 = 依赖改 `[ready]`。② 拖拽上限 `min(952, 可视宽)` 是单会话语义，并发列**可比可视区宽**（放不下由整列平移接手）⇒ 默认顶死拖不动；修 = 上限分两层（默认受可视宽约束、**用户拖出来的偏好**只受绝对上限 952 约束）。顺带修 `pointerup` 匿名注册/具名注销不匹配导致的监听器泄漏。
+
+### 磁盘清理（不可逆，先取证后动手）
+
+37 个 `dsh-webcode-bridge-hwb-*` + 4 个 `A0-Robocup-hwb-*` worktree（逐个 `git status` clean、分支 `ahead=0` 确认无独有提交）+ 51 个孤儿会话目录，全部删除；三处 `-Depth 2` 复核残留 0。未碰宿主 `workspace.json`（实读发现「并发会话组 N」从来不在宿主账本里）。
+
+### 官方一侧本轮真的升级了（0.2.0-rc.2 → 0.2.1-alpha.1）
+
+npm `dsh` 在本会话中升级（`ui-conversation` 18478→23304 行），旧行号引用全部失效——本轮新注释一律给 0.2.1-alpha.1 新行号并逐条重读。桌面 asar 仍是 0.2.0-rc.2、web profile 已 0.2.1，**两版 CSS module 哈希前缀不同** ⇒ 正是「哈希运行时发现」要解决的问题。顺带修 `webcode-preset` 差集闸门红出的官方 `standard` 新增两行 `time-context`/`tool-schedule`（判定**原样保留**：无读数支持删除）。
+
+### 验证
+
+`team-compare` 31/31（⑦⑧ 重写 + 复刻/拖拽两条新判据，删掉钉旧 UI 的三条）、`client-render` 71/71、`webcode-preset` 12/12、`client-server-contract` 2/2、全量 121 文件逐文件 exit 0；漂移闸门 19 段一致（删 1 段随跨列引用、加 7 段复刻锚点）；`probe-concurrent-live` 真机全部判据成立（banned 文本为空、左栏恰好一条、顶栏挂上官方哈希类名、9 结构位齐、更多操作三项可用、移除列生效、官方视图放行 `allow:leave`、拖宽 756→846 且持久化、双击复位）。版本号保持 **0.19.68**。
+
+## 0.19.68（2026-10-07 轮）
+
+> **本节的「修二：跨列官方会话引用」与（同版本 10-06 节的）「每组一个 git worktree 专属工作区」
+> 已被 2026-10-08 轮按用户指令整体删除**（见本节上方那条）。保留本节是为了留住两条仍然有效的结论：
+> ① 守卫放行时序的根因与修法（`allowLeave` 必须在 `panelInfo` 订阅回调里消费——现在仍成立，
+> 「在官方视图打开」还靠它）；② 官方 session header 两道闸的真机定案（仍然成立，
+> 10-08 轮的 `ColumnHeader` 正是据此选择「复刻」而非「渲染官方那一份」）。
+
+**并发会话对齐官方单会话（2026-10-07 轮，版本号不变）：修通「↗ 官方视图」+ 跨列官方会话引用「⇥ 引用」+ 官方 header 两道闸定案。**
+
+### 用户指令
+
+「研究并行界面不够单会话官方界面的地方并自行尝试修改」；确认口径：研究对象 = 本插件注入 DSH 的「并发会话」视图与决议，参照系 = DSH 官方单会话界面，跨会话需求 = 「输入应该可以方便引用到别的会话里面/让别的会话方便清楚知道另一个会话结论/借鉴/并行」。
+
+### 修一：`↗ 官方视图` knownGap 修通（long-term-issues #47④）
+
+放行标记 `probe.allowLeave` 由按钮 onClick 置位，而守卫只在 pointerdown 捕获期消费它——onClick 在 pointerdown 之后，那个消费点永远读到 false；做拉回决策的 `layout.panelInfo` 订阅回调又不看标记 ⇒ 每次交回官方视图都被拉回。修法：订阅回调在决策前同样消费放行标记（`lib/client.cjs` `createPanelGuard`）。真机修后读数：`panelGone:true`、`officialHeaders:1`、`pulls:0`、`lastDecision:"allow:leave"`。
+
+### 修二：跨列官方会话引用（列头新按钮「⇥ 引用」）
+
+走**宿主原生机制**，不抄全文：
+
+- **mention 形状**（照抄 `dsh-session-reference`）：`@[label](dsh-session:<base64url(JSON(sessionId))>)`，label 转义照官方 `escapeLabel`；
+- **写入通道**（照抄 `dsh-client-ui-conversation` 的 ConversationController，服务名逐字 `"conversation"`）：`conversation.input.shell(sessionId)` → `snapshot.draft` 读 + `setDraft(text)` 写（官方切会话搬草稿用的就是这一对）；**追加**不覆盖，提交阶段（adjudicating/submitting）拒写，失败降级剪贴板；
+- 宿主 `sessionReferenceResolver` 在发送时校验 mention 并把源会话上下文带进目标会话——「让别的会话知道另一个会话结论」由宿主在 `agent/pre-step` 完成。
+
+真机验收：点第 1 列「⇥ 引用」，第 2/3 列输入框出现 `@[…](dsh-session:InNlc3Npb24t…)`，base64url 解码 = 目标会话 id 逐字一致（canonical）。
+
+### 定案：官方 session header 在第三方面板内不可达（#47 结论更新）
+
+本轮先推翻 0.19.66（发现 chips 实际注册在 `conversation.session.header.actions`），随即在真机复判：在列条目 children 里声明该槽撞两道官方闸——授权（`renderSlot` 只认本条目 children，`renderer:331-338`）与声明唯一（`slots:191-194`；该槽已被官方 `registerHeader` 声明，`ui-conversation:18254-18257`）⇒ 真机逐字 `slot "conversation.session.header" is already declared (by an entry in "conversation.header" (mf))`，**列条目注册整体失败、列体全空**。撤销声明与渲染，自绘 chips 定案保留；「完整官方 header」由修通后的「↗ 官方视图」承担。判据反钉于 `test/team-compare.test.mjs` ⑪ 段。
+
+### 顺带的安装取证
+
+`dsh plugin --profile web add <同版本 tgz>` **不覆盖**已装的同版本包（装后文件 SHA256 与工作树不一致）。验收正解：`remove` + `add`，装后核对 `lib/client.cjs` SHA256 与工作树一致再重启。
+
+### 判据与验证
+
+`test/team-compare.test.mjs` 34/34（inject 判据加 `conversation` + ⑪ 段三条新判据）；`test/client-render.test.mjs` 71/71；全量 121 测试文件逐文件 exit 0（`NODE_TEST_CONTEXT=1`）；漂移闸门 13 段一致（新增照抄台账 `session-mention-encoding`、`conversation-input-hub`）；真机 `probe-concurrent-live` 全部判据成立（3 列各 1 官方 composer、slotErrorCount=0）。
+
+## 0.19.68（2026-10-06 收口）
+
 **并发会话「一组一行」收口（long-term-issues #40 结论反转 + 落地）。**
 
 ### 用户选了什么

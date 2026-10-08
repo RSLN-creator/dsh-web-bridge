@@ -87,15 +87,43 @@ function collectReading() {
   const cols = Array.from(document.querySelectorAll('.hwb-concurrent-col'));
   const boundary = Array.from(document.querySelectorAll('[data-hwb-boundary]'));
   const slotError = Array.from(document.querySelectorAll('[data-slot-error]'));
-  const colsDetail = cols.map((c, i) => ({
-    index: i,
-    title: (c.querySelector('.hwb-concurrent-col-title') || {}).textContent || '',
-    rect: rectOf(c),
-    bodyRect: rectOf(c.querySelector('.hwb-concurrent-col-body')),
-    composers: c.querySelectorAll('textarea, [contenteditable="true"]').length,
-    bodyText: String((c.querySelector('.hwb-concurrent-col-body') || {}).textContent || '').slice(0, 160),
-    hasWorkspaceCard: /选择工作区|选择范围|Choose a workspace/i.test(String(c.textContent || '')),
-  }));
+  const gaps = Array.from(document.querySelectorAll('.hwb-concurrent-gap'));
+  const colsDetail = cols.map((c, i) => {
+    // 列顶栏 = 官方 header 的复刻（0.19.68（10-08 轮））。读三件事：
+    //   ① 它挂的类名**是不是官方 CSS module 的哈希类**（`<6位前缀>_header`）——
+    //      这是我们「不自己写视觉」这条口径在真页面上的唯一判据；
+    //   ② 标题/chips/页签的**可见文本**（判断「和官方一致顶部」是否成立）；
+    //   ③ 官方结构位（headerLeading / titleRow / headerActions / headerUtilities /
+    //      headerCorner / tabs）是否都在。
+    const head = c.querySelector('[data-hwb-column-header]');
+    const cls = head ? String(head.className || '') : '';
+    const structural = {};
+    for (const key of ['headerLeading', 'titleRow', 'titleCluster', 'crumbs', 'crumbCurrent',
+      'headerActions', 'headerUtilities', 'headerCorner', 'tabs']) {
+      structural[key] = head ? !!head.querySelector('[class*="_' + key + '"]') : false;
+    }
+    const crumb = head ? head.querySelector('[class*="_crumbCurrent"]') : null;
+    const headTabs = head ? Array.from(head.querySelectorAll('[role="tab"]')).map(t => ({
+      text: String(t.textContent || ''), selected: t.getAttribute('aria-selected'),
+    })) : [];
+    return {
+      index: i,
+      title: crumb ? String(crumb.textContent || '') : '',
+      headerPresent: !!head,
+      // 官方哈希类名是否真的挂上了（`\w+_header` 形状；自家类名一律 hwb- 前缀，不会命中）。
+      headerUsesOfficialClass: /(^|\s)[A-Za-z0-9_-]{4,}_header(\s|$)/.test(cls),
+      headerClass: cls.slice(0, 120),
+      structural,
+      headerTabs: headTabs,
+      headerText: head ? String(head.textContent || '').slice(0, 200) : '',
+      actionsCount: head ? head.querySelectorAll('[class*="_headerActions"] > *').length : 0,
+      rect: rectOf(c),
+      bodyRect: rectOf(c.querySelector('.hwb-concurrent-col-body')),
+      composers: c.querySelectorAll('textarea, [contenteditable="true"]').length,
+      bodyText: String((c.querySelector('.hwb-concurrent-col-body') || {}).textContent || '').slice(0, 160),
+      hasWorkspaceCard: /选择工作区|选择范围|Choose a workspace/i.test(String(c.textContent || '')),
+    };
+  });
   return {
     panelRect: rectOf(panel),
     panelChain: chain(panel, 8),
@@ -104,11 +132,25 @@ function collectReading() {
     colsCount: cols.length,
     colsDeclared: colsWrap ? colsWrap.getAttribute('data-cols') : null,
     cols: colsDetail,
+    // 列宽偏好：`--hwb-col-width` 的**属主元素**是 `.hwb-concurrent`（组件把 inline style 挂在
+    // 它上面，`viewRef` 也是它）。⚠ 不能从祖先 `.hwb-concurrent-panel` 读：CSS 自定义属性只向
+    // **后代**继承，向上读恒为空串（本探针第一版就是这么读的，于是拖拽判据假红）。
+    // 同时读**实测列宽**：那才是用户看得见的事实，CSS 变量只是它的来源。
+    colWidthVar: (() => {
+      const owner = document.querySelector('.hwb-concurrent');
+      return owner ? getComputedStyle(owner).getPropertyValue('--hwb-col-width').trim() : '';
+    })(),
+    colWidthPx: cols.length ? Math.round(cols[0].getBoundingClientRect().width) : 0,
+    colWidthPref: (() => { try { return localStorage.getItem('dsh.webcode-bridge.concurrent.colWidth'); } catch (e) { return 'ERR'; } })(),
+    gapsCount: gaps.length,
+    gapCursor: gaps.length ? getComputedStyle(gaps[0]).cursor : '',
     boundaryCount: boundary.length,
     boundaryText: boundary.map(b => String(b.textContent || '').slice(0, 300)),
     slotErrorCount: slotError.length,
     slotErrorText: slotError.map(b => String(b.textContent || '').slice(0, 300)),
     panelText: String((panel || {}).textContent || '').slice(0, 400),
+    // 用户点名要删的自绘 UI：这里读**全页面文本**，任何一处出现都算回归。
+    bannedTexts: ['⇥ 引用', '⧉ 开工', '↗ 官方视图', '并发会话 ·'].filter((t) => document.body.textContent.includes(t)),
     url: location.href,
   };
 }
@@ -311,14 +353,51 @@ try {
   if (!reading.panelRect || reading.panelRect.w < 40 || reading.panelRect.h < 40) {
     problems.push('面板根节点不可见或塌高：' + JSON.stringify(reading.panelRect));
   }
-  // 0.19.66（用户选 A：自己复刻官方 header 三块 chip）：模式 chip 必须按官方数据面渲染出来。
-  // 后台任务 / 子智能体两块依赖官方各自的 hook（`props.useJobs` / `props.useSubagents`），
-  // 宿主没发就不画——所以这里只硬性要求「模式」那一块，另两块记为可选读数。
-  if (!/标准模式|PTC 模式/.test(reading.panelText || '')) {
-    problems.push('列头缺少「模式」chip（照抄官方 ui-agent-preset 的那一块；数据面 = 会话清单投影 projectionValues.agentPreset）');
+
+  // ── ① 用户点名要删的自绘 UI：一个都不许在（0.19.68（10-08 轮））──────────────
+  // 原话：「将并列会话里面非官方UI都去除！！特别指的是：… ⇥ 引用 / ↗ 官方视图 / ⧉ 开工 / ✕ /
+  // 标准模式 / 智能体团队 1 成员」+「『并发会话』在插件栏目怎么会出现什么『并发会话.3列』？？？
+  // 不要这个」+「并发会话的『开工』那一行去除！！！」。
+  if (reading.bannedTexts.length) {
+    problems.push('页面上仍出现用户点名删除的自绘 UI：' + JSON.stringify(reading.bannedTexts)
+      + '（「并发会话 ·」= 左栏历史组行，也必须没有）');
   }
-  reading.chipsSeen = ['标准模式', 'PTC 模式', '个后台任务', '个子智能体']
+
+  // ── ② 列顶栏 = 官方 header 的复刻（结构 + 官方哈希类名 + 真数据）──────────────
+  for (const c of reading.cols) {
+    if (!c.headerPresent) { problems.push('第 ' + c.index + ' 列没有顶栏（[data-hwb-column-header] 缺席）'); continue; }
+    // 官方 CSS module 类名必须真的挂上：这是「不自己写视觉」在真页面上的唯一判据。
+    // 前缀是构建哈希，逐版会变 ⇒ 只判形状 `\w{4,}_header`，不钉死 wSkVaW。
+    if (!c.headerUsesOfficialClass) {
+      problems.push('第 ' + c.index + ' 列顶栏没挂官方 CSS module 类名（officialCssPrefix 发现失败？class='
+        + c.headerClass + '）');
+    }
+    for (const key of ['headerLeading', 'titleRow', 'titleCluster', 'crumbs', 'crumbCurrent',
+      'headerActions', 'headerUtilities', 'headerCorner']) {
+      if (!c.structural[key]) problems.push('第 ' + c.index + ' 列顶栏缺官方结构位：' + key);
+    }
+    if (!c.title) problems.push('第 ' + c.index + ' 列顶栏没有会话标题（官方 crumbCurrent）');
+    // 标题不得被 worktree 目录名污染（用户点名的 `A0-Robocup-hwb-muym5osw00v6` 形态）。
+    if (/-hwb-[a-z0-9]{8,}/i.test(c.title)) {
+      problems.push('第 ' + c.index + ' 列标题仍是 worktree 目录名（会话必须建在当前工作区里）：' + c.title);
+    }
+  }
+  // 模式 chip：官方投影 `projectionValues.agentPreset` 有值时才出现（与官方 return null 同条件）。
+  reading.chipsSeen = ['标准模式', 'PTC 模式', '个后台任务', '个子智能体', '智能体团队']
     .filter((t) => (reading.panelText || '').includes(t));
+  if (!/标准模式|PTC 模式/.test(reading.panelText || '')) {
+    problems.push('列顶栏缺少「模式」chip（官方 AgentPresetLabel 复刻；数据面 = projectionValues.agentPreset）');
+  }
+  // 页签：「对话」必须在；「轨迹」只在开发者工具开启时出现（官方 viewTabs 同条件）。
+  const firstTabs = (reading.cols[0] || {}).headerTabs || [];
+  if (!firstTabs.some(t => t.text === '对话')) {
+    problems.push('列顶栏缺「对话」页签（官方 tabs 复刻；实际 ' + JSON.stringify(firstTabs) + '）');
+  }
+  if (firstTabs.some(t => t.text === '轨迹') && !firstTabs.some(t => t.text === '对话')) {
+    problems.push('页签形状异常：只有「轨迹」没有「对话」');
+  }
+  reading.devToolsTabs = firstTabs.map(t => t.text);
+
   if (reading.tabs.length !== 0) {
     problems.push('顶部不得再有面板级页签（0.19.65 起视图交给每列自己）：' + JSON.stringify(reading.tabs.map(t => t.text)));
   }
@@ -329,6 +408,54 @@ try {
   const noComposer = reading.cols.filter(c => c.composers === 0).map(c => c.index);
   if (reading.colsCount > 0 && noComposer.length) {
     problems.push('这些列里没有官方 composer：' + JSON.stringify(noComposer.map(i => reading.cols[i])));
+  }
+
+  // ── ③ 列宽拖拽（用户第 5 条：「想要做到官方那样的会话调整宽度」）──────────────
+  // 三步都要过：拖了会变 → 变了会存 → 双击复位。少任何一步都只算半个功能。
+  if (reading.gapsCount > 0) {
+    if (reading.gapCursor !== 'col-resize') {
+      problems.push('列间把手的 cursor 不是 col-resize（官方 widthHandle 同值）：' + reading.gapCursor);
+    }
+    const widthBefore = reading.colWidthVar;
+    const gapBox = await page.locator('.hwb-concurrent-gap').first().boundingBox();
+    if (gapBox) {
+      const y = gapBox.y + Math.min(gapBox.height / 2, 200);
+      await page.mouse.move(gapBox.x + gapBox.width / 2, y);
+      await page.mouse.down();
+      await page.mouse.move(gapBox.x + gapBox.width / 2 + 90, y, { steps: 8 });
+      await page.mouse.up();
+      await page.waitForTimeout(600);
+      const after = await page.evaluate(collectReading);
+      reading.drag = {
+        varBefore: widthBefore, varAfter: after.colWidthVar,
+        pxBefore: reading.colWidthPx, pxAfter: after.colWidthPx,
+        pref: after.colWidthPref,
+      };
+      // 主判据用**实测列宽**（用户看得见的就是它）；CSS 变量作为同源读数一并记录。
+      if (!(after.colWidthPx > reading.colWidthPx)) {
+        problems.push('拖动列间把手后列没有变宽（实测 ' + reading.colWidthPx + 'px → ' + after.colWidthPx
+          + 'px；--hwb-col-width ' + widthBefore + ' → ' + after.colWidthVar + '）');
+      }
+      if (!after.colWidthPref) {
+        problems.push('拖动后没有持久化列宽偏好（localStorage 仍是 ' + JSON.stringify(after.colWidthPref) + '）');
+      }
+      // 双击复位：偏好必须被清掉，列宽回到官方默认。
+      await page.locator('.hwb-concurrent-gap').first().dblclick();
+      await page.waitForTimeout(600);
+      const reset = await page.evaluate(collectReading);
+      reading.drag.resetPref = reset.colWidthPref;
+      reading.drag.resetPx = reset.colWidthPx;
+      if (reset.colWidthPref !== null) {
+        problems.push('双击把手后偏好没清掉（localStorage=' + JSON.stringify(reset.colWidthPref) + '）');
+      }
+      if (reset.colWidthPx === after.colWidthPx && after.colWidthPx !== reading.colWidthPx) {
+        problems.push('双击复位后列宽仍是拖动值（' + reset.colWidthPx + 'px）');
+      }
+    } else {
+      problems.push('找不到列间把手的 boundingBox（拖拽判据跑不了）');
+    }
+  } else if (reading.colsCount > 1) {
+    problems.push('多列却没有列间把手（.hwb-concurrent-gap 数量 = 0）');
   }
 
   // 列内点击不许跳走：点第一列正文中心，再确认面板还在。
@@ -344,55 +471,84 @@ try {
     }
   }
 
-  // ── 左栏「并发会话目录」判据（0.19.65）──────────────────────────────────────
-  // 用户原话：「否则怎么找回已过去的并发会话！！！」⇒ 建完组后左栏必须多出一行
-  // `并发会话 · N 列`，点它要能**把那一组重新打开**（列数与组内会话数一致）。
+  // ── ④ 左栏：**不得**出现「并发会话 · N 列」历史组行（用户点名不要）──────────────
   {
-    const groupRow = page.getByText(/^并发会话 · \d+ 列$/).first();
-    try {
-      await groupRow.waitFor({ timeout: 8000 });
-      reading.groupRow = (await groupRow.textContent()) || '';
-      await groupRow.click();
-      await page.waitForTimeout(2000);
-      const cols = await page.locator('.hwb-concurrent-col').count();
-      reading.groupRowCols = cols;
-      if (cols < 1) problems.push('点左栏历史组行后面板一列都没有（那一组没被找回）');
-      // 回主入口，后面的判据仍在主入口上跑
-      await page.getByText('并发会话', { exact: true }).first().click();
-      await page.locator('.hwb-concurrent-panel').first().waitFor({ timeout: 10000 });
-      await page.waitForTimeout(1500);
-    } catch (e) {
-      problems.push('左栏没有出现历史组行（「并发会话 · N 列」）——并发目录没登记上');
+    const rows = await page.evaluate(() => {
+      const side = document.querySelector('[data-hwb-nav-entry]');
+      const scope = (side && side.closest('nav,aside,[class*="sidebar"]')) || document.body;
+      return Array.from(scope.querySelectorAll('button,[role="button"],a'))
+        .map((el) => String(el.textContent || '').trim())
+        .filter((t) => /并发会话/.test(t));
+    });
+    reading.sidebarConcurrentRows = rows;
+    const groupRows = rows.filter((t) => /·\s*\d+\s*列/.test(t));
+    if (groupRows.length) {
+      problems.push('左栏仍有历史组行（用户明令删除）：' + JSON.stringify(groupRows));
+    }
+    if (rows.length !== 1) {
+      problems.push('左栏「并发会话」入口必须**只有一条**（实际 ' + rows.length + ' 条：' + JSON.stringify(rows) + '）');
     }
   }
 
-  // ── 「↗ 官方视图」判据（0.19.65）────────────────────────────────────────────
-  // 官方 header 那几块 chip（标准模式 / 后台任务 / 团队）只由**官方会话视图**渲染（槽的公开
-  // 投影不含组件），所以受支持的交付是「把这一条会话交回官方视图」。这里点第一列那颗按钮，
+  // ── ⑤ 「更多操作」菜单：官方省略号 + 三项真功能 ───────────────────────────────
+  // 0.19.68（10-08 轮）：列头那一排自绘小按钮全删，「在官方视图打开 / 下载 Session 日志 /
+  // 移除此列」收进官方 `session-log-export` 同款的省略号菜单（primitives.Menu）。
+  {
+    const moreBtn = page.locator('[data-hwb-more-actions] button').first();
+    try {
+      await moreBtn.waitFor({ timeout: 8000 });
+      await moreBtn.click();
+      await page.waitForTimeout(700);
+      const items = await page.evaluate(() => Array.from(document.querySelectorAll('[role="menuitem"],[role="menuitemcheckbox"],[role="menuitemradio"]'))
+        .map((el) => String(el.textContent || '').trim()).filter(Boolean));
+      reading.moreMenu = items;
+      for (const want of ['在官方视图打开', '下载 Session 日志', '移除此列']) {
+        if (!items.some((t) => t.includes(want))) problems.push('「更多操作」菜单缺少「' + want + '」：' + JSON.stringify(items));
+      }
+      // 菜单里的「移除此列」必须真的把这一列移走，而面板不塌（会话本身不删）。
+      const before = await page.locator('.hwb-concurrent-col').count();
+      const remove = page.getByRole('menuitem', { name: /移除此列/ }).first();
+      if (await remove.count()) {
+        await remove.click();
+        await page.waitForTimeout(1200);
+        const afterCount = await page.locator('.hwb-concurrent-col').count();
+        reading.removeColumn = { before, after: afterCount };
+        if (afterCount !== before - 1) problems.push('「移除此列」没有生效（' + before + ' → ' + afterCount + '）');
+        if ((await page.locator('.hwb-concurrent-panel').count()) === 0) problems.push('移除一列后面板整个消失');
+      }
+      await page.keyboard.press('Escape');
+      await page.waitForTimeout(300);
+    } catch (e) {
+      problems.push('「更多操作」菜单不可用：' + String(e && e.message || e));
+    }
+  }
+
+  // ── ⑥ 「在官方视图打开」判据（0.19.68（10-07 轮）修通的放行时序，10-08 轮入口挪进菜单）──
   // 要求：我们的面板消失 + 官方会话体出现 + 官方 header 元素出现（≥2：标题栏与工具行）。
   {
-    const btn = page.getByText('↗ 官方视图', { exact: true }).first();
     try {
-      await btn.waitFor({ timeout: 8000 });
-      await btn.click();
+      const moreBtn = page.locator('[data-hwb-more-actions] button').first();
+      await moreBtn.click();
+      await page.waitForTimeout(600);
+      const open = page.getByRole('menuitem', { name: /在官方视图打开/ }).first();
+      if (!(await open.count())) throw new Error('菜单里没有「在官方视图打开」');
+      await open.click();
       await page.waitForTimeout(3500);
       const panelGone = (await page.locator('.hwb-concurrent-panel').count()) === 0;
       const scroll = await page.locator('[data-conversation-scroll]').count();
       const headers = await page.evaluate(() => Array.from(document.querySelectorAll('header, [class*="header"]'))
         .filter((el) => el.getBoundingClientRect().height > 20).length);
-      reading.openOfficial = { panelGone, scroll, headers };
-      // 已知缺口（0.19.65 实测）：`ctx.uiWorkspace.openSession(sid)` 没能把中央区切到官方视图
-      //（面板没关、scroll 仍是三列自己的、header 仍为 1）⇒ 记成 knownGap 而不是判据失败：
-      // 判据只覆盖「我们声称已经能用的东西」，这一条**尚未能用**，如实记录、不当绿灯。
+      const guard = await page.evaluate(() => window.__hwbPanelGuard || null);
+      reading.openOfficial = { panelGone, scroll, headers, lastDecision: guard && guard.lastDecision, pulls: guard && guard.pulls };
       if (!panelGone || scroll < 1 || headers < 2) {
-        reading.knownGapOpenOfficial = '↗ 官方视图 未生效：panelGone=' + panelGone + ' scroll=' + scroll + ' headers=' + headers
-          + '（下一步：查 ctx.uiWorkspace 的真实成员名与调用签名，或改用官方 openSession 的其它入口）';
+        problems.push('「在官方视图打开」未生效：panelGone=' + panelGone + ' scroll=' + scroll + ' headers=' + headers
+          + ' lastDecision=' + JSON.stringify(guard && guard.lastDecision) + '（10-07 轮已修通放行时序，回退即回归）');
       }
       await page.getByText('并发会话', { exact: true }).first().click();
       await page.locator('.hwb-concurrent-panel').first().waitFor({ timeout: 10000 });
       await page.waitForTimeout(1200);
     } catch (e) {
-      problems.push('「↗ 官方视图」按钮不可用：' + String(e && e.message || e));
+      problems.push('「在官方视图打开」不可用：' + String(e && e.message || e));
     }
   }
 
@@ -455,7 +611,25 @@ if (reading) {
   console.log('tabs     : ' + JSON.stringify(reading.tabs.map(t => t.text)));
   console.log('cols     : ' + reading.colsCount + ' (data-cols=' + reading.colsDeclared + ')');
   reading.cols.forEach(c => console.log('  col#' + c.index + ' composers=' + c.composers +
-    ' wsCard=' + c.hasWorkspaceCard + ' h=' + (c.rect && c.rect.h) + ' | ' + c.title));
+    ' wsCard=' + c.hasWorkspaceCard + ' h=' + (c.rect && c.rect.h) + ' w=' + (c.rect && c.rect.w) + ' | ' + c.title));
+  // 列顶栏复刻的读数（0.19.68（10-08 轮））：官方哈希类名是否挂上、结构位是否齐、
+  // chips 与页签的**可见文本**、以及用户点名要删的自绘 UI 是否真的一个不剩。
+  const h0 = reading.cols[0];
+  if (h0) {
+    console.log('header#0 : officialClass=' + h0.headerUsesOfficialClass + ' class=' + h0.headerClass);
+    console.log('  struct : ' + JSON.stringify(h0.structural));
+    console.log('  tabs   : ' + JSON.stringify(h0.headerTabs) + ' (devTools 可见性同官方)');
+    console.log('  actions: ' + h0.actionsCount + '  text=' + JSON.stringify(h0.headerText));
+  }
+  console.log('chipsSeen: ' + JSON.stringify(reading.chipsSeen));
+  console.log('banned   : ' + JSON.stringify(reading.bannedTexts) + '（必须为空数组）');
+  console.log('sidebar  : ' + JSON.stringify(reading.sidebarConcurrentRows) + '（必须恰好 1 条）');
+  console.log('moreMenu : ' + JSON.stringify(reading.moreMenu));
+  console.log('removeCol: ' + JSON.stringify(reading.removeColumn));
+  console.log('openOffic: ' + JSON.stringify(reading.openOfficial));
+  console.log('colWidth : var=' + reading.colWidthVar + ' px=' + reading.colWidthPx + ' pref=' + JSON.stringify(reading.colWidthPref));
+  console.log('drag     : ' + JSON.stringify(reading.drag));
+  console.log('gaps     : ' + reading.gapsCount + ' cursor=' + reading.gapCursor);
   if (reading.boundaryText.length) console.log('boundary : ' + JSON.stringify(reading.boundaryText));
   if (reading.slotErrorText.length) console.log('slotError: ' + JSON.stringify(reading.slotErrorText));
   console.log('panelText: ' + JSON.stringify(reading.panelText.slice(0, 200)));

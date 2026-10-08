@@ -79,6 +79,10 @@ const KEPT_ROWS = [
   'plan-mode', 'compaction-basic', 'command-compact', 'tool-result-pruner',
   'tool-subagent-control', 'tool-subagent-list-agents', 'tool-subagent',
   'tool-ask-user', 'tool-todo', 'tool-web', 'present', 'persona', 'agent-instructions',
+  // 官方 0.2.1-alpha.1 给 standard 新增的两行，本模式**原样保留**（0.19.68（10-08 轮））：
+  // `time-context` 不注册任何工具（只注入当前时间/已用时长），`tool-schedule` 注册的四个
+  // 提醒工具是宿主真有的 ⇒ 都不增加「误调不存在工具」的面，没有读数支持删除它们。
+  'time-context', 'tool-schedule',
 ];
 
 /** 官方预设目录（找不到就跳过「包名必须来自官方」那一条，并在输出里说明）。 */

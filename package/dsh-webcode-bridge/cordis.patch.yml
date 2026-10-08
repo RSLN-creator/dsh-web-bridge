@@ -32,11 +32,21 @@
 # ## 复制来源（必须随宿主升级重读，否则本段会静默漂移）
 #
 # **来源 = 官方 `@deepseek-ai/dsh-web-app` 组合出的 `preset-standard`，读取版本
-# DSH 0.2.0-rc.2**（取法：`dsh --profile web --dump-config`，见 `.tmp/dump-config.yml`
-# 与 `.tmp/preset-standard.yml`）。0.19.50 及以前本段注释只写「从 standard 逐字复制」
+# DSH 0.2.0-rc.2；0.19.68（10-08 轮）按本段自己的要求对 0.2.1-alpha.1 重读并补齐**
+#（取法：读装机目录 `…/dsh-web-app/presets/standard.patch.yml`；本机 `spawnSync` 调外部
+# 程序一律 EPERM，故不走 `dsh --dump-config`，见 test/webcode-preset.test.mjs 的
+# `officialStandardBlocks` 注释）。0.19.50 及以前本段注释只写「从 standard 逐字复制」
 # 而**没写版本**——于是 0.2.0-rc.2 给 standard 加了三项（`workflow-ptc`、
 # `tool-subagent-codex`、`tool-subagent-claude-code`）与 `tool-plugin-manager` 之后，
 # 这里既没有报错也没有任何地方记录，**正是「差集法」失效的那种静默**。
+#
+# 0.2.1-alpha.1 的重读结果：standard 新增 `time-context` 与 `tool-schedule` 两行，
+# 均已**原样复制**进本模式（位置与 standard 逐字对应：前者在 agent-instructions 之后、
+# tool-bash 之前；后者在 tool-jobs 之后、skill-filesystem 之前）。判定理由：本模式的
+# 存在理由是**有读数背书的减法**，这两行没有读数 ⇒ 不减；且 `time-context` 一个工具
+# 都不注册（只注入「当前时间 / 已用时长」这份每步上下文），`tool-schedule` 的四个提醒
+# 工具是宿主真有的（`ctx.schedule`）⇒ 都不增加「误调不存在工具」的面。
+# 下表（差集）因此**不变**：这两行不在差集里，它们在本模式里。
 #
 # 依据是**本机真实读数**（scripts/session-read.mjs 多帧 zstd 全解，2026-09-23）：
 #   · 303 份会话 / 817 轮 / 23,636 次工具调用；其中 webcode 路由 15,296 次（64.7%）。
@@ -100,6 +110,13 @@
             name: '@deepseek-ai/dsh-agent-instructions'
             config:
               maxBytes: 65536
+          # 0.19.68（10-08 轮）随官方 0.2.1-alpha.1 补入：standard 新增的两行**原样复制**。
+          # 它们不是「裁剪」的对象——`time-context` 一个工具都不注册（只注入「当前时间 /
+          # 已用时长」这份每步上下文），`tool-schedule` 注册的四个提醒工具是**宿主真有**的
+          # （ctx.schedule），因此都不增加「误调不存在工具」的面。本模式的存在理由是减法，
+          # 但减法要有读数背书；新行没有读数 ⇒ 按 standard 原样保留（漂移闸门 ②c 的口径）。
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
           - id: tool-bash
             name: '@deepseek-ai/dsh-tool-bash'
             disabled: !!js process.platform === 'win32'
@@ -114,6 +131,8 @@
               sampleOverCapGlobResults: false
           - id: tool-jobs
             name: '@deepseek-ai/dsh-tool-jobs'
+          - id: tool-schedule
+            name: '@deepseek-ai/dsh-tool-schedule'
           - id: skill-filesystem
             name: '@deepseek-ai/dsh-skill-filesystem'
           - id: tool-skill

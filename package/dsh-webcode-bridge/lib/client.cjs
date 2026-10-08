@@ -154,16 +154,24 @@ window.__ModuleLoader__.load({
     // 组件一渲染就抛，被官方 `SlotErrorBoundary` 兜成 `<div data-slot-error>` 空盒：
     // 真机现象就是「并发界面一片空白、连页签都没有」（侧栏行在、点得动，中央区全空）。
     // 官方同款写法作依据：`dsh-client-ui-sidebar` 的 inject 同样列了 `"layout"`。
-    // 本文件的其余 `ctx.*` 读取（slots / sidebarRight / sidebarRightTabs / sessions）
-    // 都已在此声明，`ctx.effect`、`ctx.reflect` 是 cordis 自带、不需要声明。
-    // `workspaces`（0.19.68，用户「做不到你就自己新建不行吗？」）：并发组**自己新建一个真
-    // 工作区**，官方左栏就按官方默认分组（`deriveGroups`）把这一组收成一行可折叠的
-    // workspace 行——这是唯一能在官方清单里做到「一组一行」的路（详见
-    // `doc/long-term-issues.md` #40）。官方服务名逐字是 `"workspaces"`
-    //（`dsh-api-workspace-controller/lib/client.js:389` `super(ctx, "workspaces")`），
-    // 与 `uiWorkspace` **不同域**：前者是数据面（create/rename/…），后者是导航与目录面
-    //（`createDirectory` 在 `dsh-client-ui-workspace/lib/types/client/navigation.d.ts:89`）。
-    const inject = ['slots', 'sidebarRightTabs', 'sidebarRight', 'sessions', 'layout', 'uiWorkspace', 'jobs', 'workspaces'];
+    // 本文件的其余 `ctx.*` 读取（slots / sidebarRight / sidebarRightTabs / sessions / jobs /
+    // uiWorkspace / configForms）都已在此声明，`ctx.effect`、`ctx.reflect` 是 cordis 自带、不需要声明。
+    //
+    // `configForms`（0.19.68（10-08 轮））：列顶栏的「对话 / 轨迹」页签要与官方**逐字一致**——
+    // 官方 `viewTabs()` 在「开发者工具」关闭时**跳过 trajectory**（`ui-conversation:22803`
+    // `!ctx.configForms.developerTools.enabled.getSnapshot() && id === "trajectory" → continue`）。
+    // 我们读同一个开关（`ctx.configForms.developerTools.enabled`）来决定「轨迹」页签是否出现。
+    // 服务名逐字 `"configForms"`（官方 ui-settings 构造函数 `super(ctx, "configForms")`，
+    // `dsh-client-ui-settings/lib/client.js:1284`；ui-conversation 的 inject 也列了它）。
+    // 缺席时（旧宿主/测试桩）按「开发者工具关闭」处理（不显示轨迹页签）——与官方默认一致。
+    //
+    // 0.19.68（10-08 轮）**移除** `workspaces` 与 `conversation` 两个 inject：
+    //   · `workspaces`：曾供「每组新建 git worktree 专属工作区」（provisionGroupWorkspace），
+    //     该机制本轮按用户「不要多出来的文件夹」删除 ⇒ 不再需要；新列改绑**当前工作区**
+    //     （`useWorkspaces` 是 root 标准 prop，由 ui-workspace 的 provideRoot 提供，不经 inject）。
+    //   · `conversation`：曾供跨列引用「⇥ 引用」（appendToSessionDraft），本轮按用户「去除非官方
+    //     UI」删除 ⇒ 不再需要。
+    const inject = ['slots', 'sidebarRightTabs', 'sidebarRight', 'sessions', 'layout', 'uiWorkspace', 'jobs', 'configForms'];
     const RELAY_PORT = 8931;
     const relayBase = 'http://127.0.0.1:' + RELAY_PORT;
     // 每个站点一个独立源：<siteId>.localhost:<port>。
@@ -2624,79 +2632,21 @@ window.__ModuleLoader__.load({
      */
     const CONCURRENT_DEFAULT_COLS = 3;
 
-    /**
-     * 会话组的**浏览器侧**存储前缀。
-     *
-     * 为什么放浏览器本地而不是桥端：这里存的是「这一组面板由哪几条会话组成」，
-     * 是**本浏览器的面板布局**，不是任何服务端事实。会话本身早就是 Host 上的真会话
-     * （`ctx.sessions.create()` 落库、进官方会话清单、可单独打开与重开），所以这份
-     * 存储丢了也只是「面板要重新建组」，**不会丢任何对话内容**——这正是它可以放在
-     * 本地的前提。桥端那边反而没有可存的地方：`create` 返回的 id 只在面板知道。
-     */
-    const CONCURRENT_STORE_PREFIX = 'dsh-webcode-bridge.concurrent.';
+    // ── 「会话组留痕 / 历史组目录」：**已删除**（0.19.68（10-08 轮），用户明令）─────────────
+    //
+    // 用户原话：「『并发会话』在插件栏目怎么会出现什么『并发会话.3列』？？？？？？？？不要这个」。
+    // 旧实现在左栏为**每一组**注册一条 `sidebar.panellist` 行（label「并发会话 · N 列」）+ 一个
+    // 同名 `main` key，用来「找回过去的并发会话」；组本身存在浏览器 localStorage
+    // （`dsh-webcode-bridge.concurrent.groups`）。本轮**整套撤掉**：
+    //   · 左栏只剩**一条**「并发会话」入口（与官方「新会话」同级），不再随组数增长；
+    //   · 组留痕存储族（`readConcurrentGroups` / `createConcurrentGroup` /
+    //     `appendToConcurrentGroup` / `writeConcurrentGroup` / `newConcurrentGroupId`
+    //     与 `CONCURRENT_GROUPS_KEY` / `CONCURRENT_MAX_GROUPS` / `CONCURRENT_GROUP_PREFIX`）
+    //     全部删除 —— **不留死代码**；
+    //   · 找回过去那些会话不需要插件另立目录：它们本来就是 Host 上的真会话，
+    //     **官方左栏的会话清单**（按工作区分组，一个文件夹里一条会话一行）就是它们的家。
+    //     这正是用户第 1 条要求的「官方怎么管理工作区的！！文件夹内一个会话一行！！」。
 
-    // 「过去的并发会话」＝多组留痕（用户 2026-10-06：「否则怎么找回已过去的并发会话」）。
-    // 存**组**（{id, at, ids}）：主入口每次新建一组；历史组由左栏目录找回——每一组注册
-    // 一条 `sidebar.panellist` 行 + 一个**同名 main key**（官方契约原文
-    //「Each list id addresses the matching main panel」）。
-    const CONCURRENT_GROUPS_KEY = CONCURRENT_STORE_PREFIX + 'groups';
-    const CONCURRENT_MAX_GROUPS = 12;
-    const CONCURRENT_GROUP_PREFIX = 'webcode-concurrent-group-';
-
-    /** 读全部历史组；任何异常回空数组（降级不是崩溃）。 */
-    function readConcurrentGroups() {
-      try {
-        const arr = JSON.parse(window.localStorage.getItem(CONCURRENT_GROUPS_KEY) || '[]');
-        return Array.isArray(arr) ? arr.filter(g => g && typeof g.id === 'string' && Array.isArray(g.ids) && g.ids.length) : [];
-      } catch (e) { return []; }
-    }
-
-    /** 新建一组留痕，返回组 id（写不进去返回 null：降级为「这次找不回」）。
-     *
-     * `explicitId`（0.19.68）：调用方**先**要了一个 id 去建本组专属工作区，就必须用**同一个**
-     * id 落痕。否则「重开历史组」时拿到的 id 与当初建 worktree 用的 id 不同 ⇒ 服务端
-     * `reused` 永远不成立，每开一次就多建一个 worktree（真缺陷，不是洁癖）。
-     */
-    function newConcurrentGroupId() {
-      return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-    }
-
-    function createConcurrentGroup(ids, explicitId) {
-      try {
-        const list = (ids || []).filter(id => typeof id === 'string' && id);
-        if (!list.length) return null;
-        const rest = readConcurrentGroups().filter(g => g.ids.join(',') !== list.join(','));
-        const group = { id: String(explicitId || newConcurrentGroupId()), at: Date.now(), ids: list };
-        rest.unshift(group);
-        window.localStorage.setItem(CONCURRENT_GROUPS_KEY, JSON.stringify(rest.slice(0, CONCURRENT_MAX_GROUPS)));
-        return group.id;
-      } catch (e) { return null; }
-    }
-
-    /** 往已有组追加一条会话（「+ 加一列」）；组不存在就新建一组。 */
-    function appendToConcurrentGroup(groupId, sessionId) {
-      try {
-        const all = readConcurrentGroups();
-        const hit = groupId ? all.find(g => g.id === groupId) : null;
-        if (!hit) return createConcurrentGroup([sessionId]);
-        if (!hit.ids.includes(sessionId)) hit.ids = hit.ids.concat(sessionId);
-        window.localStorage.setItem(CONCURRENT_GROUPS_KEY, JSON.stringify(all));
-        return hit.id;
-      } catch (e) { return null; }
-    }
-
-    /**
-     * 写回一组真会话 id。失败静默。
-     *
-     * 0.19.65 起**只写不读**：用户第 7/8 条要求「点并发会话 = 点新会话」，每次打开都新建
-     * 一组，所以挂载不再恢复旧组。留着写是因为它仍是这条组的唯一留痕（排障时能核对
-     * 「上一次那一组是哪几条会话」），也是将来做「切回历史组」时的现成数据源。
-     */
-    function writeConcurrentGroup(key, ids) {
-      try {
-        window.localStorage.setItem(CONCURRENT_STORE_PREFIX + key, JSON.stringify(ids || []));
-      } catch (e) { /* 存储不可用：降级为「下次重新建组」 */ }
-    }
 
     /**
      * 官方 `conversation.content` factory 的 `views` 局部槽替身：只渲染**指定**视图。
@@ -2710,18 +2660,280 @@ window.__ModuleLoader__.load({
     // **已删**——它们正是「面板级页签」的实现基础，用户 2026-10-06 要求移除页签、按官方
     // 默认（会话自己记住的视图）渲染。
 
+    // ── 跨列引用「⇥ 引用」：**已删除**（0.19.68（10-08 轮），用户明令）──────────────────
+    //
+    // 用户原话：「将并列会话里面非官方 UI 都去除！！特别指的是：… ⇥ 引用 …」。
+    // 上一轮（10-07）加的这套机制（`sessionMentionOf` 产官方 mention、
+    // `appendToSessionDraft` 经 `conversation.input.shell(id).setDraft()` 写别的列草稿、
+    // 剪贴板降级）整体撤掉，`inject` 里的 `'conversation'` 与三处 `hwbConversation`
+    // prop 一并撤掉——**不留死代码**。
+    //
+    // 能力没有丢：会话引用是**宿主原生语法**，用户在任意输入框手打
+    // `@[标题](dsh-session:<base64url(JSON(sessionId))>)` 即生效
+    // （`dsh-session-reference/lib/index.js` 的 `encodeSessionReferenceUri` /
+    // `formatSessionReferenceMention`），发送时由宿主 `sessionReferenceResolver`
+    // 在 `agent/pre-step` 校验并把目标会话上下文带进当前会话。插件不再替用户按这个按钮。
+
+    /**
+     * 一列的顶栏：**官方单会话 header 的高保真复刻**（DOM 结构 / 类名 / 图标 / aria 全照官方）。
+     *
+     * 为什么在 `ConcurrentColumns`（外层）里渲染、而不是在会话作用域的 `ConcurrentColumn` 里：
+     * 顶栏要用到**只有外层才有的闭包**——`releaseColumn`（移除此列）、`hwbOpenOfficial`、
+     * `hwbAllowLeave`；而会话数据（标题/cwd/preset/team/subagent/jobs）都能用**根标准 hook**
+     * `useSessions`/`useSessionStatus` 按 sessionId 读到（官方投影就在 `byId[id]` 与
+     * `projectionsBySession[lead]` 上），不需要 SessionProvider。列**正文**才在会话作用域里
+     * （`ConcurrentColumn`），两者用 `renderSlot(slotName, { hwbView })` 的 owner prop 把
+     * 「选中的视图 id」桥接过去（官方 `DefaultConversationViews` 认 `view ?? active?.id`）。
+     *
+     * @param {Object} p 见解构
+     */
+    function ColumnHeader(p) {
+      const sessionId = p.sessionId;
+      const useSessions = typeof p.useSessions === 'function' ? p.useSessions : noSessions;
+      const useSession = typeof p.useSession === 'function' ? p.useSession : noSessions;
+      const useSessionStatus = typeof p.useSessionStatus === 'function' ? p.useSessionStatus : noSessions;
+      const useJobs = typeof p.useJobs === 'function' ? p.useJobs : noSessions;
+      const viewId = p.viewId;
+      const viewTabs = Array.isArray(p.viewTabs) ? p.viewTabs : [];
+
+      // ── 会话数据（全部根 hook 按 id 读，与官方同键；缺席一律 noSessions→null）──────────
+      const row = useSessions(s => (s && sessionId && s.byId ? s.byId[sessionId] : null)) || null;
+      const title = (row && (row.displayTitle || row.title)) || String(sessionId || '').slice(0, 16);
+      const cwd = row && typeof row.cwd === 'string' ? row.cwd : '';
+      const presetRaw = row && row.projectionValues ? row.projectionValues.agentPreset : null;
+      const presetLabel = presetRaw ? (PRESET_LABELS[String(presetRaw)] || String(presetRaw)) : '';
+      const subCatalog = row && row.projectionValues && Array.isArray(row.projectionValues.subagentCatalog)
+        ? row.projectionValues.subagentCatalog : null;
+      const isSubagentChild = useSession(s => !!(s && s.subagent));
+      // 团队：官方 `TeamAction` 取 lead 会话的投影（root 会话 lead = 自己）。
+      const leadId = useSession(s => (s && s.subagent && s.subagent.address ? s.subagent.address.parentSessionId : null)) || sessionId;
+      const team = useSessions(s => {
+        if (!s || !s.projectionsBySession || !leadId) return null;
+        const snap = s.projectionsBySession[leadId];
+        return snap && snap.values ? (snap.values.agentTeam || null) : null;
+      }) || null;
+      const teamMembers = team && Array.isArray(team.members) ? team.members : null;
+      const teamTasks = team && Array.isArray(team.tasks) ? team.tasks : null;
+      // 子智能体运行数：官方逐个看 sessionStatus（`ui-subagent:362`）。
+      const statusMap = useSessionStatus(x => x) || null;
+      const subCount = subCatalog ? subCatalog.length : 0;
+      const subRunning = subCatalog ? subCatalog.filter(c => {
+        try {
+          const st = statusMap && typeof statusMap.get === 'function' ? statusMap.get(c.id) : null;
+          return !!(st && st.running);
+        } catch (e) { return false; }
+      }).length : 0;
+      // 后台任务：官方 `JobListAction` 读 `rows[sessionId]`，活跃 = running/stopping（`ui-jobs:312/325`）。
+      const jobsRows = useJobs(s => (s && s.rows ? (s.rows[sessionId] || null) : null)) || null;
+      const jobsAll = Array.isArray(jobsRows) ? jobsRows : [];
+      const jobsLive = jobsAll.filter(r => r && (r.status === 'running' || r.status === 'stopping')).length;
+      React.useEffect(() => {
+        try { if (typeof p.watchRows === 'function' && sessionId) p.watchRows(sessionId); } catch (e) { /* 订阅失败只是没有计数 */ }
+      }, [sessionId]);
+
+      // ── 弹层开合（每块一个，全部无条件调用，遵守 hooks 规则）─────────────────────────
+      const [openTeam, setOpenTeam] = React.useState(false);
+      const [openSub, setOpenSub] = React.useState(false);
+      const [openJobs, setOpenJobs] = React.useState(false);
+      const [openApps, setOpenApps] = React.useState(false);
+      const [openMore, setOpenMore] = React.useState(false);
+      const [apps, setApps] = React.useState(null); // null=加载中 / []=不可用
+      const [appChoice, setAppChoice] = React.useState(null);
+      const [notice, setNotice] = React.useState('');
+      React.useEffect(() => {
+        let alive = true;
+        fetchOpenInAppApps().then(list => { if (alive) setApps(list); });
+        return () => { alive = false; };
+      }, []);
+      React.useEffect(() => {
+        if (!notice) return undefined;
+        const t = setTimeout(() => setNotice(''), 3200);
+        return () => clearTimeout(t);
+      }, [notice]);
+
+      const appName = (id) => APP_NAMES[String(id).toLowerCase()] || String(id);
+      const preferredApp = (Array.isArray(apps) && apps.length)
+        ? (appChoice && apps.includes(appChoice) ? appChoice : apps[0])
+        : null;
+      const iconUrl = (id) => OPEN_IN_APP_ROUTES.icon + '/' + encodeURIComponent(String(id));
+
+      const doLaunch = (appId) => {
+        if (!cwd) { setNotice('这条会话没有工作目录，无法在本地打开'); return; }
+        launchOpenInApp(appId, cwd).then(ok => { if (!ok) setNotice(HEADER_TEXT.openFailed); });
+      };
+
+      // 会话标题面包屑（官方 root 会话只有一段 crumbCurrent）。
+      const crumbs = h('nav', { className: oc('conversation', 'crumbs'), 'aria-label': HEADER_TEXT.sessionHierarchy },
+        h('span', { className: oc('conversation', 'crumbSeg') },
+          h('span', { className: oc('conversation', 'crumb') + ' ' + oc('conversation', 'crumbCurrent'), title: String(sessionId || '') }, title)));
+
+      // ── headerActions：子智能体 / 团队 / 模式 / 后台任务（官方 order 升序）──────────────
+      const actions = [];
+      // ① 子智能体（官方 order -30）：有子会话才显示（官方 `visible = entries.length>0`）。
+      if (subCount > 0 && !isSubagentChild) {
+        const label = subRunning > 0
+          ? fillCount(HEADER_TEXT.subagentsRunning, subRunning)
+          : fillCount(HEADER_TEXT.subagents, subCount);
+        const items = (subCatalog || []).map(c => ({
+          id: c.id,
+          label: (c.label || c.id) + ' · ' + (statusMap && typeof statusMap.get === 'function' && statusMap.get(c.id)?.running ? HEADER_TEXT.memberRunning : HEADER_TEXT.memberInactive),
+        }));
+        actions.push(h('div', { key: 'sub', className: oc('subagent', 'root'), 'data-hwb-chip': 'subagents' },
+          headerMenu({
+            open: openSub, items, align: 'start',
+            onSelect: (id) => { setOpenSub(false); try { if (p.hwbOpenOfficial) { if (p.hwbAllowLeave) p.hwbAllowLeave(); p.hwbOpenOfficial(id); } } catch (e) { warn('open subagent', e); } },
+            onClose: () => setOpenSub(false),
+          }, h('button', {
+            type: 'button', className: oc('subagent', 'trigger'),
+            'aria-haspopup': 'tree', 'aria-expanded': openSub, 'aria-label': label,
+            onClick: () => setOpenSub(v => !v),
+          },
+            subRunning > 0 && h('span', { className: oc('subagent', 'activitySlot') }, h(StateDot, { state: 'ongoing' })),
+            h('span', { className: oc('subagent', 'count') }, label),
+            h(IconChevronDownOutline, { size: 10, className: openSub ? oc('subagent', 'triggerOpen') : undefined })))));
+      }
+      // ② 团队（官方 order -20）：官方 `TeamAction` 恒渲染 trigger（team 未就绪时面板显示 loading）。
+      {
+        const items = (teamMembers || []).map(m => ({
+          id: String(m.id),
+          label: String(m.name || m.id) + (m.model ? ' · ' + m.model : ''),
+        }));
+        const teamLabel = HEADER_TEXT.teamTrigger + (teamMembers && teamMembers.length > 1 ? ' ' + teamMembers.length : '');
+        actions.push(h('div', { key: 'team', className: oc('team', 'root'), 'data-team-action': '1', 'data-hwb-chip': 'team' },
+          headerMenu({
+            open: openTeam, items, align: 'start',
+            onSelect: (id) => { setOpenTeam(false); try { if (p.hwbOpenOfficial) { if (p.hwbAllowLeave) p.hwbAllowLeave(); p.hwbOpenOfficial(id); } } catch (e) { warn('open teammate', e); } },
+            onClose: () => setOpenTeam(false),
+          }, h('button', {
+            type: 'button', className: oc('team', 'trigger'),
+            'aria-haspopup': 'dialog', 'aria-expanded': openTeam, 'aria-label': HEADER_TEXT.teamTrigger,
+            title: teamLabel + (teamTasks && teamTasks.length ? ' · ' + teamTasks.length + ' 任务' : ''),
+            onClick: () => setOpenTeam(v => !v),
+          },
+            h(IconUsersOutline, { size: 14 }),
+            h('span', { className: oc('team', 'triggerLabel') }, HEADER_TEXT.teamTrigger),
+            teamMembers && teamMembers.length > 1 && h('span', { className: oc('team', 'count') }, String(teamMembers.length))))));
+      }
+      // ③ 模式（官方 order -10）：只读标签（官方 `AgentPresetLabel` 就是 span，不是按钮）。
+      if (presetLabel) {
+        actions.push(h('span', {
+          key: 'preset', className: oc('presetLabel', 'label'), 'data-hwb-chip': 'mode',
+          title: '本任务的 Agent 预设，在任务开始时确定',
+        }, h(IconAgentPresetOutline, { size: 14, className: oc('presetLabel', 'icon') }), presetLabel));
+      }
+      // ④ 后台任务（官方 order +20）：有任务才显示（官方 `visibleCount===0` 时收起）。
+      if (jobsAll.length > 0) {
+        const jlabel = jobsLive > 0 ? fillCount(HEADER_TEXT.jobsLive, jobsLive) : fillCount(HEADER_TEXT.jobsIdle, jobsAll.length);
+        const jitems = jobsAll.map(r => ({
+          id: String(r.id),
+          label: String(r.label || r.id) + ' · ' + String(r.status || ''),
+        }));
+        actions.push(h('div', { key: 'jobs', className: oc('jobs', 'root'), 'data-hwb-chip': 'jobs' },
+          headerMenu({
+            open: openJobs, items: jitems, align: 'start',
+            onSelect: () => setOpenJobs(false),
+            onClose: () => setOpenJobs(false),
+          }, h('button', {
+            type: 'button', className: oc('jobs', 'trigger'),
+            'aria-haspopup': 'menu', 'aria-expanded': openJobs, 'aria-label': jlabel,
+            onClick: () => setOpenJobs(v => !v),
+          },
+            jobsLive > 0 && h('span', { className: oc('jobs', 'triggerDot') }, h(StateDot, { state: 'ongoing' })),
+            h('span', { className: oc('jobs', 'count') }, jlabel),
+            h(IconChevronDownOutline, { size: 10, className: openJobs ? oc('jobs', 'triggerOpen') : undefined })))));
+      }
+
+      // ── headerUtilities：用 X 打开 / 更多打开方式（官方 open-in-app 分裂按钮）+ 更多操作 ──
+      const utilities = [];
+      if (preferredApp && cwd) {
+        const moreItems = (Array.isArray(apps) ? apps : []).map(id => ({
+          id: 'app:' + id,
+          icon: h('img', { src: iconUrl(id), width: 14, height: 14, alt: '', className: oc('openTarget', 'appIcon'), draggable: false }),
+          label: id === preferredApp ? HEADER_TEXT.appDefault.replace('{app}', appName(id)) : appName(id),
+        }));
+        utilities.push(h('div', { key: 'openapp', className: oc('openTarget', 'menuAnchor'), 'data-hwb-open-in-app': '1' },
+          headerMenu({
+            open: openApps, items: moreItems, align: 'end',
+            onSelect: (id) => { setOpenApps(false); if (String(id).startsWith('app:')) { const aid = String(id).slice(4); setAppChoice(aid); doLaunch(aid); } },
+            onClose: () => setOpenApps(false),
+          }, h('div', { className: oc('openTarget', 'split'), 'data-open-target': 'directory', 'data-size': 'compact' },
+            h('button', {
+              type: 'button', className: oc('openTarget', 'main'),
+              'aria-label': HEADER_TEXT.openWithApp.replace('{app}', appName(preferredApp)),
+              title: HEADER_TEXT.openWithApp.replace('{app}', appName(preferredApp)),
+              onClick: () => doLaunch(preferredApp),
+            },
+              h('img', { src: iconUrl(preferredApp), width: 13, height: 13, alt: '', className: oc('openTarget', 'appIcon'), draggable: false })),
+            (Array.isArray(apps) && apps.length > 1) && h('button', {
+              type: 'button', className: oc('openTarget', 'chevron'),
+              'aria-haspopup': 'menu', 'aria-expanded': openApps, 'aria-label': HEADER_TEXT.moreWaysToOpen,
+              onClick: () => setOpenApps(v => !v),
+            }, h(IconChevronDownOutline, { size: 10 }))))));
+      }
+      // 更多操作（官方 session-log-export 的省略号菜单 + 本插件的列生命周期动作）。
+      {
+        const moreActionItems = [
+          { id: 'open-official', icon: h(IconRightUpOutline, { size: 14 }), label: '在官方视图打开' },
+          { id: 'download', icon: h(IconDownloadOutline, { size: 14 }), label: HEADER_TEXT.downloadLog },
+          { id: 'remove', icon: h(IconCloseOutline, { size: 14 }), label: '移除此列' },
+        ];
+        utilities.push(h('div', { key: 'more', 'data-hwb-more-actions': '1' },
+          headerMenu({
+            open: openMore, items: moreActionItems, align: 'end',
+            onSelect: (id) => {
+              setOpenMore(false);
+              if (id === 'open-official') { try { if (p.hwbAllowLeave) p.hwbAllowLeave(); if (p.hwbOpenOfficial) p.hwbOpenOfficial(sessionId); } catch (e) { warn('open official view', e); } }
+              else if (id === 'download') { downloadSessionLog(sessionId).then(err => { if (err) setNotice('下载失败：' + err); }); }
+              else if (id === 'remove') { try { if (p.onRemove) p.onRemove(); } catch (e) { warn('remove column', e); } }
+            },
+            onClose: () => setOpenMore(false),
+          }, h('button', {
+            type: 'button', className: oc('headerAction', 'moreButton'), size: 'sm',
+            'aria-label': HEADER_TEXT.moreActions, 'aria-haspopup': 'menu', 'aria-expanded': openMore,
+            onClick: () => setOpenMore(v => !v),
+          }, h(IconEllipsisOutline, { size: 15 })))));
+      }
+
+      // ── 页签（对话 / 轨迹）：官方 `tabs.length>1` 才显示；点击真的切官方视图 ──────────
+      const tabsEl = viewTabs.length > 1
+        ? h('div', { className: oc('conversation', 'tabs'), role: 'tablist', 'data-conversation-tabs': '' },
+          viewTabs.map(tab => h('button', {
+            key: tab.id, type: 'button', role: 'tab',
+            'aria-selected': tab.id === viewId,
+            className: oc('conversation', 'tab') + (tab.id === viewId ? ' ' + oc('conversation', 'tabActive') : ''),
+            onClick: () => { if (p.onSelectView) p.onSelectView(tab.id); },
+          }, tab.label)))
+        : null;
+
+      return h('header', {
+        className: oc('conversation', 'header'), 'data-hwb-column-header': '1',
+      },
+        // headerLeading：官方 `conversation.header.leading` 默认**没有占用者**（无包注册进它），
+        // 所以官方单会话这里本就是空的；全局那颗侧栏折叠钮属于**侧栏自己**（`ui-sidebar`
+        // SidebarRoot 的 toggle），不是每列各画一个。⇒ 忠实留空，保持结构位。
+        h('div', { className: oc('conversation', 'headerLeading'), 'data-conversation-header-leading': '' }),
+        h('div', { className: oc('conversation', 'titleRow') },
+          h('div', { className: oc('conversation', 'titleCluster') },
+            crumbs,
+            h('div', { className: oc('conversation', 'headerActions') }, actions)),
+          h('div', { className: oc('conversation', 'headerUtilities') }, utilities)),
+        // headerCorner：官方由 `ui-sidebar-right` 的 ExpandButton 占用；并发面板开着时官方右栏
+        // 本就隐藏（`activePanelId!==null`），这里忠实留空（`:empty{display:none}`）。
+        h('div', { className: oc('conversation', 'headerCorner'), 'data-conversation-header-corner': '' }),
+        tabsEl,
+        notice && h('div', { className: 'hwb-hint bad', role: 'status', style: { position: 'absolute', right: 12, top: 44, zIndex: 20, background: 'var(--dsw-specific-menu)', padding: '4px 10px', borderRadius: 8, fontSize: 12 } }, notice));
+    }
+
     /**
      * 一列 = 一条真官方会话（用户：「确保每一列都有完整的官方会话所有能力」）。
+
      *
-     * 0.19.65（用户 2026-10-06）：「**移除顶部的并发对话和并发轨迹**——反正都是界面内自行切换；
-     * 每列直接贯通一列」。⇒ 不再覆盖 `conversation.content` 的 `views` 局部槽，让官方按它自己
-     * 的默认路径走：`renderSlot("conversation.session", {})`（`dsh-client-ui-conversation:16202`），
-     * 也就是**这条会话自己记住的那个视图**（对话 / 轨迹由官方 `conversation.view` 那两个条目提供，
-     * 注册处 `ui-chat:12390` / `ui-trajectory:8736`，渲染点 `:16415`）。
-     * 我们因此不再需要 `hwbView` / `data-concurrent-view` / 面板级页签——少一层自绘，多一分
-     * 「与官方同一份渲染」。
+     * 0.19.68（10-08 轮）：`hwbView` 回来了，但语义与 0.19.55 那版**面板级页签**不同。
+     * 0.19.65 曾按用户要求删掉它（「移除顶部的并发对话和并发轨迹——反正都是界面内自行切换」）；
+     * 本轮用户改要「和官方一致顶部：… 对话 / 轨迹」⇒ 页签回到**每列自己的顶栏**（官方 header
+     * 本来就长在每列会话头上），而不再是面板级的一条。
      *
-     * @param {Object} props 官方 session 作用域标准 props
+     * @param {Object} props 官方 session 作用域标准 props + owner prop `hwbView`
      */
     function ConcurrentColumn(props) {
       const renderFactorySlot = props.renderFactorySlot;
@@ -2742,67 +2954,356 @@ window.__ModuleLoader__.load({
       const settling = shellPhase === 'blank' && session.openState === 'loading' && summaryBlank !== true;
       const hero = shellPhase === 'blank' && (session.openState === 'open' || summaryBlank === true);
 
-      // ── 照抄官方 header 的三块 chip（0.19.66，用户 2026-10-06 选 A：自己复刻）────────
+      // ── 列内**不再**画任何自绘 chrome（0.19.68（10-08 轮），用户明令）──────────────────
       //
-      // 官方那三块由三个官方包注册进 `conversation.header` 槽（该槽的公开投影**不含组件**，
-      // 见 dsh-client-ui-slots/lib/index.js:313（公开投影「without components or executable hooks」）），受支持路径拿不到 ⇒ 按用户指令**自己复刻**。复刻的口径是
-      // 「数据面抄官方、文案抄官方、拿不到就不显示」，绝不画一个假壳：
+      // 用户原话：「将并列会话里面非官方 UI 都去除！！」「只应该在比官方多隔开 3 列」。
+      // 所以 0.19.66 那套自绘 chips 行（标准模式 / 后台任务 / 子智能体 / 团队）**从列体里
+      // 搬走**：它现在长在 `ColumnHeader`（本文件下方）里，按官方 header 的 DOM 结构与
+      // 官方设计 token 复刻，并且**读的是同一批官方投影键**。列体这里只剩一件事：
+      // 渲染官方 `conversation.content`，与官方 `ui-subagent` 的 `ConversationSlotPanel`
+      // 逐字同构（`dsh-client-ui-subagent/lib/client.js:775-787`）。
       //
-      //   ① 模式：官方 `ui-agent-preset:357` 读 `state.byId[sessionId].projectionValues.agentPreset`；
-      //      默认两档的名字在官方 i18n（`:309` presetStandardName「标准模式」/ `:311`「PTC 模式」）。
-      //   ② 后台任务：官方 `ui-jobs:411` 用自己 store 的 `liveRows.length` 配 i18n
-      //      `count.live.one`「{count} 个后台任务运行中」（`:511`）。
-      //   ③ 子智能体/团队：官方 `ui-subagent` / `experimental-client-ui-agent-team` 的座位数据。
-      // ②③ 的数据面要官方各自的 hook（`props.useJobs` / `props.useSubagents`）；**宿主没发就不画**。
-      // 漂移闸门已把 ① 的官方文案与投影键登记成段（`check-official-drift.mjs`）。
-      // ① 模式：**逐字照官方的取值路径**——`ui-agent-preset:357` 读的是会话清单投影
-      //    `state.byId[sessionId].projectionValues.agentPreset`（不是打开态的 session 对象；
-      //    0.19.66 第一版就读错了这一处，真机读数里 chip 一个字都没有）。
-      const presetRaw = useSessions(s => (s && sessionId && s.byId[sessionId] ? s.byId[sessionId].projectionValues?.agentPreset : null));
-      const presetLabel = presetRaw ? (PRESET_LABELS[String(presetRaw)] || String(presetRaw)) : '';
-      const useJobsFace = typeof props.useJobs === 'function' ? props.useJobs : noSessions;
-      // 照抄官方 `ui-jobs` 的取值与口径：`useJobs(s => s.rows[sessionId])`（`ui-jobs:312`），
-      // 活跃行 = `status running/stopping`（其 `isLive` 同义），文案用官方 i18n
-      // `count.live.one`「{count} 个后台任务运行中」/ `count.idle.one`「{count} 个后台任务」。
-      // `watchRows(sessionId)` 由槽的 inject 声明发下来（官方座位同款，`ui-jobs:617`）；
-      // 宿主没发 `useJobs` 时本块整体不渲染（宁可少一块，不摆假壳）。
-      const jobsRows = useJobsFace(s => (s && s.rows ? s.rows[sessionId] : null)) || null;
-      const liveJobs = Array.isArray(jobsRows) ? jobsRows.filter(r => r && (r.status === 'running' || r.status === 'stopping')).length : null;
-      React.useEffect(() => {
-        try { if (typeof props.watchRows === 'function' && sessionId) props.watchRows(sessionId); } catch (e) { /* 订阅失败只是没有计数 */ }
-      }, [sessionId]);
-      const useSubagentsFace = typeof props.useSubagents === 'function' ? props.useSubagents : noSessions;
-      // ③ 子智能体 / 智能体团队：**走 root 标准绑定**（官方 `ui-session:469-476`
-      // `provideRoot({ hooks: { sessions, sessionStatus } })` ⇒ 任意 root 槽都拿到
-      // `useSessions` / `useSessionStatus`）。数字来源与官方同键：
-      //   · 子智能体：`byId[id].projectionValues.subagentCatalog`（官方 `ui-subagent:358-362`），
-      //     运行中 = 逐个看 `sessionStatus`（官方 `:381-385` 的 runningCount 同义）；
-      //   · 团队：`projectionsBySession[leadId].values.agentTeam`（官方 team `:238-239`），
-      //     成员/任务数 = `team.members.length` / `team.tasks.length`。
-      // ⚠ 绝不能把 `useStatus` 放进 filter 回调里逐个调用（条件调用 hook = 违反 hooks 规则，
-      //    本文件上方 SiteAccounts 踩过这条红线）：这里**整表读一次**再过滤。
-      const subCatalog = useSessions(s => (s && sessionId && s.byId[sessionId] ? s.byId[sessionId].projectionValues?.subagentCatalog : null));
-      const subCount = Array.isArray(subCatalog) ? subCatalog.length : null;
-      const useStatusFace = typeof props.useSessionStatus === 'function' ? props.useSessionStatus : noSessions;
-      const statusMap = useStatusFace(x => x) || null;
-      const subRunning = subCount === null ? null : subCatalog.filter((c) => {
-        try { return !!(statusMap && typeof statusMap.get === 'function' && statusMap.get(c.id)?.running); } catch (e) { return false; }
-      }).length;
-      const team = useSessions(s => (s && sessionId && s.projectionsBySession ? s.projectionsBySession[sessionId]?.values?.agentTeam : null)) || null;
-      const teamMembers = team && Array.isArray(team.members) ? team.members.length : null;
-      const teamTasks = team && Array.isArray(team.tasks) ? team.tasks.length : null;
+      // ## 唯一一处与官方侧栏范例的差别：视图（对话 / 轨迹）可由列头页签切换
+      // 官方范例把 `views` 局部槽钉死成 chat（`FixedChatConversationView`，`:771-773`）。
+      // 我们要的是官方 header 那两个页签能真的切视图，所以 `views` 换成按 `hwbView`
+      // 选视图的同构组件：`renderSlot('conversation.session', { view: <id> })` —— `view`
+      // 是官方 `DefaultConversationViews` 认的 owner prop（`:16412` `const viewId = view ?? active?.id`，
+      // 0.2.1-alpha.1 行号见 drift 段），最终仍走官方 `renderSlot('conversation.view', …, { only: viewId })`。
+      // ⇒ **切换的是官方视图注册表里的条目**，不是我们另画一份。
+      //
+      // 组件身份按 viewId **缓存**（`sessionViewsFor`）：每次渲染新建函数会让 React 视作
+      // 不同组件类型 ⇒ 整棵会话子树重挂载（滚动位置、输入焦点全丢）。
+      const viewId = typeof props.hwbView === 'string' && props.hwbView ? props.hwbView : undefined;
 
       return h('div', { className: 'hwb-concurrent-body' },
-        h('div', { className: 'hwb-concurrent-chips' },
-          presetLabel && h('span', { className: 'hwb-concurrent-chip', 'data-hwb-chip': 'mode', title: '当前模式（官方会话投影 agentPreset）' }, presetLabel),
-          (liveJobs > 0 || (jobsRows && jobsRows.length > 0)) && h('span', { className: 'hwb-concurrent-chip', 'data-hwb-chip': 'jobs', title: '后台任务（照抄官方 ui-jobs 的口径与文案）' }, liveJobs > 0 ? liveJobs + ' 个后台任务运行中' : jobsRows.length + ' 个后台任务'),
-          subCount !== null && subCount > 0 && h('span', { className: 'hwb-concurrent-chip', 'data-hwb-chip': 'subagents', title: '子智能体（官方投影 subagentCatalog + sessionStatus）' }, subRunning ? subCount + ' 个子智能体，' + subRunning + ' 个正在运行' : subCount + ' 个子智能体'),
-          teamMembers !== null && teamMembers > 0 && h('span', { className: 'hwb-concurrent-chip', 'data-hwb-chip': 'team', title: '智能体团队（官方投影 agentTeam）' }, '智能体团队 ' + teamMembers + ' 成员' + (teamTasks ? ' · ' + teamTasks + ' 任务' : ''))),
         renderFactorySlot('conversation.content', {
           variant: 'embedded',
           phase: settling ? 'settling' : hero ? 'hero' : 'active',
           hero,
-        }));
+        }, { slots: { views: sessionViewsFor(viewId) } }));
+    }
+
+    /**
+     * 按「选中的官方视图 id」取一个**身份稳定**的 `views` 局部槽组件。
+     *
+     * 为什么必须缓存：`renderFactorySlot(…, { slots: { views: C } })` 里的 `C` 是组件类型。
+     * 每次渲染都新建一个闭包 ⇒ 类型变了 ⇒ React 卸载重挂整棵会话子树（滚动位置/焦点/
+     * 流式增量全丢）。按 viewId 缓存后，只有**真的切换视图**时才换类型（那本来就要重渲染）。
+     *
+     * `viewId === undefined` 时返回官方的默认行为等价物：不传 `view` owner prop，
+     * 于是 `DefaultConversationViews` 回落到「这条会话自己记住的视图」
+     * （官方 `resolveActiveView(tabs, useStore(s => s.view))`）。
+     *
+     * @param {string|undefined} viewId 官方 `conversation.view` 条目 id（如 `chat` / `trajectory`）
+     * @returns {Function} 局部槽组件
+     */
+    const SESSION_VIEWS_BY_ID = new Map();
+    function sessionViewsFor(viewId) {
+      const key = viewId || '';
+      let comp = SESSION_VIEWS_BY_ID.get(key);
+      if (!comp) {
+        comp = key
+          ? (props) => h(React.Fragment, null, props.renderSlot('conversation.session', { view: key }))
+          : (props) => h(React.Fragment, null, props.renderSlot('conversation.session', {}));
+        SESSION_VIEWS_BY_ID.set(key, comp);
+      }
+      return comp;
+    }
+
+    // ══ 列顶栏：**官方 header 的高保真复刻**（0.19.68（10-08 轮），用户明令）═════════════════
+    //
+    // ## 用户要什么（原话，逐字）
+    //   「将并列会话里面非官方 UI 都去除！！特别指的是：A0-Robocup-hwb-muym5osw00v6 /
+    //     ⇥ 引用 / ↗ 官方视图 / ⧉ 开工 / ✕ / 标准模式 / 智能体团队 1 成员」
+    //   「应该改为和官方一致顶部！！！：号菜单 / <标题> / 智能体团队 / 标准模式 /
+    //     6 个后台任务 / 用 文件资源管理器 打开 / 更多打开方式 / 更多操作 / 对话 / 轨迹」
+    //   「只应该在比官方多隔开 3 列！！」
+    //
+    // ## 为什么是「复刻」而不是「渲染官方那一份」（两道闸，0.2.1-alpha.1 复核仍然成立）
+    //   闸 A（授权）：`renderSlot` 只渲染**本条目 children 声明过**的槽
+    //     （`dsh-client-ui-renderer/lib/client.js:332` `is not declared by this entry's children`）；
+    //   闸 B（声明唯一）：children 里出现**已被声明**的槽名必抛
+    //     （`dsh-client-ui-slots/lib/index.js:193` `slot "X" is already declared`），而
+    //     `conversation.session.header` 已被官方 `registerHeader` 声明为 `conversation.header`
+    //     的 child（`ui-conversation/lib/client.js:23073-23086`）。
+    //   两闸合起来 ⇒ 第三方面板**既不能声明也不能渲染**官方 session header；0.19.68（10-07 轮）
+    //   已在真机拿到逐字报错（`slot "conversation.session.header" is already declared (by an
+    //   entry in "conversation.header" (mf))`，且**列条目注册整体失败 ⇒ 列体全空**）。
+    //   官方自己在第三方面板里也不渲染 header：`ui-subagent` 的侧栏聊天只渲染
+    //   `conversation.content`（`ui-subagent/lib/client.js:775-787`）。
+    //
+    // ## 复刻的三条口径（每一条都对应「像官方」的一个可核对维度）
+    //   ① **结构逐字照官方**：`header > (headerLeading, titleRow > (titleCluster >
+    //      (crumbs, headerActions), headerUtilities), headerCorner) + tabs`——与官方
+    //      `ConversationHeader`（`:21191-21210`）/`ConversationSessionHeader`（`:21281-21350`）
+    //      同一棵 DOM 树、同一组 `role`/`aria`。
+    //   ② **样式不自己写**：直接用**官方 CSS module 的类名**。官方那些 `.wSkVaW_*` /
+    //      `.VoX2oq_*` 规则由官方包在启动时注入 `document.head`（每个包一段
+    //      `<style data-plugin-css="…">`），类名是**页面全局生效**的 ⇒ 我们挂同名类，
+    //      拿到的就是官方那份主题 token、hover、`:has()` 联动、container query。
+    //      哈希前缀**运行时发现**（见 `officialCssPrefix`），官方改哈希我们自动跟上。
+    //   ③ **数据与文案照官方**：模式读 `byId[id].projectionValues.agentPreset`（官方
+    //      `ui-agent-preset` 同一键），团队读 `projectionsBySession[lead].values.agentTeam`
+    //      （官方 `agent-team:239` 同一键），子智能体读 `…subagentCatalog` + `sessionStatus`
+    //      （官方 `ui-subagent:357-383` 同一算法），后台任务读 `ctx.jobs.state` 的
+    //      `rows[sessionId]`（官方 `ui-jobs:312` 同一键）；文案逐字抄官方 zh 词典。
+    //      **拿不到数据就不渲染那一块**（与官方 `return null` 的可见性条件一致）。
+    //
+    // ## 能点的地方都是真功能（不摆假壳）
+    //   · 「用 X 打开 / 更多打开方式」= 官方 `open-in-app` 的公开路由
+    //     （`GET open-in-app/apps`、`POST open-in-app/open`、图标 `open-in-app/icon/<id>`，
+    //     `dsh-client-ui-open-in-app/lib/client.js:12-16/114-153`）；
+    //   · 「更多操作」里的「下载 Session 日志」= 官方 `session-log-export` 的公开路由
+    //     （`HEAD api/session.export?sessionId=…&includeDescendants=true` + 同名 zip 文件名，
+    //     `dsh-session-log-export/lib/client.js:12/22-36/104-116`）；
+    //   · 团队 / 子智能体 / 后台任务三块点开是**官方 Menu 弹层**（`primitives.Menu`，官方
+    //     自己的 header 动作也用它），里面是上面那批官方投影的真数据；
+    //   · 「对话 / 轨迹」页签**真的切视图**：走官方 `conversation.session` 的 `view` owner
+    //     prop（`DefaultConversationViews`：`const viewId = view ?? active?.id`），
+    //     最终由官方 `renderSlot('conversation.view', …, { only: viewId })` 渲染官方视图。
+    //   · 只有「标准模式」是**只读**的：官方那一块本来就是只读标签——
+    //     `AgentPresetLabel` 渲染的是 `<span>`（不是按钮），源码注释原文
+    //     *Read-only by construction: a session's …*（`ui-agent-preset:1001-1021`）。
+    //     切档发生在**任务开始时**（官方 zh `headerHint`「本任务的 Agent 预设，
+    //     在任务开始时确定」），所以复刻成只读正是照官方，不是我们偷懒。
+
+    /**
+     * 官方 CSS module 的**哈希类名前缀**在运行时发现。
+     *
+     * 每个官方包启动时都注入一段 `<style data-plugin-css="<tagId>">`，正文是
+     * `.<prefix>_<name>{…}`。前缀（`wSkVaW` / `VoX2oq` …）是构建产物哈希，**每版都会变**，
+     * 所以不能写死；写死就等于「官方一升级，列顶栏立刻掉样式」。
+     *
+     * 做法：按 tagId 找到那段 style，用锚点类名反解前缀（贪婪匹配 + 回溯 ⇒ 得到最长合法前缀，
+     * `nL4_yW_moreButton` 这种**前缀里带下划线**的也能正确解出 `nL4_yW`）。
+     * 解不出来（style 还没注入 / 官方改了锚点名）才回落到 `fallback`——那是**当前构建**的
+     * 前缀，由 `scripts/check-official-drift.mjs` 盯着，官方一改就在提交前变红。
+     *
+     * @param {string} key `OFFICIAL_CSS` 的键
+     * @returns {string} 该包 CSS module 的哈希前缀
+     */
+    const OFFICIAL_CSS = {
+      conversation: { tag: '@deepseek-ai/dsh-client-ui-conversation/ConversationRoot.module.css', anchor: 'root', fallback: 'wSkVaW' },
+      team: { tag: '@deepseek-ai/dsh-experimental-client-ui-agent-team/TeamAction.module.css', anchor: 'trigger', fallback: 'VoX2oq' },
+      subagent: { tag: '@deepseek-ai/dsh-client-ui-subagent/SubagentHeaderLineage.module.css', anchor: 'trigger', fallback: 'ZKlsPq' },
+      jobs: { tag: '@deepseek-ai/dsh-client-ui-jobs/JobListAction.module.css', anchor: 'trigger', fallback: 'QsffPG' },
+      preset: { tag: '@deepseek-ai/dsh-client-ui-agent-preset/AgentPresetSeat.module.css', anchor: 'seat', fallback: 'cubgiG' },
+      presetLabel: { tag: '@deepseek-ai/dsh-client-ui-agent-preset/AgentPresetLabel.module.css', anchor: 'label', fallback: 'SVAs4q' },
+      openTarget: { tag: '@deepseek-ai/dsh-client-ui-open-in-app/OpenTargetButton.module.css', anchor: 'split', fallback: 'OMoRSG' },
+      headerAction: { tag: '@deepseek-ai/dsh-session-log-export/HeaderAction.module.css', anchor: 'moreButton', fallback: 'nL4_yW' },
+    };
+    const CSS_PREFIX_CACHE = new Map();
+
+    function officialCssPrefix(key) {
+      const cached = CSS_PREFIX_CACHE.get(key);
+      if (cached) return cached;
+      const spec = OFFICIAL_CSS[key];
+      if (!spec) return '';
+      let prefix = '';
+      try {
+        const style = typeof document !== 'undefined'
+          ? document.querySelector('style[data-plugin-css="' + spec.tag + '"]')
+          : null;
+        if (style && typeof style.textContent === 'string') {
+          const m = new RegExp('\\.([A-Za-z0-9_-]+)_' + spec.anchor + '(?![A-Za-z0-9_-])').exec(style.textContent);
+          if (m) prefix = m[1];
+        }
+      } catch (e) { /* 选择器/正则失败：走 fallback */ }
+      const resolved = prefix || spec.fallback;
+      // 只在**发现成功**时缓存：style 标签可能在插件之后才注入，缓存 fallback 会把
+      // 「暂时没找到」钉成永久错误。
+      if (prefix) CSS_PREFIX_CACHE.set(key, resolved);
+      return resolved;
+    }
+
+    /**
+     * 取一个官方 CSS module 类名（`<哈希前缀>_<名字>`）。
+     * @param {string} key `OFFICIAL_CSS` 的键
+     * @param {string} name 官方类名（如 `titleRow` / `tabActive`）
+     * @returns {string} 页面上真实生效的类名
+     */
+    function officialClass(key, name) {
+      return officialCssPrefix(key) + '_' + name;
+    }
+
+    /** 同时挂官方类与本插件的钩子类（钩子类只用于测试判据与少量本地微调，不带视觉）。 */
+    function oc(key, name, hook) {
+      return officialClass(key, name) + (hook ? ' ' + hook : '');
+    }
+
+    // 列顶栏要用的官方图标 / 状态点（`iconOf` 两代名字都列，缺位回退空组件——
+    // 与本文件既有口径一致，见 `iconOf` 注释）。
+    const IconUsersOutline = iconOf('IconUsersOutlineRegular', 'IconUsersOutline14');
+    const IconAgentPresetOutline = iconOf('IconAgentPresetOutlineRegular', 'IconAgentPresetOutline14');
+    const IconChevronDownOutline = iconOf('IconChevronDownOutlineRegular', 'IconChevronDownOutline10');
+    const IconEllipsisOutline = iconOf('IconEllipsisOutlineRegular', 'IconEllipsisOutline16');
+    const IconFolderOpenOutline = iconOf('IconFolderOpenOutlineRegular', 'IconFolderOpenOutline16');
+    const IconRightUpOutline = iconOf('IconRightUpOutlineRegular', 'IconRightUpOutline16');
+    const IconDownloadOutline = iconOf('IconDownloadOutlineRegular', 'IconDownloadOutline16');
+    const IconCloseOutline = iconOf('IconCloseOutlineRegular', 'IconCloseOutline16');
+    // 官方 `StateDot`（子智能体「正在运行」那颗点，`ui-subagent:558`）。缺位回退空 span。
+    const StateDot = typeof primitives.StateDot === 'function'
+      ? primitives.StateDot
+      : (props) => h('span', { 'data-hwb-state-dot': props && props.state });
+
+    /**
+     * 官方 `Menu` 的安全包装：`primitives.Menu` 缺席（测试桩 / 旧宿主）时**只渲染锚点**，
+     * 不渲染弹层——降级不是崩溃，且按钮本身仍然可见可点（只是没有下拉）。
+     *
+     * @param {Object} opts `{ open, items, onSelect, onClose, align, portal, dense }`
+     * @param {Object} anchorEl 触发元素（官方 Menu 的 `anchor` prop）
+     * @returns {Object} React 元素
+     */
+    function headerMenu(opts, anchorEl) {
+      if (typeof Menu !== 'function' || Menu.name === '') return anchorEl;
+      return h(Menu, {
+        open: opts.open,
+        anchor: anchorEl,
+        items: opts.items || [],
+        onSelect: opts.onSelect,
+        onClose: opts.onClose,
+        align: opts.align || 'end',
+        portal: opts.portal !== false,
+        dense: opts.dense !== false,
+        footer: opts.footer,
+      });
+    }
+
+    /**
+     * 官方 zh 文案（**逐字抄**，出处见每行注释）。
+     *
+     * 为什么抄而不是调官方 `locale`：官方 `t()` 绑的是**各包自己的命名空间**
+     * （`agent-team` / `subagent` / `job` / `settings.agentPreset` / `open-in-app` /
+     * `session-log-download`），第三方没有正当途径借用别人的命名空间；而文案本身是
+     * 公开词典。抄来的每一条都进漂移闸门（`check-official-drift.mjs` 的
+     * `header-replica-labels` 段），官方改字 ⇒ 提交前变红 ⇒ 来这里同步。
+     */
+    const HEADER_TEXT = {
+      teamTrigger: '智能体团队',            // agent-team zh `trigger`
+      memberRunning: '运行中',              // agent-team zh `memberStatus.running`
+      memberInactive: '未运行',             // agent-team zh `memberStatus.inactive`
+      memberProvisioning: '准备中',         // agent-team zh `memberStatus.provisioning`
+      memberFailed: '失败',                 // agent-team zh `memberStatus.failed`
+      memberCurrent: '当前',                // agent-team zh `currentTag`（面板里标自己那一行）
+      subagents: '{count} 个子智能体',       // ui-subagent zh `count.total.one/other`
+      subagentsRunning: '{count} 个子智能体，正在运行', // ui-subagent zh `count.running.one/other`
+      jobsLive: '{count} 个后台任务运行中',   // ui-jobs zh `count.live.one/other`
+      jobsIdle: '{count} 个后台任务',        // ui-jobs zh `count.idle.one/other`
+      presetStandard: '标准模式',            // ui-agent-preset zh `presetStandardName`
+      presetPtc: 'PTC 模式',                // ui-agent-preset zh `presetPtcName`
+      openWithApp: '用 {app} 打开',          // open-in-app zh `open.title`
+      appDefault: '{app}（默认）',           // open-in-app zh `path.appDefault`
+      openLocally: '在本地打开',             // open-in-app zh `open.tooltip`
+      moreWaysToOpen: '更多打开方式',        // open-in-app zh `path.more`
+      showFileLocation: '显示文件位置',      // open-in-app zh `path.reveal`
+      appsError: '无法获取应用列表',         // open-in-app zh `path.appsError`
+      openFailed: '打开失败，请重试',        // open-in-app zh `path.openError`
+      revealFailed: '无法显示文件位置，请重试', // open-in-app zh `path.revealError`
+      appExplorer: '文件资源管理器',         // open-in-app zh `app.explorer`
+      appFinder: '访达',                    // open-in-app zh `app.finder`
+      appFileManager: '文件管理器',          // open-in-app zh `app.filemanager`
+      appTerminal: '终端',                  // open-in-app zh `app.terminal`
+      moreActions: '更多操作',              // session-log-export zh `header.more`
+      downloadLog: '下载 Session 日志',      // session-log-export zh `menu.download`
+      sessionHierarchy: '会话层级',          // ui-conversation zh `session.hierarchy`（crumbs 的 aria-label）
+    };
+
+    /** 官方 `open-in-app` 的产品名表（zh，逐字抄 `PRODUCT_NAMES` + 四个平台名）。 */
+    const APP_NAMES = {
+      cursor: 'Cursor', vscode: 'VS Code', vscodeinsiders: 'VS Code Insiders', windsurf: 'Windsurf',
+      zed: 'Zed', sublimetext: 'Sublime Text', xcode: 'Xcode', androidstudio: 'Android Studio',
+      intellij: 'IntelliJ IDEA', pycharm: 'PyCharm', webstorm: 'WebStorm', phpstorm: 'PhpStorm',
+      goland: 'GoLand', rider: 'Rider', rustrover: 'RustRover', fork: 'Fork', sourcetree: 'SourceTree',
+      github: 'GitHub Desktop', tower: 'Tower', gitkraken: 'GitKraken', smartgit: 'SmartGit',
+      sublimemerge: 'Sublime Merge', ghostty: 'Ghostty', warp: 'Warp', iterm: 'iTerm2', kitty: 'kitty',
+      windowsterminal: 'Windows Terminal', gitbash: 'Git Bash', gnometerminal: 'GNOME Terminal',
+      konsole: 'Konsole', explorer: HEADER_TEXT.appExplorer, finder: HEADER_TEXT.appFinder,
+      filemanager: HEADER_TEXT.appFileManager, terminal: HEADER_TEXT.appTerminal,
+    };
+
+    /** `{count}` 占位替换（官方 i18n 的最小实现：本插件只用这一个占位）。 */
+    function fillCount(template, count) {
+      return String(template).replace('{count}', String(count));
+    }
+
+    /**
+     * 官方 `open-in-app` 的三条公开路由（**相对路径**，与官方逐字同款：官方写
+     * `"/open-in-app/apps".slice(1)`，即按文档 base 解析）。
+     */
+    const OPEN_IN_APP_ROUTES = {
+      apps: 'open-in-app/apps',
+      open: 'open-in-app/open',
+      icon: 'open-in-app/icon',
+    };
+
+    /** 官方 session 日志导出路由（`dsh-session-log-export:12`，同样是 `.slice(1)` 的相对形式）。 */
+    const SESSION_EXPORT_ROUTE = 'api/session.export';
+
+    /**
+     * 官方 zip 文件名口径（逐字抄 `sessionLogZipFilename`，`dsh-session-log-export:22-24`）。
+     * @param {string} sessionId 会话 id
+     * @returns {string} 浏览器保存用的文件名
+     */
+    function sessionLogZipFilename(sessionId) {
+      return 'dsh-session-' + String(sessionId).replace(/[^A-Za-z0-9_-]/g, '_') + '.zip';
+    }
+
+    /**
+     * 读本机可「打开工作区」的应用清单（官方 `OpenInAppController.run` 同一路由与解析）。
+     *
+     * 桌面宿主才有这条路由；web profile 上它 404 ⇒ 返回空数组 ⇒ 整块控件**不渲染**
+     * （官方 `OpenInAppAction` 在 `preferred === undefined` 时也是 `return null`）。
+     *
+     * @returns {Promise<string[]>} 应用 id 列表（失败为空）
+     */
+    async function fetchOpenInAppApps() {
+      try {
+        const res = await fetch(OPEN_IN_APP_ROUTES.apps, { headers: { accept: 'application/json' } });
+        if (!res.ok) return [];
+        const payload = await res.json();
+        return Array.isArray(payload && payload.apps) ? payload.apps.filter(id => typeof id === 'string') : [];
+      } catch (e) { return []; }
+    }
+
+    /**
+     * 让宿主用某个本机应用打开一个目录（官方 `OpenInAppController.launch` 同一请求体）。
+     * @param {string} appId 应用 id
+     * @param {string} path 绝对路径（会话的 cwd）
+     * @returns {Promise<boolean>} 宿主是否受理
+     */
+    async function launchOpenInApp(appId, path) {
+      try {
+        const res = await fetch(OPEN_IN_APP_ROUTES.open, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ app: appId, path }),
+        });
+        return !!res.ok;
+      } catch (e) { return false; }
+    }
+
+    /**
+     * 下载一条会话的日志 zip（官方 `SessionLogDownloadController.run` 同一流程：
+     * 先 HEAD 探路，成功才交给浏览器下载管理器；失败**如实报错**，不假装下载了）。
+     * @param {string} sessionId 会话 id
+     * @returns {Promise<string|null>} 失败原因（null = 已开始下载）
+     */
+    async function downloadSessionLog(sessionId) {
+      const route = SESSION_EXPORT_ROUTE + '?' + new URLSearchParams({
+        sessionId: String(sessionId), includeDescendants: 'true',
+      }).toString();
+      try {
+        const res = await fetch(route, { method: 'HEAD' });
+        if (!res.ok) {
+          const detail = await res.text().catch(() => '');
+          return 'HTTP ' + res.status + (detail ? ' ' + detail : '');
+        }
+        const anchor = document.createElement('a');
+        anchor.href = route;
+        anchor.download = sessionLogZipFilename(sessionId);
+        anchor.click();
+        return null;
+      } catch (e) { return String((e && e.message) || e); }
     }
 
     /**
@@ -2811,14 +3312,13 @@ window.__ModuleLoader__.load({
      * 列的**宽度与平移**算法与旧实现逐字相同：它验证过，而且是纯布局，与「列里装什么」
      * 无关。宽度上下限全部由官方常量推出，不自己编数（见下方各处注释）。
      *
-     * @param {Object} props 面板座位标准 props + `{ sessions, slotName, groupKey, view }`
+     * @param {Object} props 面板座位标准 props + `{ sessions, slotName }`
      */
     function ConcurrentColumns(props) {
       const sessions = props.sessions;
       const SessionProvider = props.SessionProvider;
       const renderSlot = props.renderSlot;
       const slotName = props.slotName;
-      const groupKey = props.groupKey || 'panel';
       const useSessions = typeof props.useSessions === 'function' ? props.useSessions : noSessions;
       const useWorkspaces = typeof props.useWorkspaces === 'function' ? props.useWorkspaces : noSessions;
       // 只取 byId 这个**稳定引用**（store 自己的对象），不要在选择器里造新对象：
@@ -2858,9 +3358,6 @@ window.__ModuleLoader__.load({
       const [ready, setReady] = React.useState(false);
       const [busy, setBusy] = React.useState(false);
       const [error, setError] = React.useState('');
-      // 「开工指令」面板（0.19.64）：复制成功与否的提示 + 剪贴板不可用时摊开的文本。
-      const [brief, setBrief] = React.useState('');
-      const [briefCopied, setBriefCopied] = React.useState(false);
       // sessionId → SessionReference。用 ref 而不是 state：引用对象不是渲染数据，
       // 它只在「建列 / 删列 / 卸载」三个时刻变化，而每次变化都伴随一次 setCols。
       const refsRef = React.useRef({});
@@ -2868,13 +3365,8 @@ window.__ModuleLoader__.load({
       const viewRef = React.useRef(null);
       // 打开面板只自动建一次组（0.19.65，用户第 7/8 条：点「并发会话」= 点「新会话」）。
       const createdRef = React.useRef(false);
-      // 这一列组在「历史组」里的 id（无 hwbGroup = 主入口新建的组）。
-      const groupRef = React.useRef(props.hwbGroup ? props.hwbGroup.id : null);
-      // 本组独立工作区的提示（0.19.68）：建成功时显示分支名，让用户一眼知道
-      // 「这一组跑在自己的 worktree / 分支上」；失败时的原因走 setError（更显眼）。
-      const [workspaceNote, setWorkspaceNote] = React.useState('');
 
-      // ── 挂载：把上次的组恢复回来；卸载：把所有引用成对释放 ────────────────────
+      // ── 挂载：卸载时把所有引用成对释放 ────────────────────────────────────────
       React.useEffect(() => {
         aliveRef.current = true;
         const refs = refsRef.current;
@@ -2884,22 +3376,8 @@ window.__ModuleLoader__.load({
           setReady(true);
           return undefined;
         }
-        // 主入口（无 hwbGroup）：每次打开都新建一组（用户第 7/8 条）。
-        // 历史组入口（有 hwbGroup）：把那一组的会话重新 retain 出来 ⇒ **找回过去的并发会话**。
-        const group = props.hwbGroup;
-        if (group && Array.isArray(group.ids)) {
-          const restored = [];
-          for (const id of group.ids) {
-            try {
-              refs[id] = sessions.retain(id, { source: 'webcodeConcurrent' });
-              restored.push({ key: 'c:' + id, sessionId: id });
-            } catch (e) { delete refs[id]; }
-          }
-          if (aliveRef.current) { setCols(restored); setReady(true); }
-        } else {
-          setCols([]);
-          setReady(true);
-        }
+        setCols([]);
+        setReady(true);
         return () => {
           aliveRef.current = false;
           for (const id of Object.keys(refs)) {
@@ -2909,27 +3387,27 @@ window.__ModuleLoader__.load({
         };
       }, []);
 
-      // 打开面板就建组（等挂载 effect 把 ready 置真之后再动手，避免与恢复逻辑抢时序）。
-      // 历史组面板（hwbGroup）不建：它的会话在上面那段恢复里已经 retain 好了。
+      // 打开面板就建一组（等挂载 effect 把 ready 置真之后再动手，避免与恢复逻辑抢时序）。
       React.useEffect(() => {
-        if (!ready || createdRef.current || props.hwbGroup) return;
+        if (!ready || createdRef.current) return;
         createdRef.current = true;
         createColumns(CONCURRENT_DEFAULT_COLS);
       }, [ready]);
-
-      // 组变了就落盘。放在 effect 而不是每个动作里：只有一处写法，不会漏。
-      React.useEffect(() => {
-        if (!ready) return;
-        writeConcurrentGroup(groupKey, cols.map(c => c.sessionId));
-      }, [ready, cols, groupKey]);
 
       // 当前中间区宽度（左右栏之间）。视图根节点的宽度**就是**中间区宽度。
       const [viewportW, setViewportW] = React.useState(
         () => (typeof window !== 'undefined' ? window.innerWidth : 1440),
       );
+      // ⚠ 依赖数组必须是 `[ready]` 而不是 `[]`（0.19.68（10-08 轮）真机抓到的既有缺陷）：
+      // 首帧 `ready=false` 时组件走上面的早返回（返回「正在读取…」），`viewRef.current` 是
+      // null ⇒ 这个 effect 首跑时 `!el` 直接 return，观察器**永远没接上**——之后 ready 翻真、
+      // 真正的根节点挂上来，也没人再观察它。真机读数：面板宽 1320px，`viewportW` 却停在
+      // `window.innerWidth`=1600 ⇒ 列宽按错误的可用空间算出 920px（三列放不下、平移按钮常驻）。
+      // `[]` 只在「挂载时 ref 一定已就位」的组件里成立；本组件有**早返回**，不满足。
       React.useEffect(() => {
+        if (!ready) return undefined;
         const el = viewRef.current;
-        if (!el || typeof ResizeObserver === 'undefined') return;
+        if (!el || typeof ResizeObserver === 'undefined') return undefined;
         const publish = () => {
           const w = el.getBoundingClientRect().width;
           if (w > 0) setViewportW(Math.round(w));
@@ -2938,7 +3416,28 @@ window.__ModuleLoader__.load({
         ro.observe(el);
         publish();
         return () => { ro.disconnect(); };
-      }, []);
+      }, [ready]);
+
+      // ── 列宽**可拖拽调整**（用户第 5 条：「想要做到官方那样的会话调整宽度」）──────────
+      //
+      // 官方单会话的内容宽度由 `ConversationWidthControls` 的左右拖拽把手控制
+      // （`ui-conversation:20828` 把它作为 `widthControls` 局部槽传进 content；`:20667`
+      // 的 `CONTENT_MIN=640` / `CONTENT_EDGE_BUDGET=176`）。并发面板**没有**把 widthControls
+      // 传进 content（每列各传一套会与「多列同宽」打架），所以列宽由本层控制：
+      //   · 每两列之间的 `hwb-concurrent-gap` 升级成**拖拽把手**（`onGapPointerDown`）；
+      //   · 上下限沿用官方那套常量推导；
+      //   · 偏好持久化（键名另起，不与官方主区那份 `dsh.conversation.contentWidth` 互相覆盖）；
+      //   · **双击复位**回官方默认宽。
+      const HWB_COL_WIDTH_KEY = 'dsh.webcode-bridge.concurrent.colWidth';
+      const readColWidthPref = () => {
+        try {
+          const raw = window.localStorage.getItem(HWB_COL_WIDTH_KEY);
+          if (raw === null) return null;
+          const v = Number(raw);
+          return Number.isFinite(v) && v > 0 ? v : null;
+        } catch (e) { return null; }
+      };
+      const [colWidthPref, setColWidthPref] = React.useState(readColWidthPref);
 
       // ── 列宽：上下限全部从官方常量推 ────────────────────────────────────────
       //
@@ -2956,13 +3455,101 @@ window.__ModuleLoader__.load({
         320,
         viewportW - SIDEBAR_MAX - Math.round(viewportW * RIGHTBAR_MAX_RATIO),
       );
+      // ── 上限分两层（0.19.68（10-08 轮）真机抓到的缺陷）────────────────────────
+      //
+      // 真机读数：1320px 视口下默认列宽已经顶到 756px，向右拖 +90px 后**列宽没变、
+      // 偏好也没存**（`drag.varAfter === varBefore`）——因为旧实现只有一个上限
+      // `min(952, viewportW − SIDEBAR_MIN − RIGHTBAR_MIN)`，那是**单会话**时代的语义
+      // （那时「一列」就是整个中间区，所以列不可能比中间区更宽）。
+      // 并发列不是这个形状：列**可以比可视中间区宽**，放不下时由既有的整列平移接手
+      // （`‹ ›` 两颗按钮的存在理由）。把用户拖出来的偏好也夹进可视宽度，等于
+      // 「已经宽到一屏一列」之后再也拖不动 ⇒ 用户第 5 条要的「像官方那样调整宽度」失效。
+      //
+      //   · 绝对上限 = 官方会话自身的完整最宽（内容 920 + 卡片余量 32）——一列能有多宽
+      //     的物理上限，与视口无关；
+      //   · 默认值的上限 = 再额外受「中间区最宽」约束——**不拖的时候**列不该宽到看不见
+//     （0.19.29 用户验收的那条语义，逐字保留）。
+      const colWidthAbsoluteMax = OFFICIAL_CONTENT_MAX + OFFICIAL_CARD_PAD;
       const colWidthMax = Math.min(
-        OFFICIAL_CONTENT_MAX + OFFICIAL_CARD_PAD,
+        colWidthAbsoluteMax,
         Math.max(colWidthMin, viewportW - SIDEBAR_MIN - RIGHTBAR_MIN),
       );
       const officialDefault = Math.min(OFFICIAL_CONTENT_MAX, Math.max(680, Math.round(viewportW * 0.64)));
-      const colWidth = Math.round(Math.min(colWidthMax, Math.max(colWidthMin, officialDefault)));
+      // **用户拖出来的偏好**优先（用户第 5 条）；没有偏好就是官方默认宽。两者都夹进上下限
+      // ——与官方 `resolveContentWidth` 同口径（`ui-conversation:20682-20686`：偏好也要
+      // `min(max(pref, MIN), max)`），只是这里的 `max` 对偏好放开到绝对上限（见上）。
+      const colWidth = Math.round(colWidthPref === null
+        ? Math.min(colWidthMax, Math.max(colWidthMin, officialDefault))
+        : Math.min(colWidthAbsoluteMax, Math.max(colWidthMin, colWidthPref)));
       const visible = Math.max(1, Math.floor((viewportW + COL_GAP) / (colWidth + COL_GAP)));
+
+      /**
+       * 列间把手的拖拽（照官方 `WidthHandle` 的写法：pointer capture + rAF 节流 +
+       * 拖动期直接写 CSS 变量不触发 React 重排，抬手才 commit）。
+       *
+       * 与官方把手的**一处刻意差别**：官方两只把手在内容左右两侧、`outward * 2`
+       * （拖右边=内容变宽，两边对称扩张）。这里把手在**两列之间**，语义是
+       * 「左边这列变宽多少，右边这列就让出多少」——但我们的列是**同宽**的
+       * （用户 0.19.29 验收过的「三列宽度同步」判据），所以拖动改的是**统一的列宽**：
+       * 向右拖 = 所有列一起变宽（总宽超出观察窗时由既有的整列平移接手）。
+       * 这样「同步」与「可调」两条要求同时成立，不需要引入每列独立宽度那套状态。
+       *
+       * @param {Object} e pointerdown 事件
+       */
+      const onGapPointerDown = (e) => {
+        if (e.button !== 0) return;
+        try { e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); } catch (err) { /* 无 capture 支持：退回普通拖动 */ }
+        const el = e.currentTarget;
+        const root = viewRef.current;
+        const startX = e.clientX;
+        const startW = colWidth;
+        let frame = null;
+        let latest = startX;
+        // 拖动期与落点都夹到**绝对上限**（不是可视宽度上限）——见上面 colWidthAbsoluteMax
+        // 那段：可平移设计下，列比可视区宽是合法形态，把它夹回可视宽度就等于「拖到一屏
+        // 一列之后再也拖不动」（真机实测：1320px 视口默认 756px 已顶死，+90px 无变化）。
+        const clamp = (v) => Math.round(Math.min(colWidthAbsoluteMax, Math.max(colWidthMin, v)));
+        const apply = () => {
+          frame = null;
+          if (!root) return;
+          const dx = latest - startX;
+          root.style.setProperty('--hwb-col-width', clamp(startW + dx) + 'px');
+        };
+        const onMove = (ev) => {
+          latest = ev.clientX;
+          if (frame === null) frame = requestAnimationFrame(apply);
+        };
+        const finish = (commit) => {
+          el.removeEventListener('pointermove', onMove);
+          el.removeEventListener('pointerup', onUp);
+          el.removeEventListener('pointercancel', onCancel);
+          if (frame !== null) { cancelAnimationFrame(frame); frame = null; }
+          try { el.toggleAttribute('data-dragging', false); } catch (err) { /* 同上 */ }
+          if (!commit) { if (root) root.style.setProperty('--hwb-col-width', startW + 'px'); return; }
+          const dx = latest - startX;
+          const next = clamp(startW + dx);
+          if (next !== startW) {
+            setColWidthPref(next);
+            try { window.localStorage.setItem(HWB_COL_WIDTH_KEY, String(next)); } catch (err) { /* 存不下只是这次不记住 */ }
+          }
+        };
+        // ⚠ 三个监听器都必须用**具名函数**注册：`removeEventListener` 要的是同一个函数引用。
+        // 旧写法把 pointerup 注册成匿名箭头 `() => finish(true)`、却去
+        // `removeEventListener('pointerup', finish)` —— 引用不匹配 ⇒ 每拖一次**泄漏一个**
+        // pointerup 监听器，且那个旧闭包下次仍会跑（读到旧的 latest/startW）。
+        const onUp = () => finish(true);
+        const onCancel = () => finish(false);
+        try { el.toggleAttribute('data-dragging', true); } catch (err) { /* 属性写不上不影响拖动 */ }
+        el.addEventListener('pointermove', onMove);
+        el.addEventListener('pointerup', onUp);
+        el.addEventListener('pointercancel', onCancel);
+      };
+
+      /** 双击把手 = 复位到官方默认宽（并清掉偏好）。 */
+      const resetColWidth = () => {
+        setColWidthPref(null);
+        try { window.localStorage.removeItem(HWB_COL_WIDTH_KEY); } catch (e) { /* 同上 */ }
+      };
 
       // 平移量永远是**整列宽 + 列间距**，所以永远不会停在半列上（用户要的对齐语义）。
       const [firstCol, setFirstCol] = React.useState(0);
@@ -2992,141 +3579,31 @@ window.__ModuleLoader__.load({
        *   ② **最近更新的工作区**——官方 `startSession` 的回落就是 recentWorkspace；
        *   ③ 都取不到（极端：宿主还没就绪）才允许不绑，此时守卫（createPanelGuard）
        *      兜住「选择工作区」跳走的那一下。
+       *
+       * ## 0.19.68（10-08 轮）：**删掉「每组一个 git worktree 专属工作区」**
+       * 用户明令「看好官方怎么管理工作区的！！文件夹内一个会话一行！！不是每个会话一个
+       * 文件夹！」。旧实现（10-06/10-07）为每一组 `git worktree add` 出一个
+       * `<repo>-hwb-<组id>` 兄弟目录、再 `workspaces.create` 注册成「并发会话组 N」，
+       * 结果：① 磁盘上堆了几十个重复检出；② 官方左栏把这些 worktree 当成**独立工作区**，
+       * 会话标题还被 worktree 目录名污染成 `A0-Robocup-hwb-muym5osw00v6`。
+       * ⇒ 现在**就在当前工作区里普通新建**（`sessions.create({ workspaceId: currentWorkspaceId() })`），
+       * 与官方「新会话」完全同路径：新会话作为**当前文件夹下的一行**出现在官方左栏，
+       * 不再有多余文件夹、不再有「并发会话组 N」工作区、标题不再被污染。
+       * 服务端 `POST concurrent-workspace` 路由与 `lib/concurrent-workspace.js` 一并删除。
        */
-      /**
-       * 给**这一组并发**准备专属工作区（0.19.68，long-term-issues #40 的收口）。
-       *
-       * ## 官方机制（实读，不是推测）
-       * 官方左栏默认按**工作区**分组（`dsh-client-ui-workspace/lib/client.js:661`
-       * `groupBy: "workspace"`），每个工作区一行，**折叠时不投影会话行**
-       *（`:492/:502` `sessions: expanded ? … : []`）⇒ 这就是用户要的「一组一行」。
-       * 而「会话属于哪个工作区」是**宿主硬判据**：会话 header 的 `cwd` 经 realpath 后必须
-       * **逐字等于**工作区的 canonical path（`dsh-workspace/lib/index.js:122`；README:172
-       * 原文 *a session from another directory cannot be moved in*）。
-       * ⇒ **不能**给会话打虚拟分组标签；想让 N 条会话同组，它们必须真跑在同一目录。
-       *
-       * ## 两步（都是官方公开入口）
-       *   ① 服务端建目录：`api('concurrent-workspace', { groupId })` → 绝对路径。
-       *      用 **git worktree + 自己的分支**（用户 2026-10-06 选 B）：列里的 agent 看得见
-       *      整个项目（与现状一致），而各组真隔离。目录**必须真实存在**——官方
-       *      `workspaces.create` 要求 `realpath` + `stat` 通过（`dsh-workspace/lib/index.js:406-409`）。
-       *   ② 官方数据面注册：`ctx.workspaces.create({ path })` → `{workspaceId,…}`，
-       *      再用 `rename` 补一个可读标题（`create` 的线上契约只收 `path`，不收标题）。
-       *
-       * ## 降级口径（「降级不是崩溃」，本文件一贯做法）
-       * 任何一步失败（不是 git 仓库、group 过滤后为空、服务面缺席……）**都不抛**：
-       * 返回 `{ ok:false, reason }`，调用方回落到旧行为（绑当前工作区），并把这句
-       * 原因如实显示在面板上。**绝不假装建好了**——那会让「一组一行」变成一句空话。
-       *
-       * @param {{id?: string}|null} group 组留痕对象（为 null 时现编一个临时 id）
-       * @returns {Promise<{ok: boolean, workspaceId?: string, path?: string, branch?: string, recipe?: object, reason?: string}>}
-       */
-      const provisionGroupWorkspace = async (group, groupId) => {
-        // ⚠ 用 `hwbWorkspaces` 这个**显式 prop**（照 `sessions: ctx.sessions` 的做法），
-        // **不叫 `workspaces`**：官方 renderer 会把槽 inject 的 `hooks:{workspaces}` 映射成
-        // `useWorkspaces`（`standardHookPropName`），而 root 标准绑定里已经有一个
-        // `workspaces` 概念；另起一个同名裸 prop 等于给自己埋一个「谁覆盖谁」的歧义。
-        const wsFace = props.hwbWorkspaces;
-        if (!wsFace || typeof wsFace.create !== 'function') return { ok: false, reason: '宿主没有提供 workspaces 服务' };
-        // 组 id 只用于**目录名/分支名**，服务端还会再净化一次（`safeGroupId`）。
-        // 必须与稍后 `createConcurrentGroup` 落痕用的 id **逐字相同**，否则「重开历史组」
-        // 拿到的 id 不同 ⇒ 服务端 `reused` 永不成立 ⇒ 每开一次就多建一个 worktree。
-        const gid = String(groupId || (group && group.id) || newConcurrentGroupId());
-        let made;
-        try {
-          made = await api('concurrent-workspace', { groupId: gid });
-        } catch (e) {
-          return { ok: false, reason: '建独立工作区目录失败：' + String(e?.message || e) };
-        }
-        if (!made || made.ok !== true || !made.path) {
-          return { ok: false, reason: (made && made.error) || '建独立工作区目录失败' };
-        }
-        let view;
-        try {
-          view = await wsFace.create({ path: String(made.path) });
-        } catch (e) {
-          return { ok: false, reason: '注册工作区失败：' + String(e?.message || e) };
-        }
-        const workspaceId = view && (view.workspaceId || view.id);
-        if (!workspaceId) return { ok: false, reason: '注册工作区成功但没有 workspaceId' };
-        // 标题:标题：`create` 收不到 title（线上契约只有 path）⇒ 单独 rename 一次。
-        // `reused=true` 是历史组重开，标题已经设过，不再覆盖用户可能的改名。
-        if (made.reused !== true && typeof wsFace.rename === 'function') {
-          try {
-            // ⚠ 编号必须从**官方工作区清单**现读，不能用 localStorage 的组数。
-            //
-            // 真机实测（2026-10-06，6 个组里 4 个没被改名）：官方 `rename` 有**重名闸**——
-            // `dsh-api-workspace-controller/lib/index.js:239-241` 在标题与既有工作区重名时
-            // 抛 `workspace/name-conflict` 并**拒改**。而本插件的组留痕写在**后面的 `.then`**
-            // 里（`createConcurrentGroup`），探针每次又是**全新浏览器**（localStorage 为空）
-            // ⇒ `readConcurrentGroups().length` 恒为 0 ⇒ 每一组都取「并发会话组 1」
-            // ⇒ 与上一组撞名 ⇒ 官方拒改、被静默 catch 吞掉 ⇒ 该组永远停在 worktree 目录名。
-            // **不是余量问题，是真缺陷**：未改名的组改成 1 还是 3 取决于浏览器里恰好有几个留痕。
-            //
-            // ⇒ 取「官方清单里已有的 `并发会话组 N` 的最大 N + 1」，并在撞名时递增重试。
-            // 不改用户已改过的名（`reused` 已在上面挡掉）。
-            const existing = typeof wsFace.list === 'function'
-              ? ((wsFace.list() || {}).items || [])
-              : [];
-            let n = 0;
-            for (const w of existing) {
-              const m = /^并发会话组\s*(\d+)$/.exec(String(w && (w.title || w.name) || ''));
-              if (m) n = Math.max(n, Number(m[1]));
-            }
-            // 撞名重试：并发建组时两个组可能算出同一个 N，官方闸会拒第二次。
-            let named = false;
-            for (let i = 1; i <= 20 && !named; i++) {
-              const want = '并发会话组 ' + (n + i);
-              if (existing.some(w => String(w && (w.title || w.name) || '') === want)) continue;
-              try { await wsFace.rename(workspaceId, want); named = true; }
-              catch (e) { if (i === 20) throw e; }
-            }
-          } catch (e) { /* 改名失败不影响归属：分组靠 cwd，不靠标题 */ }
-        }
-        return {
-          ok: true, workspaceId: String(workspaceId), path: String(made.path),
-          branch: made.branch, recipe: made.recipe, reused: made.reused === true,
-        };
-      };
-
       const createColumns = (n) => {
         if (!sessions || typeof sessions.create !== 'function' || busy) return;
         setBusy(true);
         setError('');
         const want = Math.max(1, Math.min(Number(n) || 1, CONCURRENT_MAX_COLS));
-        // 0.19.68（用户：「做不到你就自己新建不行吗？？」）：先给**这一组**开一个专属
-        // 工作区（git worktree + 自己的分支），再让每一列都绑到它 —— 官方左栏于是按官方
-        // 默认分组把这一组收成**一行可折叠的 workspace 行**（long-term-issues #40 的收口）。
-        // 取不到（不是 git 仓库 / 服务面缺席）⇒ 回落旧行为（绑当前工作区），原因如实上屏。
-        //
-        // ⚠ 组 id 在**这里**就定下来（`newConcurrentGroupId()`），随后同时交给
-        // `provisionGroupWorkspace` 与 `createConcurrentGroup(…, gid)`：
-        // 两处用同一个 id，历史组重开时服务端才会回 `reused` 而**复用**已建的 worktree。
-        const pendingGroupId = groupRef.current || newConcurrentGroupId();
-        const existingGroup = groupRef.current
-          ? readConcurrentGroups().find(g => g.id === groupRef.current) || null
-          : null;
-        provisionGroupWorkspace(existingGroup, pendingGroupId)
-          .then((provisioned) => {
-            if (!aliveRef.current) return;
-            if (!provisioned.ok) {
-              setError('独立工作区未建立（' + provisioned.reason + '），已回落为当前工作区');
-            } else if (provisioned.branch) {
-              setWorkspaceNote('本组独立工作区：' + provisioned.branch);
-            }
-            // 绑定优先级：本组专属工作区 → 当前会话的工作区（0.19.62 的回落链）。
-            return provisioned.ok ? provisioned.workspaceId : currentWorkspaceId();
-          })
-          .then((workspaceId) => {
-            if (!aliveRef.current) return;
-            // 0.19.62 真机韧性：带 workspaceId 的 create 若被宿主拒（工作区参数形状漂移、
-            // workspace 未连接、writer-held……），**回落到不绑**重试一次——最坏退回
-            // 0.19.61 的行为（有守卫兜住「选择工作区」那一下），而不是整组建不出来。
-            const make = () => (workspaceId
-              ? sessions.create({ workspaceId }).catch(() => sessions.create({}))
-              : sessions.create({}));
-            return Promise.all(Array.from({ length: want }, make));
-          })
+        const workspaceId = currentWorkspaceId();
+        // 带 workspaceId 的 create 若被宿主拒（工作区参数形状漂移、workspace 未连接、
+        // writer-held……），**回落到不绑**重试一次——最坏退回「不绑」的行为（有守卫兜住
+        // 「选择工作区」那一下），而不是整组建不出来。
+        const make = () => (workspaceId
+          ? sessions.create({ workspaceId }).catch(() => sessions.create({}))
+          : sessions.create({}));
+        Promise.all(Array.from({ length: want }, make))
           .then((ids) => {
             if (!aliveRef.current || !ids) return;
             const added = [];
@@ -3137,14 +3614,6 @@ window.__ModuleLoader__.load({
               } catch (e) { /* 这一列拿不到引用：跳过，而不是留一条永远打不开的列 */ }
             }
             if (!added.length) { setError('新建会话成功但拿不到会话引用'); return; }
-            // 留痕 + 刷左栏目录（0.19.65）：这样「过去的并发会话」才有地方找回来。
-            // 用 `pendingGroupId`（与建 worktree 时同一个 id）——见上面的 ⚠ 说明。
-            try {
-              const fresh = added.map(a => a.sessionId);
-              if (groupRef.current) { for (const id of fresh) appendToConcurrentGroup(groupRef.current, id); }
-              else { groupRef.current = createConcurrentGroup(fresh, pendingGroupId); }
-              if (typeof props.hwbSyncGroups === 'function') props.hwbSyncGroups();
-            } catch (e) { warn('concurrent group record', e); }
             setCols(prev => [...prev, ...added].slice(0, CONCURRENT_MAX_COLS));
           })
           .catch((err) => {
@@ -3152,6 +3621,7 @@ window.__ModuleLoader__.load({
           })
           .finally(() => { if (aliveRef.current) setBusy(false); });
       };
+
 
       /**
        * 把一列移出面板。
@@ -3173,62 +3643,38 @@ window.__ModuleLoader__.load({
         return (row && (row.displayTitle || row.title)) || String(id || '').slice(0, 12);
       };
 
-      /**
-       * 一列的「独立工作区」开工/收尾指令（用户 2026-10-05 的想法：git 分支 + 最后轮转合并）。
-       *
-       * ## 为什么这件事必须由用户/列里的 agent 执行，而不是本插件代跑
-       * 官方沙箱是**按会话**解析工作区根（`dsh-sandbox-policy`：「One primary workspace root
-       * per session … policy resolves `SessionHeader.cwd`」，README §147），而官方 Agent Team
-       * 明确写着「**One process and one shared checkout** — members share cwd …; this package
-       * provides no worktree, remote member, merge, or filesystem lock」，并把 worktree 隔离列为
-       * **未承诺方向**。⇒ 官方流程里**没有** worktree 设施：并发列若共用同一个检出，文件写入
-       * 互相可见（只有「写作用域」这种咨询性约定 + Lead 收尾复核）。
-       *
-       * 所以本插件能做的最实在的一件事，就是把这套**用户自己的隔离流程**变成一键可复制：
-       * 每列一个分支 + 一个 git worktree，收尾时合并回主线（「最后旋转」）。插件不代跑 git
-       *（客户端没有 fs/子进程），也不假装官方有这个能力。
-       *
-       * @param {{sessionId: string}} col 列（真会话）
-       * @param {number} index 列序号（从 0 起）
-       * @returns {string} 可直接粘进该列会话的多行指令
-       */
-      const columnBrief = (col, index) => {
-        const n = index + 1;
-        const branch = 'hwb/col-' + n;
-        const wt = '.hwb/worktrees/col-' + n;
-        return [
-          '这一列（会话 ' + col.sessionId + '）请在**自己的** git 分支与工作区里干活，不要动主检出：',
-          '',
-          '  git worktree add -b ' + branch + ' ' + wt + ' HEAD',
-          '  cd ' + wt,
-          '',
-          '收尾（全部列跑完后，由主线那一列或你本人执行「轮转」）：',
-          '',
-          '  git -C <主检出> merge --no-ff ' + branch,
-          '',
-          '为什么这样：官方 DSH 的沙箱按**会话**解析工作区根（SessionHeader.cwd），并发列共用同一'
-            + '检出时文件写入互相可见；官方 Agent Team 同样是 one shared checkout、不带 worktree。'
-            + '隔离这一步因此落在分支/工作区上，本插件只负责把它变成可复制的指令。',
-        ].join('\n');
-      };
+      // ── 每列「选中的官方视图」（对话 / 轨迹）────────────────────────────────────
+      //
+      // 0.19.68（10-08 轮）：列头页签要**真的切视图**（用户点名「对话 / 轨迹」必须和官方
+      // 一致）。状态放在**外层 ConcurrentColumns**：页签长在 ColumnHeader（外层渲染），
+      // 正文长在会话作用域的 ConcurrentColumn（内层）——用 `renderSlot(slotName, { hwbView })`
+      // 的 owner prop 把选中值传进去（见 ConcurrentColumn 的 `sessionViewsFor(viewId)`）。
+      // 默认 `''` = 不传 view ⇒ 官方按「这条会话自己记住的视图」渲染（与官方单会话一致）。
+      const [viewsByCol, setViewsByCol] = React.useState({});
+      const selectViewFor = (key, viewId) => setViewsByCol(prev => ({ ...prev, [key]: viewId }));
 
-      /** 复制一列的开工指令；剪贴板不可用时把文本摊在面板里（用户自己选中复制）。 */
-      const copyColumnBrief = (col, index) => {
-        let text = '';
-        try { text = columnBrief(col, index); } catch (e) { text = ''; }
-        if (!text) return;
+      // 官方 `conversation.view` 页签清单（对话 / 轨迹）。**读官方注册表**，不写死：
+      // 官方 `viewTabs()` 就是遍历 `slots.entries("conversation.view")` 取 id+label
+      // （`ui-conversation:22798-22809`），并且当「开发者工具」关闭时**跳过 trajectory**。
+      // 我们照抄这条过滤，保证「轨迹」页签的可见性与官方单会话逐字一致。
+      const viewTabs = React.useMemo(() => {
         try {
-          if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(text).then(
-              () => { setBrief(text); setBriefCopied(true); },
-              () => { setBrief(text); setBriefCopied(false); },
-            );
-            return;
+          if (!props.hwbSlots || typeof props.hwbSlots.entries !== 'function') return [];
+          const entries = props.hwbSlots.entries('conversation.view') || [];
+          const devTools = props.hwbDevTools && typeof props.hwbDevTools.getSnapshot === 'function'
+            ? props.hwbDevTools.getSnapshot() : false;
+          const tabs = [];
+          for (const e of entries) {
+            const id = e && e.options ? e.options.id : undefined;
+            if (!id) continue;
+            if (!devTools && id === 'trajectory') continue;
+            const raw = e.options.label;
+            const label = typeof raw === 'function' ? raw() : (raw || id);
+            tabs.push({ id, label });
           }
-        } catch (e) { /* 剪贴板被策略挡住：走下面的摊开路径 */ }
-        setBrief(text);
-        setBriefCopied(false);
-      };
+          return tabs;
+        } catch (e) { return []; }
+      }, [props.hwbSlots, props.hwbDevTools]);
 
       if (!ready) return h('div', { className: 'hwb-concurrent' }, h('p', { className: 'hwb-hint' }, '正在读取并发会话…'));
 
@@ -3250,23 +3696,14 @@ window.__ModuleLoader__.load({
           onClick: () => createColumns(cols.length === 0 ? CONCURRENT_DEFAULT_COLS : 1),
         }, busy ? '…' : (cols.length === 0 ? '新建并发会话' : '+ 加一列')),
         error && h('p', { className: 'hwb-hint bad' }, error),
-        // 本组独立工作区（0.19.68）：让用户一眼知道这一组跑在自己的 worktree/分支上，
-        // 以及收尾时怎么合并回来（「最后旋转」）。**只报事实**：路径/分支来自服务端读数。
-        workspaceNote && h('p', { className: 'hwb-hint', 'data-hwb-workspace-note': '1' }, workspaceNote),
-        brief && h('div', { className: 'hwb-concurrent-brief' },
-          h('div', { className: 'hwb-concurrent-brief-head' },
-            h('span', null, briefCopied
-              ? '已复制到剪贴板：粘进对应列的输入框即可（收尾时按末尾那条合并回主线）'
-              : '剪贴板不可用：请手动选中下面的文本复制'),
-            h('button', {
-              type: 'button', className: 'hwb-concurrent-mini',
-              onClick: () => { setBrief(''); setBriefCopied(false); },
-            }, '收起')),
-          h('pre', { className: 'hwb-concurrent-brief-body' }, brief)),
-        cols.length === 0 && h('p', { className: 'hwb-hint' },
-          '每一列都是一条真的官方会话：各自有独立 sessionId，跑真实的 agent loop，'
-          + '带官方原生的消息、模型选择与输入框。新建之后它们也会出现在左侧会话清单里，'
-          + '可以单独打开、继续、重开。'),
+        // 0.19.68（10-08 轮）：**「⧉ 开工」那一整行已删**（用户第 2 条：「并发会话的『开工』
+        // 那一行去除！！！」）。它是「每组一个 git worktree」那套隔离流程的说明书面板
+        // （`columnBrief` 产的 `git worktree add … / merge --no-ff …` 指令 + 剪贴板降级摊开的
+        // 文本），随 worktree 供地一并撤掉：`columnBrief` / `copyColumnBrief` / `brief` /
+        // `briefCopied` 状态与 `.hwb-concurrent-brief*` 样式全部删除，不留死代码。
+        // 同理「本组独立工作区：hwb/concurrent/<组id>」那行提示（`workspaceNote`）也删——
+        // 会话现在就跑在**当前工作区**里（官方口径：一个文件夹内一条会话一行）。
+        cols.length === 0 && h('p', { className: 'hwb-hint' }, '正在新建 ' + CONCURRENT_DEFAULT_COLS + ' 条会话…'),
         cols.length > 0 && h('div', { className: 'hwb-concurrent-viewport' },
           cols.length > visible && h('button', {
             type: 'button', className: 'hwb-concurrent-pan left', disabled: !canPanLeft,
@@ -3281,43 +3718,47 @@ window.__ModuleLoader__.load({
             'data-cols': String(cols.length),
             style: { transform: 'translateX(' + (-first * (colWidth + COL_GAP)) + 'px)' },
           },
-          // 0.19.65（用户第 4 条）：**列与列之间只留左右间隔**（16px，与平移步长同值），
-          // 间隔本身是一个真元素——鼠标移上去才画出 1px 竖线，平时完全隐藏。
-          // 「上下不用框」：列不画边框、不画分隔线，列头平时隐形（既有行为）。
+          // 列与列之间那条 16px 间隔现在是**拖拽把手**（用户第 5 条）：
+          // 平时只有一条 hover 才现形的 1px 竖线（与官方 `widthHandle` 同观感：
+          // `opacity:0` → hover/拖动时 `opacity:1`），按住左右拖即调整**所有列**的统一宽度，
+          // 双击复位。`cursor:col-resize` 与官方把手逐字同值。
           cols.reduce((acc, col, i) => {
             if (i > 0) {
-              acc.push(h('div', { key: 'gap:' + col.key, className: 'hwb-concurrent-gap', 'aria-hidden': 'true' },
-                h('span', { className: 'hwb-concurrent-gap-line' })));
+              acc.push(h('div', {
+                key: 'gap:' + col.key,
+                className: 'hwb-concurrent-gap',
+                role: 'separator',
+                'aria-orientation': 'vertical',
+                title: '拖动调整列宽 · 双击复位',
+                onPointerDown: onGapPointerDown,
+                onDoubleClick: resetColWidth,
+              }, h('span', { className: 'hwb-concurrent-gap-line' })));
             }
             acc.push(h('div', { key: col.key, className: 'hwb-concurrent-col' },
-              h('div', { className: 'hwb-concurrent-col-head' },
-                h('span', { className: 'hwb-concurrent-col-title', title: col.sessionId }, titleOf(col.sessionId)),
-                h('button', {
-                  type: 'button', className: 'hwb-concurrent-mini',
-                  title: '把这一条会话交回官方单会话视图打开（那里才有官方的标题栏/标准模式/后台任务/团队）',
-                  onClick: () => {
-                    try {
-                      // 先放行（见守卫里的 allowLeave），再交回官方视图；否则守卫会把我们拉回来。
-                      if (props.hwbAllowLeave) props.hwbAllowLeave();
-                      if (props.hwbOpenOfficial) props.hwbOpenOfficial(col.sessionId);
-                    } catch (e) { warn('open official view (column)', e); }
-                  },
-                }, '↗ 官方视图'),
-                h('button', {
-                  type: 'button', className: 'hwb-concurrent-mini',
-                  title: '复制这一列的「独立工作区」指令（git worktree + 分支，收尾时合并回主线）',
-                  onClick: () => copyColumnBrief(col, cols.indexOf(col)),
-                }, '⧉ 开工'),
-                h('button', {
-                  type: 'button', className: 'hwb-concurrent-mini',
-                  title: '把这一列移出面板（不删那条会话）',
-                  onClick: () => releaseColumn(col.key),
-                }, '✕')),
+              // 列顶栏：**官方单会话 header 的高保真复刻**（结构/类名/图标/aria 全照官方），
+              // 渲染在会话作用域**之外**（用根 hook 按 sessionId 读官方投影），因此拿得到
+              // releaseColumn / hwbOpenOfficial 这些只有外层才有的闭包。
+              h(HwbBoundary, { label: '列顶栏 ' + titleOf(col.sessionId) },
+                h(ColumnHeader, {
+                  sessionId: col.sessionId,
+                  useSessions: props.useSessions,
+                  useSessionStatus: props.useSessionStatus,
+                  useJobs: props.useJobs,
+                  watchRows: props.watchRows,
+                  viewId: viewsByCol[col.key] || 'chat',
+                  viewTabs,
+                  onSelectView: (id) => selectViewFor(col.key, id),
+                  onRemove: () => releaseColumn(col.key),
+                  hwbOpenOfficial: props.hwbOpenOfficial,
+                  hwbAllowLeave: props.hwbAllowLeave,
+                })),
               h('div', { className: 'hwb-concurrent-col-body' },
                 SessionProvider && refsRef.current[col.sessionId]
                   ? h(HwbBoundary, { label: '并发列 ' + titleOf(col.sessionId) },
                     h(SessionProvider, { session: refsRef.current[col.sessionId] },
-                      renderSlot(slotName, {})))
+                      // `hwbView` 是**owner prop**：穿过官方 slot 渲染进到列正文组件，
+                      // 由 ConcurrentColumn 交给 `views` 局部槽 ⇒ 页签真的切官方视图。
+                      renderSlot(slotName, { hwbView: viewsByCol[col.key] || '' })))
                   : h('p', { className: 'hwb-hint' }, '这一列的会话引用不可用（换 profile 或会话被删）'))));
             return acc;
           }, []))),
@@ -3422,8 +3863,8 @@ window.__ModuleLoader__.load({
         h(HwbBoundary, { label: '并发会话面板' },
           h(ConcurrentColumns, {
             ...props,
-            // 「本面板主动放行」的接线（0.19.65）：列头那颗「↗ 官方视图」用它告诉守卫
-            // 「这一下是用户明确要离开」，否则守卫会把面板拉回来（真机实测过）。
+            // 「本面板主动放行」的接线（0.19.65）：顶栏「更多操作」菜单里的「在官方视图打开」
+            // 用它告诉守卫「这一下是用户明确要离开」，否则守卫会把面板拉回来（真机实测过）。
             hwbAllowLeave: () => { try { factsRef.current.allowLeave = true; } catch (e) { /* 放行标记失败不影响面板 */ } },
           })));
     }
@@ -3505,6 +3946,21 @@ window.__ModuleLoader__.load({
      */
     function layoutFaceOf(ctx) {
       try { return ctx.layout; } catch (e) { return undefined; }
+    }
+
+    /**
+     * 读「开发者工具」开关的**唯一入口**（0.19.68（10-08 轮））。
+     *
+     * 官方 `viewTabs()` 用它决定「轨迹」页签是否出现（`ui-conversation:22803`）。返回官方那个
+     * `enabled` observable（带 `getSnapshot()`）；服务缺席（旧宿主/测试桩）返回 undefined ⇒
+     * 调用方按「关闭」处理（不显示轨迹页签），与官方默认一致。inject 已补 `'configForms'`，
+     * 所以这里的 try/catch 只兜「服务确实缺席」，不兜 inject 漏声明（那由 team-compare 判据变红）。
+     *
+     * @param {Object} ctx 客户端插件上下文
+     * @returns {{getSnapshot: Function}|undefined} 开发者工具开关 observable（缺席为 undefined）
+     */
+    function devToolsFaceOf(ctx) {
+      try { return ctx.configForms.developerTools.enabled; } catch (e) { return undefined; }
     }
 
     /**
@@ -3622,9 +4078,9 @@ window.__ModuleLoader__.load({
       // 开在 portal 里，DOM 不在面板子树内，挂在面板根上的监听永远看不到那一下）。
       const onDocumentPointerDown = (ev) => {
         try {
-          // 「本面板主动放行」（0.19.65）：列头的「↗ 官方视图」是**用户明确要离开**的按钮，
-          // 但它在面板内点击 ⇒ 会被判成「面板内点击/门户链」而拉回来（真机实测就是这条把
-          // 官方视图挡住的）。所以放行标记优先于一切指纹。
+          // 「本面板主动放行」（0.19.65）：顶栏「更多操作 → 在官方视图打开」是**用户明确要离开**
+          // 的动作，但它由面板内点击发起 ⇒ 会被判成「面板内点击/门户链」而拉回来（真机实测就是
+          // 这条把官方视图挡住的）。所以放行标记优先于一切指纹。
           if (probe && probe.allowLeave) {
             probe.allowLeave = false;
             lastInsidePointerAt = 0;
@@ -3670,6 +4126,20 @@ window.__ModuleLoader__.load({
             if (active === panelId) return;             // 仍是本面板：无事
             if (active !== null) return;                // 别的全局面板被选中：放行（用户真实选择）
             // 面板被切回「单个会话」：两类判据（机制见函数头注释）。
+            //
+            // 0.19.68（10-07 轮）（#47④「↗ 官方视图」knownGap 的根因，实读时序得出）：放行标记
+            // `probe.allowLeave` 由按钮的 **onClick** 置位，而 onClick 发生在 pointerdown
+            // **之后**——pointerdown 捕获期那个消费点永远读到的都是 false（真机两轮实测
+            // `knownGapOpenOfficial`）。订阅回调才是「跳走那一刻」真正做决策的地方，
+            // 所以这里必须同样消费标记：用户明确要离开 ⇒ 清掉面板内指纹、放行。
+            if (probe && probe.allowLeave) {
+              probe.allowLeave = false;
+              lastInsidePointerAt = 0;
+              popupOwnedAt = 0;
+              forensics.lastActive = active;
+              forensics.lastDecision = 'allow:leave';
+              return;
+            }
             const now = Date.now();
             const insideWindow = now - lastInsidePointerAt <= PANEL_GUARD_MS;
             // 门户链：面板内那一下打开了浮层，随后在浮层里又点了一下（落点在面板外、
@@ -6603,11 +7073,13 @@ window.__ModuleLoader__.load({
         // 左右切换看列——所以「3 个会话宽度同步」在结构上成立。
         ".hwb-concurrent-viewport{position:relative;flex:1;min-height:0;overflow:hidden;display:flex}",
         ".hwb-concurrent-columns{display:flex;gap:0;min-height:0;flex:none;transition:transform .18s ease}",
-        // 列间「左右间隔」：一个真元素（16px，与平移步长 COL_GAP 同值），平时隐形；
-        // 鼠标移到间隔上才画出 1px 竖线（用户第 4 条）。上下不画任何框线。
-        ".hwb-concurrent-gap{flex:0 0 16px;position:relative;align-self:stretch}",
+        // 列间「左右间隔」= **拖拽把手**（0.19.68（10-08 轮），用户第 5 条「像官方那样调整
+        // 会话宽度」）：16px 宽（与平移步长 COL_GAP 同值），`cursor:col-resize` 与官方
+        // `widthHandle` 逐字同值；平时只有一条 hover / 拖动才现形的 1px 竖线（与官方把手
+        // 同观感：官方 `.wSkVaW_widthHandle:after` 也是 opacity 0→1）。上下不画任何框线。
+        ".hwb-concurrent-gap{flex:0 0 16px;position:relative;align-self:stretch;cursor:col-resize;touch-action:none}",
         ".hwb-concurrent-gap-line{position:absolute;left:50%;top:10px;bottom:10px;width:1px;margin-left:-.5px;background:var(--dsw-alias-border-l3,#8886);opacity:0;transition:opacity .12s ease}",
-        ".hwb-concurrent-gap:hover .hwb-concurrent-gap-line{opacity:1}",
+        ".hwb-concurrent-gap:hover .hwb-concurrent-gap-line,.hwb-concurrent-gap[data-dragging] .hwb-concurrent-gap-line{opacity:1}",
         // 尊重「减少动态效果」偏好：平移是纯装饰性的。
         "@media (prefers-reduced-motion:reduce){.hwb-concurrent-columns{transition:none}}",
         // 左右切换按钮：绝对定位在中间区左右边缘、垂直居中；底色与毛玻璃取自官方胶囊
@@ -6622,33 +7094,20 @@ window.__ModuleLoader__.load({
         // 本轮改的是「列里装什么」，外观判据没变，因此这一对的取值逐字保留。
         ".hwb-concurrent-col{flex:0 0 var(--hwb-col-width,420px);width:var(--hwb-col-width,420px);background:transparent;border:0;border-radius:12px;display:flex;flex-direction:column;min-height:0;overflow:hidden;transition:background-color .12s ease,box-shadow .12s ease}",
         ".hwb-concurrent-col:hover,.hwb-concurrent-col:focus-within{background:var(--dsw-alias-interactive-bg-hover,#00000008);box-shadow:inset 0 0 0 .5px var(--dsw-alias-border-l3,#8884)}",
-        // 列头只放「这是哪条会话」与一个移出按钮，并且平时隐形：用户第 1 点要求上方不占位。
-        // 会话身份仍然可见（hover / 键盘进入本列才随那点光一起现形），用户要能核对。
-        // 列头 = 官方 header 的**第一段**（0.19.65，用户 2026-10-06：「顶部对应单会话的名称…
-        // 那一行的显示」+「你可以做到一摸一样吗」）。官方 header 的标题是**常显**的，所以这里
-        // 去掉 0.19.29 那套「hover 才现形」；官方那三块 chip（标准模式 / 后台任务 / 团队）由
-        // 三个官方包注册进 `conversation.header` 槽，而该槽的公开投影**不含组件**
-        //（`dsh-client-ui-slots/lib/index.js:313`：exported **without components**）⇒ 受支持的
-        // 路径下拿不到，只能后续按「复刻」处理（见 dsh-client-ui-slots/lib/index.js:313（公开投影「without components or executable hooks」））。
-        ".hwb-concurrent-col-head{display:flex;align-items:center;gap:8px;flex:none;padding:0 12px;height:44px;box-sizing:border-box}",
-        ".hwb-concurrent-col-title{flex:1;min-width:0;font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary,inherit);opacity:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
-        ".hwb-concurrent-col:hover .hwb-concurrent-col-title,.hwb-concurrent-col:focus-within .hwb-concurrent-col-title{opacity:1}",
-        ".hwb-concurrent-mini{flex:none;height:24px;padding:0 8px;font:inherit;font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary,#666);cursor:pointer;background:transparent;border:none;border-radius:8px;opacity:0;transition:opacity .12s,background-color .1s}",
-        ".hwb-concurrent-col:hover .hwb-concurrent-mini,.hwb-concurrent-col:focus-within .hwb-concurrent-mini{opacity:1}",
-        ".hwb-concurrent-mini:hover{background:var(--dsw-alias-interactive-bg-hover-solid,#00000012);color:var(--dsw-alias-label-primary)}",
+        // 列顶栏 = **官方 header 的高保真复刻**（0.19.68（10-08 轮），用户「和官方一致顶部」）。
+        // 它直接挂官方 CSS module 的哈希类名（`wSkVaW_header` / `wSkVaW_titleRow` / …），
+        // 那些规则由官方包在启动时注入 document.head、页面全局生效 ⇒ 主题 token / hover /
+        // container query 全部与官方单会话逐字一致。这里只补两条**布局适配**（不改官方观感）：
+        //   · 复刻 header 在窄列里也 `flex:none`（官方那条 `.wSkVaW_header{flex:none}` 本就带，
+        //     这里再钉一次防止被列的 flex 上下文影响）；
+        //   · 官方 header 的左右内边距（`padding:10px 28px 0 20px`）是为整幅中央区设计的，
+        //     在 ~420px 的列里偏宽 ⇒ 收窄到 `10px 12px 0 12px`，让 chips 在窄列里放得下。
+        //     这是「多隔开 3 列」必然带来的尺寸适配，不是另起一套视觉。
+        ".hwb-concurrent-col>header[data-hwb-column-header]{flex:none;padding-left:12px;padding-right:12px}",
         // 列体：官方会话体自己带滚动容器（`[data-conversation-scroll]`），这里只保证高度
         // 确定，并把**官方那一份**撑满本列（`>*` 只作用于直接子节点，不会串到别处）。
         ".hwb-concurrent-col-body{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}",
         ".hwb-concurrent-body{position:relative;display:flex;flex-direction:column;flex:1;min-height:0;width:100%;overflow:hidden}",
-        // 列头的三块 chip（照抄官方 header）：形态与官方一致（小圆角胶囊 / 12px / 次要色），
-        // 拿不到数据的那块**不渲染**（宁可少一块，也不摆一个假壳）。
-        ".hwb-concurrent-chips{display:flex;align-items:center;gap:6px;flex:none;padding:0 12px 6px;flex-wrap:wrap}",
-        ".hwb-concurrent-chip{font-size:12px;line-height:20px;padding:1px 8px;border-radius:9px;border:.5px solid var(--dsw-alias-border-l3,#8885);color:var(--dsw-alias-label-secondary,inherit);white-space:nowrap}",
-        // 「开工指令」面板（0.19.64）：一列的独立工作区（git worktree + 分支）指令。
-        // 它属于**面板**而不是列：指令是给用户复制走的，摊在列里会把列挤变形。
-        ".hwb-concurrent-brief{margin:8px 12px 0;padding:8px 10px;border:.5px solid var(--dsw-alias-border-l3,#8884);border-radius:10px;background:var(--dsw-alias-bg-layer-1,#00000005)}",
-        ".hwb-concurrent-brief-head{display:flex;align-items:center;gap:8px;justify-content:space-between;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,inherit)}",
-        ".hwb-concurrent-brief-body{margin:6px 0 0;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:18px;color:var(--dsw-alias-label-primary,inherit)}",
         ".hwb-concurrent-body>*{flex:1 1 auto;min-height:0;min-width:0}",
       ].join('');
       document.head.appendChild(style);
@@ -7083,85 +7542,17 @@ window.__ModuleLoader__.load({
         } catch (e) { warn('tab menu item (window)', e); }
       });
 
-      // ---- 左栏「并发会话目录」：找回过去的组（0.19.65，用户 2026-10-06）------------
+      // ---- 左栏「并发会话目录」（历史组行）：**已删除**（0.19.68（10-08 轮），用户明令）------
       //
-      // 用户原话：「像是左侧新增同『工作区』面板视图并级的目录显示并发会话那样！
-      // 否则怎么找回已过去的并发会话！！！」。官方契约给了做法（`ui-cordis-client-runner`
-      // 对 sidebar.panellist 的说明原文：「**Each list id addresses the matching main panel**」）：
-      // 每一组 = 一条 `sidebar.panellist` 行 + 一个**同名 `main` key**；点行 → 打开那个面板。
-      // 主入口（并发会话）负责**新建**一组；这些历史行负责**找回**。
+      // 用户原话：「『并发会话』在插件栏目怎么会出现什么『并发会话.3列』？？？？？？？？不要这个」。
+      // 旧实现在这里为**每一组**注册一条 `sidebar.panellist` 行（label「并发会话 · N 列」）+ 一个
+      // 同名 `main` key（`syncGroupRows` / `groupRows`），本意是「找回过去的并发会话」。
+      // 本轮整套撤掉：左栏只剩**一条**「并发会话」入口，不再随组数增长。
       //
-      // 三个细节都是有理由的，别省：
-      //   · **幂等**：已登记的组直接跳过（面板建完新组后会再喊一次 `syncGroupRows`）；
-      //   · **子槽名每组唯一**：`conversation` 那类槽名全局唯一，重复声明会抛
-      //     `slot "X" is already declared`，所以列正文槽名带上组 id；
-      //   · **全程 try/catch**：目录里任何一处失败都只损失那一行，不影响主入口。
-      const groupRows = new Map();
-      const syncGroupRows = () => {
-        try {
-          for (const g of readConcurrentGroups()) {
-            const key = CONCURRENT_GROUP_PREFIX + g.id;
-            if (groupRows.has(key)) continue;
-            const colSlot = CONCURRENT_COLUMN_SLOT + ':' + g.id;
-            const offRow = (() => {
-              try {
-                return ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
-                  name: 'sidebar.panellist', id: key, order: 31,
-                  // 行文字带列数：一眼能看出那一组有几条会话（找回来时最要紧的信息）。
-                  label: () => '并发会话 · ' + g.ids.length + ' 列',
-                }, ConcurrentPanelIcon));
-              } catch (e) { warn('concurrent group row', e); return null; }
-            })();
-            const offPanel = (() => {
-              try {
-                return ctx.slots.inject('main', () => ctx.slots.register({
-                  name: 'main', key,
-                  children: { [colSlot]: { kind: 'single', scope: 'session' } },
-                }, (props) => h(HwbBoundary, { label: '并发会话（历史组）' },
-                  h(ConcurrentPanel, {
-                    ...props,
-                    sessions: ctx.sessions,
-                    layout: layoutFaceOf(ctx),
-                    slotName: colSlot,
-                    groupKey: 'group:' + g.id,
-                    hwbGroup: g,
-                    hwbSyncGroups: syncGroupRows,
-                    // 本组专属工作区（0.19.68）：历史组重开时**复用**已建的那个
-                    //（目录已在 ⇒ 服务端回 reused，不重复 rename），见 provisionGroupWorkspace。
-                    hwbWorkspaces: ctx.workspaces,
-                  }))));
-              } catch (e) { warn('concurrent group panel', e); return null; }
-            })();
-            const offCol = (() => {
-              try {
-                return ctx.slots.inject(colSlot, () => ctx.slots.register(
-                  {
-                    name: colSlot,
-                    // 与主入口同一套：jobs 的 store + watchRows 经槽 inject 发给列组件（照抄 ui-jobs）。
-                    inject: () => ({
-                      hooks: { jobs: ctx.jobs.state },
-                      watchRows: (sid) => ctx.jobs.watchRows(sid),
-                    }),
-                  },
-                  (props) => h(ConcurrentColumn, props),
-                ));
-              } catch (e) { warn('concurrent group column', e); return null; }
-            })();
-            groupRows.set(key, () => {
-              try { if (offCol) offCol(); } catch (e) { /* 卸载期失败不影响其余注销 */ }
-              try { if (offPanel) offPanel(); } catch (e) { /* 同上 */ }
-              try { if (offRow) offRow(); } catch (e) { /* 同上 */ }
-            });
-          }
-        } catch (e) { warn('concurrent group rows', e); }
-      };
-      own(() => {
-        syncGroupRows();
-        return () => {
-          for (const off of groupRows.values()) { try { off(); } catch (e) { /* 同上 */ } }
-          groupRows.clear();
-        };
-      });
+      // 为什么撤掉不算丢功能：那些会话本来就是 Host 上的真会话，**官方左栏的会话清单**
+      // 就是它们的家（按工作区分组，一个文件夹里一条会话一行——正是用户第 1 条要的口径）。
+      // 插件再立一套自己的目录，等于在官方清单旁边多出一份会漂移的副本。
+      // 连带删除：组留痕存储族（见 `CONCURRENT_DEFAULT_COLS` 上方那段说明）。
 
       // 会话头角落席位让官方 dsh-client-ui-sidebar-right 持有（其 ExpandButton
       // 与本面板同 store、同 toggleExpanded 职责，重复声明反酿席位冲突）。
@@ -7219,6 +7610,14 @@ window.__ModuleLoader__.load({
               // 声明一个 **session 作用域**子槽，是本面板能拿到官方 `SessionProvider` 与
               // `renderSlot` 的唯一途径（dsh-client-ui-renderer/lib/client.js:732-739）。
               children: { [CONCURRENT_COLUMN_SLOT]: { kind: 'single', scope: 'session' } },
+              // 后台任务数据面（0.19.68（10-08 轮））：列顶栏 `ColumnHeader` 在**面板层**
+              // 渲染（不是会话层），所以 jobs 的 store + watchRows 要 inject 到**这一条**
+              // main 注册上（照官方 `ui-jobs:610-621` 的座位声明），经标准 props 变成
+              // `useJobs` / `watchRows` 交给 ConcurrentColumns → ColumnHeader。
+              inject: () => ({
+                hooks: { jobs: ctx.jobs.state },
+                watchRows: (sid) => ctx.jobs.watchRows(sid),
+              }),
             // 整个条目**再包一层**插件自建边界（0.19.63）。0.19.62 的边界包在
             // `ConcurrentPanel` 内部，而「构造 ConcurrentPanel 元素本身」抛错时它够不着
             // ——真机空白正是这一种形态（组件函数里读 `ctx.layout` 即抛）。边界提到条目
@@ -7230,15 +7629,13 @@ window.__ModuleLoader__.load({
                 // 经 layoutFaceOf 读，缺席时降级为「没有守卫」（见该函数的注释）。
                 layout: layoutFaceOf(ctx),
                 slotName: CONCURRENT_COLUMN_SLOT,
-                groupKey: 'panel',
-                // 主入口建完一组后，让左栏「并发会话目录」立刻多出那一行（0.19.65）。
-                hwbSyncGroups: syncGroupRows,
-                // 本组专属工作区（0.19.68）：主入口点「并发会话」= 新建一组 ⇒ 也为它
-                // 新开一个 git worktree 工作区，官方左栏于是把这一组收成一行。
-                hwbWorkspaces: ctx.workspaces,
-                // 「↗ 用官方视图打开」：官方 header 那几块 chip（标准模式 / 后台任务 / 团队）只由
-                // 官方会话视图渲染（槽的公开投影不含组件，见 dsh-client-ui-slots/lib/index.js:313（公开投影「without components or executable hooks」）），所以受支持的做法
-                // 是把这一条会话**交回官方视图**——`uiWorkspace.openSession`。失败只 warn，不影响面板。
+                // 列顶栏页签（对话 / 轨迹）要读官方视图注册表与「开发者工具」开关：
+                // `hwbSlots` = ctx.slots（读 conversation.view 的 id/label），
+                // `hwbDevTools` = 开发者工具开关快照（关时隐藏「轨迹」，与官方逐字一致）。
+                hwbSlots: ctx.slots,
+                hwbDevTools: devToolsFaceOf(ctx),
+                // 「在官方视图打开」：把这一条会话交回官方单会话视图——`uiWorkspace.openSession`。
+                // 失败只 warn，不影响面板。
                 hwbOpenOfficial: (sid) => {
                   try { ctx.uiWorkspace.openSession(sid); } catch (e) { warn('open official view', e); }
                 },
@@ -7247,12 +7644,13 @@ window.__ModuleLoader__.load({
             const offCol = ctx.slots.inject(CONCURRENT_COLUMN_SLOT, () => ctx.slots.register(
               {
                 name: CONCURRENT_COLUMN_SLOT,
-                // 照抄官方 `ui-jobs` 的座位声明（`ui-jobs:610-621`）：把 jobs 的 store 与
-                // `watchRows` 通过槽的 inject 发给我们的列组件 ⇒ 列头能显示「N 个后台任务运行中」。
-                inject: () => ({
-                  hooks: { jobs: ctx.jobs.state },
-                  watchRows: (sid) => ctx.jobs.watchRows(sid),
-                }),
+                // ⚠ 不得声明 `conversation.session.header` 为 child（0.19.68（10-07 轮）真机取证，
+                // 0.2.1-alpha.1 复核仍成立）：一个槽名只允许声明一次，官方 registerHeader 已声明它
+                // （`ui-conversation:23073-23086`），再声明必抛 `already declared` 且**列条目注册整体
+                // 失败 ⇒ 列体全空**。⇒ 列顶栏由 `ColumnHeader` **复刻**（官方类名/图标/aria/投影键），
+                // 而不是 renderSlot 官方那一份。完整两道闸说明见 ColumnHeader 顶部注释。
+                // 0.19.68（10-08 轮）：jobs inject 已上移到 main 面板注册（列顶栏在面板层渲染），
+                // 这里不再需要 inject。
               },
               (props) => h(ConcurrentColumn, props),
             ));
@@ -7263,6 +7661,7 @@ window.__ModuleLoader__.load({
           });
         } catch (e) { warn('main panel body (concurrent)', e); }
       });
+
 
       // ---- 右栏页签版并发视图（0.19.67，用户：「右侧 tab 功能一并抄上」）------------
       //
@@ -7283,8 +7682,6 @@ window.__ModuleLoader__.load({
       // 只在全屏下实用**。本版与主面板版**并存**，用户按需选。
       const RAIL_TAB_ID = 'webcode-concurrent/rail';
       const RAIL_COL_SLOT = 'webcode-concurrent.rail.column';
-      /** 右栏版显示**最近一组**（左栏目录里最新那条）。 */
-      const latestGroup = () => { try { return readConcurrentGroups()[0] || null; } catch (e) { return null; } };
       own(() => {
         try {
           const off = ctx.sidebarRightTabs.register({
@@ -7308,16 +7705,19 @@ window.__ModuleLoader__.load({
             name: 'sidebar.right.pane.tab',
             key: RAIL_TAB_ID,
             children: { [RAIL_COL_SLOT]: { kind: 'single', scope: 'session' } },
+            // 与主面板同款：jobs 数据面 inject 到这一条（列顶栏在面板层渲染）。
+            inject: () => ({
+              hooks: { jobs: ctx.jobs.state },
+              watchRows: (sid) => ctx.jobs.watchRows(sid),
+            }),
           }, (props) => h(HwbBoundary, { label: '并发会话（右栏）' },
             h(ConcurrentColumns, {
               ...props,
               sessions: ctx.sessions,
               layout: layoutFaceOf(ctx),
               slotName: RAIL_COL_SLOT,
-              groupKey: 'rail',
-              hwbGroup: latestGroup(),
-              hwbSyncGroups: syncGroupRows,
-              hwbWorkspaces: ctx.workspaces,
+              hwbSlots: ctx.slots,
+              hwbDevTools: devToolsFaceOf(ctx),
               hwbOpenOfficial: (sid) => { try { ctx.uiWorkspace.openSession(sid); } catch (e) { warn('open official view (rail)', e); } },
             }))));
         } catch (e) { warn('concurrent rail tab body', e); }
@@ -7327,11 +7727,8 @@ window.__ModuleLoader__.load({
           return ctx.slots.inject(RAIL_COL_SLOT, () => ctx.slots.register(
             {
               name: RAIL_COL_SLOT,
-              // 与主入口同款：jobs 数据面经槽 inject 发给列组件（照 `ui-jobs:610-621`）。
-              inject: () => ({
-                hooks: { jobs: ctx.jobs.state },
-                watchRows: (sid) => ctx.jobs.watchRows(sid),
-              }),
+              // ⚠ 不得声明 conversation.session.header 为 child（两道闸，见主面板列注册处注释）。
+              // 列顶栏走 ColumnHeader 复刻；jobs 数据面已上移到右栏页签注册，这里不再 inject。
             },
             (props) => h(ConcurrentColumn, props),
           ));

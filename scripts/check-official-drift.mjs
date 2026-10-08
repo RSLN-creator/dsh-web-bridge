@@ -117,6 +117,54 @@ const SEGMENTS = [
     why: '客户端热换链（mtime/ctime/size → rebuilt 帧）——桌面端「不重启就生效」的全部依据',
     patterns: [/artifactRevision|mtimeMs/, /clientModules\.rebuilt/, /pollIntervalMs/],
   },
+  {
+    id: 'session-mention-encoding',
+    file: 'dsh-session-reference/lib/index.js',
+    why: '会话引用的官方编码（@[label](dsh-session:<base64url(JSON(id))>)）——跨列引用「⇥ 引用」按钮已按用户 10-08 口径删除，但**宿主原生语法仍在**（用户可手打），官方改形状则手打的引用也会失效，故保留监控',
+    patterns: [/function encodeSessionReferenceUri/, /function formatSessionReferenceMention/, /function escapeLabel/],
+  },
+  {
+    id: 'session-header-children',
+    file: 'dsh-client-ui-conversation/lib/client.js',
+    why: '列顶栏复刻的官方 header 子槽结构（registerSessionHeader 声明 lineage/actions/utilities/corner）——0.19.68（10-08 轮）ColumnHeader 按这棵树逐字复刻 DOM，官方增删子槽则复刻失同步',
+    patterns: [/name: "conversation\.session\.header"/, /"conversation\.session\.header\.actions"/, /"conversation\.session\.header\.utilities"/, /"conversation\.session\.header\.corner"/],
+  },
+  {
+    id: 'preset-readonly-label',
+    file: 'dsh-client-ui-agent-preset/lib/client.js',
+    why: '列顶栏「模式」chip 的只读形态（AgentPresetLabel 渲染 span 而非按钮 + Read-only by construction）——复刻成只读标签的依据，官方改成可点则复刻失同步',
+    patterns: [/function AgentPresetLabel/, /Read-only by construction/],
+  },
+  {
+    id: 'subagent-count-i18n',
+    file: 'dsh-client-ui-subagent/lib/client.js',
+    why: '列顶栏「子智能体」chip 复刻的官方文案（count.total.one「{count} 个子智能体」）——官方改字则 HEADER_TEXT.subagents 失同步',
+    patterns: [/"count\.total\.one": "\{count\} 个子智能体"/],
+  },
+  {
+    id: 'team-action-i18n',
+    file: 'dsh-experimental-client-ui-agent-team/lib/client.js',
+    why: '列顶栏「团队」chip 复刻的官方文案（trigger「智能体团队」）与投影键（projectionsBySession[lead].values.agentTeam）——官方改字/改键则复刻失同步',
+    patterns: [/trigger: "智能体团队"/, /projectionsBySession\[leadSessionId\]/],
+  },
+  {
+    id: 'open-in-app-routes',
+    file: 'dsh-client-ui-open-in-app/lib/client.js',
+    why: '列顶栏「用 X 打开 / 更多打开方式」走的官方公开路由（apps/open/icon）——官方改路由则复刻的按钮 404',
+    patterns: [/OPEN_IN_APP_APPS_ROUTE = "\/open-in-app\/apps"/, /OPEN_IN_APP_OPEN_ROUTE = "\/open-in-app\/open"/, /OPEN_IN_APP_ICON_PREFIX_ROUTE = "\/open-in-app\/icon"/],
+  },
+  {
+    id: 'session-export-route',
+    file: 'dsh-session-log-export/lib/client.js',
+    why: '列顶栏「更多操作 → 下载 Session 日志」走的官方路由（api/session.export）与 zip 文件名口径——官方改路由/文件名则复刻的下载失效',
+    patterns: [/SESSION_LOG_EXPORT_ROUTE = "\/api\/session\.export"/, /function sessionLogZipFilename/],
+  },
+  {
+    id: 'jobs-live-status',
+    file: 'dsh-client-ui-jobs/lib/client.js',
+    why: '列顶栏「后台任务」chip 的「运行中」判据（status running/stopping，与官方 isLive 同义）——官方改状态字面量则计数失同步',
+    patterns: [/status === "running"/, /status === "stopping"/],
+  },
 ];
 
 /** 极简 asar 读取：头 16 字节 + JSON 目录 + 相对偏移。 */
