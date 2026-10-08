@@ -1,5 +1,5 @@
 {
-  "at": "2026-10-08T00:46:40.344Z",
+  "at": "2026-10-08T15:05:21.498Z",
   "asar": "D:/2_Download_Main/4_DeepSeek Harness_code/resources/app.asar",
   "segments": {
     "conversation-view-switcher": {
@@ -306,6 +306,26 @@
         },
         {
           "pattern": "/function sessionLogZipFilename/",
+          "hits": 1
+        }
+      ]
+    },
+    "primitives-button-and-chevrons": {
+      "file": "dsh-client-ui-primitives/lib/index.js",
+      "why": "列平移按钮用的官方原子（0.19.69，用户口径 A：直接用 primitives.Button + 官方 chevron）——Button 的 variant/size 取值与两颗 chevron 图标的导出名一旦变，我们的按钮会掉样式或画不出图标",
+      "sha256": "e26bda9bce97f358",
+      "lines": 3,
+      "perPattern": [
+        {
+          "pattern": "/const Button = forwardRef\\(function Button\\(\\{ variant = \"ghost\", size = \"md\"/",
+          "hits": 1
+        },
+        {
+          "pattern": "/const IconChevronLeftOutlineRegular = /",
+          "hits": 1
+        },
+        {
+          "pattern": "/const IconChevronRightOutlineRegular = /",
           "hits": 1
         }
       ]

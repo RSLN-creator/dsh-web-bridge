@@ -317,12 +317,19 @@ test('★ 0.19.55 并发：列宽上下限取自官方常量，放不下时左�
   assert.match(src, /\.hwb-concurrent-col\{[^}]*flex:0 0 var\(--hwb-col-width/,
     '列宽必须由 --hwb-col-width 统一给（三列同一个值 ⇒ 宽度同步）');
   assert.match(body, /'--hwb-col-width': colWidth \+ 'px'/, '列宽是算出来的像素值，挂在 style 上');
-  assert.match(body, /cols\.length > visible && h\('button'/, '放不下才出现切换按钮');
-  assert.match(body, /const visible = Math\.max\(1, Math\.floor\(\(viewportW \+ COL_GAP\) \/ \(colWidth \+ COL_GAP\)\)\)/,
-    '可见列数按整数列算，不出现半列');
-  assert.ok(body.includes("transform: 'translateX(' + (-first * (colWidth + COL_GAP)) + 'px)'"),
-    '平移量必须是整列宽 + 列间距（永远整列对齐）');
-  assert.match(body, /const maxFirst = Math\.max\(0, cols\.length - visible\)/, '必须有平移上界');
+  assert.match(body, /maxOffset > 0\.5 && h\(Button/, '放不下才出现切换按钮');
+  // 0.19.69：可见列数不再是「整数列」，平移真源换成**单一像素偏移**（用户要的鼠标 / 触控板
+  // 横向连续移动不可能落在整列上，也不该被吸附回整列 —— 那就是用户说的「强制跳下个会话」）。
+  assert.ok(!/\bvisible\b/.test(body), '不得再有整数列模型（visible / firstCol 一律撤掉）');
+  assert.match(body, /const contentW = cols\.length > 0 \? cols\.length \* colWidth \+ \(cols\.length - 1\) \* COL_GAP : 0;/,
+    '内容总宽 = 列数×列宽 + 列间间隔（n 列只有 n−1 条间隔）');
+  assert.match(body, /const maxOffset = Math\.max\(0, contentW - viewportW\)/, '必须有平移上界（像素余量）');
+  assert.match(body, /const \[offsetPx, setOffsetPx\] = React\.useState\(0\)/, '偏移必须是 React 状态');
+  assert.ok(body.includes("transform: 'translateX(' + (-offset) + 'px)'"),
+    '平移量是像素偏移（连续，不吸附整列）');
+  // ‹ › 按钮**仍按整列步进**（用户 0.19.29 验收过的对齐语义），只是落点也由 offsetPx 表达。
+  assert.match(body, /const COL_STEP = colWidth \+ COL_GAP;/, '按钮步长必须是整列宽 + 列间距');
+  assert.match(body, /prev \+ delta \* COL_STEP/, '按钮必须整列步进');
   assert.match(body, /disabled: !canPanLeft/, '到最左时左按钮必须置灰');
   assert.match(body, /disabled: !canPanRight/, '到最右时右按钮必须置灰');
   assert.match(src, /\.hwb-concurrent-pan\{position:absolute;top:50%;transform:translateY\(-50%\)/,
@@ -331,6 +338,42 @@ test('★ 0.19.55 并发：列宽上下限取自官方常量，放不下时左�
     '按钮底色必须是官方胶囊那一支 specific-menu');
   assert.match(src, /\.hwb-concurrent-pan\{[^}]*backdrop-filter:var\(--dsw-menu-backdrop-filter\)/,
     '毛玻璃必须与官方胶囊同源');
+  // 0.19.69（用户口径 A：直接用官方 primitives.Button + 官方 IconChevronLeft/RightOutline14）：
+  // 按钮本体换成**官方组件**，自绘的圆形胶囊与 `‹ ›` 字形一律不得再出现。
+  assert.match(body, /h\(Button, \{\s*\n\s*variant: 'ghost', size: 'sm',/, '平移按钮必须是官方 primitives.Button（ghost/sm）');
+  assert.match(body, /icon: h\(IconChevronLeftOutline, \{ size: 14 \}\)/, '左按钮必须用官方 IconChevronLeftOutline14');
+  assert.match(body, /icon: h\(IconChevronRightOutline, \{ size: 14 \}\)/, '右按钮必须用官方 IconChevronRightOutline14');
+  assert.ok(!/'\u2039'|'\u203a'/.test(src), '不得再出现自绘的 ‹ › 字形');
+  // ⚠ 左右**两颗都要**是官方 Button：只判 `h(Button` 会被「一颗改回自绘 <button>」的变异体蒙混
+  // 过关（变异测试实测——另一颗仍命中）。所以反向钉住：`.hwb-concurrent-pan` 不得由 `h('button'` 渲染。
+  assert.ok(!/h\('button',\s*\{[^}]*hwb-concurrent-pan/.test(body),
+    '平移按钮不得再有自绘的 <button>（两颗都必须走官方 primitives.Button）');
+  assert.equal((body.match(/h\(Button, \{\s*\n\s*variant: 'ghost', size: 'sm',/g) || []).length, 2,
+    '左右两颗平移按钮都必须是官方 primitives.Button（ghost/sm）');
+  assert.ok(!/\.hwb-concurrent-pan:focus-visible/.test(src), '焦点环归官方 Button，不得自绘');
+});
+
+test('★ 0.19.69 并发：鼠标 / 触控板横向滚动 = 连续移动列（不强制跳下个会话）', () => {
+  const src = clientSrc();
+  const body = compareBody(src);
+  // 判据：非 passive 原生 wheel 监听挂在**观察窗节点**上（React 的 onWheel 在根容器是
+  // passive，preventDefault 会失效），且只接管横向意图（deltaX 占主导 / Shift+滚轮）。
+  assert.match(body, /ref: viewportRef/, '观察窗节点必须挂 ref（滚轮监听要挂它）');
+  assert.match(body, /el\.addEventListener\('wheel', onWheel, \{ passive: false \}\)/,
+    '必须用非 passive 原生 wheel 监听');
+  assert.match(body, /return \(\) => el\.removeEventListener\('wheel', onWheel\)/,
+    '监听器必须用**同一个具名函数**注销（匿名注册 / 具名注销会泄漏）');
+  assert.match(body, /const horizontal = Math\.abs\(e\.deltaX\) > Math\.abs\(e\.deltaY\)/,
+    '横向判据 = deltaX 占主导');
+  assert.match(body, /if \(!horizontal && !e\.shiftKey\) return;/, 'Shift+滚轮也算横向');
+  // ⚠ 纵向滚轮必须原样放行：列里装的是官方会话体，纵向滚动归它自己。
+  // ⚠ 这一条必须**逐字**钉住那一行：只写 `/offsetRef\.current \+ dx/` 会被「先加 dx 再取整到
+  // 整列」的变异体蒙混过关（变异测试实测），而「吸附回整列」正是用户点名不要的行为。
+  assert.match(body, /const next = Math\.min\(max, Math\.max\(0, offsetRef\.current \+ dx\)\);/,
+    '滚轮必须按像素连续累加（不吸附整列）');
+  assert.ok(!/Math\.round\([^)]*offsetRef/.test(body),
+    '滚轮落点不得取整 / 吸附回整列（用户：不强制跳下个会话）');
+  assert.match(body, /\}, \[hasViewport\]\)/, '依赖必须是 hasViewport（首帧无节点时不能空转，见 0.19.68 缺陷）');
 });
 
 test('★ 0.19.55 并发：列的可见边界 = 官方那套「隐形 + hover 光」（用户 0.19.29 第 1 点）', () => {

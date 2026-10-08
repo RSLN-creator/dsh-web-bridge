@@ -88,6 +88,25 @@ function collectReading() {
   const boundary = Array.from(document.querySelectorAll('[data-hwb-boundary]'));
   const slotError = Array.from(document.querySelectorAll('[data-slot-error]'));
   const gaps = Array.from(document.querySelectorAll('.hwb-concurrent-gap'));
+  // 左右平移按钮（0.19.69）：现在是**官方 primitives.Button**（ghost/sm 胶囊 + 官方
+  // IconChevronLeft/RightOutline14），不再是自绘圆钮。读三件事：① 它挂的类名里有官方
+  // Button 的哈希类（`\w+_button`）——「用官方组件」这条口径在真页面上的唯一判据；
+  // ② 里面有没有 `<svg>`（官方图标真渲染出来了）；③ 平移条的 translateX（滚轮/按钮的落点）。
+  const panLeft = document.querySelector('.hwb-concurrent-pan.left');
+  const panRight = document.querySelector('.hwb-concurrent-pan.right');
+  const panInfo = (el) => {
+    if (!el) return null;
+    const cls = String(el.className || '');
+    return {
+      tag: el.tagName.toLowerCase(),
+      cls: cls.slice(0, 120),
+      usesOfficialButtonClass: /(^|\s)[A-Za-z0-9_-]{4,}_button(\s|$)/.test(cls),
+      hasIcon: !!el.querySelector('svg'),
+      disabled: el.disabled === true,
+      rect: rectOf(el),
+    };
+  };
+  const colsStrip = document.querySelector('.hwb-concurrent-columns');
   const colsDetail = cols.map((c, i) => {
     // 列顶栏 = 官方 header 的复刻（0.19.68（10-08 轮））。读三件事：
     //   ① 它挂的类名**是不是官方 CSS module 的哈希类**（`<6位前缀>_header`）——
@@ -144,6 +163,9 @@ function collectReading() {
     colWidthPref: (() => { try { return localStorage.getItem('dsh.webcode-bridge.concurrent.colWidth'); } catch (e) { return 'ERR'; } })(),
     gapsCount: gaps.length,
     gapCursor: gaps.length ? getComputedStyle(gaps[0]).cursor : '',
+    panLeft: panInfo(panLeft),
+    panRight: panInfo(panRight),
+    stripTransform: colsStrip ? String(colsStrip.style.transform || '') : '',
     boundaryCount: boundary.length,
     boundaryText: boundary.map(b => String(b.textContent || '').slice(0, 300)),
     slotErrorCount: slotError.length,
@@ -231,7 +253,10 @@ try {
         const text = String(el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 46);
         const aria = String(el.getAttribute('aria-label') || el.getAttribute('title') || '').slice(0, 46);
         const label = text || aria || el.tagName.toLowerCase();
-        if (/发送|停止|send|stop|✕|‹|›|^并发对话$|^并发轨迹$/.test(label)) continue;
+        // 左右平移按钮现在是官方 `Button`（图标里没有 ‹ › 字形了，0.19.69），所以改按
+        // **类名**跳过——探针逐点一轮不该去点它（另有 §③′ 专测平移）。
+        if (/发送|停止|send|stop|✕|^并发对话$|^并发轨迹$/.test(label)) continue;
+        if (el.closest('.hwb-concurrent-pan')) continue;
         if (el.closest('textarea, [contenteditable="true"]')) continue;
         const r = el.getBoundingClientRect();
         if (r.width < 6 || r.height < 6) continue;
@@ -408,6 +433,65 @@ try {
   const noComposer = reading.cols.filter(c => c.composers === 0).map(c => c.index);
   if (reading.colsCount > 0 && noComposer.length) {
     problems.push('这些列里没有官方 composer：' + JSON.stringify(noComposer.map(i => reading.cols[i])));
+  }
+
+  // ── ③′ 左右平移按钮 = 官方 primitives.Button + 官方 chevron 图标（0.19.69，口径 A）──
+  // 原话：「将并列会话那里的左右悬浮按钮优化为统一官方UI」。判据是**可核对维度**而不是「看着像」：
+  //   ① 元素挂得上官方 Button 的哈希类名（`\w+_button`）⇒ 用的是官方组件、官方胶囊几何；
+  //   ② 里面渲染出 `<svg>` ⇒ 官方 IconChevronLeft/RightOutline14 真的画出来了；
+  //   ③ 页面上**没有**自绘的 ‹ › 字形（旧实现的正文字符）。
+  for (const [side, info] of [['左', reading.panLeft], ['右', reading.panRight]]) {
+    if (!info) {
+      // 放不下才出现（`maxOffset > 0.5`）；本探针默认开 3 列，正常必然出现。
+      problems.push(side + '平移按钮缺席（3 列时 maxOffset 必然 > 0）');
+      continue;
+    }
+    if (!info.usesOfficialButtonClass) {
+      problems.push(side + '平移按钮没挂官方 Button 的类名（还是自绘的？class=' + info.cls + '）');
+    }
+    if (!info.hasIcon) problems.push(side + '平移按钮里没有官方 chevron 图标（<svg> 缺席）');
+  }
+  if (/[\u2039\u203a]/.test(reading.panelText || '')) {
+    problems.push('面板里仍出现自绘的 ‹ › 字形（0.19.69 起按钮改用官方 chevron 图标）');
+  }
+  // 滚轮 / 触控板横滑 = 连续移动列（用户：「增加鼠标右滑可以移动列（这个移动不需要强制跳下个会话）」）。
+  // 判据 = 平移条的 translateX 真的跟着**连续**变（不是整列跳）。鼠标滚轮在无头 chromium 里可以
+  // 用 CDP 合成：page.mouse.wheel(dx, dy)。这里给一个**明显不是整列宽**的量（37px），若实现仍
+  // 吸附整列，translateX 就会落在 ±(列宽+16) 的整数倍上 ⇒ 下面的「不是整列倍数」判据会红。
+  if (reading.colsCount > 1) {
+    const strip = await page.evaluate(() => {
+      const el = document.querySelector('.hwb-concurrent-columns');
+      return el ? String(el.style.transform || '') : '';
+    });
+    const readX = (t) => {
+      const m = /translateX\((-?[\d.]+)px\)/.exec(String(t || ''));
+      return m ? Number(m[1]) : null;
+    };
+    const xBefore = readX(strip);
+    const box = await page.locator('.hwb-concurrent-viewport').first().boundingBox();
+    if (box && xBefore !== null) {
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await page.mouse.wheel(37, 0);
+      await page.waitForTimeout(350);
+      const after = await page.evaluate(collectReading);
+      const xAfter = readX(after.stripTransform);
+      reading.wheelPan = { xBefore, xAfter, transform: after.stripTransform };
+      if (!(xAfter !== null && xAfter < xBefore)) {
+        problems.push('横向滚轮没有移动列：translateX ' + JSON.stringify(strip) + ' → '
+          + JSON.stringify(after.stripTransform) + '（期望向左移动 = 负向）');
+      } else {
+        // 「不强制跳下个会话」= 落点**不是**整列步长的整数倍（吸附回整列就是用户不要的行为）。
+        const step = after.colWidthPx + 16;
+        const drift = Math.abs(xAfter - xBefore);
+        const snapped = Math.abs(drift - Math.round(drift / step) * step) < 1;
+        if (snapped && Math.abs(drift) > 2) {
+          problems.push('横向滚轮被吸附回整列了（位移 ' + drift + 'px 恰是列步长 ' + step + 'px 的整数倍）——'
+            + '用户要的是连续移动、不强制跳下个会话');
+        }
+      }
+    } else {
+      problems.push('读不到平移条的 translateX 或观察窗 boundingBox（滚轮平移判据跑不了）');
+    }
   }
 
   // ── ③ 列宽拖拽（用户第 5 条：「想要做到官方那样的会话调整宽度」）──────────────

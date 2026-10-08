@@ -3141,6 +3141,10 @@ window.__ModuleLoader__.load({
     const IconRightUpOutline = iconOf('IconRightUpOutlineRegular', 'IconRightUpOutline16');
     const IconDownloadOutline = iconOf('IconDownloadOutlineRegular', 'IconDownloadOutline16');
     const IconCloseOutline = iconOf('IconCloseOutlineRegular', 'IconCloseOutline16');
+    // 左右平移按钮的图标（0.19.69）：官方 `IconChevronLeftOutline14` / `…RightOutline14`。
+    // 两代名字都列（`…Regular` 是 0.1.7-alpha.2 起的名字，见 `iconOf` 注释），缺位回退空组件。
+    const IconChevronLeftOutline = iconOf('IconChevronLeftOutlineRegular', 'IconChevronLeftOutline14');
+    const IconChevronRightOutline = iconOf('IconChevronRightOutlineRegular', 'IconChevronRightOutline14');
     // 官方 `StateDot`（子智能体「正在运行」那颗点，`ui-subagent:558`）。缺位回退空 span。
     const StateDot = typeof primitives.StateDot === 'function'
       ? primitives.StateDot
@@ -3481,7 +3485,6 @@ window.__ModuleLoader__.load({
       const colWidth = Math.round(colWidthPref === null
         ? Math.min(colWidthMax, Math.max(colWidthMin, officialDefault))
         : Math.min(colWidthAbsoluteMax, Math.max(colWidthMin, colWidthPref)));
-      const visible = Math.max(1, Math.floor((viewportW + COL_GAP) / (colWidth + COL_GAP)));
 
       /**
        * 列间把手的拖拽（照官方 `WidthHandle` 的写法：pointer capture + rAF 节流 +
@@ -3551,16 +3554,73 @@ window.__ModuleLoader__.load({
         try { window.localStorage.removeItem(HWB_COL_WIDTH_KEY); } catch (e) { /* 同上 */ }
       };
 
-      // 平移量永远是**整列宽 + 列间距**，所以永远不会停在半列上（用户要的对齐语义）。
-      const [firstCol, setFirstCol] = React.useState(0);
-      const maxFirst = Math.max(0, cols.length - visible);
-      const first = Math.min(firstCol, maxFirst);
-      const canPanLeft = first > 0;
-      const canPanRight = first < maxFirst;
+      // ── 平移模型：**单一像素偏移**（0.19.69，用户：「增加鼠标右滑可以移动列（这个移动
+      //    不需要强制跳下个会话）」）────────────────────────────────────────────
+      //
+      // 旧模型是 `firstCol`（整数列下标）+ `translateX(-first × 步长)`：一次只能整列跳，
+      // 而且**只能靠两颗按钮**。用户要的是「鼠标 / 触控板横向滚」这种**连续**移动——它不可能
+      // 正好落在整列上，也**不该被吸附回整列**（那正是用户说的「强制跳下个会话」）。所以真源
+      // 换成 `offsetPx`：一个夹在 [0, maxOffset] 里的像素偏移。
+      //
+      // 两条语义同时成立，各走各的：
+      //   · **滚轮 / 触控板横滑**（下面 `onWheel`）→ 连续加减像素，停在哪儿就是哪儿；
+      //   · **‹ › 两颗按钮** → 仍按**整列宽 + 列间距**步进（用户 0.19.29 验收过的对齐语义），
+      //     只是落点现在也由 `offsetPx` 表达（不再有第二份 `firstCol` 状态）。
+      const COL_STEP = colWidth + COL_GAP;
+      // 内容总宽 = 列数×列宽 + 列间间隔（n 列只有 n−1 条间隔）；余量 = 内容总宽 − 观察窗宽。
+      const contentW = cols.length > 0 ? cols.length * colWidth + (cols.length - 1) * COL_GAP : 0;
+      const maxOffset = Math.max(0, contentW - viewportW);
+      const [offsetPx, setOffsetPx] = React.useState(0);
+      const offset = Math.min(offsetPx, maxOffset);
+      // 半个像素的容差：像素偏移在浮点 / 取整下很难**精确**等于 0 或 maxOffset。
+      const canPanLeft = offset > 0.5;
+      const canPanRight = offset < maxOffset - 0.5;
+      // 窗口宽度 / 列宽 / 列数变了要重新夹取（旧实现夹的是整数列，现在夹像素）。
       React.useEffect(() => {
-        setFirstCol(prev => Math.min(prev, Math.max(0, cols.length - visible)));
-      }, [cols.length, visible]);
-      const panBy = (delta) => setFirstCol(prev => Math.min(Math.max(0, prev + delta), maxFirst));
+        setOffsetPx(prev => Math.min(prev, Math.max(0, maxOffset)));
+      }, [maxOffset]);
+      const panBy = (delta) => setOffsetPx(prev => Math.min(Math.max(0, prev + delta * COL_STEP), maxOffset));
+
+      // `offsetRef` / `maxOffsetRef` 让下面的 `onWheel` 读到**最新值**而不必重建监听器；
+      // `viewportRef` 是滚轮监听要挂的那个观察窗节点。
+      const offsetRef = React.useRef(0);
+      offsetRef.current = offset;
+      const maxOffsetRef = React.useRef(0);
+      maxOffsetRef.current = maxOffset;
+      const viewportRef = React.useRef(null);
+      // ⚠ 依赖必须是 `hasViewport` 而不是 `[]`：`cols.length === 0` 时走的是另一条渲染分支、
+      // 视口节点根本不存在，用 `[]` 会重演 0.19.68 抓到的那个既有缺陷（首帧 ref 为 null ⇒
+      // 监听器永远没接上，见上面 ResizeObserver 那段注释）。
+      const hasViewport = cols.length > 0;
+      React.useEffect(() => {
+        if (!hasViewport) return undefined;
+        const el = viewportRef.current;
+        if (!el || typeof el.addEventListener !== 'function') return undefined;
+        /**
+         * 鼠标 / 触控板**横向滚动 = 移动列**（用户 0.19.69：「增加鼠标右滑可以移动列（这个
+         * 移动不需要强制跳下个会话）」）。
+         *
+         * 只接管**横向意图**：触控板两指横滑（`deltaX` 占主导）或 `Shift+滚轮`。**纵向滚轮
+         * 原样放行**——列里装的是官方会话体，纵向滚动归它自己；把纵向也吃掉会让会话滚不动。
+         *
+         * 与设置页 tab 条那条（本文件 `tabsRef`）同一套「非 passive 原生监听」写法：React 的
+         * `onWheel` 在根容器上是 passive，`preventDefault` 会失效 / 告警。
+         */
+        const onWheel = (e) => {
+          const horizontal = Math.abs(e.deltaX) > Math.abs(e.deltaY);
+          if (!horizontal && !e.shiftKey) return;
+          const max = maxOffsetRef.current;
+          if (!(max > 0)) return;
+          const dx = horizontal ? e.deltaX : e.deltaY;
+          if (!dx) return;
+          const next = Math.min(max, Math.max(0, offsetRef.current + dx));
+          if (next !== offsetRef.current) setOffsetPx(next);
+          // 只在**真有可平移余量**时才拦默认行为，避免同一次横滑又被拿去滚页面。
+          e.preventDefault();
+        };
+        el.addEventListener('wheel', onWheel, { passive: false });
+        return () => el.removeEventListener('wheel', onWheel);
+      }, [hasViewport]);
 
       /**
        * 新建一列（或首次建组）。每条列都是一条 Host 上的真会话。
@@ -3704,19 +3764,31 @@ window.__ModuleLoader__.load({
         // 同理「本组独立工作区：hwb/concurrent/<组id>」那行提示（`workspaceNote`）也删——
         // 会话现在就跑在**当前工作区**里（官方口径：一个文件夹内一条会话一行）。
         cols.length === 0 && h('p', { className: 'hwb-hint' }, '正在新建 ' + CONCURRENT_DEFAULT_COLS + ' 条会话…'),
-        cols.length > 0 && h('div', { className: 'hwb-concurrent-viewport' },
-          cols.length > visible && h('button', {
-            type: 'button', className: 'hwb-concurrent-pan left', disabled: !canPanLeft,
-            title: '看左边一列', onClick: () => panBy(-1),
-          }, '‹'),
-          cols.length > visible && h('button', {
-            type: 'button', className: 'hwb-concurrent-pan right', disabled: !canPanRight,
-            title: '看右边一列', onClick: () => panBy(1),
-          }, '›'),
+        cols.length > 0 && h('div', { className: 'hwb-concurrent-viewport', ref: viewportRef },
+          // 左右平移按钮 = **官方 `primitives.Button`**（0.19.69，用户选口径 A：「直接用官方
+          // 组件 primitives.Button（官方胶囊 + 官方 IconChevronLeftOutline14 /
+          // IconChevronRightOutline14 图标）」）。自绘的圆形 `‹ ›` 按钮连同它的视觉样式一并撤掉，
+          // 只留下**把它浮起来**那部分定位与底色（见样式表那一段注释）。
+          maxOffset > 0.5 && h(Button, {
+            variant: 'ghost', size: 'sm',
+            className: 'hwb-concurrent-pan left',
+            icon: h(IconChevronLeftOutline, { size: 14 }),
+            'aria-label': '看左边一列', title: '看左边一列',
+            disabled: !canPanLeft,
+            onClick: () => panBy(-1),
+          }),
+          maxOffset > 0.5 && h(Button, {
+            variant: 'ghost', size: 'sm',
+            className: 'hwb-concurrent-pan right',
+            icon: h(IconChevronRightOutline, { size: 14 }),
+            'aria-label': '看右边一列', title: '看右边一列',
+            disabled: !canPanRight,
+            onClick: () => panBy(1),
+          }),
           h('div', {
             className: 'hwb-concurrent-columns',
             'data-cols': String(cols.length),
-            style: { transform: 'translateX(' + (-first * (colWidth + COL_GAP)) + 'px)' },
+            style: { transform: 'translateX(' + (-offset) + 'px)' },
           },
           // 列与列之间那条 16px 间隔现在是**拖拽把手**（用户第 5 条）：
           // 平时只有一条 hover 才现形的 1px 竖线（与官方 `widthHandle` 同观感：
@@ -7082,10 +7154,20 @@ window.__ModuleLoader__.load({
         ".hwb-concurrent-gap:hover .hwb-concurrent-gap-line,.hwb-concurrent-gap[data-dragging] .hwb-concurrent-gap-line{opacity:1}",
         // 尊重「减少动态效果」偏好：平移是纯装饰性的。
         "@media (prefers-reduced-motion:reduce){.hwb-concurrent-columns{transition:none}}",
-        // 左右切换按钮：绝对定位在中间区左右边缘、垂直居中；底色与毛玻璃取自官方胶囊
-        // 面板那一对（`specific-menu` + `menu-backdrop-filter`），与官方浮动胶囊同色。
-        ".hwb-concurrent-pan{position:absolute;top:50%;transform:translateY(-50%);z-index:11;width:28px;height:28px;padding:0;display:grid;place-items:center;font:inherit;font-size:16px;line-height:1;cursor:pointer;border:none;border-radius:50%;color:var(--dsw-alias-label-secondary);background:var(--dsw-specific-menu);backdrop-filter:var(--dsw-menu-backdrop-filter);box-shadow:var(--dsw-elevation-soft)}",
-        ".hwb-concurrent-pan:hover:not(:disabled),.hwb-concurrent-pan:focus-visible:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-solid);color:var(--dsw-alias-label-primary)}",
+        // 左右平移按钮（0.19.69）：**元素本体是官方 `primitives.Button`**（用户口径 A），
+        // 图标是官方 `IconChevronLeft/RightOutline14`。胶囊几何、hover / active、焦点环、
+        // disabled 全部由**官方 Button 自己的 CSS** 提供（按 `variant:'ghost'` + `size:'sm'`
+        // 渲染），本插件**不再自绘那颗圆钮**。
+        //
+        // 这里只剩「把它浮起来」这一层——官方没有现成的「浮在内容上的横向平移」控件，所以
+        // 位置与浮层底色只能由我们给；但**用的全是官方 token**（`specific-menu` +
+        // `menu-backdrop-filter` + `elevation-soft`，与官方浮动胶囊同色同阴影）。
+        //
+        // 特异性说明（这决定了悬停时拿到的是**官方那一下**）：本类只有 1 个类名，而官方
+        // `.ghost:hover:not(:disabled)` 是 2 个 ⇒ 悬停 / 按下时官方规则胜出；静止态官方
+        // `.button{background:transparent}` 与本类同为 1 个类，我们的样式后注入 ⇒ 静止时用
+        // 下面这条浮层底色（否则透明按钮压在会话内容上会看不见）。
+        ".hwb-concurrent-pan{position:absolute;top:50%;transform:translateY(-50%);z-index:11;width:28px;padding:0;color:var(--dsw-alias-label-secondary);background:var(--dsw-specific-menu);backdrop-filter:var(--dsw-menu-backdrop-filter);box-shadow:var(--dsw-elevation-soft)}",
         ".hwb-concurrent-pan:disabled{opacity:0;pointer-events:none}",
         ".hwb-concurrent-pan.left{left:6px}",
         ".hwb-concurrent-pan.right{right:6px}",

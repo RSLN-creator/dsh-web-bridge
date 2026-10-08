@@ -160,6 +160,17 @@ const SEGMENTS = [
     patterns: [/SESSION_LOG_EXPORT_ROUTE = "\/api\/session\.export"/, /function sessionLogZipFilename/],
   },
   {
+    id: 'primitives-button-and-chevrons',
+    file: 'dsh-client-ui-primitives/lib/index.js',
+    why: '列平移按钮用的官方原子（0.19.69，用户口径 A：直接用 primitives.Button + 官方 chevron）——'
+      + 'Button 的 variant/size 取值与两颗 chevron 图标的导出名一旦变，我们的按钮会掉样式或画不出图标',
+    patterns: [
+      /const Button = forwardRef\(function Button\(\{ variant = "ghost", size = "md"/,
+      /const IconChevronLeftOutlineRegular = /,
+      /const IconChevronRightOutlineRegular = /,
+    ],
+  },
+  {
     id: 'jobs-live-status',
     file: 'dsh-client-ui-jobs/lib/client.js',
     why: '列顶栏「后台任务」chip 的「运行中」判据（status running/stopping，与官方 isLive 同义）——官方改状态字面量则计数失同步',

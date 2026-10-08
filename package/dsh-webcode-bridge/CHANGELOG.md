@@ -5,6 +5,53 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.69
+
+**并列会话的左右悬浮按钮改用官方 UI + 鼠标 / 触控板横向滚动连续移动列（2026-10-08 第二轮）。**
+
+### 用户指令（两条，逐字）
+
+①「将并列会话那里的左右悬浮按钮优化为统一官方UI」；②「增加鼠标右滑可以移动列（这个移动不需要
+强制跳下个会话）」。两条选型经用户确认：① 口径 **A** —— 「直接用官方组件 primitives.Button（官方
+胶囊 + 官方 IconChevronLeftOutline14 / IconChevronRightOutline14 图标）」；② 「鼠标滚轮 / 触控板
+横向滚动来平移」。
+
+### 一、左右悬浮按钮 = 官方 primitives.Button（不再自绘）
+
+- 旧实现是**自绘**的圆形毛玻璃 `‹` `›` 钮（`.hwb-concurrent-pan` 自带 `border-radius:50%`、
+  `place-items:center`、`font-size:16px` 的字形，只借了官方 `specific-menu` 底色）。
+- 现在按钮本体是 **`primitives.Button`**（`variant:'ghost'` + `size:'sm'`），图标是官方
+  `IconChevronLeftOutline14` / `IconChevronRightOutline14`（两代名字都试，见 `iconOf`）。
+  胶囊几何、hover / active、焦点环、disabled 全部由**官方 Button 自己的 CSS** 提供。
+- 本插件只剩「把它浮起来」那一层（`position:absolute` + 官方 token 的浮层底色 / 毛玻璃 / 阴影）：
+  官方没有「浮在内容上的横向平移」控件，位置只能自己给。
+  ⚠ 特异性是**刻意**的：本类 1 个类名，而官方 `.ghost:hover:not(:disabled)` 是 2 个 ⇒ 悬停 / 按下时
+  官方规则胜出；静止态官方 `.button{background:transparent}` 与本类同为 1 个类、我们的样式后注入 ⇒
+  静止时用浮层底色（否则透明按钮压在会话内容上看不见）。
+
+### 二、鼠标 / 触控板横向滚动 = 连续移动列（不吸附回整列）
+
+- **平移真源从「整数列下标」换成「单一像素偏移」**（`firstCol` → `offsetPx`）：用户要的连续移动
+  不可能正好落在整列上，也**不该被吸附回整列**——那正是用户说的「强制跳下个会话」。
+- 非 passive 原生 `wheel` 监听挂在观察窗节点上（React 的 `onWheel` 在根容器是 passive，
+  `preventDefault` 会失效）；**只接管横向意图**（`deltaX` 占主导，或 `Shift+滚轮`），
+  **纵向滚轮原样放行**——列里装的是官方会话体，纵向滚动归它自己。
+- `‹` `›` 两颗按钮**仍按整列宽 + 列间距步进**（用户 0.19.29 验收过的对齐语义），只是落点也由
+  `offsetPx` 表达，不再有第二份状态。
+- 监听器用**同一个具名函数**注册 / 注销（0.19.68 记过匿名注册 / 具名注销会泄漏）；effect 依赖是
+  `hasViewport` 而不是 `[]`（`cols.length===0` 时走另一条渲染分支、节点不存在——0.19.68 抓过的
+  「首帧 ref 为 null ⇒ 监听器永远没接上」同一族缺陷）。
+
+### 验证
+
+`team-compare` **32/32**（新增两条判据：官方 Button + 官方 chevron / 横向滚轮连续移动；并改写列宽与
+平移那一组，删掉钉旧自绘 UI 的三条）、`client-render` 71/71、`client-server-contract` 2/2、
+全量 121 测试文件逐文件 exit 0。**两条新判据都做了反向变异**：把滚轮改回「先加 dx 再取整到整列」
+⇒ 新判据红；把左按钮改回自绘 `<button>` ⇒ 判据红（首版只判一颗，被「另一颗仍命中」蒙混过关，
+已收紧成两颗都判）。漂移闸门新增 1 段（`primitives-button-and-chevrons`，共 20 段）。
+
+真机 `probe-concurrent-live` 新增读数与判据：平移钮挂官方 Button 哈希类名、内含官方 `<svg>` 图标、
+页面无 `‹ ›` 字形、横向滚轮后 `translateX` 连续变化且**不是列步长整数倍**（即没有被吸附回整列）。
 ## 0.19.68
 
 **并发会话按官方口径重构（2026-10-08 轮，版本号不变）：删三套自造机制 + 列顶栏改官方 header 高保真复刻 + 列宽可拖拽。**
