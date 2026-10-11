@@ -244,13 +244,50 @@ test('②b 坏 JSON 的锁 ⇒ 按 free 接管，但必须留痕（不静默）'
   assert.ok(logs.some((l) => /unreadable lock/.test(l)), '必须留下可归因的告警，实际=' + JSON.stringify(logs));
 });
 
-test('②c 过期锁 ⇒ 允许接管，且留痕说明接管了陈旧锁', () => {
-  const dir = tmpDir('stale');
+test('②c 过期的锁 + 存活判据弃权 ⇒ **保守拒绝接管**（不误放），并带可诊断的 recoverable 信号', () => {
+  const dir = tmpDir('stale-abstain');
   fs.writeFileSync(path.join(dir, BRIDGE_LOCK_FILE), JSON.stringify({ pid: 8888, at: Date.now() - 99_999_999 }), 'utf8');
   const logs = [];
-  const got = acquireBridgeLock(dir, { pid: 1, startedAt: 1 }, { logger: { warn: (m) => logs.push(String(m)) } });
-  assert.equal(got.ok, true, '陈旧锁必须能被接管');
-  assert.ok(logs.some((l) => /STALE lock/.test(l)), '必须留痕，实际=' + JSON.stringify(logs));
+  // ⚠ 这条用例此前是**宿主依赖**的假绿/假红，而且改名之前还测错了分支。三件事都要记下：
+  //
+  // 1) **不注入 isAlive 时**，`acquireBridgeLock` 会默认用真实 `isProcessAlive`
+  //    （bridge-lock.js:465），通过与否取决于「宿主里 pid 8888 是否活着」。
+  //    真机后果（0.19.75 实测）：CI 的 windows-latest/node 24 上恰好存在 pid 8888
+  //    ⇒ 判成「持有者活着」⇒ 拒绝接管 ⇒ 用例红；而同一 commit 的 windows/node22
+  //    与两个 ubuntu 作业全绿、本机连跑 12 次也全绿。
+  // 2) 旧名字写的是「过期锁 ⇒ 允许接管」，但注入 `dead` 会走**另一条分支**：
+  //    「持有者已死」在 `decideBridgeLock` 里排在「过期兜底」之前（bridge-lock.js:161
+  //    早于 :196），于是用例证的是 `holder-process-dead`（②d 的重复），
+  //    `stale-lock-expired` 那一支反而没有被它覆盖。
+  // 3) **经 `acquireBridgeLock` 根本走不到「过期兜底」那一支**：入口恒注入 isAlive
+  //    （:465），而 `isProcessAlive` 只回布尔、`safeAlive` 又把「非布尔/抛错」当活着
+  //    ⇒ 判据永不弃权 ⇒ `expired` 分支在生产路径上不可达。它只对**直接调用
+  //    `decideBridgeLock` 的调用方**有效（①e / ①e6 / ①f 在纯函数层覆盖它）。
+  //
+  // 所以本用例断言**生产路径上真正会发生的那件事**：判据弃权 ⇒ 保守按活着处理 ⇒
+  // 拒绝接管，但把「锁其实已过期」作为可诊断信号带出来。
+  const abstain = () => undefined;
+  const got = acquireBridgeLock(dir, { pid: 1, startedAt: 1 },
+    { isAlive: abstain, logger: { warn: (m) => logs.push(String(m)) } });
+  assert.equal(got.ok, false, '判据弃权时不得放行（误放的代价是两个桥互相杀浏览器）');
+  assert.equal(got.reason, 'held-by-live-owner');
+  assert.equal(got.recoverable, true, '必须带出「其实已过期」这条可诊断信号');
+  assert.equal(got.recoveryBasis, 'holder-alive-but-lock-expired');
+  assert.ok(logs.some((l) => /DENIED/.test(l)), '拒绝必须留痕，实际=' + JSON.stringify(logs));
+});
+
+test('②c2 过期的锁 + 判据明确「已死」⇒ 允许接管并留痕（这条路才是 acquire 走得通的接管）', () => {
+  const dir = tmpDir('stale-dead');
+  fs.writeFileSync(path.join(dir, BRIDGE_LOCK_FILE), JSON.stringify({ pid: 8888, at: Date.now() - 99_999_999 }), 'utf8');
+  const logs = [];
+  // 注入**确定已死**：这是经 `acquireBridgeLock` 可达的接管路径（②c 说明里的第 3 点）。
+  const got = acquireBridgeLock(dir, { pid: 1, startedAt: 1 },
+    { isAlive: dead, logger: { warn: (m) => logs.push(String(m)) } });
+  assert.equal(got.ok, true, '持有者已死必须能接管');
+  // 注意 reason 在**接管成功后**会被改写成 `acquired-after-takeover`
+  //（判据层的 `holder-process-dead` 是**接管前**的裁决，见 ②d 的写法）。
+  assert.equal(got.reason, 'acquired-after-takeover');
+  assert.ok(logs.some((l) => /STALE lock/.test(l)), '接管必须留痕，实际=' + JSON.stringify(logs));
 });
 
 test('②d 盘上一份「持有者已死」的锁 ⇒ 接管并改写成本进程（假 pid + 注入判据）', () => {
