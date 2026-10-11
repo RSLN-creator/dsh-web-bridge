@@ -5,6 +5,73 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.75
+
+**先让验收工具不能假绿，再谈站点覆盖；并给「内容丢在哪一层」装上逐层取证。**
+
+复审复核 0.19.74 后指出：看门狗与调用恢复的方向对，但**站点验收工具自身**有三个会
+制造假结论的问题，且 Issue #1 的**内容交付**那一半并未解决。本轮按此收口。
+
+### 一、验收工具：三个「自己制造假结论」的缺陷
+
+1. **最终状态把 `UNVERIFIED` 汇总成 `PASS`。** 旧收尾只问「有没有一项 FAIL」，
+   没有就 PASS ⇒ 一个站点**一条工具调用都没产出**也能被盖章通过。
+   现在判定完全交给纯函数 `verdictOf()`：优先级 `FAIL > BLOCKED > UNVERIFIED > PASS`，
+   且**缺必要检查项也算不确定**（防止「没跑那一段」被读成「那一段没问题」）。
+2. **从未真正做工具结果往返。** 旧实现只「发送 → 解析调用」，注释却写成
+   「工具结果回填后能收束」（描述超出实现）。现在真的执行 `read`、把结果作为
+   `mcp_action:"result"` 回填进**同一个**网页会话、再解析第二轮，产生
+   `tool.resultRoundTrip`；并且**校验两轮会话 id 一致**（否则那是两次独立提问，不是往返）。
+3. **全文回读掩盖流式交付失败。** 旧写法在没有增量时只要全文非空就判「流有正文」，
+   **恰好掩盖 Issue #1 的症状**。现在 `stream.fullText` / `stream.deltaReceived` /
+   `stream.consistency` 三项分开判（`streamDeliveryVerdict()`）。
+
+另外：`--profile` 的语义歧义已明确为 `--profile-root`（收**根目录**，脚本在其下按
+站点取子目录；旧名保留但会打印按根目录解释的提示）；`login.basis=probe-fallback`
+（声明了登录特征却一个都没命中 = 猜测）不再记 `PASS`。
+
+### 二、交付链逐层取证（`lib/delivery-trace.js`）
+
+复审明确指出：`lastEventAt` 只在**适配器收到流事件**时推进，而 `domReplyChars` 只是
+诊断读数——**不会**把页面 DOM 里的正文送回流里。所以看门狗计时修好，也不会把卡在
+DOM 里的那 2172 字补回来：**「不再误杀」与「内容是否完整交付」是两件事。**
+
+新增逐层取证：`capture → decoder → driver → relay → adapter`，每层记
+**事件数 / 字符数 / 首末时刻 / 内容哈希**（默认**不留原文**；`WEBCODE_DELIVERY_TRACE_SAMPLE=N`
+才保留每层前 N 字符）。`compareStages()` 给出**首个分叉层**，并区分两件下一步完全
+不同的事：
+
+- 某层**零事件** ⇒ 丢在「上游→本层」这一段（查上游的发送/绑定）；
+- 某层**有事件但更短** ⇒ 丢在**本层**（查本层的解析/过滤）。
+
+`capture` 是**原始上线帧**（含字段名与转义），与正文长度本就不可比，因此只判
+「有没有解出正文」而不比长度——否则每一轮正常生成都会被报成分叉。
+
+### 三、#53 三态（窄口径）
+
+登录状态改为 **已验证登录 / 已验证未登录 / 不确定**。`probe-fallback` 与 `stale`
+落进 `uncertain`；`probe-ok`/`probe-bad` 是核验结果；**`input-fallback` 保持原语义**
+（DeepSeek 没有 `loginProbe`，靠输入框回退是设计如此——若连这一档也降为不确定，
+主站点会长期显示「不确定」）。不确定时**不**改写 `loggedIn`：那会把只是站点改版
+导致特征失效的**已登录用户**判成未登录，是用误报换谎报。
+
+### 判据与变异
+
+新增 `test/site-verify-verdict.test.mjs`（16 项，含「零工具调用不得判 PASS」
+「只有全文+零增量不得算流式通过」「缺项不得判 PASS」）、
+`test/delivery-trace.test.mjs`（12 项）、`test/delivery-trace-wiring.test.mjs`（5 项，
+接线级）、`test/login-state.test.mjs`（6 项）。
+**变异 V1–V5 全部被抓**，且各被对应护栏抓住（V1 收尾退回旧形状 ⇒ ①；
+V2 未知状态自成一桶 ⇒ ④；V3 缺项不折算 ⇒ ②；V4 probe-fallback 退回已验证 ⇒ ①；
+V5 适配器只数 delta ⇒ ⑤）。
+
+### 本轮**未**做（诚实边界）
+
+- **Issue #1 的原始内容缺失仍未闭环**：本轮只交付了取证工具，**没有**真机复现
+  「页面 2172 字未回传」并定位到具体层——那需要真实 DeepSeek 长会话，且要登录态。
+- 真机长轮次（>120s 单轮）、首字节耗时分布、非 Windows 平台、多站点真机覆盖均未做。
+- 站点验收工具修好了，但**尚未用它跑过任何真实站点**（那需要用户的登录态）。
+
 ## 0.19.74
 
 **从「继续证明锁协议」转向「修用户看得见的故障」：两个看门狗既有缺陷 + 工具调用静默丢失 + 每站点真实验收入口。**

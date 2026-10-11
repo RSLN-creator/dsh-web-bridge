@@ -193,10 +193,20 @@ test('接线：会话丢失计数与现场进入 status()（原先完全静默�
   const src = readLib('browser-driver.js');
   assert.ok(/let sessionLostCount = 0;/.test(src), '应有丢失计数');
   assert.ok(/let lastSessionLost = null;/.test(src), '应有最近一次现场');
-  // status() 的返回对象里必须带上这两个字段（供 /__webcode/status 与右栏读取）
+  // status() 的返回对象里必须带上这两个字段（供 /__webcode/status 与右栏读取）。
+  //
+  // ⚠ 这里按**函数边界**取体，而不是旧的 `stAt + 4000` 定长窗口：
+  // 0.19.75 在 status() 里新增了 `loginState` / `loginVerified` 两段带原因的注释，
+  // 把 `sessionLostCount` 推到了偏移 5802 处 —— 定长窗口于是**假红**
+  // （字段就在函数里、只是不在窗口内）。定长窗口测的是「字段离函数头多近」，
+  // 那从来不是我们要的判据。
   const stAt = src.indexOf('function status() {');
   assert.ok(stAt > 0, '应有 status()');
-  const stBody = src.slice(stAt, stAt + 4000);
+  // 函数体：从 status() 起，到下一个顶层 `  function ` 或 `  async function ` 为止。
+  const rest = src.slice(stAt + 'function status() {'.length);
+  const nextFn = rest.search(/\n {2}(?:async )?function /);
+  const stBody = nextFn >= 0 ? rest.slice(0, nextFn) : rest.slice(0, 8000);
+  assert.ok(stBody.length > 500, 'status() 函数体取体失败（长度可疑：' + stBody.length + '）');
   assert.ok(/^\s*sessionLostCount,\s*$/m.test(stBody), 'status() 必须透出 sessionLostCount');
   assert.ok(/^\s*lastSessionLost,\s*$/m.test(stBody), 'status() 必须透出 lastSessionLost');
 });

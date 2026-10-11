@@ -24,6 +24,7 @@ import { createBrowserDriver } from './browser-driver.js';
 import { zeroProgressDecision } from './zero-progress.js';
 import { findDegenerateRepeat } from './repeat-detect.js';
 import { idleWindowDecision } from './idle-window.js';
+import { createDeliveryTrace, compareStages } from './delivery-trace.js';
 import { createWebControl, buildSessionEvents, mainLineOf } from './web-control.js';
 import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, stripProtocolRegions, proseSafeEnd, readCallAt, partialProtocolAt, unresolvedCallFenceAt, closingFenceAfter, headlessCallTailAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeOfficialToolCalls, normCallArgs, inferToolNameFromArgs, recoverUnparsedCalls, callsLostFromParse, officialToolCallSpecimen, officialCallExampleFor, buildPreset } from './agent-preset.js';
 // 只用 `teachFor`（1146 的续跑重申、3290 的首轮落盘）——那两处是**真调用**，
@@ -624,11 +625,26 @@ function idleTimeoutError(timeoutMs, scene) {
     const label = ageS <= 5 ? '本轮收束原因' : `上一轮收束原因（${ageS}s 前）`;
     return `，${label} ${scene.lastEndReason}`;
   })();
+  // 0.19.75：开启交付链取证时，把**逐层结论**接进报错。
+  //
+  // 为什么值得占这段字符：本条报错的原始工单（Issue #1）里，「页面已有 2172 字
+  // 未回传」只告诉我们**末梢**没收到，说不出丢在哪一层——于是排查只能在
+  // 捕获/解码器/驱动/relay/适配器之间猜。有了逐层读数，同一条报错直接给出
+  // 「首个分叉点」。
+  const traceNote = (() => {
+    const dt = scene?.deliveryTrace || scene?.adapterTrace;
+    if (!dt) return '';
+    const parts = [];
+    if (dt.firstLossAt) parts.push(`首个分叉层=${dt.firstLossAt}`);
+    else parts.push('逐层未见分叉');
+    if (dt.diverged === true) parts.push('（有内容丢失）');
+    return `，交付链${parts.join('')}（详见 status().deliveryTrace）`;
+  })();
   const hint = scene
     ? `（页面${scene.preview ? '在' : '不在'}${scene.lastRecovered ? `，最近一次部分流：${scene.lastRecovered.reason} ${scene.lastRecovered.chars} 字` : ''}`
       + `${stalled ? `，最近一次只出思维链：思考 ${stalled.thinkingChars} 字 / 正文 ${stalled.answerChars} 字（${stalled.reason}）` : ''}`
       + endReason
-      + `${phaseNote}${activity}${pendingChars}）`
+      + `${phaseNote}${activity}${pendingChars}${traceNote}）`
     : '';
   const err = new Error(`WEB_NO_PROGRESS: 桥侧已 ${Math.round(timeoutMs / 1000)}s 没有从网页收到任何新事件${hint} — 本轮已中止，可重试`);
   // 旧文案是「网页侧超过 Ns 没有任何新内容」，而本看门狗量的是**适配器流**多久
@@ -1367,6 +1383,16 @@ export function apply(ctx, config = {}) {
           // 会以为自己配的 240s 没生效。
           windowCapped: decision?.capped === true,
         };
+        // 0.19.75：把 **适配器侧** 的两层（relay / adapter）并入现场。
+        // 只在开启取证时有值；与驱动侧那三层在报错里合成完整五层链。
+        const localTrace = (() => {
+          if (!turn?.trace) return null;
+          try {
+            const snap = turn.trace.snapshot();
+            return { ...compareStages(snap), at: Date.now() };
+          } catch { return null; }
+        })();
+        if (localTrace) base.adapterTrace = localTrace;
         try {
           const st = driverForRead(idleAccountKey)?.status?.() || null;
           if (!st) return base;
@@ -1391,6 +1417,10 @@ export function apply(ctx, config = {}) {
             // `domReplyChars` 很大而这边零事件 ⇒ 网页早写完，缺的是回传。
             lastActivityAt: st.lastActivityAt ?? null,
             domReplyChars: st.domReplyChars ?? null,
+            // 0.19.75：驱动侧那三层（capture/decoder/driver）的逐层读数。
+            // 与上面两个末梢读数并列但语义不同：那两个只说「最近动过没有」
+            // 「页面有多少字」，这一份才说得出**哪一层**把内容丢了。
+            deliveryTrace: st.deliveryTrace ?? null,
           };
         } catch { return base; }
       };
@@ -1443,6 +1473,21 @@ export function apply(ctx, config = {}) {
       // `Promise.resolve().then(cfg.executor)`）——排队时间由 executor 的
       // `markPreDeliver` 一并计入 preDeliverMs。
       const submitAtReal = Date.now();
+      // 0.19.75：本轮的交付链取证器（adaptor 侧的两层：relay / adapter）。
+      //
+      // 一轮一个实例（**绝不跨轮复用**：跨轮复用正是本仓库记过的「旧读数冒充本轮」
+      // 那一类缺陷）。驱动侧的三层（capture/decoder/driver）由驱动自己的
+      // `active.trace` 记，两边**各记各的**、最终在 /status 与超时报错里并列——
+      // 不共用同一个实例，因为它们分属两个进程内对象、寿命也不同。
+      // 默认关闭（`deliveryTrace` 配置或 `WEBCODE_DELIVERY_TRACE=1` 才开）。
+      turn.trace = (cfg.deliveryTrace === true || process.env.WEBCODE_DELIVERY_TRACE === '1')
+        ? createDeliveryTrace({
+          sampleChars: (() => {
+            const n = Number(cfg.deliveryTraceSampleChars ?? process.env.WEBCODE_DELIVERY_TRACE_SAMPLE);
+            return Number.isFinite(n) && n > 0 ? n : 0;
+          })(),
+        })
+        : null;
       // 真源取 **turn.meta**（适配器与 executor 共享的同一个对象，见 relay.submit 的
       // `meta: turn.meta`）：
       //   · `preDeliverMs` —— executor 在把消息交给网页那一刻定值的**累计**时长
@@ -1557,15 +1602,27 @@ export function apply(ctx, config = {}) {
           // lastEventAt 每拍都刷新（它是 deadline 的起点，不是相位标记）。
           if (firstEventAt === null) firstEventAt = Date.now();
           lastEventAt = Date.now();
+          // 0.19.75 第 5 层：**适配器真正取走**的事件。
+          // 正文类事件（delta / think）才计入字符；end 事件只计一次事件数，
+          // 它的 text 是权威回读，由驱动层那句补记覆盖，不在这里重复计。
+          if (ev?.delta) turn.trace?.note('adapter', ev.delta);
+          else if (ev?.think) turn.trace?.note('adapter', ev.think);
+          else if (ev) turn.trace?.note('adapter', '');
           return ev;
         } finally { if (timer) clearTimeout(timer); }
       };
       const settled = relay
         .submit(turn.prompt, {
           signal: options.signal,
-          onDelta: (t) => ch.push({ delta: t }),
-          onThink: (t) => ch.push({ think: t }),
-          onImage: (img) => ch.push({ image: img }),
+          // 0.19.75 交付链取证（第 4 层 relay / 第 5 层 adapter）。
+          //
+          // 为什么要**分开**记这两层：它们之间隔着 `ch`（一个内存 channel）与
+          // `nextWithIdle()` 的消费循环。若 relay 有而 adapter 没有，说明事件推进了
+          // channel 却没有被消费循环取出（或消费循环已经退出）——这与「relay 之前
+          // 就没了」是两回事，报错必须能把两者分开。
+          onDelta: (t) => { turn.trace?.note('relay', t); ch.push({ delta: t }); },
+          onThink: (t) => { turn.trace?.note('relay', t); ch.push({ think: t }); },
+          onImage: (img) => { ch.push({ image: img }); },
           meta: turn.meta,
         })
         .then(({ text, thinking, images }) => ch.push({ end: { text, thinking, images } }))
@@ -1667,7 +1724,14 @@ export function apply(ctx, config = {}) {
             if (full && full !== acc) {
               if (full.startsWith(acc)) {
                 const rest = full.slice(acc.length);
-                if (rest) { acc = full; yield* openText(); yield { type: 'text-delta', index: textIndex, text: rest }; }
+                // 0.19.75 交付链取证：这一段「权威全文补发的尾巴」同样是**适配器
+                // 真正交付给用户**的内容，必须计入 adapter 层。
+                //
+                // 为什么不能只数 ev.delta：真机存在「增量通道什么都没送、正文只存在于
+                // decoder.finish() 的权威全文里」的形态（0.16.4 记过）。只数 delta 的话
+                // 那种轮次会显示成「relay 有、adapter 零」而被误判成分叉——而用户
+                // 其实**拿到了**全部正文（这一支正是把它补发出去的地方）。
+                if (rest) { acc = full; turn.trace?.note('adapter', rest); yield* openText(); yield { type: 'text-delta', index: textIndex, text: rest }; }
               } else {
                 acc = full; // diverged: block-end below carries the truth
               }

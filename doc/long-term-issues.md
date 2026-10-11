@@ -64,7 +64,8 @@
 | 49 | **0.19.69 的 profile 安装与「重启 dsh web」在本机沙箱内无法执行**（2026-10-08 登记，**等用户在正常环境补做**）——本轮发布链其余各步全部完成并已复核：git 提交 `2b63492` + `1ab845f`、push（`05967a1..1ab845f`，走 HTTPS + `http.sslBackend=openssl`）、tag `v0.19.69`、GitHub Release 带资产 `dsh-webcode-bridge-0.19.69.tgz`（930,799 B）、CI 与 CodeQL success、npm `latest = 0.19.69`（`dist.shasum a6f8b8459dff…` 与本地 tarball 逐字节同源）。**卡住的是最后一步**：`~/.dsh` 整棵树在本沙箱内**只读**（写探针文件即 `Access denied`），`dsh plugin --profile web add <tgz>` 报 `EPERM: operation not permitted, open …\profiles\web\package.json.lock`。⇒ 用户须在正常环境里 `dsh plugin --profile web add .\dsh-webcode-bridge-0.19.69.tgz` 并**重启 dsh web**（「装完不重启 = 等于没装」）。⚠ 注意 #45 同族风险：桌面端是**另一条**通道（`dsh` CLI 拒绝管理 desktop profile），声明与磁盘一致要完全退出桌面端后用桌面端自己的 carrier。 | 中 | 否 | `~/.dsh/profiles/web/package.json`、`doc/progress.md`（0.19.69 节 §四） |
 | 51 | **适配器看门狗的两个既有缺陷**（2026-10-11 登记，**同日修复 0.19.74**）——回应 GitHub Issue #1 报错原文的自相矛盾（「驱动不在忙」+「最近驱动活动 2s 前」+「页面已有 2172 字回复未回传」）。**A：相位被冻结整轮** —— `nextWithIdle()` 首次执行在 executor 微任务**之前**，而驱动的 `busy = true` 在 `runTurn` 内部（更晚）⇒ 第一次读到的 `busy` 恒 false，相位恒判「网页还没开口且驱动不在忙」，`idleFirstByteMultiplier` **在生产路径上从未生效**；而 `idleScene()` 开火时读的是**新鲜**读数 ⇒ 冻结相位与新鲜现场被并排印出。既有护栏 ① 用静态桩（驱动从未被调用就报 busy）复现不出该时序。**B：`idleDeadline` 锚在 `submitAtReal`** —— 文档承诺「自上次事件起 N 秒」，实现却是整轮固定 ⇒ 是**总时长上限**冒充静默上限。实测（窗口 1300ms、每 150ms 一个 delta）：修前 **1315ms 处判死**，而那时已收到 `chunk0…chunk7`；该缺陷在 `471efcd` 上同样复现（stash 复核过）。**修法**：相位每拍重算 + 起点取 `max(投放时刻, 上次事件)` + 文案改「桥侧已 Ns 没有从网页收到任何新事件」/「驱动**自报**不在忙」。护栏 ⑧/⑨/⑨b（反向安全线：事件真停了仍须判死）/⑩；变异 M1/M2/M3 全部被抓且各被对应护栏抓住。**未做**：真机长轮次（>120s 单轮）复现、首字节耗时分布采集。 | 高 | 否 | `lib/index.js`（`nextWithIdle` / `idleDeadline` / `idleTimeoutError` / `driverForRead`）、`lib/idle-window.js`、`test/watchdog-first-byte.test.mjs` ⑧⑨⑨b⑩、`.tmp/probe-deadline-origin.mjs`、`.tmp/mutation-watchdog.mjs` |
 | 52 | **`TOOL_CALL_UNPARSED` 残余：部分丢失的调用被静默丢弃**（2026-10-11 登记，**同日修复 0.19.74**）——#25「若要修」第 2 条点名的形态（现有 mismatch 配对不覆盖「流式丢块」）。两个恢复点的门是 `withheld > 0 && !calls.length`，只在**一条都没解析出来**时跑 ⇒ 一轮 3 条调用、解析出 2 条、丢 1 条时，既不复恢复也不发 UNPARSED 提示，**静默丢步骤**。实测（`.tmp/probe-partial-loss.mjs`）：修前派发 **2/3** 且正文零提示；修后 3/3。**修法是减法不是追加**：`recoverUnparsedCalls` 读 DSML `<invoke>` 骨架，对主解析已拿到的调用**也会**返回一份（实测纯 DSML 下主解析 `read+glob`、恢复层同样 `read+glob`）⇒ 直接追加会**重复派发**。新增纯函数 `callsLostFromParse`，按「名+规范化参数」可消耗配对，只留真丢的。红线不放宽：只走 `read`/`glob`/`grep`。护栏 `test/partial-call-loss.test.mjs` 9 项（含 ② 不得重复派发、④ 写类红线）；变异 P1/P2/P3 全部被抓。⚠ 自曝两坑：首版把 `withheld` 用在**声明之前**（TDZ 当场抛）；首版 ⑤ 的形态下「只比名字」恰好也得到 1 条 ⇒ **P3 逃逸**，改写后 P3 才红。**未做**：该形态在生产日志里的发生率未估计；真截断仍只能靠提示重发。 | 高 | 否 | `lib/index.js`（`valid` 后的 `callsLostFromParse` 调用点）、`lib/agent-preset.js`（`callsLostFromParse`）、`test/partial-call-loss.test.mjs`、`.tmp/probe-partial-loss.mjs`、`.tmp/probe-dedup2.mjs`、`.tmp/mutation-partial-loss.mjs` |
-| 53 | **登录判定对已声明特征的站点会「靠输入框兜底」谎报已登录**（2026-10-11 登记，**未修，待真机对照读数**）——用 0.19.74 新增的按站点验收入口跑**全新空 profile**：`PASS login.loggedIn`（`basis=probe-fallback`）＋`BLOCKED send.text — NEED_LOGIN` ⇒ **登录判定说已登录、真实发送路径说要登录**，面板会把未登录站点显示成「已登录」。**真机 DOM 读数**（`test-mock/probe-kimi-login2.mjs`，Playwright locator）：声明的 `loginProbe.bad` 命中**0** 个可见节点、页面「登录」二字（exact）可见数 **0**、输入框**可见 1**。根因：`judgeLoggedIn` 的兜底是 `visibleComposerCount(p) > 0`，而 kimi 游客页**自带完整输入框**（同族还有 qwen/gemini/doubao/zai）。**为什么本轮不修**：修法需要该站点真实未登录特征，而本机拿不到「已登录 kimi」对照读数；若改成「声明了 bad 却没命中 ⇒ 判未登录」，会**把所有已登录用户误判成未登录**（谎报与误报都要避免）。本轮只把它变成**可复核读数**（验收脚本记 FAIL 而非 PASS）并登记。**怎么修**：先采已登录 kimi 的 DOM（`accountProbe.name` 的 `span.user-name` 可候选 `ok` 特征），有成对读数后补 `loginProbe.ok`（正向特征优先于输入框兜底），再逐站补齐。 | 高 | 否 | `lib/browser-driver.js`（`judgeLoggedIn`）、`lib/providers.js`（`loginProbe` / `accountProbe`）、`test-mock/site-verify.mjs`、`test-mock/probe-kimi-login2.mjs` |
+| 53 | **登录判定对已声明特征的站点会「靠输入框兜底」谎报已登录**（2026-10-11 登记；**同日加三态收窄：probe-fallback → uncertain**）——用 0.19.74 新增的按站点验收入口跑**全新空 profile**：`PASS login.loggedIn`（`basis=probe-fallback`）＋`BLOCKED send.text — NEED_LOGIN` ⇒ **登录判定说已登录、真实发送路径说要登录**，面板会把未登录站点显示成「已登录」。**真机 DOM 读数**（`test-mock/probe-kimi-login2.mjs`，Playwright locator）：声明的 `loginProbe.bad` 命中**0** 个可见节点、页面「登录」二字（exact）可见数 **0**、输入框**可见 1**。根因：`judgeLoggedIn` 的兜底是 `visibleComposerCount(p) > 0`，而 kimi 游客页**自带完整输入框**（同族还有 qwen/gemini/doubao/zai）。**0.19.75 处置**：加**第三态**而不是收紧判定——`probe-ok`/`probe-bad`=已验证、`input-fallback`=按 `loggedIn` 照旧（**DeepSeek 路径，降级会让主站点长期显示「不确定」**）、`probe-fallback`/`stale`/未知=**`uncertain`**；不确定时**不改写** `loggedIn`（改了会把站点改版导致的已登录用户判成未登录 = 用误报换谎报），护栏 `test/login-state.test.mjs` 6 项钉住。**仍未做**：没有「已登录 kimi」对照读数，故**未**为任何站点补 `loginProbe.ok`——三态只是把猜测如实标出，**并没有让判定更准**；qwen/gemini/doubao/zai 成对读数同样未采。 | 高 | 否 | `lib/browser-driver.js`（`judgeLoggedIn` / `loginState` / `loginVerified`）、`lib/providers.js`（`loginProbe` / `accountProbe`）、`test/login-state.test.mjs`、`test-mock/site-verify.mjs` |
+| 54 | **Issue #1 的「内容交付」那一半仍未闭环：缺少可定位到层的证据**（2026-10-11 登记；**同日交付取证工具，未做真机定位**）——复审明确指出：0.19.74 修的是**看门狗计时**（相位冻结 + deadline 锚点），而 `lastEventAt` 只在**适配器收到流事件**时推进、`domReplyChars` 只是诊断读数，**都不会**把页面 DOM 里的正文送回流里 ⇒ 「不再误杀」≠「内容完整交付」，那 2172 字仍可能卡在 DOM 且本轮改动不会补回。**处置（工具已交付）**：新增 `lib/delivery-trace.js`，沿 `capture → decoder → driver → relay → adapter` 五层各记**事件数/字符数/首末时刻/内容哈希**（默认**不留原文**；`WEBCODE_DELIVERY_TRACE=1` 开启，`WEBCODE_DELIVERY_TRACE_SAMPLE=N` 才留前 N 字符）。`compareStages()` 给出**首个分叉层**并区分两件下一步完全不同的事：某层**零事件**（丢在「上游→本层」，查上游发送/绑定）vs 某层**有事件但更短**（丢在**本层**，查本层解析/过滤）。⚠ `capture` 是**原始上线帧**（含字段名/转义），与正文长度**不可比**，只判「有没有解出正文」——否则每轮正常生成都报分叉。读数出现在 `status().deliveryTrace` 与 `WEB_NO_PROGRESS` 报错文本里。**仍未做**：**没有**真机复现「页面 2172 字未回传」并据此定位到具体层（需真实 DeepSeek 长会话 + 登录态，只能由用户执行）。**下一步**：`WEBCODE_DELIVERY_TRACE=1` 跑一轮，看 `firstLossAt`；若驱动回读完整、增量也完整而 DSH 收到的正文不完整 ⇒ 查适配器；若驱动本身就丢 ⇒ 从 capture/decoder 查起。 | 高 | 否 | `lib/delivery-trace.js`、`lib/browser-driver.js`（`active.trace` / `status().deliveryTrace`）、`lib/index.js`（relay/adapter 两层 + 报错文本）、`test/delivery-trace.test.mjs`（12 项）、`test/delivery-trace-wiring.test.mjs`（5 项） |
 
 > **一览表完整性（2026-09-16 修正；2026-09-26 补上闸门）**：本表此前**漏登记 #19 与 #20**（正文有、表里没有）。
 > 这两条都是可机检的登记错误，而当时没有任何闸门覆盖「正文条目 ↔ 表格条目」的一致性。
@@ -3533,16 +3534,33 @@ node test-mock/site-verify.mjs --site kimi
 doubao 的 `tiptap`、z.ai 的 `#chat-input`——providers.js 的注释早已记过这一族）。
 声明了 `bad` 特征却一个都不命中时，旧实现标 `probe-fallback` 然后**照样回 true**。
 
-### 为什么本轮不修（诚实边界）
+### 0.19.75 的处置（**加第三态**，不是收紧判定）
 
-- 修法需要**该站点真实的未登录特征**，而本机拿不到「已登录的 kimi」对照读数
-  （空 profile 上没有登录按钮 = 特征本身与真机不符，属站点改版/区域差异）。
-- 若在此处改成「声明了 bad 却没命中 ⇒ 判未登录」，会**把所有已登录用户误判成未登录**
-  ——那比现状更糟（本仓库对「谎报」与「误报」记过多次，两者都要避免）。
-- 因此本轮只把它**变成可复核的读数**（验收脚本把这条矛盾记成 FAIL 而不是 PASS），
-  并在此登记；不在没有对照读数的情况下改判据。
+复审指出不必在「强行判未登录」与「错误显示已登录」之间二选一。于是改为**三态**：
 
-### 若要修，从哪下手
+| basis | 三态 | 理由 |
+| --- | --- | --- |
+| `probe-ok` / `probe-bad` | `verified-in` / `verified-out` | 站点特征命中 = 核验结果 |
+| `input-fallback` | 按 `loggedIn` 照旧 | **DeepSeek 的路径**：它没有 `loginProbe`，靠输入框回退是设计如此 |
+| `probe-fallback` | **`uncertain`** | 声明了特征却一个都没命中 ⇒ 猜测 |
+| `stale` / `null` / 未知值 | **`uncertain`** | 未核验；未知值绝不得落进「已验证」 |
+
+**为什么不确定时不把 `loggedIn` 改成 `false`**：那会把「站点改版导致特征失效」的
+**已登录用户**判成未登录——用误报换谎报。第三态的意义正是**两边都不说**，
+由面板如实显示「待确认」。护栏 `test/login-state.test.mjs` ⑤ 钉住
+`needLogin` 仍只看 `loggedIn === false`。
+
+**口径刻意收窄（只动 `probe-fallback`）**：若连 `input-fallback` 也降为不确定，
+主站点（DeepSeek）面板会长期显示「不确定」——那是可见的行为退化，且与
+「DeepSeek 是唯一可整天长跑的站点」这一既有结论冲突。护栏同文件 ③。
+
+### 仍未做（诚实边界）
+
+- **没有采到「已登录 kimi」的对照读数**，因此没有为任何站点补 `loginProbe.ok`。
+  三态只是把「猜测」如实标出来，**并没有**让登录判定变得更准。
+- qwen / gemini / doubao / zai 的成对读数同样未采。
+
+### 若要继续，从哪下手
 
 1. 采一次**已登录 kimi** 的 DOM：确认登录后 `button/a:has-text("登录")` 是否真的消失、
    以及已登录页是否有稳定正向特征（`accountProbe.name` 的 `span.user-name` 已声明，
@@ -3553,5 +3571,81 @@ doubao 的 `tiptap`、z.ai 的 `#chat-input`——providers.js 的注释早已�
 
 ### 可复核入口
 
-`node test-mock/site-verify.mjs --site <站点>`（0.19.74 新增），
+`node test-mock/site-verify.mjs --site <站点>`（0.19.74 新增；0.19.75 收紧判定为四态），
 `--list` 看全部站点；四态口径见该文件头注释。
+
+---
+
+## 54. **Issue #1 的「内容交付」那一半未闭环：取证工具已交付，真机定位未做**（2026-10-11 登记）
+
+### 复审的判断（本轮据此实施）
+
+> *「本轮证明了两件事：首字节宽限之前可能由于生产时序而失效；持续有增量的轮次
+> 之前可能由于固定 deadline 被误杀。这两项都值得修……但是，原始现场还有一条独立
+> 线索：页面 DOM 已经有 2172 字，驱动活动时间也很近，却没有正确回传。」*
+>
+> *「适配器的 `lastEventAt` 是消费流事件时更新的；单纯读取 `lastActivityAt` 或
+> `domReplyChars` 作为诊断信息，并不会把 DOM 正文重新送入流中。因此，即使看门狗
+> 计时已经正确，若正文仍卡在网页 DOM、没有通过驱动捕获与 relay 进入适配器流，
+> 现有改动也不会自动补回这 2172 字。」*
+
+这个区分是对的，也是本轮不再宣称「Issue #1 已解决」的原因：
+**「看门狗不再误杀」与「内容是否完整交付」是两件事。**
+
+### 处置：交付链逐层取证（`lib/delivery-trace.js`，0.19.75 新增）
+
+沿链路五层各记**事件数 / 字符数 / 首末时刻 / 内容哈希**：
+
+```
+capture（原始上线帧）→ decoder（正文）→ driver → relay → adapter
+```
+
+读数出现在两处：`status().deliveryTrace`，以及 `WEB_NO_PROGRESS` 报错文本里的
+`交付链首个分叉层=…`。
+
+### 判据的关键区分（`compareStages()`）
+
+| 形态 | 结论 | 下一步 |
+| --- | --- | --- |
+| 上游有事件、**本层零事件** | 丢在「上游→本层」这一段 | 查上游的发送/绑定 |
+| 上游有事件、**本层有事件但更短** | 丢在**本层** | 查本层的解析/过滤 |
+
+只报「适配器零事件」是**末梢症状**，分不出这两者——而 Issue #1 的排查正卡在这里。
+
+### 两条刻意的设计（各自都有护栏）
+
+1. **`capture` 不与 `decoder` 比长度。** 原始帧含字段名/转义/分帧头，必然比正文长；
+   若逐字比，**每一轮正常生成都会被报成分叉**（工具天天喊狼来了就没人看了）。
+   这一段只判「有没有解出正文」（`TEXT_STAGES` 只含 decoder→driver→relay→adapter）。
+2. **默认不留原文**，只记长度与哈希——用户对话不该为排障默认落盘；
+   `WEBCODE_DELIVERY_TRACE_SAMPLE=N` 才保留每层前 N 字符。
+
+### 开关
+
+```powershell
+$env:WEBCODE_DELIVERY_TRACE = '1'
+# 或在插件配置里 deliveryTrace: true
+```
+
+默认**关闭**：取证器每帧做一次 sha256 更新，长会话下是真实开销。
+
+### 仍未做（本条的实质结论）
+
+- **没有真机复现「页面 2172 字未回传」并据此定位到具体层。** 那需要真实 DeepSeek
+  长会话与登录态，只能由用户在正常环境执行。本轮交付的是**工具**，不是定位结论。
+- 因此**不要**把 Issue #1 标记为已解决；正确表述是「两个确定的看门狗缺陷已修，
+  原始内容缺失故障仍待真实链路确认」。
+
+### 若要继续，从哪下手
+
+1. `WEBCODE_DELIVERY_TRACE=1` 跑一轮长会话，复现后再看 `firstLossAt`；
+2. 若**驱动回读完整、增量也完整**而 DSH 收到的正文不完整 ⇒ 重点查**适配器**；
+   若**驱动本身就已经丢了** ⇒ 从 **capture / decoder** 查起；
+3. 补两种回归形态：**持续增量**（不得被腰斩）与**真正静默**（必须超时）——
+   0.19.74 的 ⑨/⑨b 已钉住计时器边界，勿在取证改动中破坏它们。
+
+### 判据材料存放
+
+`.tmp/probe-trace-readings.mjs`（两种交付形状的实测）、
+`.tmp/probe-trace-live.mjs`、`test/delivery-trace.test.mjs`（12 项）、
+`test/delivery-trace-wiring.test.mjs`（5 项接线级）。

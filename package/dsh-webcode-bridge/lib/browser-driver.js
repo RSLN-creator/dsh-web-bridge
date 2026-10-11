@@ -23,6 +23,7 @@ import { getSite, getContract, resolveWebModel, conversationNav, conversationIdF
 import { DEFAULT_SLOT, normalizeSlot } from './accounts.js';
 import { selectWebModel, pickerUsable } from './model-picker.js';
 import { deriveLastRate, shouldSettleWip, shouldSettleStalledThinking, answerDomLength, cleanAnswerDomText, shouldRescueStalledCapture } from './metrics.js';
+import { createDeliveryTrace, compareStages } from './delivery-trace.js';
 import { emptyWebResponseError } from './zero-progress.js';
 import { readIdentityCache, writeIdentityCache } from './account-cache.js';
 // 「昵称/头像候选」的页面侧扫描：**只在显式 debug 时**使用（见 readAccountIdentity）。
@@ -953,6 +954,19 @@ export function createBrowserDriver(options = {}) {
   // 必须远小于 requestTimeoutMs（240s），否则这一轮永远轮不到稳态收束、
   // 只能等通用超时（报错信息也就失去「收束原因」这条线索）。
   const DOM_BLIND_MS = Math.max(WIP_IDLE_MS * 6, 15_000);
+  // 0.19.75 交付链逐层取证的开关（默认关：它只在排查「内容丢在哪一层」时需要）。
+  //
+  // 为什么要显式开：取证器每帧做一次 sha256 更新，长会话下是真实开销；而绝大多数
+  // 运行不需要它。开启方式（两条都支持，配置优先）：
+  //   · 环境变量 `WEBCODE_DELIVERY_TRACE=1`（可附 `WEBCODE_DELIVERY_TRACE_SAMPLE=N`
+  //     额外保留每层前 N 字符原文——**默认 0 = 不留原文**，用户对话不该为排障默认落盘）；
+  //   · 插件配置 `deliveryTrace: true` / `deliveryTraceSampleChars: N`。
+  const deliveryTraceEnabled = cfg.deliveryTrace === true
+    || process.env.WEBCODE_DELIVERY_TRACE === '1';
+  const deliveryTraceSampleChars = (() => {
+    const n = Number(cfg.deliveryTraceSampleChars ?? process.env.WEBCODE_DELIVERY_TRACE_SAMPLE);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  })();
   // 本轮收束原因，供 /status 与右栏显示：finished | partial-wip-settled |
   // partial-wip-settled(dom-unavailable) | timeout。null = 尚未跑过轮次。
   let lastEndReason = null;
@@ -964,6 +978,10 @@ export function createBrowserDriver(options = {}) {
   // 读成了「网页已经收束过、所以桥该收到东西」，排查方向当场被带偏。
   // 记住写入时刻，报错里就能把「刚刚这一轮」与「很久以前那一轮」分开。
   let lastEndReasonAt = null;
+  // 0.19.75：最近一轮的**交付链逐层读数**（snapshot + 比对结论）。
+  // 与 lastEndReason 同寿命：本轮结束后**不**清空，于是超时那一刻
+  // （或 /status 事后查看）取到的是刚刚这一轮的读数，而不是本轮清空后的 null。
+  let _lastDeliveryTrace = null;
   /** 收束原因与它的写入时刻必须**同时**更新——分两处写迟早会漂移成
    *  「时间是新的、原因是旧的」这种最难查的读数。 */
   function noteEndReason(reason) {
@@ -1502,6 +1520,45 @@ export function createBrowserDriver(options = {}) {
       loginBasis: lastLoginBasis || (cachedTrusted ? cachedLogin.basis : (cachedLogin ? 'stale' : null)),
       loginCheckedAt: lastLogin?.at ?? cachedLogin?.at ?? null,
       needLogin: effectiveLoggedIn === false,
+      // 0.19.75（#53 窄口径）：登录状态**三态**——已验证登录 / 已验证未登录 / 不确定。
+      //
+      // ## 为什么需要第三态
+      //
+      // 复审指出：不必在「强行判未登录」与「错误显示已登录」之间二选一。
+      // `probe-fallback` 的含义是「站点**声明了**登录特征，却一个都没命中，于是退回
+      // 按『有输入框』兜底」——那是**猜测**，不是核验结果。真机读数（全新空 profile、
+      // kimi）：声明的 bad 特征命中 0、页面「登录」可见数 0、输入框可见 1
+      // ⇒ 旧实现回 loggedIn=true，面板把一个**没登录**的站点显示成「已登录」，
+      // 而真实发送路径立刻回 NEED_LOGIN。
+      //
+      // ## 口径刻意收窄（只动 probe-fallback）
+      //
+      //   · `probe-ok`        → 'verified-in'  （正向特征命中，是核验结果）
+      //   · `probe-bad`       → 'verified-out' （负向特征命中，是核验结果）
+      //   · `input-fallback`  → 'verified-in'/'verified-out' 按 loggedIn 照旧
+      //     （**这是 DeepSeek 的路径**——它没有 loginProbe，靠输入框回退是设计如此。
+      //      若把这一档也降为不确定，主站点会长期显示「不确定」，那是可见的行为退化，
+      //      且与「DeepSeek 是唯一可整天长跑的站点」这一既有结论冲突。）
+      //   · `probe-fallback`  → **'uncertain'**（声明了特征却没命中 = 猜测）
+      //   · `stale`/null      → 'uncertain'（旧版本落盘值、尚未核验）
+      //
+      // 为什么不确定时**不**把 loggedIn 改成 false：那会把已登录用户（只是站点改版
+      // 让特征没命中）判成未登录——谎报与误报都要避免。第三态的意义正是**两边都不说**，
+      // 由面板如实显示「待确认」，而不是替用户下结论。
+      loginState: (() => {
+        const basis = lastLoginBasis || (cachedTrusted ? cachedLogin.basis : (cachedLogin ? 'stale' : null));
+        if (basis === 'probe-ok') return 'verified-in';
+        if (basis === 'probe-bad') return 'verified-out';
+        if (basis === 'input-fallback') return effectiveLoggedIn === true ? 'verified-in' : 'verified-out';
+        // probe-fallback / stale / null / 未知值：一律不确定（未知值不得落进「已验证」）
+        return 'uncertain';
+      })(),
+      // 登录结论是否**已核验**（面板据此决定要不要画「已登录」那个绿点）。
+      loginVerified: (() => {
+        const basis = lastLoginBasis || (cachedTrusted ? cachedLogin.basis : (cachedLogin ? 'stale' : null));
+        return basis === 'probe-ok' || basis === 'probe-bad'
+          || (basis === 'input-fallback' && effectiveLoggedIn != null);
+      })(),
       selectedModel,
       // 最近一次回读确认成功的思考等级（0.19.48）：`null` = 用户没选过（Default），
       // 不是「选了但没生效」——后者会在那一轮直接抛 THINK_EFFORT_UI_CHANGED。
@@ -1551,6 +1608,13 @@ export function createBrowserDriver(options = {}) {
       // 页面往返），而「最近活动很新 + 页面已有 N 字未回传」正是这次事故的一句话定位。
       lastActivityAt,
       domReplyChars,
+      // 0.19.75 交付链逐层读数（仅在开启取证时有值；未开启恒为 null）。
+      //
+      // 为什么必须与 lastActivityAt / domReplyChars **并列但语义不同**：
+      // 那两个是末梢诊断读数（「驱动最近有没有动过」「页面 DOM 有多少字」），
+      // **不会**告诉我们是哪一层把内容丢了。这里给出逐层计数/哈希，
+      // 于是「页面有 2172 字但适配器零事件」能进一步定位到具体层。
+      deliveryTrace: deliveryTraceEnabled ? _lastDeliveryTrace : null,
       lastTimeoutScene,
       // C-3：会话槽丢失的可核对数字（原先完全静默——用户只看到「每轮新开对话」）
       sessionLostCount,
@@ -1678,11 +1742,17 @@ export function createBrowserDriver(options = {}) {
             active.lastProgressAt = performance.now();
             // 0.16.3：驱动侧现场读数（适配器看门狗据此区分「网页没回传」与「链路死了」）。
             noteActivity();
+            // 0.19.75 交付链取证：解码器**吐出的正文**（第 2 层）。
+            // 与 capture 层分开记：两者长度不同即说明解码器吃掉了内容。
+            active.trace?.note('decoder', t);
             // 0.15.2：「正文真的来了」的独立时刻。它与 lastProgressAt 刻意分开——
             // 思考增量刷新前者、**不**刷新这个。混成一个的话，「一直思考」与
             // 「思考完给出正文」在判据上无法区分，硬上限就永远判不出来。
             active.lastAnswerAt = performance.now();
             active.text += t;
+            // 第 3 层：驱动自己累积到的正文（正常与 decoder 逐字相同；
+            // 若这里更少，说明驱动侧的过滤/累积逻辑丢了东西）。
+            active.trace?.note('driver', t);
             try { active.onDelta?.(t); } catch {}
           },
           onThink: (t) => {
@@ -1715,6 +1785,10 @@ export function createBrowserDriver(options = {}) {
       } catch { /* debug only */ }
     }
     if (m.phase === 'chunk') {
+      // 0.19.75 交付链取证（第 1 层）：**原始上线帧**。
+      // 刻意与 decoder 层分开：原始帧含字段名/转义/分帧头，长度与正文**不可比**，
+      // 判据见 lib/delivery-trace.js 的 TEXT_STAGES（只比「有没有解出正文」）。
+      if (m.text) active.trace?.note('capture', String(m.text));
       if (m.text) active.rawHead = ((active.rawHead || '') + m.text).slice(0, 400);
       // 流**尾**（0.19.45）。只留首段是看不出真因的——真机 2026-09-28 GLM 那轮报错是
       // 「empty response from web AI | 流首段: …"parts":[],"status":"init"…」，
@@ -1765,6 +1839,15 @@ export function createBrowserDriver(options = {}) {
   function finishActive() {
     const a = active;
     if (a) lastFinished = a;
+    // 0.19.75：在 active 被清掉**之前**冻结交付链读数（snapshot 是冻结语义，
+    // 之后再记事件也不会改变已返回的这一份）。放在这里而不是每个收尾分支里：
+    // 收尾路径有多条（稳态收束 / DOM 兜底 / 超时 / 中止），逐条写必然漏一条。
+    if (a?.trace) {
+      try {
+        const snap = a.trace.snapshot();
+        _lastDeliveryTrace = { ...compareStages(snap), at: Date.now(), settledBy: a.settled_by || null };
+      } catch { /* 取证失败绝不影响收尾本身 */ }
+    }
     active = null;
     busy = false;
     if (a?.timer) clearTimeout(a.timer);
@@ -3399,6 +3482,13 @@ export function createBrowserDriver(options = {}) {
           domRescueDone: false,
           wipTimer: null,
           settled_by: null,
+          // 0.19.75 交付链逐层取证（**一轮一个实例**，绝不跨轮复用——跨轮复用正是
+          // 本仓库记过的「旧读数冒充本轮」那一类缺陷的来源）。
+          // 只在显式开启时创建，默认零开销：`WEBCODE_DELIVERY_TRACE=1`，
+          // 或配置传入的 deliveryTrace 开关。
+          trace: deliveryTraceEnabled
+            ? createDeliveryTrace({ sampleChars: deliveryTraceSampleChars })
+            : null,
         };
       });
       timer = setTimeout(async () => {
@@ -3916,6 +4006,19 @@ export function createBrowserDriver(options = {}) {
         : ('partial:' + (result.reason || 'unknown'));
       noteEndReason(lastFinished?.settled_by || decoderSettled);
       metrics.endReason = lastEndReason;
+      // 0.19.75：把**权威全文**也记进 driver 层。
+      //
+      // 为什么这一步不能省：真机存在「增量通道什么都没送、正文只存在于
+      // decoder.finish() 的权威全文里」的形态（0.16.4 记过）。若 driver 层只记
+      // onDelta 的增量，那种轮次会显示成「driver 层 0 字」而被误判成分叉。
+      // 这里补记两者之差：差额部分**不是丢失**，而是「没走增量通道」。
+      if (active?.trace && typeof result.text === 'string' && result.text) {
+        const already = active.trace.snapshot().driver.chars;
+        if (result.text.length > already) {
+          active.trace.note('driver', result.text.slice(already),
+            active.trace.snapshot().driver.lastAt ?? undefined);
+        }
+      }
       if (fin) Object.assign(fin, { metrics, chars: (result.text || '').length });
       return {
         text: result.text,

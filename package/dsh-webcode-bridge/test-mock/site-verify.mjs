@@ -1,4 +1,4 @@
-// site-verify.mjs — **按站点**的真实验收入口（0.19.74 新增）。
+// site-verify.mjs — **按站点**的真实验收入口（0.19.74 新增；0.19.75 按复审意见收紧）。
 //
 // ## 为什么需要它（这一条来自复审意见）
 //
@@ -8,34 +8,66 @@
 // 验证」这件事，**没有可重复的真实验收入口**就一直只能停在口头声明上。
 //
 // 本脚本把「站点」从硬编码变成一个参数，并对每个站点跑**同一套**最小真实闭环，
-// 逐项给出四态结论（pass / fail / blocked / unverified），而不是笼统的「能用」。
+// 逐项给出四态结论，而不是笼统的「能用」。
+//
+// ## 0.19.75：修掉三个「工具自己制造假结论」的缺陷（复审指出）
+//
+//   ① **最终状态把 UNVERIFIED 汇总成 PASS** —— 收尾原写作
+//      `failed ? 'FAIL' : 'PASS'` ⇒ 只要没有 FAIL，站点整体就 PASS，哪怕一条工具
+//      调用都没产出。现在判定完全交给 `site-verify-verdict.mjs` 的 `verdictOf()`
+//      （四态优先级 + 必要检查项缺失也算不确定），且该纯函数本身有反向护栏
+//      `test/site-verify-verdict.test.mjs`。
+//   ② **从未真正做工具结果往返** —— 旧实现只「发送 → 解析调用」就收尾，却在注释里
+//      写成「工具结果回填后能收束」（描述超出实现）。现在**真的**执行 `read`、
+//      把结果作为 `mcp_action:"result"` 回填进**同一个**网页会话、再解析第二轮，
+//      产生 `tool.resultRoundTrip` 这一项。
+//   ③ **全文回读掩盖流式交付失败** —— 旧写法 `String(text || sent?.text || '')`
+//      在没有增量时只要全文非空就判「流有正文」，**恰好掩盖 Issue #1 的症状**。
+//      现在 `stream.fullText` / `stream.deltaReceived` / `stream.consistency`
+//      三项分开判（判据见 `streamDeliveryVerdict()`）。
 //
 // ## 用法
 //
 //   node test-mock/site-verify.mjs --site kimi
 //   node test-mock/site-verify.mjs --site qwen --site doubao
 //   node test-mock/site-verify.mjs --list
-//   node test-mock/site-verify.mjs --site glm --profile "<已登录的 profile 目录>"
+//   node test-mock/site-verify.mjs --site glm --profile-root "<profile 根目录>"
 //
 // 环境变量：REAL_PROFILE（默认 .edge-real-profile）／REAL_HEADLESS=0 看窗口。
+//
+// ## `--profile-root` 的语义（0.19.75 明确，旧名 `--profile` 有歧义）
+//
+// 它收的是**profile 根目录**：脚本会在其下按站点取子目录（deepseek 用根本身，
+// 其余用 `<root>/<siteId>`），与产品的「登录态按站点各自持久」一致。
+// 旧名 `--profile` 的注释写着「已登录的 profile 目录」，但代码仍会拼 `/<siteId>`
+// ⇒ 传一个已登录的 kimi 目录时实际读的是它下面的 `kimi` 子目录（复审指出的歧义）。
+// 旧名仍接受（向后兼容），但会打印一行提示说明它按**根目录**解释。
 //
 // ## 四态口径（必须如实，不许把「没跑」写成「通过」）
 //
 //   PASS       真实页面 + 真实请求支持该结论
 //   FAIL       真实页面复现了失败（附现场读数）
 //   BLOCKED    外部条件挡住（未登录 / 验证码 / 站点风控）——不是产品结论
-//   UNVERIFIED 本脚本没有覆盖该项（例如视觉、思考档位尚未声明）
+//   UNVERIFIED 该项没有验到（缺读数、缺调用、缺回填）——**绝不是通过**
+//
+// 汇总优先级：`FAIL` > `BLOCKED` > `UNVERIFIED` > `PASS`；**缺必要检查项也算
+// UNVERIFIED**（防止「没跑那一段」被读成「那一段没问题」）。
 //
 // ## 边界（写清楚，别让下一个人以为它验了什么）
 //
-//   · 它验的是**每站点最小真实闭环**：登录判定 → 输入框可用 → 真发送 → 回读 →
-//     流里有正文 → 工具调用可解析 → 工具结果回填后能收束。
-//   · 它**不**验：长运行稳定性、多轮工具循环的收敛、会话重启恢复、视觉上传、
-//     思考档位。那些要各自的专项入口（见 doc/site-acceptance.md 的矩阵）。
-//   · 登录态来自你指定的 profile；脚本**只读**已有登录，不代你登录、不代过验证码。
+//   · 它验的是**每站点最小真实闭环**：登录判定 → 真发送 → 最终全文与**流式增量**
+//     分别到位且一致 → 工具调用可解析 → **工具真的执行并把结果回填同一网页会话**
+//     → 第二轮能继续 → 本轮有收束读数。
+//   · 它**不**验：长运行稳定性（>120s 单轮）、多轮工具循环的收敛、会话重启恢复、
+//     视觉上传、思考档位。那些要各自的专项入口。
+//   · 登录态来自你指定的 profile 根；脚本**只读**已有登录，不代你登录、不代过验证码。
+//   · `tool.resultRoundTrip` 验的是**驱动层**的往返（同一网页会话里的第二轮）。
+//     它**不**等于 DSH 适配器层的完整工具闭环（那要 `real-verify.mjs` 那条链路）。
 import { createBrowserDriver } from '../lib/browser-driver.js';
 import { getSite, SITES } from '../lib/providers.js';
 import { serializeFirstTurn, parseAgentReply } from '../lib/agent-preset.js';
+import { verdictOf, streamDeliveryVerdict } from './site-verify-verdict.mjs';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -67,7 +99,11 @@ if (!siteIds.length) {
   console.error('例：  node test-mock/site-verify.mjs --site kimi');
   process.exit(1);
 }
-const profileArg = flagValues('--profile')[0];
+const profileArg = flagValues('--profile-root')[0] || flagValues('--profile')[0];
+if (!flagValues('--profile-root')[0] && flagValues('--profile')[0]) {
+  console.log('[note] `--profile` 按**根目录**解释（与 `--profile-root` 同义）：'
+    + '脚本会在其下按站点取子目录。旧名保留仅为向后兼容。');
+}
 const PROFILE = profileArg || process.env.REAL_PROFILE
   || path.join(PKG, '..', '..', '.edge-real-profile');
 const HEADLESS = process.env.REAL_HEADLESS !== '0';
@@ -98,17 +134,30 @@ function pickModel(site) {
 async function verifySite(siteId) {
   const site = getSite(siteId);
   if (!site) {
-    return { siteId, status: 'FAIL', checks: [{ name: 'site.registered', status: 'FAIL', detail: `未知站点 id（--list 看可用站点）` }] };
+    const checks = [{ name: 'site.registered', status: 'FAIL', detail: '未知站点 id（--list 看可用站点）' }];
+    return { siteId, ...verdictOf(checks), checks };
   }
   const checks = [];
   const add = (name, status, detail = '') => {
     checks.push({ name, status, detail });
     console.log(`  ${status.padEnd(10)} ${name}${detail ? '  — ' + detail : ''}`);
   };
+  /**
+   * 统一的收尾判定：**所有**返回路径都走它。
+   *
+   * 为什么连「已经明确 FAIL/BLOCKED」的提前返回也要走纯函数：只要有一条路径自己拼
+   * 状态字符串，判定规则就有第二个真源，迟早与 `verdictOf` 漂移（本项目对「两处
+   * 口径漂移」记过多次）。这里宁可多绕一次函数调用。
+   */
+  const finalize = () => {
+    const v = verdictOf(checks);
+    if (v.reasons.length) console.log(`    ⇒ 判定依据：${v.reasons.join('；')}`);
+    return { siteId, status: v.status, checks, verdict: v };
+  };
   const modelId = pickModel(site);
   if (!modelId) {
     add('site.models', 'FAIL', '该站点没有声明任何模型（providers.js 的 models 为空）');
-    return { siteId, status: 'FAIL', checks };
+    return finalize();
   }
 
   // 每个站点一份独立 profile 子目录（登录态按站点各自持久，与产品行为一致）。
@@ -130,20 +179,29 @@ async function verifySite(siteId) {
       conn = await driver.connect();
     } catch (err) {
       add('login.connect', 'BLOCKED', String(err?.message || err).slice(0, 160));
-      return { siteId, status: 'BLOCKED', checks };
+      return finalize();
     }
     if (!conn?.loggedIn) {
       // 未登录**不是产品结论**：它说明这台机器的该站点 profile 没有登录态。
       add('login.loggedIn', 'BLOCKED',
         `profile 未登录（${profileDir}）——请在设置页为该站点点「登录」后重跑`);
       await driver.close?.().catch(() => {});
-      return { siteId, status: 'BLOCKED', checks };
+      return finalize();
     }
     add('login.loggedIn', 'PASS', profileDir);
-
     const st = driver.status?.() || {};
     if (st.needLogin === true) add('login.needLogin', 'FAIL', '已判定登录却同时报 needLogin=true');
-    else add('login.needLogin', 'PASS', st.loginBasis ? `basis=${st.loginBasis}` : '');
+    else add('login.needLogin', 'PASS', '未同时报 needLogin=true');
+    // ⚠ `basis=probe-fallback` 的含义是「声明了登录特征却一个都没命中，退回按
+    // 「有输入框」兜底」——那是**猜测**，不是核验结果。0.19.75 起不许把它记成 PASS：
+    // 与 #53 同一口径（登录状态分「已验证登录 / 已验证未登录 / 不确定」三态），
+    // 这里如实记 UNVERIFIED，最终状态因此不会是 PASS。
+    // 只收窄 probe-fallback（用户选定的窄口径）：DeepSeek 没有 loginProbe，
+    // basis 恒为 input-fallback，其显示与判定保持不变。
+    add('login.basis', st.loginBasis === 'probe-fallback' ? 'UNVERIFIED' : 'PASS',
+      st.loginBasis === 'probe-fallback'
+        ? '登录特征一个都没命中，退回「有输入框」兜底 ⇒ 登录状态不确定（不是已验证登录）'
+        : (st.loginBasis ? `basis=${st.loginBasis}` : 'basis 未报告'));
 
     // ---- ② 模型与发送：真实发送一轮纯文本并回读 ----
     //
@@ -170,19 +228,34 @@ async function verifySite(siteId) {
         add('login.verdictConsistent', 'FAIL',
           `登录判定回 loggedIn=true（basis=${st.loginBasis ?? '?'}），但真实发送路径回 ${code}`
           + '——面板会把未登录站点显示成「已登录」，登录判定的兜底判据需要收紧');
-        return { siteId, status: 'FAIL', checks };
+        return finalize();
       }
       add('send.text', 'FAIL', `${code || '(no code)'}: ${String(err?.message || err).slice(0, 160)}`);
-      return { siteId, status: 'FAIL', checks };
+      return finalize();
     }
     add('login.verdictConsistent', 'PASS', '登录判定与真实发送路径一致');
     // 「发出去了」= 驱动返回了结果对象（回读成功）；正文是否非空单独判。
     add('send.text', 'PASS', '已投递并回读（驱动返回了结果对象）');
-    const body = String(text || sent?.text || '');
-    add('stream.body', body.trim().length > 0 ? 'PASS' : 'FAIL',
-      body.trim().length > 0 ? `${body.trim().length} 字` : '回读为空——网页没给出正文');
 
-    // ---- ③ 工具调用：真实工具闭环（模型输出调用 → 可解析）----
+    // ---- ②b 交付形状：**全文**与**流式增量**必须分开判（复审指出的第三个缺陷）----
+    //
+    // 旧写法 `String(text || sent?.text || '')` 会在「没收到任何增量、但回读对象带正文」
+    // 时得到一个非空 body 并判 PASS —— **那恰好掩盖 Issue #1 的症状**（页面有正文、
+    // 流式交付链没送到）。这里拆成三项：全文存在 / 增量真的到了 / 两者一致。
+    const delivery = streamDeliveryVerdict({ fullText: sent?.text, deltaText: text });
+    add('stream.fullText', delivery.fullTextOk ? 'PASS' : 'FAIL',
+      delivery.fullTextOk ? `${delivery.fullChars} 字` : '最终回读里没有正文——网页没给出内容');
+    // 增量没到**不等于**网页没生成（可能就是交付链断在页面→流这一段），所以它不是
+    // FAIL 而是 UNVERIFIED：本机这一次没验到「增量能到」，不能据此断言产品坏了。
+    add('stream.deltaReceived', delivery.deltaOk ? 'PASS' : 'UNVERIFIED', delivery.note);
+    add('stream.consistency', delivery.consistent ? 'PASS' : 'UNVERIFIED',
+      delivery.consistent ? '全文与增量逐字一致' : delivery.note);
+
+    // ---- ③ 工具调用 + **真实结果往返**（复审指出的第二个缺陷）----
+    //
+    // 旧实现只「发送 → 解析调用」就收尾，注释却写成「工具结果回填后能收束」。
+    // 现在真的做往返：解析出调用 → 本地执行 read → 把结果作为 mcp_action:"result"
+    // 回填进**同一个**网页会话（fresh:false）→ 解析第二轮。
     let loopText = '';
     let loopResult = null;
     try {
@@ -198,7 +271,7 @@ async function verifySite(siteId) {
       const code = err?.code || '';
       add('tool.loop', /CAPTCHA|RATE_LIMIT/.test(code) ? 'BLOCKED' : 'FAIL',
         `${code || '(no code)'}: ${String(err?.message || err).slice(0, 140)}`);
-      return { siteId, status: checks.some((c) => c.status === 'FAIL') ? 'FAIL' : 'BLOCKED', checks };
+      return finalize();
     }
     const authoritative = String(loopResult?.text || loopText || '');
     const parsed = parseAgentReply(authoritative, { tools: toolSchema });
@@ -208,13 +281,66 @@ async function verifySite(siteId) {
         ? `解析出 ${calls.length} 条：${calls.map((c) => c.name).join(', ')}`
         : '本轮没有产出可解析的调用（模型可能直接回答了，也可能是漂移——需要人工判读原始回复）');
 
+    if (calls.length > 0) {
+      // 真的执行 read（路径限定在包内，且只读），再把结果回填进同一网页会话。
+      const call = calls.find((c) => c.name === 'read') || calls[0];
+      const rel = String(call?.arguments?.path ?? 'README.md');
+      const abs = path.resolve(PKG, rel);
+      // 安全线：只允许读包内文件，不把任意路径交给网页模型指定的参数。
+      const inside = abs.startsWith(PKG + path.sep) || abs === PKG;
+      let toolOutput = '';
+      let toolError = '';
+      if (!inside) { toolError = `拒绝读取包外路径：${rel}`; }
+      else {
+        try { toolOutput = fs.readFileSync(abs, 'utf8').slice(0, 1500); }
+        catch (e) { toolError = String(e?.message || e); }
+      }
+      const resultMsg = '```json\n' + JSON.stringify(toolError
+        ? { mcp_action: 'result', name: call.name, status: 'error', error: toolError }
+        : { mcp_action: 'result', name: call.name, status: 'success', output: toolOutput }) + '\n```';
+
+      // 回填进**同一个**网页会话：fresh:false（不新开会话，否则往返无意义）。
+      let secondText = '';
+      let secondResult = null;
+      try {
+        secondResult = await driver.sendTurn(
+          'site-verify-loop',
+          resultMsg + '\n请基于以上真实工具结果给一行结论并收束，不要再调用工具。',
+          { fresh: false, model: modelId, onDelta: (d) => { secondText += d; } },
+        );
+      } catch (err) {
+        const code = err?.code || '';
+        add('tool.resultRoundTrip', /CAPTCHA|RATE_LIMIT/.test(code) ? 'BLOCKED' : 'FAIL',
+          `第二轮（回填结果）失败：${code || '(no code)'}: ${String(err?.message || err).slice(0, 120)}`);
+        return finalize();
+      }
+      const secondBody = String(secondResult?.text || secondText || '');
+      // 判据分两层，缺一不可：
+      //   ① 第二轮**真的收到回复**（往返闭环成立）；
+      //   ② **同一个会话**（驱动回话里带 sessionId，且与首轮一致）——否则「回填」
+      //      可能进了一个新会话，那不是往返而是两次独立提问。
+      const firstSid = loopResult?.sessionId ?? null;
+      const secondSid = secondResult?.sessionId ?? null;
+      const sameSession = Boolean(firstSid && secondSid && firstSid === secondSid);
+      const gotReply = secondBody.trim().length > 0;
+      add('tool.resultRoundTrip', (gotReply && sameSession) ? 'PASS' : 'UNVERIFIED',
+        gotReply
+          ? (sameSession
+            ? `第二轮收到 ${secondBody.trim().length} 字，会话一致（${String(secondSid).slice(0, 24)}）`
+            : `第二轮收到回复但**会话 id 不一致**（首轮 ${firstSid ?? 'null'} / 次轮 ${secondSid ?? 'null'}）`
+              + '——这更像两次独立提问，不算往返闭环')
+          : '第二轮没有任何回复——工具结果可能没被网页受理');
+    } else {
+      add('tool.resultRoundTrip', 'UNVERIFIED', '首轮没有可解析的调用，无从做结果往返');
+    }
+
     // ---- ④ 会话连续性/收束：驱动报告了收束原因才谈得上「收得住」----
     const diag = await driver.diagnostics?.().catch(() => null);
     const endReason = diag?.lastEndReason ?? st.lastEndReason ?? null;
     add('turn.settled', endReason ? 'PASS' : 'UNVERIFIED', endReason ? `收束原因=${endReason}` : '没有收束读数');
 
-    const failed = checks.some((c) => c.status === 'FAIL');
-    return { siteId, status: failed ? 'FAIL' : 'PASS', checks };
+    // 最终状态**完全交给纯函数判定**（四态优先级 + 缺必要项也算不确定）。
+    return finalize();
   } finally {
     await driver.close?.().catch(() => {});
   }
@@ -230,10 +356,16 @@ for (const siteId of siteIds) {
 
 console.log('\n=== 汇总（四态） ===');
 for (const r of summary) {
-  const counts = { PASS: 0, FAIL: 0, BLOCKED: 0, UNVERIFIED: 0 };
-  for (const c of r.checks) counts[c.status] = (counts[c.status] || 0) + 1;
+  // 计数**直接用纯函数给的那一份**（它已经把未知状态折算进 UNVERIFIED），
+  // 不再在这里按原始 status 字符串重数一遍——那会引入第二个真源。
+  const c = r.verdict?.counts || {};
+  const missing = r.verdict?.missing || [];
   console.log(`  ${r.siteId.padEnd(10)} ${r.status.padEnd(10)} `
-    + `PASS=${counts.PASS} FAIL=${counts.FAIL} BLOCKED=${counts.BLOCKED} UNVERIFIED=${counts.UNVERIFIED}`);
+    + `PASS=${c.PASS || 0} FAIL=${c.FAIL || 0} BLOCKED=${c.BLOCKED || 0} UNVERIFIED=${c.UNVERIFIED || 0}`
+    + (missing.length ? `  缺必要项=${missing.length}` : ''));
 }
 console.log('\n判读纪律：只有真实页面 + 真实请求支持的才是 PASS；'
-  + 'BLOCKED 说明外部条件挡住（未登录/验证码），**不是**产品结论。');
+  + 'BLOCKED 说明外部条件挡住（未登录/验证码），**不是**产品结论；'
+  + 'UNVERIFIED 表示该项没验到（或必要项缺失）——**同样不是通过**。');
+console.log('四态优先级：FAIL > BLOCKED > UNVERIFIED > PASS（判定规则见 site-verify-verdict.mjs，'
+  + '反向护栏 test/site-verify-verdict.test.mjs）。');
