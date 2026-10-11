@@ -5,6 +5,37 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.73
+
+**守卫回收协议：存活判定必须排在移走之前（复审指出的三进程窗口）。**
+
+`recoverStaleGuard()` 原顺序是**先 `rename` 移走守卫、后查存活**。移走期间 `guardDir`
+路径**不存在**，第三个进程 C 可趁空档 `mkdir` 成功并自认持有者——而原持有者 A
+**仍活着、仍在临界区**。
+
+**确定性三进程注入读数**：`guardPathExistsAfterRename: false` →
+`C_acquiredInWindow: true` → `B_putBackSucceeded: false` ⇒ **A 与 C 同时持有**，
+且 A 的守卫被永久遗弃在 aside 路径。
+
+**这不是「年龄兜底」那一类风险**：B 的判断本身**正确**（A 活着 ⇒ 拒绝回收），
+破坏互斥的是「先移走」这个动作 ⇒ **只加一次存活检查不够**。
+
+**修法**：
+
+1. **先**读标记 + 判存活（完全不碰路径），明确存活 ⇒ 当场拒绝（路径始终存在）；
+2. 只有「确认已死」或「判据无结论且远超放宽阈值」才 `rename` 认领；
+3. 认领后**复核身份**（`pid` + `startedAt`）防 ABA，不一致就放回并报告竞争；
+4. 放不回也**不继续**（宁可放弃回收，也不冒双持风险）。
+
+**为什么不用原子替换**：实测**文件** `rename` 覆盖已存在目标原子成功，但**非空目录**
+抛 `EPERM`（目录无法原子替换）；守卫是目录（`mkdir` 是唯一的原子「不存在才创建」原语）
+⇒ 只能靠「先验证后动手」。
+
+**防线**：⑨b2（inode 不得变化 + C 不得进入 + 不得遗留 aside）、⑨c2（ABA 复核）、
+⑨c3（已死仍可回收）；`bridge-lock.test.mjs` **38/38**；**变异 M15–M17 全部被抓**。
+⚠ 诚实记录：⑨c2 首版是**装饰性的**（M16 逃逸），已重写为用 `isAlive` 回调在
+「预检后、认领前」确定性替换守卫，才真正命中窗口。
+
 ## 0.19.72
 
 **过渡互斥的回收判据：活着的持有者不再被年龄回收（复审指出的真漏洞）+ 释放判据加固。**

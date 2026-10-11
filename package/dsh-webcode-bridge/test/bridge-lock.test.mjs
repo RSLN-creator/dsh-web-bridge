@@ -508,6 +508,40 @@ test('⑨b ★ 持有者明确存活时，再老也不得回收（0.19.72；审�
   fs.rmSync(guard, { recursive: true, force: true });
 });
 
+test('⑨b2 ★★ 存活判定必须排在移走之前：守卫 inode 不得变化，C 无从趁空档进入（0.19.73）', () => {
+  const dir = tmpDir('guard-no-gap');
+  const guard = path.join(dir, BRIDGE_GUARD_DIRNAME);
+  // 复审给出的确定性三进程交错：A 存活且在临界区，B 来回收，C 试图趁空档进入。
+  // 破坏互斥的不是 B 的**判断**（A 活着 ⇒ 拒绝，是对的），而是「先 rename 移走」
+  // 这个动作：路径一旦消失，C 就能 mkdir 成功。
+  fs.mkdirSync(guard, { recursive: true });
+  fs.writeFileSync(path.join(guard, 'owner.json'),
+    JSON.stringify({ pid: process.pid, startedAt: 1, label: 'A (alive, inside CS)' }), 'utf8');
+  ageDir(guard, DEFAULT_BRIDGE_GUARD_STALE_MS + 60_000);
+  const inodeBefore = fs.statSync(guard).ino;
+
+  // B：并发桥来回收。修复后它必须在**碰路径之前**就拒绝。
+  const bWarn = [];
+  const bGot = acquireTransitionGuard(guard, { waitMs: 0, logger: { warn: (m) => bWarn.push(String(m)) } });
+  assert.equal(bGot, false, '持有者存活 ⇒ B 必须拒绝');
+  assert.ok(bWarn.some((l) => /still ALIVE/.test(l)), 'B 的拒绝必须可归因');
+
+  // C：同一窗口里再来一个（真 API）。A 还在临界区，C **绝不能**拿到。
+  assert.equal(acquireTransitionGuard(guard, { waitMs: 0 }), false,
+    'A 仍持有 ⇒ C 绝不能进入（这是「互相排斥」本身）');
+
+  // 决定性不变量：守卫从未被移走（inode 不变）⇒ 路径从未消失 ⇒ 窗口根本不存在。
+  assert.ok(fs.existsSync(guard), '守卫路径必须始终存在（不能有「暂时不存在」的窗口）');
+  assert.equal(fs.statSync(guard).ino, inodeBefore,
+    'inode 必须不变：一旦变化就说明守卫被移走过，那个窗口就是 C 的入口');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(guard, 'owner.json'), 'utf8')).pid, process.pid,
+    'A 的守卫必须原样留着');
+  // 不得在盘上留下被遗弃的 aside（0.19.72 的注入里 putBack 失败会留下它）。
+  assert.deepEqual(fs.readdirSync(dir).filter((f) => f.includes('.stale-')), [],
+    '不得遗留被遗弃的 aside 目录');
+  fs.rmSync(guard, { recursive: true, force: true });
+});
+
 test('⑨c 持有者明确已死 ⇒ 必须能被回收（不永久锁死那一侧）', () => {
   const dir = tmpDir('guard-dead-owner');
   const guard = path.join(dir, BRIDGE_GUARD_DIRNAME);
@@ -521,6 +555,63 @@ test('⑨c 持有者明确已死 ⇒ 必须能被回收（不永久锁死那一�
   assert.equal(acquireTransitionGuard(guard, { waitMs: 0, logger: { warn: (m) => warnings.push(String(m)) } }), true,
     '持有者已死 ⇒ 必须回收，否则用户被永久挡在门外');
   assert.ok(warnings.some((l) => /owner pid=987654 is dead/.test(l)), '留痕要写明死因，实际=' + JSON.stringify(warnings));
+  releaseTransitionGuard(guard);
+});
+
+test('⑨c2 ★ 验完到认领之间守卫被换掉 ⇒ 必须放回并拒绝（ABA 复核，0.19.73）', () => {
+  const dir = tmpDir('guard-aba');
+  const guard = path.join(dir, BRIDGE_GUARD_DIRNAME);
+  fs.mkdirSync(guard, { recursive: true });
+  // 起初是「已死」的持有者 987654，年龄足够老 ⇒ 预检会放行到认领分支。
+  fs.writeFileSync(path.join(guard, 'owner.json'),
+    JSON.stringify({ pid: 987654, startedAt: 1, label: 'dead' }), 'utf8');
+  ageDir(guard, DEFAULT_BRIDGE_GUARD_STALE_MS + 1000);
+
+  // ★ 关键：在**预检读标记之后、rename 认领之前**把守卫换成另一个持有者。
+  // 这正好落在那条真实窗口里（预检 → 认领），无需给生产代码加测试钩子——
+  // `isAlive` 就是在预检阶段被调用的，在它里面做替换即可确定性地命中。
+  const swapped = { done: false };
+  const isAliveSwapping = (pid) => {
+    if (!swapped.done && Number(pid) === 987654) {
+      swapped.done = true;
+      // 模拟「另一个回收者/新持有者」在此刻重建了守卫（活着的 pid 55555）
+      fs.rmSync(guard, { recursive: true, force: true });
+      fs.mkdirSync(guard, { recursive: true });
+      fs.writeFileSync(path.join(guard, 'owner.json'),
+        JSON.stringify({ pid: 55555, startedAt: 5, label: 'new owner (alive)' }), 'utf8');
+    }
+    return false;                       // 对**原来那个**持有者判「已死」⇒ 允许进认领分支
+  };
+
+  const warnings = [];
+  const got = acquireTransitionGuard(guard, {
+    waitMs: 0, isAlive: isAliveSwapping, logger: { warn: (m) => warnings.push(String(m)) },
+  });
+  assert.ok(swapped.done, '前置条件：替换必须真的发生过（否则本用例是空转的）');
+  assert.equal(got, false,
+    '认领到的身份与预检时不一致 ⇒ 必须放回并拒绝（否则会删掉别人刚建立的活守卫）');
+  assert.ok(warnings.some((l) => /ABA on transition guard/.test(l)),
+    '必须留痕写明是 ABA，实际=' + JSON.stringify(warnings));
+
+  // 决定性断言：**新持有者的守卫必须还在**（被放回了），而不能被删掉。
+  assert.ok(fs.existsSync(guard), '新持有者的守卫必须被放回，不能凭空消失');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(guard, 'owner.json'), 'utf8')).pid, 55555,
+    '守卫必须仍属于新持有者 55555');
+  fs.rmSync(guard, { recursive: true, force: true });
+});
+
+test('⑨c3 明确已死且身份未被换 ⇒ 正常路径必须仍然能回收（ABA 复核不得堵死这一侧）', () => {
+  const dir = tmpDir('guard-aba-ok');
+  const guard = path.join(dir, BRIDGE_GUARD_DIRNAME);
+  fs.mkdirSync(guard, { recursive: true });
+  fs.writeFileSync(path.join(guard, 'owner.json'),
+    JSON.stringify({ pid: 987654, startedAt: 1, label: 'dead' }), 'utf8');
+  ageDir(guard, DEFAULT_BRIDGE_GUARD_STALE_MS + 1000);
+  const warnings = [];
+  assert.equal(acquireTransitionGuard(guard, {
+    waitMs: 0, isAlive: () => false, logger: { warn: (m) => warnings.push(String(m)) },
+  }), true, '身份没被换 ⇒ 必须能回收（这是「不永久锁死」那一侧）');
+  assert.ok(warnings.some((l) => /owner pid=987654 is dead/.test(l)));
   releaseTransitionGuard(guard);
 });
 

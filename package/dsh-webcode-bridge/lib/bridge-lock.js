@@ -332,99 +332,117 @@ function readGuardOwner(guardDir) {
 }
 
 /**
- * 原子认领一个陈旧的守卫目录，并**复核它确实可以安全回收**。
+ * 回收一个陈旧守卫。
  *
- * ## 为什么不能只看年龄（0.19.72；审阅指出并已复现）
+ * ## 0.19.73：为什么必须「先验证，后动手」（复审指出并已确定性复现）
  *
- * 初版（0.19.71）的回收判据**只有** `mtime` 超过 15 秒。设计理由「临界区只有毫秒级
- * 同步文件操作」是**概率论证，不是不变量**——进程可以被暂停（调试器、系统休眠、
- * GC 停顿、文件系统异常）超过 15 秒而**仍然活着**。故障注入实测：把守卫的 mtime
- * 改老、`owner.json` 里保留一个**确定存活**的 pid，调用方**照样**回收成功
- * （`acquiredGuardWhileAAlive: true`）⇒ 两个进程都认为自己持有守卫，互斥被破坏。
+ * 0.19.72 的顺序是**先移走、后判定**：
  *
- * 这与锁文件那条 12 小时的教训**完全相同**（见文件头 §3.6）：**时间上限只能触发
- * 恢复判定，不能证明接管安全**。我在判据层刚修完这一点，却在守卫层重犯了一次，
- * 所以这里的判据改成和锁文件同构的三态：
+ *   ① `rename(guardDir, aside)`  ← 此刻 guardDir **这个路径不存在**
+ *   ② 读 `owner.json`、判存活
+ *   ③ 若持有者仍存活 ⇒ 把 aside 放回
  *
- *   ① 持有者标记的 pid **明确已死** ⇒ 可回收（这是唯一能证明安全的情形）；
- *   ② 持有者标记的 pid **明确存活** ⇒ **绝不回收**，无论多老（宁可超时拒绝，
- *      也不冒双持风险——与 `decideBridgeLock` 同一条口径）；
- *   ③ 标记缺失/损坏/存活判据给不出结论 ⇒ 退回**年龄**兜底（否则坏标记会造成
- *      永久锁死），但该兜底要显著放宽并**留痕**，因为它是猜测而非证明。
+ * 第 ① 与第 ③ 步之间那个「路径不存在」的窗口是**真实可用的**：第三个进程 C 可以
+ * 恰好在此刻 `mkdir(guardDir)` 成功并自认持有者，而**原持有者 A 仍然活着、仍在
+ * 临界区里**。确定性三进程注入实测（`.tmp/lockrace/guard-gap-injection.mjs`）：
  *
- * ## 为什么还要复核年龄
+ *   guardPathExistsAfterRename: false      ← 路径消失
+ *   C_acquiredInWindow:         true       ← C 趁空档进入
+ *   B_putBackSucceeded:         false      ← 放回还失败了（C 已占位）
+ *   ⇒ A（存活、在临界区）与 C 同时持有；且 A 的守卫被永久遗弃在 aside 路径
  *
- * `rename` 认领的是「此刻位于该路径的东西」，而不是「我们先前观察到的那一个」。
- * 认领之后再看一眼，若它其实是**新的**（别的进程刚重建了守卫），就原样放回去并
- * 如实报告竞争——这正是 `rename` 不能当 CAS 用那条教训（#50 的 P2）在这一层的应用。
+ * **这不是「年龄兜底」那一类风险**：B 的判断本身是**正确**的（A 活着 ⇒ 拒绝回收），
+ * 破坏互斥的是「先移走」这个动作本身。所以只加一次存活检查不够——**存活判定必须
+ * 排在任何移走操作之前**。
+ *
+ * 现在的顺序：
+ *
+ *   ① 读标记 + 判存活（**完全不碰路径**）：明确存活 ⇒ 当场拒绝，路径始终存在，
+ *      C 无从进入；
+ *   ② 只有「确认已死」或「判据无结论且远超放宽阈值」才 `rename` 认领；
+ *   ③ 认领后**复核身份**（pid + startedAt 与验过的一致）——防「验完到认领之间
+ *      被别人换了」的 ABA；不一致就放回并如实报告竞争；
+ *   ④ 放不回去时**也不继续**（宁可放弃回收，也不冒双持风险）。
+ *
+ * ## 为什么不用「原子替换」绕开窗口
+ *
+ * 本机实测：**文件** `rename` 覆盖已存在目标会原子成功，但**非空目录**会 `EPERM`
+ * （目录无法原子替换）。守卫是目录（`mkdir` 是我们唯一的原子「不存在才创建」
+ * 原语），因此没有「无窗口替换」可用 ⇒ 只能靠「先验证后动手」把窗口关掉。
  *
  * @param {string} guardDir
  * @param {number} now
- * @param {number} staleMs 年龄兜底上限（仅在存活判据给不出结论时使用）
+ * @param {number} staleMs 年龄门槛
  * @param {(m: string) => void} warn
  * @param {(pid: number) => boolean} isAlive 注入的存活判据
- * @returns {boolean} true = 已清掉一个确认可回收的守卫（调用方应重试 mkdir）
+ * @returns {boolean} true = 已确认可回收并已清掉（调用方应重试 mkdir）
  */
 function recoverStaleGuard(guardDir, now, staleMs, warn, isAlive) {
-  const aside = `${guardDir}.stale-${process.pid}-${now}-${Math.random().toString(36).slice(2, 8)}`;
-  try {
-    fs.renameSync(guardDir, aside);                 // 原子：只有一个进程能认领成功
-  } catch {
-    return false;                                    // ENOENT = 已被别人回收；别的错也不硬闯
+  // ── ① 先验证：读标记 + 判存活。**这一段完全不碰路径。** ──────────────
+  const preOwner = readGuardOwner(guardDir);
+  const preMtime = dirMtimeMs(guardDir);
+  if (preMtime === null) return false;                 // 已消失（别人先回收了）
+  const preAge = now - preMtime;
+  if (preAge <= staleMs) return false;                 // 还没到门槛
+
+  const prePid = Number(preOwner?.pid);
+  const prePidUsable = Number.isFinite(prePid) && prePid > 0;
+  let preVerdict;
+  if (prePidUsable && typeof isAlive === 'function') {
+    try { preVerdict = isAlive(prePid); } catch { preVerdict = undefined; }
   }
 
-  /** 放回去（认领到的不是可回收物时）。放不回也不能删。 */
-  const putBack = () => {
-    try { fs.renameSync(aside, guardDir); return true; } catch { return false; }
-  };
-
-  // ① 复核年龄：认领到的其实是**新的** ⇒ 不是陈旧物，原样放回。
-  const mtime = dirMtimeMs(aside);
-  const age = mtime === null ? Infinity : now - mtime;
-  if (age <= staleMs) {
-    putBack();
+  if (preVerdict === true) {
+    // 持有者明确活着 ⇒ **当场拒绝，绝不移走**。路径保持存在，C 无从趁空档进入。
+    // 这正是复审要求的那条：「明确存活的持有者必须在任何移走操作之前就被拒绝」。
+    warn(`[bridge-lock] refusing to recover transition guard at ${guardDir}: `
+      + `owner pid=${prePid} is still ALIVE (age=${Math.round(preAge / 1000)}s). `
+      + 'A live owner is never evicted by age alone — it may simply be paused.');
     return false;
   }
 
-  // ② 存活与身份判据：**这才是能否安全回收的决定性证据**。
-  const owner = readGuardOwner(aside);
-  const ownerPid = Number(owner?.pid);
-  const pidUsable = Number.isFinite(ownerPid) && ownerPid > 0;
-
-  if (pidUsable && typeof isAlive === 'function') {
-    let aliveVerdict;
-    try { aliveVerdict = isAlive(ownerPid); } catch { aliveVerdict = undefined; }
-    if (aliveVerdict === true) {
-      // 持有者明确活着 ⇒ **绝不回收**。与锁文件判据同一条口径：
-      // 「误拒的代价是一条说得清的提示，误放的代价是两个桥互相杀浏览器」。
-      putBack();
-      warn(`[bridge-lock] refusing to recover transition guard at ${guardDir}: `
-        + `owner pid=${ownerPid} is still ALIVE (age=${Math.round(age / 1000)}s). `
-        + 'A live owner is never evicted by age alone — it may simply be paused.');
-      return false;
-    }
-    if (aliveVerdict === false) {
-      try { fs.rmSync(aside, { recursive: true, force: true }); } catch { /* 下次再来 */ }
-      warn(`[bridge-lock] recovered transition guard at ${guardDir}: owner pid=${ownerPid} is dead `
-        + `(age=${Math.round(age / 1000)}s)`);
-      return true;
-    }
-    // 判据给不出结论（异常/非布尔）⇒ 落到下面的放宽兜底。
-  }
-
-  // ③ 存活判据缺席、pid 不可用、或判据失效 ⇒ 只能用放宽的年龄兜底。
-  //    这是**猜测**，因此：门槛显著更高，并且必须留痕说明「这是猜测」。
+  // 只有「确认已死」才有资格回收；「判据无结论」只能在**远超**放宽阈值时兜底。
+  // 注意 `prePidUsable === false`（无标记/坏标记）与 `preVerdict === undefined`
+  // （判据抛错/非布尔）都属「不知道」，两者都必须过放宽阈值才敢动。
   const guessMs = Math.max(staleMs * 4, staleMs + 60_000);
-  if (age > guessMs) {
-    try { fs.rmSync(aside, { recursive: true, force: true }); } catch { /* 下次再来 */ }
-    warn(`[bridge-lock] recovered transition guard at ${guardDir} on an AGE GUESS `
-      + `(age=${Math.round(age / 1000)}s > ${Math.round(guessMs / 1000)}s, `
-      + `owner pid=${pidUsable ? ownerPid : 'unknown'}, liveness=${pidUsable ? 'inconclusive' : 'no-marker'}). `
-      + 'This is a guess, not proof — if a bridge was merely paused, double-drive is possible.');
-    return true;
+  const confirmedDead = preVerdict === false;
+  const mayGuess = preAge > guessMs;                    // 放宽门槛（仅在非确认死亡时用到）
+  if (!confirmedDead && !mayGuess) return false;        // 不知道就别动
+
+  // ── ② 原子认领（只有一个进程能 rename 成功）─────────────────────────
+  const aside = `${guardDir}.stale-${process.pid}-${now}-${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    fs.renameSync(guardDir, aside);
+  } catch {
+    return false;                                       // ENOENT = 输给别人；别的错也不硬闯
   }
-  putBack();
-  return false;
+
+  // ── ③ 复核身份：认领到的必须**就是我们刚验过的那一个**（防 ABA）──────
+  const postOwner = readGuardOwner(aside);
+  const sameIdentity = Number(postOwner?.pid) === prePid
+    && Number(postOwner?.startedAt) === Number(preOwner?.startedAt);
+  if (!sameIdentity) {
+    // 验完到认领之间被人换了（别人刚建立的活守卫）⇒ 原样放回，如实报告竞争。
+    let back = false;
+    try { fs.renameSync(aside, guardDir); back = true; } catch { back = false; }
+    warn(`[bridge-lock] ABA on transition guard at ${guardDir}: claimed a different owner `
+      + `(expected pid=${prePid || '?'}, got pid=${postOwner?.pid ?? '?'}); putBack=${back}. `
+      + 'Refusing to remove it.');
+    return false;
+  }
+
+  // ── ④ 确认无疑 ⇒ 清掉 ────────────────────────────────────────────────
+  try { fs.rmSync(aside, { recursive: true, force: true }); } catch { /* 下次再来 */ }
+  if (confirmedDead) {
+    warn(`[bridge-lock] recovered transition guard at ${guardDir}: owner pid=${prePid} is dead `
+      + `(age=${Math.round(preAge / 1000)}s)`);
+  } else {
+    warn(`[bridge-lock] recovered transition guard at ${guardDir} on an AGE GUESS `
+      + `(age=${Math.round(preAge / 1000)}s > ${Math.round(guessMs / 1000)}s, `
+      + `owner pid=${prePidUsable ? prePid : 'unknown'}, liveness=inconclusive). `
+      + 'This is a guess, not proof — if a bridge was merely paused, double-drive is possible.');
+  }
+  return true;
 }
 
 /**
