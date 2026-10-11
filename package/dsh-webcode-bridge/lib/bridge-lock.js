@@ -300,6 +300,9 @@ export const DEFAULT_BRIDGE_GUARD_STALE_MS = 15_000;
 /** 等待守卫的最长时间（毫秒）。竞争只发生在「同一瞬间启动两个桥」时。 */
 export const DEFAULT_BRIDGE_GUARD_WAIT_MS = 4_000;
 
+/** 本进程的启动时刻（守卫持有者标记用；与锁文件判据同源）。 */
+const GUARD_STARTED_AT = Date.now();
+
 /** 同步小睡：`Atomics.wait` 可用就用它（不烧 CPU），否则退化为自旋。 */
 function sleepSync(ms) {
   if (!(ms > 0)) return;
@@ -311,38 +314,117 @@ function sleepSync(ms) {
   }
 }
 
+/** 本进程的守卫启动时刻（供持有者标记写入；测试可覆盖）。 */
+function guardStartedAt() { return GUARD_STARTED_AT; }
+
 /** 读一个目录的 mtime（毫秒）；读不到返回 null。 */
 function dirMtimeMs(p) {
   try { return fs.statSync(p).mtimeMs; } catch { return null; }
 }
 
+/** 读守卫的持有者标记；读不到/损坏返回 null（**不可当成「没有持有者」**）。 */
+function readGuardOwner(guardDir) {
+  try {
+    const raw = fs.readFileSync(path.join(guardDir, 'owner.json'), 'utf8');
+    const o = JSON.parse(raw);
+    return (o && typeof o === 'object') ? o : null;
+  } catch { return null; }
+}
+
 /**
- * 原子认领一个陈旧的守卫目录，并**复核它确实陈旧**。
+ * 原子认领一个陈旧的守卫目录，并**复核它确实可以安全回收**。
  *
- * 为什么必须复核：`rename` 认领的是「此刻位于该路径的东西」，而不是「我们先前
- * 观察到的那一个」。认领之后再看一眼年龄，若它其实**是新的**（别的进程刚重建
- * 了守卫），就原样放回去并如实报告竞争——这正是 `rename` 不能当 CAS 用那条
- * 教训（#50 的 P2）在守卫这一层的应用。
+ * ## 为什么不能只看年龄（0.19.72；审阅指出并已复现）
  *
- * @returns {boolean} true = 已清掉一个确认陈旧的守卫（调用方应重试 mkdir）
+ * 初版（0.19.71）的回收判据**只有** `mtime` 超过 15 秒。设计理由「临界区只有毫秒级
+ * 同步文件操作」是**概率论证，不是不变量**——进程可以被暂停（调试器、系统休眠、
+ * GC 停顿、文件系统异常）超过 15 秒而**仍然活着**。故障注入实测：把守卫的 mtime
+ * 改老、`owner.json` 里保留一个**确定存活**的 pid，调用方**照样**回收成功
+ * （`acquiredGuardWhileAAlive: true`）⇒ 两个进程都认为自己持有守卫，互斥被破坏。
+ *
+ * 这与锁文件那条 12 小时的教训**完全相同**（见文件头 §3.6）：**时间上限只能触发
+ * 恢复判定，不能证明接管安全**。我在判据层刚修完这一点，却在守卫层重犯了一次，
+ * 所以这里的判据改成和锁文件同构的三态：
+ *
+ *   ① 持有者标记的 pid **明确已死** ⇒ 可回收（这是唯一能证明安全的情形）；
+ *   ② 持有者标记的 pid **明确存活** ⇒ **绝不回收**，无论多老（宁可超时拒绝，
+ *      也不冒双持风险——与 `decideBridgeLock` 同一条口径）；
+ *   ③ 标记缺失/损坏/存活判据给不出结论 ⇒ 退回**年龄**兜底（否则坏标记会造成
+ *      永久锁死），但该兜底要显著放宽并**留痕**，因为它是猜测而非证明。
+ *
+ * ## 为什么还要复核年龄
+ *
+ * `rename` 认领的是「此刻位于该路径的东西」，而不是「我们先前观察到的那一个」。
+ * 认领之后再看一眼，若它其实是**新的**（别的进程刚重建了守卫），就原样放回去并
+ * 如实报告竞争——这正是 `rename` 不能当 CAS 用那条教训（#50 的 P2）在这一层的应用。
+ *
+ * @param {string} guardDir
+ * @param {number} now
+ * @param {number} staleMs 年龄兜底上限（仅在存活判据给不出结论时使用）
+ * @param {(m: string) => void} warn
+ * @param {(pid: number) => boolean} isAlive 注入的存活判据
+ * @returns {boolean} true = 已清掉一个确认可回收的守卫（调用方应重试 mkdir）
  */
-function recoverStaleGuard(guardDir, now, staleMs, warn) {
-  const aside = `${guardDir}.stale-${process.pid}-${now}`;
+function recoverStaleGuard(guardDir, now, staleMs, warn, isAlive) {
+  const aside = `${guardDir}.stale-${process.pid}-${now}-${Math.random().toString(36).slice(2, 8)}`;
   try {
     fs.renameSync(guardDir, aside);                 // 原子：只有一个进程能认领成功
   } catch {
     return false;                                    // ENOENT = 已被别人回收；别的错也不硬闯
   }
+
+  /** 放回去（认领到的不是可回收物时）。放不回也不能删。 */
+  const putBack = () => {
+    try { fs.renameSync(aside, guardDir); return true; } catch { return false; }
+  };
+
+  // ① 复核年龄：认领到的其实是**新的** ⇒ 不是陈旧物，原样放回。
   const mtime = dirMtimeMs(aside);
   const age = mtime === null ? Infinity : now - mtime;
   if (age <= staleMs) {
-    // 认领到的其实是**新的**守卫 ⇒ 它不是陈旧物。放回去，按竞争处理（不放行）。
-    try { fs.renameSync(aside, guardDir); } catch { /* 放不回去也不敢删：下面只报告 */ }
+    putBack();
     return false;
   }
-  try { fs.rmSync(aside, { recursive: true, force: true }); } catch { /* 下次再来 */ }
-  warn(`[bridge-lock] recovered a stale transition guard at ${guardDir} (age=${Math.round(age / 1000)}s)`);
-  return true;
+
+  // ② 存活与身份判据：**这才是能否安全回收的决定性证据**。
+  const owner = readGuardOwner(aside);
+  const ownerPid = Number(owner?.pid);
+  const pidUsable = Number.isFinite(ownerPid) && ownerPid > 0;
+
+  if (pidUsable && typeof isAlive === 'function') {
+    let aliveVerdict;
+    try { aliveVerdict = isAlive(ownerPid); } catch { aliveVerdict = undefined; }
+    if (aliveVerdict === true) {
+      // 持有者明确活着 ⇒ **绝不回收**。与锁文件判据同一条口径：
+      // 「误拒的代价是一条说得清的提示，误放的代价是两个桥互相杀浏览器」。
+      putBack();
+      warn(`[bridge-lock] refusing to recover transition guard at ${guardDir}: `
+        + `owner pid=${ownerPid} is still ALIVE (age=${Math.round(age / 1000)}s). `
+        + 'A live owner is never evicted by age alone — it may simply be paused.');
+      return false;
+    }
+    if (aliveVerdict === false) {
+      try { fs.rmSync(aside, { recursive: true, force: true }); } catch { /* 下次再来 */ }
+      warn(`[bridge-lock] recovered transition guard at ${guardDir}: owner pid=${ownerPid} is dead `
+        + `(age=${Math.round(age / 1000)}s)`);
+      return true;
+    }
+    // 判据给不出结论（异常/非布尔）⇒ 落到下面的放宽兜底。
+  }
+
+  // ③ 存活判据缺席、pid 不可用、或判据失效 ⇒ 只能用放宽的年龄兜底。
+  //    这是**猜测**，因此：门槛显著更高，并且必须留痕说明「这是猜测」。
+  const guessMs = Math.max(staleMs * 4, staleMs + 60_000);
+  if (age > guessMs) {
+    try { fs.rmSync(aside, { recursive: true, force: true }); } catch { /* 下次再来 */ }
+    warn(`[bridge-lock] recovered transition guard at ${guardDir} on an AGE GUESS `
+      + `(age=${Math.round(age / 1000)}s > ${Math.round(guessMs / 1000)}s, `
+      + `owner pid=${pidUsable ? ownerPid : 'unknown'}, liveness=${pidUsable ? 'inconclusive' : 'no-marker'}). `
+      + 'This is a guess, not proof — if a bridge was merely paused, double-drive is possible.');
+    return true;
+  }
+  putBack();
+  return false;
 }
 
 /**
@@ -361,17 +443,19 @@ export function acquireTransitionGuard(guardDir, opts = {}) {
     ? Number(opts.staleMs) : DEFAULT_BRIDGE_GUARD_STALE_MS;
   const waitMs = Number.isFinite(Number(opts.waitMs)) && Number(opts.waitMs) >= 0
     ? Number(opts.waitMs) : DEFAULT_BRIDGE_GUARD_WAIT_MS;
+  // 存活判据：与锁文件判据同源（默认 isProcessAlive）。**这是回收能否安全的关键**。
+  const isAlive = typeof opts.isAlive === 'function' ? opts.isAlive : isProcessAlive;
   const deadline = Date.now() + waitMs;
   const label = opts.label || '';
 
   for (;;) {
     try {
       fs.mkdirSync(guardDir, { recursive: false });
-      // 持有者标记只用于诊断（回收判据是 mtime，不依赖它；缺了也不影响判定）。
+      // 持有者标记：**回收判据会读它**（存活 + 身份），不再只是诊断信息。
       try {
         fs.writeFileSync(path.join(guardDir, 'owner.json'),
-          JSON.stringify({ pid: process.pid, at: Date.now(), label }), 'utf8');
-      } catch { /* 标记写不进去不影响互斥成立 */ }
+          JSON.stringify({ pid: process.pid, startedAt: guardStartedAt(), at: Date.now(), label }), 'utf8');
+      } catch { /* 标记写不进去不影响互斥成立；但它会让回收退回年龄兜底 */ }
       return true;
     } catch (err) {
       if (err?.code !== 'EEXIST') {
@@ -382,7 +466,7 @@ export function acquireTransitionGuard(guardDir, opts = {}) {
     const now = Date.now();
     const mtime = dirMtimeMs(guardDir);
     if (mtime !== null && now - mtime > staleMs) {
-      if (recoverStaleGuard(guardDir, now, staleMs, warn)) continue;   // 已清掉 ⇒ 立刻重试
+      if (recoverStaleGuard(guardDir, now, staleMs, warn, isAlive)) continue;   // 已清掉 ⇒ 立刻重试
     }
     if (Date.now() >= deadline) {
       warn(`[bridge-lock] transition guard busy at ${guardDir} (waited ${waitMs}ms); refusing to mutate the lock`);
@@ -392,16 +476,58 @@ export function acquireTransitionGuard(guardDir, opts = {}) {
   }
 }
 
-/** 释放过渡互斥（只删自己的：先确认持有者标记，再删目录）。 */
+/**
+ * 释放过渡互斥：**只删自己的**，且判据不只 pid。
+ *
+ * ## 为什么 pid 不够（0.19.72；审阅第 2 点）
+ *
+ * pid 不是永久唯一的进程身份——会被复用。旧持有者若在「守卫已被回收、新持有者
+ * 已重建」之后恢复执行并调用本函数，仅凭 `owner.pid === process.pid` 可能**误删
+ * 新持有者的守卫**，等于把别人从临界区里踢出去。因此判据加上 `startedAt`
+ * （本模块对「本进程这一化身」的既有身份来源，与 `decideBridgeLock` 的
+ * `previous-incarnation` 分支同一套语义）。
+ *
+ * ## 标记缺失/损坏时的策略（明确的，不是碰运气）
+ *
+ * · `owner.json` **缺失** ⇒ 退回「只删自己的」不可能判定。这里选择**删除**：
+ *   守卫是本进程刚在 `acquireTransitionGuard` 里 `mkdir` 出来的，若标记写失败
+ *   （磁盘满/权限），不删就会把一个**空守卫**永久留在盘上，让所有人拿不到锁——
+ *   那比误删更糟，而且它不可能是「别人的守卫」（别人建立时会写自己的标记）。
+ * · `owner.json` **损坏**（非 JSON / 不是对象）⇒ 同上按「可能是我自己写坏的」处理，
+ *   但**留痕**，因为损坏本身是异常信号。
+ *
+ * @param {string} guardDir
+ * @param {{pid?: number, startedAt?: number, logger?: object}} [opts]
+ * @returns {boolean} 是否真的删掉了
+ */
 export function releaseTransitionGuard(guardDir, opts = {}) {
   const warn = typeof opts.logger?.warn === 'function' ? opts.logger.warn.bind(opts.logger) : () => {};
+  const myPid = Number.isFinite(Number(opts.pid)) ? Number(opts.pid) : process.pid;
+  const myStartedAt = Number.isFinite(Number(opts.startedAt)) ? Number(opts.startedAt) : guardStartedAt();
   try {
     const ownerPath = path.join(guardDir, 'owner.json');
-    if (fs.existsSync(ownerPath)) {
+    const ownerExists = fs.existsSync(ownerPath);
+    if (ownerExists) {
       let owner = null;
-      try { owner = JSON.parse(fs.readFileSync(ownerPath, 'utf8')); } catch { owner = null; }
-      // 被别人回收过又重建 ⇒ 里面不是我的标记，**绝不能删**（会放别人进临界区）。
-      if (owner && Number(owner.pid) !== process.pid) return false;
+      let corrupt = false;
+      try {
+        owner = JSON.parse(fs.readFileSync(ownerPath, 'utf8'));
+        if (!owner || typeof owner !== 'object') { corrupt = true; owner = null; }
+      } catch { corrupt = true; owner = null; }
+
+      if (owner) {
+        // 被别人回收过又重建 ⇒ 里面不是我的标记，**绝不能删**（会放别人进临界区）。
+        if (Number(owner.pid) !== myPid) return false;
+        // 同 pid 但不同化身 ⇒ 这是**复用了我 pid 的另一个进程**（或我的上一个化身），
+        // 不是本次持有 ⇒ 同样不许删。
+        if (Number.isFinite(Number(owner.startedAt)) && Number(owner.startedAt) !== myStartedAt) return false;
+      } else if (corrupt) {
+        warn(`[bridge-lock] transition guard owner.json is corrupt at ${guardDir}; `
+          + 'treating it as ours (an unremovable empty guard would block every bridge)');
+      }
+    } else {
+      warn(`[bridge-lock] transition guard has no owner.json at ${guardDir}; `
+        + 'treating it as ours (an unremovable empty guard would block every bridge)');
     }
     fs.rmSync(guardDir, { recursive: true, force: true });
     return true;

@@ -470,27 +470,132 @@ test('⑧b 无锁文件时的多进程首建同样只能有一个赢家', async 
   assert.deepEqual(winners, Array(rounds).fill(1), `实际=${JSON.stringify(winners)}`);
 });
 
-// ───────── ⑨ 过渡互斥自身：陈旧守卫必须能被有界回收（否则永久挡人） ─────────
+// ───────── ⑨ 过渡互斥自身：回收判据与所有权边界 ─────────
 
-test('⑨ 陈旧的过渡互斥守卫会被回收；活着的守卫不会被抢', () => {
-  const dir = tmpDir('guard');
+/** 把目录的 mtime 往前推（模拟「很久以前建立的」）。 */
+function ageDir(p, ms) {
+  const t = new Date(Date.now() - ms);
+  fs.utimesSync(p, t, t);
+}
+
+test('⑨ 空守卫必须互斥；拿不到时立即失败而不是硬闯', () => {
+  const dir = tmpDir('guard-basic');
   const guard = path.join(dir, BRIDGE_GUARD_DIRNAME);
-
-  // ① 一个新的守卫 = 别人正在用 ⇒ 不许抢（waitMs=0 立即失败，不阻塞测试）
   assert.equal(acquireTransitionGuard(guard, { waitMs: 0 }), true, '空守卫必须能拿到');
   assert.equal(acquireTransitionGuard(guard, { waitMs: 0 }), false,
     '守卫已被自己持有 ⇒ 第二次必须失败（它确实是互斥）');
   assert.equal(releaseTransitionGuard(guard), true);
+  assert.equal(fs.existsSync(guard), false, '释放后必须真的删掉');
+});
 
-  // ② 被人强杀留下的陈旧守卫 ⇒ 必须能被回收，否则用户被永久挡在门外
+test('⑨b ★ 持有者明确存活时，再老也不得回收（0.19.72；审阅指出的真漏洞）', () => {
+  const dir = tmpDir('guard-live-owner');
+  const guard = path.join(dir, BRIDGE_GUARD_DIRNAME);
+  // 复现审阅给的交错：A 已进临界区、被暂停超过回收阈值，但 **A 仍然活着**。
   fs.mkdirSync(guard, { recursive: true });
-  const old = Date.now() - DEFAULT_BRIDGE_GUARD_STALE_MS - 5000;
-  fs.utimesSync(guard, new Date(old), new Date(old));      // 把 mtime 改老
-  assert.equal(acquireTransitionGuard(guard, { waitMs: 0 }), true,
-    '陈旧守卫必须被回收——这是「不永久锁死」那一侧');
+  fs.writeFileSync(path.join(guard, 'owner.json'),
+    JSON.stringify({ pid: process.pid, startedAt: 1, label: 'A (paused inside critical section)' }), 'utf8');
+  ageDir(guard, DEFAULT_BRIDGE_GUARD_STALE_MS + 60_000);   // 远超过期阈值，甚至超过放宽兜底
 
-  // ③ 释放只删自己的：把 owner.json 改成别人的 pid，release 必须拒绝
-  fs.writeFileSync(path.join(guard, 'owner.json'), JSON.stringify({ pid: 999999, at: Date.now() }), 'utf8');
-  assert.equal(releaseTransitionGuard(guard), false, '不得删掉别人的守卫（否则会放别人进临界区）');
+  const warnings = [];
+  const got = acquireTransitionGuard(guard, {
+    waitMs: 0, logger: { warn: (m) => warnings.push(String(m)) },
+  });
+  assert.equal(got, false,
+    '持有者明确存活 ⇒ 必须拒绝回收，无论守卫多老（它可能只是被暂停了）');
+  assert.ok(warnings.some((l) => /still ALIVE/.test(l)), '必须留痕说明是「活着所以不回收」，实际=' + JSON.stringify(warnings));
+  assert.ok(fs.existsSync(guard), '拒绝回收后守卫必须原样留着');
+  fs.rmSync(guard, { recursive: true, force: true });
+});
+
+test('⑨c 持有者明确已死 ⇒ 必须能被回收（不永久锁死那一侧）', () => {
+  const dir = tmpDir('guard-dead-owner');
+  const guard = path.join(dir, BRIDGE_GUARD_DIRNAME);
+  fs.mkdirSync(guard, { recursive: true });
+  // 987654 不可能存在 ⇒ 明确已死
+  fs.writeFileSync(path.join(guard, 'owner.json'),
+    JSON.stringify({ pid: 987654, startedAt: 1, label: 'crashed bridge' }), 'utf8');
+  ageDir(guard, DEFAULT_BRIDGE_GUARD_STALE_MS + 1000);
+
+  const warnings = [];
+  assert.equal(acquireTransitionGuard(guard, { waitMs: 0, logger: { warn: (m) => warnings.push(String(m)) } }), true,
+    '持有者已死 ⇒ 必须回收，否则用户被永久挡在门外');
+  assert.ok(warnings.some((l) => /owner pid=987654 is dead/.test(l)), '留痕要写明死因，实际=' + JSON.stringify(warnings));
+  releaseTransitionGuard(guard);
+});
+
+test('⑨d 存活判据给不出结论时：只能用显著放宽的年龄兜底，且必须留痕说是「猜测」', () => {
+  const dir = tmpDir('guard-guess');
+  const guard = path.join(dir, BRIDGE_GUARD_DIRNAME);
+  const boom = () => { throw new Error('probe failed'); };
+
+  // ① 刚过原阈值、但没到放宽阈值 ⇒ **不回收**（判据失效时宁可拒绝）
+  fs.mkdirSync(guard, { recursive: true });
+  fs.writeFileSync(path.join(guard, 'owner.json'), JSON.stringify({ pid: 4242, startedAt: 1 }), 'utf8');
+  ageDir(guard, DEFAULT_BRIDGE_GUARD_STALE_MS + 5000);
+  assert.equal(acquireTransitionGuard(guard, { waitMs: 0, isAlive: boom }), false,
+    '判据失效时不得按原阈值回收');
+  fs.rmSync(guard, { recursive: true, force: true });
+
+  // ② 远超放宽阈值（max(4×stale, stale+60s)）⇒ 允许兜底，但必须留痕写明是猜测
+  fs.mkdirSync(guard, { recursive: true });
+  fs.writeFileSync(path.join(guard, 'owner.json'), JSON.stringify({ pid: 4242, startedAt: 1 }), 'utf8');
+  ageDir(guard, DEFAULT_BRIDGE_GUARD_STALE_MS * 8);
+  const warnings = [];
+  assert.equal(acquireTransitionGuard(guard, { waitMs: 0, isAlive: boom, logger: { warn: (m) => warnings.push(String(m)) } }), true);
+  assert.ok(warnings.some((l) => /AGE GUESS/.test(l)), '兜底必须留痕说明这是猜测，实际=' + JSON.stringify(warnings));
+  assert.ok(warnings.some((l) => /double-drive is possible/.test(l)), '必须写明风险后果');
+  releaseTransitionGuard(guard);
+});
+
+test('⑨e 无 owner 标记的空守卫：按「可能是自己写坏的」删除，不留永久阻塞', () => {
+  const dir = tmpDir('guard-no-marker');
+  const guard = path.join(dir, BRIDGE_GUARD_DIRNAME);
+  fs.mkdirSync(guard, { recursive: true });          // 故意不写 owner.json
+  const warnings = [];
+  const got = acquireTransitionGuard(guard, {
+    waitMs: 0, isAlive: () => false, logger: { warn: (m) => warnings.push(String(m)) },
+  });
+  // 放的是死 pid 判据 + 无标记 ⇒ 走放宽兜底；刚建的守卫达不到门槛 ⇒ 拒绝（这是安全的）。
+  assert.equal(got, false, '无标记 + 未到放宽阈值 ⇒ 拒绝');
+  // 但**释放**必须能清掉它，否则一个写坏标记的空守卫会永久阻塞所有人。
+  fs.writeFileSync(path.join(guard, 'owner.json'), '{ not json', 'utf8');
+  assert.equal(releaseTransitionGuard(guard, { logger: { warn: (m) => warnings.push(String(m)) } }), true,
+    '损坏的标记必须按「可能是自己写坏的」删除——不可删除的空守卫会挡住所有人');
+  assert.ok(warnings.some((l) => /corrupt/.test(l)), '损坏必须留痕，实际=' + JSON.stringify(warnings));
+});
+
+test('⑨f ★ 释放不只认 pid：同 pid 不同化身不得删（审阅第 2 点）', () => {
+  const dir = tmpDir('guard-identity');
+  const guard = path.join(dir, BRIDGE_GUARD_DIRNAME);
+  fs.mkdirSync(guard, { recursive: true });
+  // 我方身份：pid = 当前进程，startedAt = 111
+  // 守卫标记：**同一个 pid**，但 startedAt = 222 ⇒ 是复用了我 pid 的另一个化身
+  fs.writeFileSync(path.join(guard, 'owner.json'),
+    JSON.stringify({ pid: process.pid, startedAt: 222 }), 'utf8');
+  assert.equal(releaseTransitionGuard(guard, { pid: process.pid, startedAt: 111 }), false,
+    '同 pid 不同 startedAt ⇒ 不得删（否则会放别人进临界区）');
+  assert.ok(fs.existsSync(guard), '拒绝后守卫必须留着');
+
+  // 身份完全对上 ⇒ 允许删
+  fs.writeFileSync(path.join(guard, 'owner.json'),
+    JSON.stringify({ pid: process.pid, startedAt: 111 }), 'utf8');
+  assert.equal(releaseTransitionGuard(guard, { pid: process.pid, startedAt: 111 }), true);
+});
+
+test('⑨g 守卫被回收并重建后，旧持有者释放不得删除新守卫', () => {
+  const dir = tmpDir('guard-reacquired');
+  const guard = path.join(dir, BRIDGE_GUARD_DIRNAME);
+  // 旧持有者 A（别人的 pid）
+  fs.mkdirSync(guard, { recursive: true });
+  fs.writeFileSync(path.join(guard, 'owner.json'), JSON.stringify({ pid: 55555, startedAt: 5 }), 'utf8');
+  // A 的守卫被回收、B 重建
+  fs.rmSync(guard, { recursive: true, force: true });
+  fs.mkdirSync(guard, { recursive: true });
+  fs.writeFileSync(path.join(guard, 'owner.json'), JSON.stringify({ pid: 66666, startedAt: 6 }), 'utf8');
+  // A 恢复后尝试释放 ⇒ 必须拒绝，B 的守卫必须还在
+  assert.equal(releaseTransitionGuard(guard, { pid: 55555, startedAt: 5 }), false);
+  assert.ok(fs.existsSync(guard), 'B 的守卫必须留着');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(guard, 'owner.json'), 'utf8')).pid, 66666);
   fs.rmSync(guard, { recursive: true, force: true });
 });
