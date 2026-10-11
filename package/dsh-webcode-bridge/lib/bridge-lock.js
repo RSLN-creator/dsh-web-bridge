@@ -157,17 +157,47 @@ export function decideBridgeLock(existing, now, self = {}) {
 
   // ── 持有者已死（0.19.22）────────────────────────────────────────
   // 必须排在「时间上限」之前：死进程的锁**不需要**等满 12 小时。
-  if (isAlive && safeAlive(isAlive, hPid) === false) {
+  const aliveVerdict = isAlive ? safeAlive(isAlive, hPid) : null;
+  if (aliveVerdict === false) {
     return { state: 'free', reason: 'holder-process-dead', holder: existing, stale: true };
   }
 
-  // ── 时间上限：pid 判据给不出结论时的有界兜底 ────────────────────
   const hAt = Number(existing.at);
-  if (Number.isFinite(hAt) && now - hAt > staleMs) {
+  const expired = Number.isFinite(hAt) && now - hAt > staleMs;
+
+  // ── 明确存活：锁龄**不再**构成放行理由（0.19.71；回归 ①e2）──────────
+  //
+  // 0.19.22 把时间上限写成「pid 判据给不出结论时的兜底」，但实现是：`safeAlive`
+  // 已经明确返回 true 之后，代码**仍然继续往下走**并在过期时放行。于是
+  // 「一个真跑了 12 小时以上的桥」会被第二个实例抢走账号锁——两个桥同时驱动
+  // 同一账号、互相杀浏览器、两条用户消息交错污染同一网页会话（见文件头）。
+  //
+  // 时间上限**只能触发恢复判定，不能证明接管安全**：它无法区分「持有者真的跑
+  // 了 12 小时」与「pid 被复用、原持有者早已消失」。因此这里一律拒绝，并把
+  // 后者需要的出口显式标出来（`recoverable` / `recoveryBasis`）：
+  //   · 调用方据此可以告诉用户「这把锁过期了但进程还活着」；
+  //   · **但本轮没有**为它接线任何自动恢复路径——`acquireBridgeLock` 的接管分支
+  //     仍是「读→判→写」，而实测证明那条路径在陈旧锁场景下会**多持有者**
+  //     （见 `doc/long-term-issues.md` #50 的 P1/P2/P3 三个协议）。
+  // ⇒ 现状是「不会无声抢锁」+「有可诊断的恢复信号」，**不是**「已具备安全恢复」。
+  //   把 `recoverable` 接成自动接管**必须**先落地原子+身份绑定的协议，否则
+  //   等于用一个新的双持换掉一个误报。
+  if (aliveVerdict === true) {
+    return {
+      state: 'held', reason: 'held-by-live-owner', holder: existing, stale: false,
+      recoverable: expired,
+      recoveryBasis: expired ? 'holder-alive-but-lock-expired' : null,
+    };
+  }
+
+  // ── 时间上限：**仅**在「存活判据缺席」时的有界兜底 ──────────────────
+  // 保持 0.19.18 起的行为：不注入 isAlive 时，过期锁仍可被接管，否则
+  // 「判据不可用」就会退化成永久锁死。①e / ①f 钉住这一侧。
+  if (expired) {
     return { state: 'free', reason: 'stale-lock-expired', holder: existing, stale: true };
   }
 
-  // 其余一律拒绝：持有者还活着，且锁未过期。
+  // 其余一律拒绝：持有者还活着（或判据给不出结论），且锁未过期。
   // 误拒的代价是「用户看到一条说得清的提示」，误放的代价是「两个桥互相杀浏览器」。
   return { state: 'held', reason: 'held-by-live-owner', holder: existing, stale: false };
 }
@@ -210,6 +240,189 @@ function envStaleMs() {
   return Number.isFinite(raw) && raw > 0 ? raw : undefined;
 }
 
+// ───────────────────── 过渡互斥（transition guard）─────────────────────
+//
+// ## 为什么光有 `wx` 还不够（2026-10-11 实测）
+//
+// 锁文件的**创建**用 `wx`（独占创建）本来就是原子的；坏的是**接管陈旧锁**那条路：
+// 它是「读 → 判 → 非独占覆写」，两步之间没有任何原子性。盘上留有陈旧锁时
+// （强杀/崩溃/重启的常见后果，正是 0.19.22 要解决的场景），多个进程可以**全部**
+// 读到同一份陈旧锁、**全部**判定可接管、然后**全部**覆写并各自返回 `ok:true`
+// ⇒ 同一账号出现多个持有者，破坏用户立的准则「同一账号不能同时桥接运行」。
+//
+// 实测（修复前）：`fresh`（盘上无锁文件）**0/20** 多持；`stale`（盘上有死锁）
+// **20/20** 多持；屏障同步 4 进程 × 8 轮**每轮 4 个进程全部 `ok`**。
+//
+// ## 为什么不是「换成 mkdir 锁」也不是「rename aside」
+//
+// 三个候选都被**同一个固定交错**打穿过（完整读数见 `doc/long-term-issues.md` #50）：
+//
+//   · `rename(lockPath, aside)` 是**按路径**操作，不是**按身份**操作 ⇒ A 可能移走
+//     B **刚建立**的活锁（ABA 问题）。实测：A 移走的是 `B-LIVE`，两个进程同时
+//     认为自己持有。**「原型 0/N 多持」不构成安全证明**——它只说明那个交错没触发。
+//   · 天真的「`mkdir` 当锁 + `rmdir` 回收」只修**首次获取**；回收那一步仍然是
+//     「先删掉、再建立」，照样把新持有者删掉。
+//   · 非独占覆写（当前实现）B 直接被静默覆盖。
+//
+// ⇒ 真正需要的不是「换一个看似原子的原语」，而是**把所有对锁文件的改动
+//   （建立、回收、释放）串行化进同一个临界区**。
+//
+// ## 设计
+//
+// 用一个**短命目录**当过渡互斥：`mkdir` 在 POSIX 与 Windows 上都是原子的
+// 「不存在才创建」语义。**所有**对 `lockPath` 的改动都在它里面发生，于是
+// 「读 → 判 → 写」不再与其他进程交错。临界区内只有几次同步文件操作
+// （无网络、无浏览器、无等待），因此它天然是**毫秒级**的。
+//
+// 守卫自身的回收因此可以有一个**远紧于 12 小时**的界：临界区只有毫秒级，
+// 一个 15 秒仍未被释放的守卫**不可能**是合法持有者（进程被强杀是唯一解释）。
+// 回收 = `rename` 原子认领 + 认领后**复核年龄**。这是它与 12 小时那条的关键区别：
+// 12 小时那条无法区分「持有者真跑了 12 小时」与「pid 被复用」（见 §3.6），
+// 而 15 秒 ≫ 毫秒级临界区，这个区分是成立的。
+//
+// ## 与旧版锁文件的兼容
+//
+// `lockPath` 的内容格式**一字未改**（`pid/startedAt/siteId/accountKey/at/version`），
+// 升级前后互相看得懂对方写的锁。守卫目录是新增的旁挂文件，旧版本会忽略它。
+
+/** 过渡互斥目录名（放在 profileDir 里，与锁文件同级）。 */
+export const BRIDGE_GUARD_DIRNAME = 'webcode-bridge.lock.guard.d';
+
+/**
+ * 守卫的过期上限：超过就认为持有它的进程被强杀了。
+ *
+ * 取值依据：临界区只有**毫秒级**的几次同步文件操作，因此 15 秒是三个数量级
+ * 以上的余量。刻意远小于锁文件那个 12 小时——时间上限只有在「远大于合法
+ * 持有时长」时才谈得上安全回收（见文件头 §设计）。
+ */
+export const DEFAULT_BRIDGE_GUARD_STALE_MS = 15_000;
+
+/** 等待守卫的最长时间（毫秒）。竞争只发生在「同一瞬间启动两个桥」时。 */
+export const DEFAULT_BRIDGE_GUARD_WAIT_MS = 4_000;
+
+/** 同步小睡：`Atomics.wait` 可用就用它（不烧 CPU），否则退化为自旋。 */
+function sleepSync(ms) {
+  if (!(ms > 0)) return;
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch {
+    const end = Date.now() + ms;
+    while (Date.now() < end) { /* 自旋兜底：只在 Atomics 不可用时走到 */ }
+  }
+}
+
+/** 读一个目录的 mtime（毫秒）；读不到返回 null。 */
+function dirMtimeMs(p) {
+  try { return fs.statSync(p).mtimeMs; } catch { return null; }
+}
+
+/**
+ * 原子认领一个陈旧的守卫目录，并**复核它确实陈旧**。
+ *
+ * 为什么必须复核：`rename` 认领的是「此刻位于该路径的东西」，而不是「我们先前
+ * 观察到的那一个」。认领之后再看一眼年龄，若它其实**是新的**（别的进程刚重建
+ * 了守卫），就原样放回去并如实报告竞争——这正是 `rename` 不能当 CAS 用那条
+ * 教训（#50 的 P2）在守卫这一层的应用。
+ *
+ * @returns {boolean} true = 已清掉一个确认陈旧的守卫（调用方应重试 mkdir）
+ */
+function recoverStaleGuard(guardDir, now, staleMs, warn) {
+  const aside = `${guardDir}.stale-${process.pid}-${now}`;
+  try {
+    fs.renameSync(guardDir, aside);                 // 原子：只有一个进程能认领成功
+  } catch {
+    return false;                                    // ENOENT = 已被别人回收；别的错也不硬闯
+  }
+  const mtime = dirMtimeMs(aside);
+  const age = mtime === null ? Infinity : now - mtime;
+  if (age <= staleMs) {
+    // 认领到的其实是**新的**守卫 ⇒ 它不是陈旧物。放回去，按竞争处理（不放行）。
+    try { fs.renameSync(aside, guardDir); } catch { /* 放不回去也不敢删：下面只报告 */ }
+    return false;
+  }
+  try { fs.rmSync(aside, { recursive: true, force: true }); } catch { /* 下次再来 */ }
+  warn(`[bridge-lock] recovered a stale transition guard at ${guardDir} (age=${Math.round(age / 1000)}s)`);
+  return true;
+}
+
+/**
+ * 拿过渡互斥（有副作用：建目录 + 写持有者标记）。拿到返回 true。
+ *
+ * 全同步实现：调用方（`launch()` 与 `process.on('exit')`）都在同步上下文里，
+ * 因此这里不做成 async。等待用 `Atomics.wait` 小睡，不空转烧 CPU。
+ *
+ * @param {string} guardDir 守卫目录
+ * @param {{now?: number, staleMs?: number, waitMs?: number, label?: string, logger?: object}} [opts]
+ * @returns {boolean} 是否拿到
+ */
+export function acquireTransitionGuard(guardDir, opts = {}) {
+  const warn = typeof opts.logger?.warn === 'function' ? opts.logger.warn.bind(opts.logger) : () => {};
+  const staleMs = Number.isFinite(Number(opts.staleMs)) && Number(opts.staleMs) > 0
+    ? Number(opts.staleMs) : DEFAULT_BRIDGE_GUARD_STALE_MS;
+  const waitMs = Number.isFinite(Number(opts.waitMs)) && Number(opts.waitMs) >= 0
+    ? Number(opts.waitMs) : DEFAULT_BRIDGE_GUARD_WAIT_MS;
+  const deadline = Date.now() + waitMs;
+  const label = opts.label || '';
+
+  for (;;) {
+    try {
+      fs.mkdirSync(guardDir, { recursive: false });
+      // 持有者标记只用于诊断（回收判据是 mtime，不依赖它；缺了也不影响判定）。
+      try {
+        fs.writeFileSync(path.join(guardDir, 'owner.json'),
+          JSON.stringify({ pid: process.pid, at: Date.now(), label }), 'utf8');
+      } catch { /* 标记写不进去不影响互斥成立 */ }
+      return true;
+    } catch (err) {
+      if (err?.code !== 'EEXIST') {
+        warn(`[bridge-lock] transition guard mkdir failed at ${guardDir}: ${err?.message}`);
+        return false;
+      }
+    }
+    const now = Date.now();
+    const mtime = dirMtimeMs(guardDir);
+    if (mtime !== null && now - mtime > staleMs) {
+      if (recoverStaleGuard(guardDir, now, staleMs, warn)) continue;   // 已清掉 ⇒ 立刻重试
+    }
+    if (Date.now() >= deadline) {
+      warn(`[bridge-lock] transition guard busy at ${guardDir} (waited ${waitMs}ms); refusing to mutate the lock`);
+      return false;
+    }
+    sleepSync(5);
+  }
+}
+
+/** 释放过渡互斥（只删自己的：先确认持有者标记，再删目录）。 */
+export function releaseTransitionGuard(guardDir, opts = {}) {
+  const warn = typeof opts.logger?.warn === 'function' ? opts.logger.warn.bind(opts.logger) : () => {};
+  try {
+    const ownerPath = path.join(guardDir, 'owner.json');
+    if (fs.existsSync(ownerPath)) {
+      let owner = null;
+      try { owner = JSON.parse(fs.readFileSync(ownerPath, 'utf8')); } catch { owner = null; }
+      // 被别人回收过又重建 ⇒ 里面不是我的标记，**绝不能删**（会放别人进临界区）。
+      if (owner && Number(owner.pid) !== process.pid) return false;
+    }
+    fs.rmSync(guardDir, { recursive: true, force: true });
+    return true;
+  } catch (err) {
+    warn(`[bridge-lock] transition guard release failed at ${guardDir}: ${err?.message}`);
+    return false;
+  }
+}
+
+/** 在过渡互斥保护下执行 fn；拿不到守卫时返回哨兵而不是硬闯。 */
+function withTransitionGuard(guardDir, opts, fn) {
+  if (!acquireTransitionGuard(guardDir, opts)) {
+    return { __guardUnavailable: true };
+  }
+  try {
+    return fn();
+  } finally {
+    releaseTransitionGuard(guardDir, opts);
+  }
+}
+
 /**
  * 拿锁（有副作用：写文件 + 登记退出兜底）。拿到返回 `{ ok: true, path }`，
  * 被拒返回 `{ ok: false, ...decide }`。
@@ -236,6 +449,12 @@ export function acquireBridgeLock(profileDir, info = {}, opts = {}) {
   const alive = typeof opts.isAlive === 'function' ? opts.isAlive : isProcessAlive;
   const staleMs = opts.staleMs ?? envStaleMs();
   const self = { pid: selfPid, startedAt: info.startedAt, staleMs, isAlive: alive };
+  // 过渡互斥：**所有对 lockPath 的改动都在它里面**（见文件头「设计」）。
+  const guardDir = path.join(dir, BRIDGE_GUARD_DIRNAME);
+  const guardStaleMs = Number.isFinite(Number(opts.guardStaleMs)) && Number(opts.guardStaleMs) > 0
+    ? Number(opts.guardStaleMs) : DEFAULT_BRIDGE_GUARD_STALE_MS;
+  const guardWaitMs = Number.isFinite(Number(opts.guardWaitMs)) && Number(opts.guardWaitMs) >= 0
+    ? Number(opts.guardWaitMs) : DEFAULT_BRIDGE_GUARD_WAIT_MS;
 
   let existing = null;
   try {
@@ -278,43 +497,76 @@ export function acquireBridgeLock(profileDir, info = {}, opts = {}) {
     heldLocks.set(lockPath, { profileDir: dir, pid: selfPid, startedAt: info.startedAt });
     installExitHook();
   };
+  const freshLock = () => ({
+    ok: true, path: lockPath, state: 'free', reason: 'acquired', holder: null, guard: 'held',
+  });
+
   try {
     fs.mkdirSync(dir, { recursive: true });
-    // `wx` = 独占创建：并发的两个进程只有一个能成功，这是**无锁竞争**的正确判据。
-    fs.writeFileSync(lockPath, serialized, { encoding: 'utf8', flag: 'wx' });
-    remember();
-    return { ok: true, path: lockPath, state: 'free', reason: 'acquired', holder: null };
   } catch (err) {
-    if (err?.code !== 'EEXIST') {
+    warn(`[bridge-lock] cannot create profile dir ${dir}: ${err?.message}`);
+    return { ok: false, path: lockPath, state: 'free', reason: 'write-failed', holder: null };
+  }
+
+  // ── 唯一改动锁文件的地方：整个「读 → 判 → 写」都在过渡互斥里 ──────────────
+  //
+  // 这是 0.19.71 修的核心。上面那次 `decideBridgeLock` 只是**快速路径**
+  // （无竞争时避免进临界区、也避免与全局串行），**不可作为权威判据**：从那次
+  // 读取到这里之间，别的进程可能已经把陈旧锁接管走了。因此临界区里**必须
+  // 重新读一次**，并按同一套判据重新裁决。
+  const guarded = withTransitionGuard(guardDir, {
+    now, staleMs: guardStaleMs, waitMs: guardWaitMs,
+    label: `acquire:${info.accountKey || info.siteId || '?'}`, logger: opts.logger,
+  }, () => {
+    // ★ 临界区内重读：权威事实来源
+    let live = null;
+    try {
+      if (fs.existsSync(lockPath)) live = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+    } catch (err) {
+      warn(`[bridge-lock] unreadable lock at ${lockPath} inside guard (${err?.message}); treating as free`);
+      live = null;
+    }
+    const re = decideBridgeLock(live, now, self);
+
+    if (re.state === 'mine') return { ok: true, path: lockPath, ...re };
+    if (re.state === 'held') {
+      const h = re.holder || {};
+      warn(`[bridge-lock] DENIED (in guard): ${lockPath} held by pid=${h.pid} account=${h.accountKey || '?'}`);
+      return { ok: false, path: lockPath, ...re };
+    }
+
+    // free ⇒ 可写。**整份覆写**（不再依赖 `wx` 给原子性：原子性已由临界区提供）。
+    //
+    // 为什么从「`wx` 独占创建 + EEXIST 回退」改成「无条件覆写」：
+    //   · 临界区已保证同一时刻只有一个进程在这里，因此不存在「两个都写成功」；
+    //   · 旧写法在接管分支用的是**非独占** `writeFileSync`（那才是缺陷），
+    //     而首建分支用 `wx`——两套语义分叉正是 bug 的温床；
+    //   · 保留「坏锁/陈旧锁必须能被覆盖」的既有语义（②b/②c 钉住的那一侧）。
+    try {
+      fs.writeFileSync(lockPath, serialized, { encoding: 'utf8' });
+    } catch (err) {
       warn(`[bridge-lock] write failed at ${lockPath}: ${err?.message}`);
       return { ok: false, path: lockPath, state: 'free', reason: 'write-failed', holder: null };
     }
-    // EEXIST：文件已存在。两种可能必须**分开处置**——
-    //   · 我们正处在「接管陈旧/坏锁/已死持有者」路径（前面已判定 free）：文件就是我们
-    //     要覆盖的那个陈旧锁，必须**覆盖写**。首版在这里一律拒绝，于是「坏锁/过期锁」
-    //     把用户永久挡在门外（test/bridge-lock.test.mjs ②b/②c 抓到，两条断言先红）；
-    //   · 我们处在「无锁竞争」路径：说明另一个进程**在我们检查之后**抢到了锁，
-    //     回读它、如实拒绝——绝不能覆盖（覆盖就等于两个桥同时跑）。
-    let other = null;
-    try { other = JSON.parse(fs.readFileSync(lockPath, 'utf8')); } catch { other = null; }
-    // 用**同一条判据**重新裁决「现在这份文件」：只有它已不可信（陈旧/坏/持有者已死）
-    // 才允许覆盖。判据必须与上面逐字相同——两条判据分叉过一次就是 bug 的温床。
-    const recheck = decideBridgeLock(other, now, self);
-    if (recheck.state === 'held') {
-      warn(`[bridge-lock] DENIED (race): ${lockPath} created by pid=${other?.pid ?? '?'} between check and write`);
-      return { ok: false, path: lockPath, state: 'held', reason: 'race-lost-to-live-owner', holder: other };
-    }
-    // 现在这份文件已陈旧/损坏（或恰是本进程的旧锁）⇒ 安全覆盖。
-    try {
-      fs.writeFileSync(lockPath, serialized, { encoding: 'utf8' });
-      remember();
-      warn(`[bridge-lock] took over unusable lock at ${lockPath} (reason=${recheck.reason})`);
+    remember();
+    if (re.stale) {
+      warn(`[bridge-lock] took over STALE lock at ${lockPath} (reason=${re.reason}, `
+        + `holder pid=${live?.pid}, age=${Math.round((now - Number(live?.at || 0)) / 1000)}s)`);
       return { ok: true, path: lockPath, state: 'free', reason: 'acquired-after-takeover', holder: null };
-    } catch (err2) {
-      warn(`[bridge-lock] takeover write failed at ${lockPath}: ${err2?.message}`);
-      return { ok: false, path: lockPath, state: 'free', reason: 'write-failed', holder: null };
     }
+    return freshLock();
+  });
+
+  if (guarded.__guardUnavailable) {
+    // 拿不到过渡互斥 ⇒ **绝不改动锁文件**。宁可拒绝启动并说明，也不冒双持风险：
+    // 「误拒的代价是一条说得清的提示，误放的代价是两个桥互相杀浏览器」。
+    warn(`[bridge-lock] held back: transition guard unavailable at ${guardDir}`);
+    return {
+      ok: false, path: lockPath, state: 'held', reason: 'transition-guard-busy',
+      holder: verdict.holder || existing || null, stale: false,
+    };
   }
+  return guarded;
 }
 
 /**
@@ -329,16 +581,29 @@ export function releaseBridgeLock(profileDir, info = {}) {
   const dir = String(profileDir || '');
   if (!dir) return false;
   const lockPath = path.join(dir, BRIDGE_LOCK_FILE);
-  try {
-    if (!fs.existsSync(lockPath)) { heldLocks.delete(lockPath); return false; }
-    const cur = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
-    const minePid = Number.isFinite(Number(info.pid)) ? Number(info.pid) : process.pid;
-    if (Number(cur?.pid) !== minePid) return false;                       // 已被别人接管
-    if (Number.isFinite(Number(info.startedAt)) && Number(cur?.startedAt) !== Number(info.startedAt)) return false;
-    fs.rmSync(lockPath, { force: true });
-    heldLocks.delete(lockPath);
-    return true;
-  } catch { return false; }
+  const guardDir = path.join(dir, BRIDGE_GUARD_DIRNAME);
+  // 释放也是**对锁文件的改动**，因此同样进临界区：否则它可能与「接管」交错，
+  // 把刚被新持有者写下的锁删掉（那正是 ④ 那条最危险边界要防的事）。
+  //
+  // 与 acquire 的区别：这里**拿不到守卫时直接放弃释放**（返回 false），
+  // 而不是抛错或硬闯——释放失败的最坏后果是「锁多留一会儿」，由进程退出兜底
+  // 与「持有者已死」判据收拾；硬闯的后果是删掉别人的锁。
+  // `waitMs: 0` 是必须的：本函数会被 `process.on('exit')` 兜底调用，而退出处理器
+  // 只能是同步且应当尽快的——在那里等守卫会把「正常退出」拖成卡顿。不等待
+  // 不损失正确性：拿不到就放弃本次释放，锁留给「持有者已死」判据收拾。
+  const guarded = withTransitionGuard(guardDir, { label: 'release', waitMs: 0 }, () => {
+    try {
+      if (!fs.existsSync(lockPath)) { heldLocks.delete(lockPath); return false; }
+      const cur = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+      const minePid = Number.isFinite(Number(info.pid)) ? Number(info.pid) : process.pid;
+      if (Number(cur?.pid) !== minePid) return false;                     // 已被别人接管
+      if (Number.isFinite(Number(info.startedAt)) && Number(cur?.startedAt) !== Number(info.startedAt)) return false;
+      fs.rmSync(lockPath, { force: true });
+      heldLocks.delete(lockPath);
+      return true;
+    } catch { return false; }
+  });
+  return guarded.__guardUnavailable ? false : guarded;
 }
 
 /** 便于报错的持有者描述（纯函数）。 */
@@ -351,8 +616,17 @@ export function describeBridgeLockHolder(holder, siteId, accountKey, opts = {}) 
     : opts.alive === false ? '（本机实测：该进程已不在进程表里）'
       : '';
   const fileNote = opts.lockPath ? `锁文件：${opts.lockPath}。` : '';
+  // 「锁过期但进程仍活着」是一个**真歧义**状态（0.19.71 起才会出现）：
+  // 要么原持有者真的跑了很久，要么它的 pid 已被无关进程复用。两者在锁文件里
+  // 长得一样，所以文案必须**两种都说到**，而不是假装知道是哪一种。
+  const recoverableNote = opts.recoverable === true
+    ? '⚠ 这把锁的写入时间已超过过期窗口，但该 pid 现在仍在运行：'
+      + '可能是原持有者确实跑了很久，也可能是原进程早已退出、而这个 pid 被别的程序复用了。'
+      + '请先确认是否真的还有另一个 dsh 在跑（例如看该 pid 对应的程序）。'
+    : '';
   return `账号 ${who} 已被另一个桥接实例占用（pid ${h.pid ?? '?'}，自 ${when} 起）${aliveNote}。`
     + '同一账号不能同时桥接运行——请先关闭另一个 dsh / 另一个窗口，或在设置里为该站点配置第二个账户槽。'
+    + recoverableNote
     + fileNote
     + '若确认没有任何别的 dsh 在跑，删除该锁文件后重试即可：桥在启动时会自动接管「持有者进程已不存在」的锁。';
 }

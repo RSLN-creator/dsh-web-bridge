@@ -59,7 +59,8 @@
 | 45 | **桌面 profile 的声明与磁盘分叉：声明仍钉 0.19.61，磁盘已是 0.19.64**（2026-10-05 登记）——本轮靠官方 `client-hmr` 通道**原地热换** `lib/client.cjs` 让桌面端立刻用上修复（不改进程、不重启应用），但**没改 profile 声明**。风险：任何一次 pnpm 通道（装别的插件、启动期 reconcile）都可能把客户端静默换回声明里的旧版 ⇒ 缺陷复发。恢复「声明 == 磁盘」必须**完全退出桌面端**后走官方通道装一次（`dsh` CLI 拒绝管理 desktop profile，须用桌面端自己的 carrier），且宿主半边本来就要重启才换 | 中 | 否 | `~/.dsh/profiles/desktop/package.json`、`~/.dsh/profiles/desktop/node_modules/dsh-webcode-bridge/lib/client.cjs`、`doc/progress.md`（2026-10-05 §八）、`doc/research/2026-10-05-dsh-multi-session-and-client-hot-swap.md` §5 |
 | 46 | **npm 发布被账号安全策略挡在「staged 待批」**（2026-10-05 登记，**同日已解决**）——`npm publish` 报成功但 registry 上 `latest` 仍是 0.19.51（`E409 Cannot publish over previously staged version "0.19.64"`）；根因是 npm 收紧「绕过 2FA 的 token 直接发布」，本机 token 属该类 ⇒ 发布被暂存，需账号主人 2FA 批准。**用户本人批准后已上线**：`latest = 0.19.64`、61 files、shasum `8a7aa56f…` 与本地打包 tarball **逐字节相同**（`published 2026-10-05T15:56:43Z`）。留档价值 = 「命令行打印 `+ pkg@ver` 不等于 registry 上线」这条判据（必须直连 registry 读 `dist-tags`） | 中 | 否 | `~/.npmrc`（token）、npm registry `dsh-webcode-bridge`、`package/dsh-webcode-bridge/dsh-webcode-bridge-0.19.64.tgz` |
 | 47 | **官方会话 chrome 在第三方面板内不可达：列顶栏按官方 DOM+官方 CSS module 复刻、右侧 tab 靠官方页签承载**（2026-10-06 登记；10-07 两处更新；**2026-10-08 复刻落地并升级判据**）——① 官方 header 三块 chip 注册进 `conversation.session.header` 的子槽，该槽只由官方会话视图渲染（0.2.1-alpha.1：`ui-conversation:21191-21210`），且 slots 公开投影**不含组件**（`dsh-client-ui-slots/lib/index.js:313` 原文 without components or executable hooks）⇒ 受支持路径下无法原样挂载；② 官方右栏可见性写死 `activePanelId === null`（`ui-sidebar-right:5874`/`:9062`）⇒ 面板开着必无右栏，第三方也不能在自有面板里渲染官方右栏内容（`renderer:330-333` 归属校验）；③ **出路已落地**：右栏改用官方**页签**承载并发列（`sidebarRightTabs.register` + `sidebar.right.pane.tab`，真机 `window.__hwbRail={registered:true}`）；④ **「在官方视图打开」已修通（10-07 轮）**：放行标记由按钮 onClick 置位、而守卫只在 pointerdown 捕获期消费 ⇒ 订阅回调决策时读不到；修法 = `createPanelGuard` 的 panelInfo 订阅回调**同样消费**放行标记，真机 `panelGone:true + headers:4 + lastDecision:"allow:leave"`（10-08 轮该入口从列头按钮挪进官方同款「更多操作」菜单，放行时序一字未改，判据仍钉两个消费点）；⑤ **「列内渲染官方 session header」定案为做不到（10-07 真机取证，10-08 在 0.2.1-alpha.1 复核仍成立）**：两道官方闸——授权（renderSlot 只认本条目 children 声明，`renderer:332`）+ 声明唯一（children 声明遇已声明槽名必抛，`slots:193`；该槽已被官方 registerHeader 声明为 conversation.header 的 child，`ui-conversation:23073-23086`）⇒ 真机逐字 `slot "conversation.session.header" is already declared (by an entry in "conversation.header" (mf))`，**列条目注册整体失败、列体全空**。⇒ 出路不是「自绘一套看着像的」，而是**按官方复刻**（10-08 轮 `ColumnHeader`）：结构逐字照官方 `ConversationHeader`/`ConversationSessionHeader` 那棵树（9 个结构位 + 同组 role/aria）、**样式不自己写**（直接挂官方 CSS module 的哈希类名，前缀由 `officialCssPrefix` 运行时从 `<style data-plugin-css>` 反解 ⇒ 官方改哈希自动跟上；桌面 asar 0.2.0-rc.2 与 web 0.2.1-alpha.1 **前缀不同**，这条设计让两版都拿得到正确样式）、数据与文案照官方投影键与 zh 词典（拿不到就不渲染那块）、「对话/轨迹」页签**真的切官方视图**（读官方 `conversation.view` 注册表 + 经 `conversation.session` 的 `view` owner prop，组件身份按 viewId 缓存防重挂）；⑥ 右栏受官方布局所限（常态 300px～45%、中列保底 400px），3–4 列并排只在全屏下实用 | 中 | 否 | `package/dsh-webcode-bridge/lib/client.cjs`、`test-mock/probe-concurrent-live.mjs`、`scripts/check-official-drift.mjs`、`doc/progress.md`（2026-10-08 轮 §四） |
-| 48 | **「提示词投递 = 纯文本」档在长会话上必然发不完整（`PROMPT_TRUNCATED`）**（2026-10-06 登记，本轮**未修**）——真机造 jobs 时撞到：用户设置 `promptTransport: inline`（全局），44,202 字符提示词灌进 deepseek 输入框，**两次尝试都恰好丢 126 个字符**（44,202→44,076；压缩重试后 36,253→36,127），`PROMPT_TRUNCATED` 回读校验如实拦下、**该轮直接失败**；同一轮把投递形态切到 `attach`（插件默认值）后立刻成功。读数还显示 `SITE_COMPOSER_HARD_LIMIT` 目前**只有 kimi: 200,000**，deepseek **不在表里** ⇒ 选了 `inline` 的 deepseek 长会话没有任何底线兜底。**126 是常量**（两次差值相同）⇒ 更像写入通道丢一段固定前缀/后缀，而不是「输入框长度上限」；`native composer write` 两次都如实报了「falling back to chunked write」。**未修的理由**：这是**既有**缺陷（非本轮引入），而修法有两个方向且影响用户设置语义（① 把 deepseek 写进 `SITE_COMPOSER_HARD_LIMIT` 强制改走附件；② 查清这 126 字符为何恒定丢失）——属「用户拍板」范围，不擅自改产品行为 | 中 | 否 | `lib/browser-driver.js`（`SITE_COMPOSER_HARD_LIMIT` / `fillComposer` / 回读校验）、`doc/progress.md`（2026-10-06 真机验收节） |
+| 48 | **「提示词投递 = 纯文本」档在长会话上必然发不完整（`PROMPT_TRUNCATED`）**（2026-10-06 登记；**2026-10-11 归因更正 + 真机实证**）——真机造 jobs 时撞到：用户设置 `promptTransport: inline`（全局），44,202 字符提示词灌进 deepseek 输入框，**两次尝试都恰好丢 126 个字符**（44,202→44,076；压缩重试后 36,253→36,127），`PROMPT_TRUNCATED` 回读校验如实拦下、**该轮直接失败**；同一轮把投递形态切到 `attach`（插件默认值）后立刻成功。⚠ **原登记把归因写成「更像写入通道丢一段固定前缀/后缀」——该归因已证伪**：2026-10-11 用真机 Chromium（HeadlessChrome/151）跑离线 textarea 探针，五项断言全部成立 —— CRLF 输入回读差值 **252 = 252**（等于 CRLF 对数）、LF 对照**零差**、CRLF→LF 规范化后**内容逐字相等**、**尾部保留**、且生产判据 `echoed.length < sent.length - 8` 确实会触发。**结论：丢的 126 个「字符」是 126 个 `\r\n` 被 `textarea.value` 按 HTML 规范规范化为 `\n`，正文内容零丢失；这是桥的判据误报，不是网页截断。** 旁证：本机 prompt-store 与事故同日的 4 个会话提示词文件 `CRLF` 计数**恰为 126**（`session-19e2fa47-…__deepseek.md`，2026/10/6 10:12:56），其 CRLF 区段起点前文正是 `Instructions from: AGENTS.md`，而本机 `AGENTS.md` 恰好 **126 行**（`core.autocrlf=true`）。**本轮已修（L1 编辑器层）**：新增纯函数 `composerEchoVerdict`，判据从「比长度」改成比**内容等价**，规范化白名单刻意极窄（只允许 `\r\n`→`\n`、**行尾**空白、NFC），**不允许**泛化 trim / 折叠中间空白；真正的截断（中间丢字 / 尾部截断 / **等长内容被替换**）依然被拦住。⑦ 条护栏 + 变异 M8–M10 全被抓（M8「退回只比长度」让 ①③④ 一起红）。**L2 提交层仍待做**：`composerCleared()` / `navigatedAway()` 只证明「消息已离开输入框」，**不证明**「提交的正文与输入等价」；证据不足时应记**不确定**。`SITE_COMPOSER_HARD_LIMIT` 仍只有 kimi: 200,000 | 中 | 部分 | `lib/browser-driver.js`（`composerEchoVerdict` / `fillComposer` / `writeFieldNative` / `readComposer`）、`test/composer-write.test.mjs`（回读判据 ①–⑦）、`doc/progress.md`（2026-10-11 节）、`.tmp/evidence/crlf-chromium.json`（真机读数） |
+| 50 | **账号锁接管路径非原子：陈旧锁可被多个进程同时「接管」**（2026-10-11 登记，**同日完全修复 0.19.71**）——`acquireBridgeLock` 的接管分支是「读 → 判 → **非独占** `writeFileSync` 覆写」，而正常首建路径用的是 `flag:'wx'`（那条是对的）。⇒ 盘上留有陈旧锁时（强杀/崩溃/重启的常见后果，正是 0.19.22 要解决的场景），多个进程可全部判定可接管并**全部返回 `ok:true`**，破坏「同一账号不得同时桥接」这条用户准则。**实测**：`fresh`（无锁文件）**0/20** 多持；`stale`（盘上有死锁）**20/20** 多持；屏障同步 4 进程 ×8 轮**每轮 4 个进程全 `ok`**。**触发窗口须如实标定**：无屏障自然调度 **0/84**、单次接管全程仅 **2.0–4.2ms** ⇒ 真实竞态缺陷，但**不是高频故障**，且触发率**尚未**从生产数据估计（该试验不是生产启动事件的随机抽样）。**修复（同日完成，两层）**：① **判据层** —— `decideBridgeLock` 加「明确存活 ⇒ 一律 `held`，锁龄不再构成放行理由」，时间上限**降级为仅当存活判据缺席时的有界兜底**，并把 PID 复用出口显式标为 `recoverable`；② **原子层** —— 新增**过渡互斥**（`webcode-bridge.lock.guard.d`，`mkdir` 原子原语），**所有对锁文件的改动（建立/回收/释放）都在临界区内**，且临界区内**重读并重新裁决**（外面那次读只作快速路径，不作权威判据）。**修复后多进程实测：`stale` 2×12 轮与 4×8 轮均 0 多持、每轮恰好 1 个赢家**；`fresh` 无退化。**护栏**：新增 ①e2–①e6、⑤b、**⑧/⑧b（真多进程竞争）**、⑨（守卫回收与只删自己的）⇒ `bridge-lock.test.mjs` **29/29**；**变异测试 M1–M7 全部被抓**（其中 M5「摘掉过渡互斥」直接让 ⑧ 变红 ⇒ 该护栏真实承载修复）。**三个被证伪的候选协议（教训，写给下一个改锁的人）**：`rename` aside 是**按路径**而非**按身份**操作 ⇒ 会移走别人刚建立的**活锁**（ABA；实测 A 移走 `B-LIVE`，两进程同时认为自己持有）；天真的「`mkdir` 当锁 + `rmdir` 回收」**只修首次获取、回收仍删掉新持有者**；非独占覆写则直接静默覆盖。⇒ **「原型 0/N 多持」不构成安全证明**，只说明**该交错**未触发。**平台语义（Windows 实测）**：`rename` 覆盖已存在目标**成功且静默覆盖**、源不存在 `ENOENT`、**目标被打开读取 `EPERM`**、`wx` 落已存在 `EEXIST` ⇒ `EPERM`（进程性失败）与 `ENOENT`（输竞争）**不能一并当「拿到锁」**。**已知边界**：守卫的有效性依赖「临界区远短于守卫超时（15s）」，若未来有人在临界区内加入网络/浏览器等待会破坏该前提（注释已写明）；非 Windows 未验证 | 高 | 是 | `lib/bridge-lock.js`（`decideBridgeLock` / `acquireBridgeLock` / `acquireTransitionGuard`）、`test/bridge-lock.test.mjs`（①e2–①e6、⑤b、⑧、⑧b、⑨）、`doc/progress.md`（2026-10-11 节） |
 | 49 | **0.19.69 的 profile 安装与「重启 dsh web」在本机沙箱内无法执行**（2026-10-08 登记，**等用户在正常环境补做**）——本轮发布链其余各步全部完成并已复核：git 提交 `2b63492` + `1ab845f`、push（`05967a1..1ab845f`，走 HTTPS + `http.sslBackend=openssl`）、tag `v0.19.69`、GitHub Release 带资产 `dsh-webcode-bridge-0.19.69.tgz`（930,799 B）、CI 与 CodeQL success、npm `latest = 0.19.69`（`dist.shasum a6f8b8459dff…` 与本地 tarball 逐字节同源）。**卡住的是最后一步**：`~/.dsh` 整棵树在本沙箱内**只读**（写探针文件即 `Access denied`），`dsh plugin --profile web add <tgz>` 报 `EPERM: operation not permitted, open …\profiles\web\package.json.lock`。⇒ 用户须在正常环境里 `dsh plugin --profile web add .\dsh-webcode-bridge-0.19.69.tgz` 并**重启 dsh web**（「装完不重启 = 等于没装」）。⚠ 注意 #45 同族风险：桌面端是**另一条**通道（`dsh` CLI 拒绝管理 desktop profile），声明与磁盘一致要完全退出桌面端后用桌面端自己的 carrier。 | 中 | 否 | `~/.dsh/profiles/web/package.json`、`doc/progress.md`（0.19.69 节 §四） |
 
 > **一览表完整性（2026-09-16 修正；2026-09-26 补上闸门）**：本表此前**漏登记 #19 与 #20**（正文有、表里没有）。
@@ -3007,7 +3008,7 @@ npm notice Your package is being processed and may take a few minutes to become 
 - ⑥ 右栏受官方布局所限（常态 300px～45%、中列保底 400px）⇒ 3–4 列并排只在全屏下实用。
 
 
-## 48. **「提示词投递 = 纯文本」档在长会话上必然发不完整**（2026-10-06 登记，本轮**未修**）
+## 48. **「提示词投递 = 纯文本」档发不完整：L1 判据已修，L2 待做**（2026-10-06 登记；2026-10-11 归因更正 + L1 修复）
 
 ### 现象（真机，非推测）
 
@@ -3116,3 +3117,214 @@ dsh plugin --profile web add .\dsh-webcode-bridge-0.19.69.tgz
 `~/.dsh` 只读是**环境边界**，不是本插件的缺陷；在只读层里强写（例如改 ACL、换 profile 根）会
 制造「装上了但其实装在别处」的假象——那比「如实报告这一步没做」坏得多（本仓库对「不造假状态」
 有成文纪律）。安装本身是可逆、幂等的一条命令，交给用户在正常环境执行即可。
+
+## 48. **「提示词投递 = 纯文本」档发不完整：归因已更正为「换行规范化误报」**（2026-10-11 更新）
+
+> 原登记（2026-10-06）的标题与归因是「像写入通道丢一段固定前缀/后缀」。**该归因已证伪。**
+> 本条目保留原始读数，只更正归因与状态。
+
+### 现象（真机，非推测）——读数不变
+
+0.19.68 验收轮在真页面（web profile，deepseek）发一条指令，轮次在**投递阶段**失败：
+
+```
+[webcode-driver:deepseek] native composer write returned 44076/44202 chars — falling back to chunked write
+[webcode-bridge] PROMPT_TRUNCATED — 一次性压缩重试（44202 → 36253 字符，目标 ≤ 42028）
+[webcode-driver:deepseek] native composer write returned 36127/36253 chars — falling back to chunked write
+```
+
+| 尝试 | 应写 | 回读 | 丢失 |
+| --- | --- | --- | --- |
+| 第一次 | 44,202 | 44,076 | **126** |
+| 压缩重试后 | 36,253 | 36,127 | **126** |
+
+### 归因更正：丢的是 126 个 `\r\n`，正文零丢失（2026-10-11 真机实证）
+
+**离线 textarea 探针在真实 Chromium（HeadlessChrome/151）上跑通**，五项断言全部成立：
+
+| 断言 | 读数 |
+| --- | --- |
+| CRLF 输入的回读差值 = CRLF 对数 | **252 = 252** |
+| LF 对照 | **差值 0** |
+| CRLF→LF 规范化后内容 | **逐字相等** |
+| 尾部标记 | **保留** |
+| 生产判据 `echoed.length < sent.length - 8` | **会触发**（即误报） |
+
+⇒ **`textarea.value` 按 HTML 规范把 `\r\n` 规范化为 `\n`**。桥拿**长度**当**内容完整性**的
+代理，而长度在不同换行口径下本就不可比 ⇒ 报 `PROMPT_TRUNCATED`。
+
+**旁证（本机落盘，与事故同日）**：4 个 `~/.dsh/webcode/sessions/session-*__deepseek.md`
+的 `CRLF` 计数**恰为 126**（`session-19e2fa47-…`，2026/10/6 10:12:56）；其 CRLF 区段起点
+前文正是 `Instructions from: AGENTS.md`；本机 `AGENTS.md` 恰好 **126 行**（`core.autocrlf=true`）。
+
+**为什么「126 是常量」这个观察本身就指向换行**：`AGENTS.md` 的行数是常量，
+所以它贡献的 CRLF 数也是常量——与「写入通道丢固定段」在读数上无法区分，
+这正是原归因走偏的原因。
+
+> ⚠ 证据状态：**归因已实证**（真机 Chromium + 落盘旁证）；但**判据仍未修**，
+> 生产上 `inline` 长会话仍会误报。
+
+### 仍未修的部分（判据）
+
+- ~~`browser-driver.js:3528` 仍按**长度**比较~~ ⇒ **本轮已修（见下）**。
+- ~~修法分两层~~ ⇒ **L1 已落地；L2 仍待做**。
+
+#### L1 编辑器层：已修（0.19.71）
+
+新增纯函数 **`composerEchoVerdict`**（`lib/browser-driver.js`），把判据从「比长度」
+改成比**内容等价**。规范化白名单**刻意极窄**：
+
+| 允许 | 理由 |
+| --- | --- |
+| `\r\n` → `\n`（含孤立 `\r`） | 浏览器对 textarea 的既定行为，就是本次误报的根因 |
+| **行尾**空白差异 | 富文本编辑器会吞掉 |
+| NFC 归一化 | 某些编辑器会重排组合字符 |
+
+**不允许**：泛化 trim / 折叠中间空白 / 忽略缩进 / 忽略大小写 —— 那些会掩盖真正
+的正文损坏，而这条判据存在的全部理由就是不让半截正文被当成成功。
+
+**七类用例（`test/composer-write.test.mjs` ①–⑦）**：CRLF 通过 / LF 对照零差 /
+中间丢字失败 / 尾部截断失败 / **等长内容被替换失败**（这条专门证明只比长度不够）/
+只允许行尾空白差异（中间空白差异必须失败）/ 读不到回读时不断言截断。
+
+**变异测试 M8–M10 全部被抓**：M8「退回只比长度」让 ①（126 误报本身）与 ③④
+一起变红 —— 这正是修复前那个真实缺陷会复发的形式。
+
+#### L2 提交层：**仍待做**
+
+发送确认（`browser-driver.js` 的 `composerCleared()` / `navigatedAway()`）只证明
+「消息已离开输入框」，**不证明**「提交的正文与输入等价」。两者是**不同断言**：
+证据不足时应输出**不确定**状态，而不是成功。需与运行控制（取消/暂停）一起设计，
+因为「已提交但状态未知」正是中断路径必须能表达的东西。
+
+### 判据材料存放
+
+`.tmp/evidence/crlf-chromium.json`（真机读数）、`textarea-crlf-probe.html`（离线探针，
+可直接用浏览器打开；其断言曾把期望值写成 `N` 而非 `inputCRLF`，导致 `allAssertionsPass`
+恒假——**已修**，见该文件内注释）。
+
+## 50. **账号锁接管路径非原子**（2026-10-11 登记；**同日已完全修复**）
+
+### 缺陷（实测，非推测）
+
+`acquireBridgeLock` 的接管分支（`bridge-lock.js:298-312`）是
+「**读 → 判 → 非独占 `writeFileSync` 覆写**」，而正常首建路径用的是 `flag:'wx'`
+（**那条是对的**）。⇒ 盘上留有**陈旧锁**时（强杀/崩溃/重启的常见后果，正是 0.19.22
+要解决的场景），多个进程可全部判定「可接管」并**全部返回 `ok:true`** —— 破坏
+用户准则「同一账号不能同时桥接运行」（文件头已记该失败形态：互相杀浏览器、
+两条用户消息交错污染同一网页会话）。
+
+### 实测读数
+
+| 场景 | 进程 | 轮数 | 多持轮数 |
+| --- | --- | --- | --- |
+| `fresh`（盘上无锁文件） | 2 | 20 | **0** ← `wx` 正确 |
+| `stale`（盘上有死锁） | 2 | 20 | **20** |
+| `stale`，屏障同步 | 4 | 8 | **8**（每轮 4 个进程**全部** `ok`） |
+
+### 触发窗口须如实标定（不得夸大成高频）
+
+| 条件 | 多持 |
+| --- | --- |
+| 屏障同步（等同一时刻发令） | 8/8、8/8、20/20 |
+| **无屏障**（自然调度，错峰 0–1000ms） | **0/84** |
+
+单次接管全程实测：min **2.041ms** / median **2.538ms** / max **4.159ms**。
+
+⇒ **定性**：真实竞态缺陷、破坏核心互斥不变量，**应优先修**；
+但**当前证据不支持**称其为高频故障，**触发率也尚未从生产数据估计**
+（上述试验不是生产启动事件的随机抽样，启动时序/锁残留比例/热重载/进程数都会改变结果）。
+
+### 同日修复：判据层（0.19.71）
+
+`decideBridgeLock` 原实现有个与注释**不符**的分支：`safeAlive` 已明确返回 `true`
+之后，代码**仍继续往下走**并在锁过期时放行 —— 于是「真跑了 12 小时以上的桥」会被
+第二个实例抢走锁。修法：
+
+1. **明确存活 ⇒ 一律 `held`**，锁龄**不再**构成放行理由；
+2. 时间上限**降级为**「仅当存活判据缺席时的有界兜底」（保住 0.19.22 修掉的
+   「自己的死锁把自己挡 12 小时」不复发）；
+3. PID 复用（原持有者已消失、pid 被无关活进程占用）的出口显式标为
+   **`recoverable: true`** —— 不永久锁死，也**不**无声放行。
+
+**护栏**：新增 ①e2–①e6（含「isAlive 抛异常 ≠ 持有者已死」「无 isAlive + 过期仍有界放行」）。
+**变异测试 M1–M4 全部被抓**（退回活进程被锁龄放行 / 异常当死亡 / 去掉 `recoverable` /
+去掉无判据兜底 ⇒ 各 `fail 2–3`）。回归：`bridge-lock.test.mjs` **25/25**。
+
+### 原子层修复（同日完成）
+
+用**同一个固定交错**（t1 A 读到陈旧锁并判定可接管 → t2 B 完成接管装上活锁 → t3 A 恢复并执行接管）
+评测五个协议，结果：
+
+| 协议 | 双持 | 说明 |
+| --- | --- | --- |
+| P1 原实现（非独占写） | **是** | B 被静默覆盖 |
+| P2 `rename` aside + `wx` | **是** | **A 移走 B 的活锁**（rename 按**路径**而非**身份**操作，是 ABA，不是 CAS） |
+| P3 天真 `mkdir` 目录锁（回收 = rmdir + mkdir） | **是** | **只修首次获取；回收仍删掉新持有者** |
+| P4b `rename` + 移动后校验身份 + 非覆盖还原 | 否 | `final_on_disk: "B"` |
+| **P5 `mkdir` 过渡互斥 + 临界区内重检** | 否 | **← 已落地为生产实现** |
+
+> ⚠ **教训（写给下一个改锁的人）**：把 `rename aside` 换成 `mkdir` **并不能**自动解决
+> 陈旧锁回收的竞态 —— P3 与 P2 同样双持。修复必须让接管动作**绑定被检查的那一份锁**
+> （身份校验或临界区重检），而不是只换一个"看似原子"的原语。
+> 另：「原型 0/N 多持」**不构成安全证明**，只说明**该交错**未触发。
+
+**落地形态（P5）**：
+
+1. 新增**过渡互斥** `webcode-bridge.lock.guard.d`（`mkdir` 原子原语，与锁文件同级）；
+2. **所有对锁文件的改动**（建立 / 回收 / 释放）都在该临界区内发生；
+3. 临界区内**重读锁文件并重新裁决** —— 外面那次 `decideBridgeLock` 只作**快速路径**，
+   **不作权威判据**（从它到临界区之间，别的进程可能已经把陈旧锁接管走了）；
+4. 守卫本身**只删自己的**（按 `owner.json` 的 pid 核验），被别人回收过又重建时**绝不删**；
+5. 拿不到守卫时**绝不改动锁文件**：acquire 返回 `transition-guard-busy` 明确拒绝
+   （误拒可接受，误放不可接受），release 放弃本次释放（锁留给「持有者已死」判据收拾）。
+
+**守卫的过期界为什么可以远紧于 12 小时**：临界区内只有几次同步文件操作
+（无网络 / 无浏览器 / 无等待），实测**毫秒级**；因此 15 秒是三个数量级以上的余量，
+「持有者真跑了 15 秒」在物理上不可能 ⇒ 回收判据成立。这正是它与锁文件那条 12 小时
+本质不同之处（12 小时无法区分「真跑了很久」与「pid 被复用」，见 §3.6）。
+
+回收守卫用 `rename` 原子认领 + **认领后复核年龄**（认领到的若是**新的**守卫就原样放回，
+按竞争处理）—— 这是 P2 那条 ABA 教训在守卫这一层的应用。
+
+**修复前后多进程实测对比**：
+
+| 场景 | 修复前 | 修复后 |
+| --- | --- | --- |
+| `stale`，2 进程 × 12 轮 | **20/20 多持** | **0 多持**（每轮恰好 1 个赢家） |
+| `stale`，4 进程 × 8 轮 | **8/8 多持**（每轮 4 个全 `ok`） | **0 多持**（每轮恰好 1 个赢家） |
+| `fresh`，2 进程 × 12 轮 | 0 多持 | 0 多持（无退化） |
+
+**护栏**：⑧/⑧b 是**真多进程**竞争测试（子进程拿到锁后**保持存活**，排除「赢家已死」
+造成的人为假象）；⑨ 钉守卫的陈旧回收与「只删自己的」。`bridge-lock.test.mjs` **29/29**。
+**变异测试 M1–M7 全部被抓**，其中 **M5「摘掉过渡互斥」直接让 ⑧ 变红** ⇒ 该护栏真实承载修复
+（不是装饰）。
+
+**平台语义（Windows 实测，实现时必须区分）**：
+
+| 操作 | 结果 |
+| --- | --- |
+| `rename` 覆盖**已存在**目标 | **成功并静默覆盖** |
+| `rename` 源不存在 | `ENOENT` |
+| `rename` 目标**被打开读取** | **`EPERM`** |
+| `wx` 落到已存在文件 | `EEXIST` |
+
+⇒ `EPERM`（目标被占用 = 进程性失败）与 `ENOENT`（输了竞争）**必须分开处置**，
+不能一并当「拿到锁」。
+
+**验收条件（采纳审阅措辞，已满足）**：PID 复用不得导致永久拒绝；过期锁恢复必须有界；
+**任何恢复路径都不得让两个进程同时成功取得同一账号的锁**；无法可靠证明旧持有者已停止时，
+应**显式呈现不确定状态**，而不是用身份猜测代替互斥保证。
+
+**已知边界（未验，不声称已覆盖）**：
+- 守卫的有效性**依赖**「临界区远短于守卫超时」这一前提。若未来有人在临界区内加入
+  网络 / 浏览器等待，该前提即被破坏（实现处注释已写明）。
+- 非 Windows 平台未实测（`mkdir` 的原子语义在两平台都成立，但错误码分支未逐条验证）。
+- 真实「两个桥互相杀浏览器」的**端到端**复现未做 —— 已证明的是**协议不再允许**该状态。
+
+### 判据材料存放
+
+`.tmp/lockrace/protocol-aba.mjs`（P1–P4）、`.tmp/lockrace/protocol-aba2.mjs`（P4b/P5）、
+`.tmp/lockrace/aba2.mjs`（ABA 确定性交错）、`.tmp/lockrace/rename-semantics.mjs`（平台语义）、
+`.tmp/lockrace/mutation-lock.mjs`（判据层变异）、`.tmp/lockrace/mutation-guard.mjs`（守卫层变异）、
+`.tmp/lockrace/verify-fix.mjs`（修复后多进程对比）。

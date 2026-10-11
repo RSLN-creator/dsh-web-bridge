@@ -17,7 +17,7 @@
 // 为什么这些用例不是空转：它们钉住的是**边界与反例**，即「改坏了会怎样」。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { composerWritePlan, stallStep, composerStrategy } from '../lib/browser-driver.js';
+import { composerWritePlan, stallStep, composerStrategy, composerEchoVerdict } from '../lib/browser-driver.js';
 
 // ---------------------------------------------------------- composerWritePlan
 
@@ -122,4 +122,61 @@ test('两条策略并存：field 与 editable 都要能被分块计划覆盖', (
     assert.equal(p.kind, kind);
     assert.equal(p.chunks, 5);
   }
+});
+
+// ------------------------------------------------ composerEchoVerdict（0.19.71）
+//
+// 这一组钉的是 long-term-issues #48 的真根因：旧判据比**长度**，而浏览器按 HTML
+// 规范把 `textarea.value` 的 `\r\n` 规范化成 `\n`，于是回读必然比原文短（短的量
+// 恰好 = CRLF 个数）。真机实测 44,202 字符两次都「丢 126」——那 126 是注入的
+// `AGENTS.md` 的 126 行，**正文一字未少**，纯属误报；`-8` 容差对此毫无帮助。
+//
+// 判据因此改成比**内容等价**。下面每一条都对应一类真实的失败/误报形态。
+
+test('回读判据 ①：换行规范化不得算截断（126 字符误报的根因）', () => {
+  const sent = 'line-a\r\nline-b\r\n'.repeat(126) + 'TAIL';
+  const echoed = sent.replace(/\r\n/g, '\n');          // 浏览器 textarea 的既定行为
+  const v = composerEchoVerdict(sent, echoed);
+  assert.equal(v.ok, true, 'CRLF→LF 是浏览器规范行为，不是网页截断');
+  assert.equal(v.reason, 'newline-normalized');
+  // 差值必须恰好等于 CRLF 个数——这是「已知误报量」的可核对读数。
+  assert.equal(v.sentLength - v.echoedLength, 252, '126 行 ⇒ 252 个 CRLF');
+});
+
+test('回读判据 ②：LF 输入零差（对照组）', () => {
+  const sent = 'line-a\nline-b\n'.repeat(126) + 'TAIL';
+  const v = composerEchoVerdict(sent, sent);
+  assert.equal(v.ok, true);
+  assert.equal(v.reason, 'exact');
+  assert.equal(v.sentLength, v.echoedLength);
+});
+
+test('回读判据 ③：中间丢一个字符必须失败', () => {
+  const v = composerEchoVerdict('a\r\nb\r\nc', 'a\nbXc');
+  assert.equal(v.ok, false);
+  assert.equal(v.reason, 'content-mismatch');
+});
+
+test('回读判据 ④：尾部截断必须失败（判据存在的理由）', () => {
+  const v = composerEchoVerdict('a\r\nb\r\nc', 'a\nb');
+  assert.equal(v.ok, false);
+});
+
+test('回读判据 ⑤：★ 等长内容被替换必须失败（只比长度会漏掉这一类）', () => {
+  const v = composerEchoVerdict('abcdef', 'abcdeX');
+  assert.equal(v.sentLength, v.echoedLength, '长度完全相同——旧判据对此完全无感');
+  assert.equal(v.ok, false, '内容不同就必须失败，否则判据是空转的');
+});
+
+test('回读判据 ⑥：只允许行尾空白差异，正文中间的空白差异必须失败', () => {
+  assert.equal(composerEchoVerdict('a  \nb\t\n', 'a\nb\n').ok, true, '行尾空白由编辑器吞掉');
+  assert.equal(composerEchoVerdict('a b', 'a  b').ok, false,
+    '中间空白是正文内容——放过它就会掩盖真正的损坏');
+});
+
+test('回读判据 ⑦：读不到回读时不断言截断（既有行为，不因本判据回归）', () => {
+  const v = composerEchoVerdict('abc', null);
+  assert.equal(v.ok, true);
+  assert.equal(v.reason, 'echo-unavailable');
+  assert.equal(v.echoedLength, -1, '读不到用 -1 表达，不伪装成 0');
 });

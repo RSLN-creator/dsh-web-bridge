@@ -40,6 +40,8 @@ import {
   decideBridgeLock, acquireBridgeLock, releaseBridgeLock, isProcessAlive,
   releaseAllBridgeLocks, heldBridgeLockPaths,
   describeBridgeLockHolder, BRIDGE_LOCK_FILE, DEFAULT_BRIDGE_LOCK_STALE_MS,
+  BRIDGE_GUARD_DIRNAME, DEFAULT_BRIDGE_GUARD_STALE_MS,
+  acquireTransitionGuard, releaseTransitionGuard,
 } from '../lib/bridge-lock.js';
 
 /** 每个用例一个独立临时目录，互不干扰。 */
@@ -119,6 +121,63 @@ test('①e decideBridgeLock：超过 staleMs ⇒ free 且标记 stale（有界�
   // 边界：恰好等于上限 ⇒ 不算过期（用 > 而非 >=），避免边界抖动
   const edge = { pid: 5555, at: now - DEFAULT_BRIDGE_LOCK_STALE_MS };
   assert.equal(decideBridgeLock(edge, now, { pid: 111, startedAt: 2 }).state, 'held');
+});
+
+test('①e2 过期时间只触发恢复判定：明确活着的持有者不能仅因锁龄而被放行', () => {
+  const now = 1_800_000_000_000;
+  const lock = {
+    pid: 5555,
+    startedAt: 123,
+    at: now - DEFAULT_BRIDGE_LOCK_STALE_MS - 1,
+    siteId: 'glm',
+    accountKey: 'glm',
+  };
+  const v = decideBridgeLock(lock, now, {
+    pid: 111,
+    startedAt: 456,
+    isAlive: live,
+  });
+
+  // 0.19.71 修复前本测试为红（实现会在 isAlive() === true 后继续走 staleMs 分支）。
+  // 修复**不能**只是「活着永远 held」：PID 复用仍需有界恢复，见 ①e3 / ①e4。
+  assert.equal(v.state, 'held');
+  assert.equal(v.reason, 'held-by-live-owner');
+  // 但必须把「可能是 PID 复用」这条出口显式标出来，否则会退化成永久锁死。
+  assert.equal(v.recoverable, true, '活着但已过期 ⇒ 标记可恢复，供原子恢复路径使用');
+  assert.equal(v.recoveryBasis, 'holder-alive-but-lock-expired');
+});
+
+test('①e3 PID 复用不得造成永久锁死：过期是可恢复信号，而不是无声放行', () => {
+  const now = 1_800_000_000_000;
+  // 持有者 pid 早已消失，该 pid 被一个**无关活进程**占用 ⇒ isAlive 恒 true。
+  const lock = { pid: 1234, startedAt: 1, at: now - 30 * 24 * 60 * 60 * 1000 };
+  const v = decideBridgeLock(lock, now, { pid: 5678, startedAt: 9, isAlive: live });
+  // 不放行（否则活进程被抢锁），但**明确标记可恢复**（否则永久锁死）。
+  assert.equal(v.state, 'held');
+  assert.equal(v.recoverable, true, 'PID 复用场景必须有有界出口');
+});
+
+test('①e4 新锁 + 活持有者 ⇒ 不可恢复（正常占用不得被恢复路径碰）', () => {
+  const now = 1_800_000_000_000;
+  const lock = { pid: 1234, startedAt: 1, at: now - 60_000 };
+  const v = decideBridgeLock(lock, now, { pid: 5678, startedAt: 9, isAlive: live });
+  assert.equal(v.state, 'held');
+  assert.notEqual(v.recoverable, true, '未过期就不该给出任何恢复信号');
+});
+
+test('①e5 isAlive 抛异常 ≠ 持有者已死（不得按死亡放行）', () => {
+  const now = 1_800_000_000_000;
+  const lock = { pid: 1234, startedAt: 1, at: now - 1000 };
+  const v = decideBridgeLock(lock, now, { pid: 5678, startedAt: 9, isAlive: () => { throw new Error('probe failed'); } });
+  assert.equal(v.state, 'held', '判据失效时误拒可接受，误放不可接受');
+});
+
+test('①e6 无 isAlive + 过期 ⇒ 仍有界放行（判据缺席时的兜底不得退化为永久锁死）', () => {
+  const now = 1_800_000_000_000;
+  const lock = { pid: 1234, startedAt: 1, at: now - DEFAULT_BRIDGE_LOCK_STALE_MS - 1 };
+  const v = decideBridgeLock(lock, now, { pid: 5678, startedAt: 9 });
+  assert.equal(v.state, 'free');
+  assert.equal(v.reason, 'stale-lock-expired');
 });
 
 test('①f decideBridgeLock：staleMs 可配置（真机排障与离线测试的旋钮）', () => {
@@ -266,6 +325,19 @@ test('⑤ describeBridgeLockHolder：含账号、pid、时间、存活读数、�
   assert.match(msg, /账户槽/, '必须告诉用户怎么解决');
   assert.match(msg, /该进程仍在运行/, '存活读数必须写出来——用户最先想知道 pid 到底还在不在');
   assert.match(msg, /webcode-bridge\.lock\.json/, '锁文件路径必须写出来，否则用户无从自己清');
+  // 0.19.71：未过期（recoverable 不为 true）时**不得**出现歧义提示——
+  // 否则正常占用会被说成「可能 pid 被复用」，把用户往错方向引。
+  assert.ok(!/pid 被别的程序复用/.test(msg), '未过期就不该暗示 pid 复用');
+});
+
+test('⑤b describeBridgeLockHolder：锁过期但 pid 仍活着 ⇒ 必须把两种可能都说到', () => {
+  const msg = describeBridgeLockHolder({ pid: 4242, at: 1_800_000_000_000, siteId: 'glm', accountKey: 'glm' },
+    'glm', 'glm', { alive: true, lockPath: 'D:\\x\\webcode-bridge.lock.json', recoverable: true });
+  // 这是 0.19.71 引入的真歧义状态：原持有者跑了很久 vs pid 被复用，锁文件里长得一样。
+  assert.match(msg, /超过过期窗口/, '必须说明锁已过期');
+  assert.match(msg, /确实跑了很久/, '必须给出「真的跑了很久」这一种可能');
+  assert.match(msg, /被别的程序复用/, '必须给出「pid 被复用」这一种可能');
+  assert.match(msg, /删除该锁文件/, '必须仍然给出可行动的出路——否则用户被锁死时无从下手');
 });
 
 // ───────── ⑥ 驱动器接线（源码结构断言） ─────────
@@ -320,4 +392,105 @@ test('⑦b ★ 真机事故复现：活着的持有者锁 ⇒ 拒；同一把锁
   assert.equal(after.reason, 'acquired-after-takeover');
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir, BRIDGE_LOCK_FILE), 'utf8')).pid, process.pid);
   assert.ok(logs.some((l) => /holder-process-dead/.test(l)), '接管留痕=' + JSON.stringify(logs));
+});
+
+// ───────── ⑧ ★★ 多进程接管竞争：陈旧锁不得出现多个持有者 ─────────
+//
+// 这一组钉的是 0.19.71 修的那个**真缺陷**（long-term-issues #50）：接管分支原本是
+// 「读 → 判 → 非独占覆写」，中间没有原子性，于是盘上留有陈旧锁时多个进程可以
+// **全部**判定可接管、**全部**返回 ok:true ⇒ 同一账号多个持有者。
+//
+// 修复前实测：`fresh` 0/20 多持、`stale` **20/20** 多持、屏障同步 4 进程 × 8 轮
+// **每轮 4 个进程全部 ok**。修复后：全部 0 多持、每轮恰好 1 个赢家。
+//
+// ## 为什么这个判据必须是**真多进程**的
+//
+// 进程内的 Map 挡不住「两个 dsh 进程」——这正是文件头写明的那条理由。同一个进程里
+// 连续调两次 acquire 只能测到「判据逻辑」，测不到「读→写之间有窗口」，而缺陷恰在后者。
+//
+// ## 为什么赢家必须**保持存活**
+//
+// 第一版探针让赢家拿到锁就退出，于是「赢家已死」本身就能解释多持——那是**人为假象**，
+// 不能当证据。这里的子进程拿到锁后必须活满 holdMs，才谈得上「两个活着的持有者」。
+
+/** 起一个「等发令 → 抢锁 → 活满 holdMs → 退出」的真子进程；返回其结论。 */
+function spawnLockRacer(dir, startAt, holdMs) {
+  const child = spawn(process.execPath, ['-e', `
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const startAt = ${startAt}, hold = ${holdMs};
+    const sleep = (ms) => { if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
+    (async () => {
+      const { acquireBridgeLock } = await import(${JSON.stringify(new URL('../lib/bridge-lock.js', import.meta.url).href)});
+      while (Date.now() < startAt) sleep(5);
+      let res;
+      try { res = acquireBridgeLock(${JSON.stringify(dir)}, { pid: process.pid, startedAt: Date.now(), siteId: 'race', accountKey: 'race' }, { logger: { warn() {} } }); }
+      catch (e) { res = { ok: false, reason: 'threw' }; }
+      fs.writeFileSync(path.join(${JSON.stringify(dir)}, 'r-' + process.pid + '.json'),
+        JSON.stringify({ pid: process.pid, ok: res.ok === true, reason: res.reason }));
+      sleep(hold);
+    })();
+  `], { stdio: 'ignore' });
+  return new Promise((resolve) => { child.on('exit', () => resolve()); child.on('error', () => resolve()); });
+}
+
+/** 跑一轮 N 进程竞争，返回这一轮真正拿到锁的进程数。 */
+async function raceOnce(dir, n, holdMs = 4000) {
+  const startAt = Date.now() + 900;
+  await Promise.all(Array.from({ length: n }, () => spawnLockRacer(dir, startAt, holdMs)));
+  let winners = 0;
+  for (const f of fs.readdirSync(dir)) {
+    if (!f.startsWith('r-')) continue;
+    try { if (JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')).ok) winners += 1; } catch { /* 未完写 */ }
+  }
+  return winners;
+}
+
+test('⑧ ★ 盘上留有陈旧锁时，多进程接管只能有一个赢家（0.19.71 修的真缺陷）', async () => {
+  const rounds = 5;
+  const winners = [];
+  for (let i = 0; i < rounds; i += 1) {
+    const dir = tmpDir('race-stale-' + i);
+    // 持有者 pid 不存在 ⇒ 每个进程都会判「可接管」。修复前这正是 20/20 多持的场景。
+    fs.writeFileSync(path.join(dir, BRIDGE_LOCK_FILE),
+      JSON.stringify({ pid: 987654, startedAt: 1, at: 1, siteId: 'race', accountKey: 'race' }), 'utf8');
+    winners.push(await raceOnce(dir, 3));
+  }
+  assert.deepEqual(winners, Array(rounds).fill(1),
+    `每轮必须恰好 1 个赢家；实际=${JSON.stringify(winners)}（>1 即「同一账号多个持有者」，准则被绕过）`);
+});
+
+test('⑧b 无锁文件时的多进程首建同样只能有一个赢家', async () => {
+  const rounds = 4;
+  const winners = [];
+  for (let i = 0; i < rounds; i += 1) {
+    const dir = tmpDir('race-fresh-' + i);
+    winners.push(await raceOnce(dir, 3));
+  }
+  assert.deepEqual(winners, Array(rounds).fill(1), `实际=${JSON.stringify(winners)}`);
+});
+
+// ───────── ⑨ 过渡互斥自身：陈旧守卫必须能被有界回收（否则永久挡人） ─────────
+
+test('⑨ 陈旧的过渡互斥守卫会被回收；活着的守卫不会被抢', () => {
+  const dir = tmpDir('guard');
+  const guard = path.join(dir, BRIDGE_GUARD_DIRNAME);
+
+  // ① 一个新的守卫 = 别人正在用 ⇒ 不许抢（waitMs=0 立即失败，不阻塞测试）
+  assert.equal(acquireTransitionGuard(guard, { waitMs: 0 }), true, '空守卫必须能拿到');
+  assert.equal(acquireTransitionGuard(guard, { waitMs: 0 }), false,
+    '守卫已被自己持有 ⇒ 第二次必须失败（它确实是互斥）');
+  assert.equal(releaseTransitionGuard(guard), true);
+
+  // ② 被人强杀留下的陈旧守卫 ⇒ 必须能被回收，否则用户被永久挡在门外
+  fs.mkdirSync(guard, { recursive: true });
+  const old = Date.now() - DEFAULT_BRIDGE_GUARD_STALE_MS - 5000;
+  fs.utimesSync(guard, new Date(old), new Date(old));      // 把 mtime 改老
+  assert.equal(acquireTransitionGuard(guard, { waitMs: 0 }), true,
+    '陈旧守卫必须被回收——这是「不永久锁死」那一侧');
+
+  // ③ 释放只删自己的：把 owner.json 改成别人的 pid，release 必须拒绝
+  fs.writeFileSync(path.join(guard, 'owner.json'), JSON.stringify({ pid: 999999, at: Date.now() }), 'utf8');
+  assert.equal(releaseTransitionGuard(guard), false, '不得删掉别人的守卫（否则会放别人进临界区）');
+  fs.rmSync(guard, { recursive: true, force: true });
 });

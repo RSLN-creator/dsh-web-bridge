@@ -375,6 +375,60 @@ export function composerWritePlan({ length = 0, chunkChars = 20_000, kind = 'fie
 }
 
 /**
+ * 回读校验（**纯函数**，便于离线断言）：这一次写入的正文是否**内容等价**。
+ *
+ * ## 为什么不能比长度（0.19.71；long-term-issues #48 的真根因）
+ *
+ * 旧判据是 `echoed.length < sent.length - 8`。它在换行口径不同的情况下**本就不可比**：
+ * 浏览器按 HTML 规范把 `textarea.value` 里的 `\r\n` 规范化成 `\n`，于是回读**必然**
+ * 比原文短，短的量恰好等于 CRLF 个数。真机读数（2026-10-11，HeadlessChrome/151）：
+ * 44,202 字符的提示词两次都「丢 126 个字符」，而那 126 正是注入的 `AGENTS.md` 的
+ * **126 行**（126 个 `\r\n`）——**正文一字未少**，纯属误报；`-8` 的容差对此毫无帮助。
+ * 实测五项断言：CRLF 差值 = CRLF 对数（252=252）、LF 对照零差、规范化后内容逐字相等、
+ * 尾部保留、旧判据确实触发。
+ *
+ * ## 允许的规范化（白名单，刻意极窄）
+ *
+ *   · `\r\n` → `\n`（以及孤立的 `\r` → `\n`）：浏览器对 textarea 的既定行为；
+ *   · **行尾**空白差异（每行右端的空格/制表符）：富文本编辑器会吞掉；
+ *   · Unicode 归一化（NFC）：某些编辑器会重排组合字符。
+ *
+ * **不允许**：泛化的 trim / 折叠中间空白 / 忽略缩进 / 忽略大小写——那些会掩盖真正的
+ * 正文损坏，而本判据存在的全部理由就是不让半截正文被当成成功。
+ *
+ * ## 真正的截断依然会被拦住
+ *
+ * 网页只收了前半截时，规范化后**依然**不等 ⇒ `ok:false`，并给出可归因的 `reason`
+ * 与实测长度，供上层自动压缩重试取数（`err.accepted` / `err.total`）。
+ *
+ * @param {string} sent 我们写进输入框的正文
+ * @param {string|null|undefined} echoed 从网页回读到的正文（读不到时传 null）
+ * @returns {{ok: boolean, reason: string, sentLength: number, echoedLength: number}}
+ */
+export function composerEchoVerdict(sent, echoed) {
+  const s = String(sent ?? '');
+  const sentLength = s.length;
+  // 读不到（表单控件与富文本编辑器的读取方式不同，见 readComposer）：不能断言截断。
+  // 这是**既有行为**——旧判据对非字符串同样直接放行。
+  if (typeof echoed !== 'string') {
+    return { ok: true, reason: 'echo-unavailable', sentLength, echoedLength: -1 };
+  }
+  const echoedLength = echoed.length;
+  if (echoed === s) return { ok: true, reason: 'exact', sentLength, echoedLength };
+
+  /** 白名单规范化：只动换行与行尾空白，绝不动正文内容。 */
+  const norm = (t) => String(t ?? '')
+    .replace(/\r\n?/g, '\n')          // CRLF / 孤立 CR → LF
+    .replace(/[ \t]+$/gm, '')         // 每行行尾空白
+    .normalize('NFC');                // Unicode 归一化
+
+  if (norm(echoed) === norm(s)) {
+    return { ok: true, reason: 'newline-normalized', sentLength, echoedLength };
+  }
+  return { ok: false, reason: 'content-mismatch', sentLength, echoedLength };
+}
+
+/**
  * 完成请求元数据的**可判定摘要**（0.19.11，2026-09-24）。
  *
  * ## 为什么必须改（这是「投递链不自证」的直接病灶）
@@ -2081,8 +2135,11 @@ export function createBrowserDriver(options = {}) {
         // 0.19.22：报错里必须带上**存活读数**与**锁文件路径**——用户最先想知道
         // 「那个 pid 到底还在不在」，以及「我能不能自己清掉它」。判据只会在
         // 确认持有者活着时给出 held，因此这里传 true。
+        // 0.19.71：`recoverable`（锁过期但 pid 仍活着）必须一并透传——那是
+        // 「原持有者跑了很久」与「pid 被无关进程复用」无法区分的那一种，
+        // 文案要说清两种可能，而不是让用户面对一句无从下手的拒绝。
         const err = new Error(describeBridgeLockHolder(got.holder, siteId, accountKey, {
-          alive: true, lockPath: got.path,
+          alive: true, lockPath: got.path, recoverable: got.recoverable === true,
         }));
         withWebcodeCode(err, 'BRIDGE_ACCOUNT_BUSY');
         err.bridgeLock = got;
@@ -3522,16 +3579,35 @@ export function createBrowserDriver(options = {}) {
       // 写不进去、要么回读校验直接失败。按真实元素形态分派输入与回读。
       await fillComposer(input, message);
       // 网页输入框有长度上限，超限会被静默截断——模型只看到半截提示词却照常
-      // 作答，长跑里表现为「越到后面越答非所问」。回读一次，长度对不上就拒绝
+      // 作答，长跑里表现为「越到后面越答非所问」。回读一次，对不上就拒绝
       // 发送，让上层压缩后重试（此时还没按 Enter，网页端没有被污染）。
+      //
+      // ## 0.19.71：判据从「比长度」改成「比内容等价」（long-term-issues #48）
+      //
+      // 旧判据是 `echoed.length < message.length - 8`。它有个**实测过的误报**：
+      // 浏览器按 HTML 规范把 `textarea.value` 里的 `\r\n` 规范化成 `\n`，于是
+      // 回读**必然**比原文短（短多少 = CRLF 个数）。真机读数：44,202 字符的
+      // 提示词两次都恰好「丢 126 个字符」——那 126 正是注入的 `AGENTS.md` 的
+      // 行数（126 个 `\r\n`），**正文一字未少**。而 `-8` 的容差对 126 毫无帮助
+      // ⇒ 长会话 `inline` 档必然失败。
+      //
+      // 长度在换行口径不同的情况下**本就不可比**，所以判据改成比较**内容等价**：
+      // 只在**显式白名单**的规范化之后比较。白名单刻意极窄——只允许换行规范化
+      // （`\r\n` → `\n`）与行尾空白差异，**不允许**泛化的 trim / 折叠空白 /
+      // 忽略缩进（那会掩盖真正的内容损坏）。
+      //
+      // 真正的截断（网页只收了前半截）在规范化后**依然**不等 ⇒ 照旧拦住。
       const echoed = await readComposer(input);
-      if (typeof echoed === 'string' && echoed.length < String(message).length - 8) {
-        const err = new Error(`PROMPT_TRUNCATED: 网页输入框只接收了 ${echoed.length}/${String(message).length} 字符（网页端长度上限）— 请缩短上下文或先压缩历史再重试`);
+      // 与下方发送确认里的 `sent`（布尔）区分：这里用 echoVerdict 承载判据结果。
+      const echoVerdict = composerEchoVerdict(String(message), echoed);
+      if (!echoVerdict.ok) {
+        const err = new Error(`PROMPT_TRUNCATED: 网页输入框只接收了 ${echoVerdict.echoedLength}/${echoVerdict.sentLength} 字符`
+          + `（判据=${echoVerdict.reason}）— 请缩短上下文或先压缩历史再重试`);
         withWebcodeCode(err, 'PROMPT_TRUNCATED');
         // accepted/total 供 executor 的自动压缩重试取数（0.16.11）：真机 0a62dbb8
         // 整轮差 11 个字符就作废——这种轮次必须能按已接受长度自动压缩重试一次。
-        err.accepted = echoed.length;
-        err.total = String(message).length;
+        err.accepted = echoVerdict.echoedLength;
+        err.total = echoVerdict.sentLength;
         throw err;
       }
       throwIfAborted();
