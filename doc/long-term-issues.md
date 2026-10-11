@@ -62,6 +62,9 @@
 | 48 | **「提示词投递 = 纯文本」档在长会话上必然发不完整（`PROMPT_TRUNCATED`）**（2026-10-06 登记；**2026-10-11 归因更正 + 真机实证**）——真机造 jobs 时撞到：用户设置 `promptTransport: inline`（全局），44,202 字符提示词灌进 deepseek 输入框，**两次尝试都恰好丢 126 个字符**（44,202→44,076；压缩重试后 36,253→36,127），`PROMPT_TRUNCATED` 回读校验如实拦下、**该轮直接失败**；同一轮把投递形态切到 `attach`（插件默认值）后立刻成功。⚠ **原登记把归因写成「更像写入通道丢一段固定前缀/后缀」——该归因已证伪**：2026-10-11 用真机 Chromium（HeadlessChrome/151）跑离线 textarea 探针，五项断言全部成立 —— CRLF 输入回读差值 **252 = 252**（等于 CRLF 对数）、LF 对照**零差**、CRLF→LF 规范化后**内容逐字相等**、**尾部保留**、且生产判据 `echoed.length < sent.length - 8` 确实会触发。**结论：丢的 126 个「字符」是 126 个 `\r\n` 被 `textarea.value` 按 HTML 规范规范化为 `\n`，正文内容零丢失；这是桥的判据误报，不是网页截断。** 旁证：本机 prompt-store 与事故同日的 4 个会话提示词文件 `CRLF` 计数**恰为 126**（`session-19e2fa47-…__deepseek.md`，2026/10/6 10:12:56），其 CRLF 区段起点前文正是 `Instructions from: AGENTS.md`，而本机 `AGENTS.md` 恰好 **126 行**（`core.autocrlf=true`）。**本轮已修（L1 编辑器层）**：新增纯函数 `composerEchoVerdict`，判据从「比长度」改成比**内容等价**，规范化白名单刻意极窄（只允许 `\r\n`→`\n`、**行尾**空白、NFC），**不允许**泛化 trim / 折叠中间空白；真正的截断（中间丢字 / 尾部截断 / **等长内容被替换**）依然被拦住。⑦ 条护栏 + 变异 M8–M10 全被抓（M8「退回只比长度」让 ①③④ 一起红）。**L2 提交层仍待做**：`composerCleared()` / `navigatedAway()` 只证明「消息已离开输入框」，**不证明**「提交的正文与输入等价」；证据不足时应记**不确定**。`SITE_COMPOSER_HARD_LIMIT` 仍只有 kimi: 200,000 | 中 | 部分 | `lib/browser-driver.js`（`composerEchoVerdict` / `fillComposer` / `writeFieldNative` / `readComposer`）、`test/composer-write.test.mjs`（回读判据 ①–⑦）、`doc/progress.md`（2026-10-11 节）、`.tmp/evidence/crlf-chromium.json`（真机读数） |
 | 50 | **账号锁接管路径非原子：陈旧锁可被多个进程同时「接管」**（2026-10-11 登记，**同日完全修复 0.19.71**）——`acquireBridgeLock` 的接管分支是「读 → 判 → **非独占** `writeFileSync` 覆写」，而正常首建路径用的是 `flag:'wx'`（那条是对的）。⇒ 盘上留有陈旧锁时（强杀/崩溃/重启的常见后果，正是 0.19.22 要解决的场景），多个进程可全部判定可接管并**全部返回 `ok:true`**，破坏「同一账号不得同时桥接」这条用户准则。**实测**：`fresh`（无锁文件）**0/20** 多持；`stale`（盘上有死锁）**20/20** 多持；屏障同步 4 进程 ×8 轮**每轮 4 个进程全 `ok`**。**触发窗口须如实标定**：无屏障自然调度 **0/84**、单次接管全程仅 **2.0–4.2ms** ⇒ 真实竞态缺陷，但**不是高频故障**，且触发率**尚未**从生产数据估计（该试验不是生产启动事件的随机抽样）。**修复（同日完成，两层）**：① **判据层** —— `decideBridgeLock` 加「明确存活 ⇒ 一律 `held`，锁龄不再构成放行理由」，时间上限**降级为仅当存活判据缺席时的有界兜底**，并把 PID 复用出口显式标为 `recoverable`；② **原子层** —— 新增**过渡互斥**（`webcode-bridge.lock.guard.d`，`mkdir` 原子原语），**所有对锁文件的改动（建立/回收/释放）都在临界区内**，且临界区内**重读并重新裁决**（外面那次读只作快速路径，不作权威判据）。**修复后多进程实测：`stale` 2×12 轮与 4×8 轮均 0 多持、每轮恰好 1 个赢家**；`fresh` 无退化。**护栏**：新增 ①e2–①e6、⑤b、**⑧/⑧b（真多进程竞争）**、⑨（守卫回收与只删自己的）⇒ `bridge-lock.test.mjs` **29/29**；**变异测试 M1–M7 全部被抓**（其中 M5「摘掉过渡互斥」直接让 ⑧ 变红 ⇒ 该护栏真实承载修复）。**三个被证伪的候选协议（教训，写给下一个改锁的人）**：`rename` aside 是**按路径**而非**按身份**操作 ⇒ 会移走别人刚建立的**活锁**（ABA；实测 A 移走 `B-LIVE`，两进程同时认为自己持有）；天真的「`mkdir` 当锁 + `rmdir` 回收」**只修首次获取、回收仍删掉新持有者**；非独占覆写则直接静默覆盖。⇒ **「原型 0/N 多持」不构成安全证明**，只说明**该交错**未触发。**平台语义（Windows 实测）**：`rename` 覆盖已存在目标**成功且静默覆盖**、源不存在 `ENOENT`、**目标被打开读取 `EPERM`**、`wx` 落已存在 `EEXIST` ⇒ `EPERM`（进程性失败）与 `ENOENT`（输竞争）**不能一并当「拿到锁」**。**0.19.73（复审三进程窗口，已修复）**：0.19.72 的顺序是**先 rename 移走、后查存活** —— 移走期间路径不存在，第三个进程 C 可趁空档 mkdir 成功，而 A **仍活着、仍在临界区**。确定性注入：guardPathExistsAfterRename:false → C_acquiredInWindow:true → B_putBackSucceeded:false ⇒ A 与 C 同时持有、A 的守卫被永久遗弃。**这不是年龄兜底那类风险**（B 的判断本身正确）。修法 = **先验证后动手**：存活判定排在任何移走之前；认领后复核身份防 ABA；放不回也不继续。护栏 ⑨b2/⑨c2/⑨c3 + 变异 M15–M17 全被抓。**\n\n**已知边界（0.19.72 更新）**：初版（0.19.71）的守卫回收**只看 mtime**，复审指出「通常几毫秒」是概率论证而非不变量——进程可被暂停（调试器/休眠/GC 停顿）超过 15 秒而**仍然活着**。**故障注入已复现**：mtime 改老 + `owner.json` 保留**确定存活**的 pid ⇒ 调用方照样回收成功（`acquiredGuardWhileAAlive: true`），两个进程都认为自己持有守卫。**0.19.72 已修**：回收改成与锁文件同构的三态（明确存活 ⇒ **绝不回收**；明确死亡 ⇒ 回收；判据给不出结论 ⇒ 仅用**显著放宽**的年龄兜底且**留痕说明是猜测**）；释放判据也从「只认 pid」加固为「pid + `startedAt`」（防 pid 复用误删别人的守卫），并明确「标记缺失/损坏 ⇒ 按可能是自己写坏的删除」（不可删除的空守卫会挡住所有人）。护栏 ⑨b–⑨g + 变异 M11–M14 全被抓。**未验**：非 Windows；真实「两个桥互相杀浏览器」的端到端复现（已证明的是**协议不再允许**该状态） | 高 | 是 | `lib/bridge-lock.js`（`decideBridgeLock` / `acquireBridgeLock` / `acquireTransitionGuard` / `recoverStaleGuard` / `releaseTransitionGuard`）、`test/bridge-lock.test.mjs`（①e2–①e6、⑤b、⑧、⑧b、⑨–⑨g）、`doc/progress.md`（2026-10-11 节） |
 | 49 | **0.19.69 的 profile 安装与「重启 dsh web」在本机沙箱内无法执行**（2026-10-08 登记，**等用户在正常环境补做**）——本轮发布链其余各步全部完成并已复核：git 提交 `2b63492` + `1ab845f`、push（`05967a1..1ab845f`，走 HTTPS + `http.sslBackend=openssl`）、tag `v0.19.69`、GitHub Release 带资产 `dsh-webcode-bridge-0.19.69.tgz`（930,799 B）、CI 与 CodeQL success、npm `latest = 0.19.69`（`dist.shasum a6f8b8459dff…` 与本地 tarball 逐字节同源）。**卡住的是最后一步**：`~/.dsh` 整棵树在本沙箱内**只读**（写探针文件即 `Access denied`），`dsh plugin --profile web add <tgz>` 报 `EPERM: operation not permitted, open …\profiles\web\package.json.lock`。⇒ 用户须在正常环境里 `dsh plugin --profile web add .\dsh-webcode-bridge-0.19.69.tgz` 并**重启 dsh web**（「装完不重启 = 等于没装」）。⚠ 注意 #45 同族风险：桌面端是**另一条**通道（`dsh` CLI 拒绝管理 desktop profile），声明与磁盘一致要完全退出桌面端后用桌面端自己的 carrier。 | 中 | 否 | `~/.dsh/profiles/web/package.json`、`doc/progress.md`（0.19.69 节 §四） |
+| 51 | **适配器看门狗的两个既有缺陷**（2026-10-11 登记，**同日修复 0.19.74**）——回应 GitHub Issue #1 报错原文的自相矛盾（「驱动不在忙」+「最近驱动活动 2s 前」+「页面已有 2172 字回复未回传」）。**A：相位被冻结整轮** —— `nextWithIdle()` 首次执行在 executor 微任务**之前**，而驱动的 `busy = true` 在 `runTurn` 内部（更晚）⇒ 第一次读到的 `busy` 恒 false，相位恒判「网页还没开口且驱动不在忙」，`idleFirstByteMultiplier` **在生产路径上从未生效**；而 `idleScene()` 开火时读的是**新鲜**读数 ⇒ 冻结相位与新鲜现场被并排印出。既有护栏 ① 用静态桩（驱动从未被调用就报 busy）复现不出该时序。**B：`idleDeadline` 锚在 `submitAtReal`** —— 文档承诺「自上次事件起 N 秒」，实现却是整轮固定 ⇒ 是**总时长上限**冒充静默上限。实测（窗口 1300ms、每 150ms 一个 delta）：修前 **1315ms 处判死**，而那时已收到 `chunk0…chunk7`；该缺陷在 `471efcd` 上同样复现（stash 复核过）。**修法**：相位每拍重算 + 起点取 `max(投放时刻, 上次事件)` + 文案改「桥侧已 Ns 没有从网页收到任何新事件」/「驱动**自报**不在忙」。护栏 ⑧/⑨/⑨b（反向安全线：事件真停了仍须判死）/⑩；变异 M1/M2/M3 全部被抓且各被对应护栏抓住。**未做**：真机长轮次（>120s 单轮）复现、首字节耗时分布采集。 | 高 | 否 | `lib/index.js`（`nextWithIdle` / `idleDeadline` / `idleTimeoutError` / `driverForRead`）、`lib/idle-window.js`、`test/watchdog-first-byte.test.mjs` ⑧⑨⑨b⑩、`.tmp/probe-deadline-origin.mjs`、`.tmp/mutation-watchdog.mjs` |
+| 52 | **`TOOL_CALL_UNPARSED` 残余：部分丢失的调用被静默丢弃**（2026-10-11 登记，**同日修复 0.19.74**）——#25「若要修」第 2 条点名的形态（现有 mismatch 配对不覆盖「流式丢块」）。两个恢复点的门是 `withheld > 0 && !calls.length`，只在**一条都没解析出来**时跑 ⇒ 一轮 3 条调用、解析出 2 条、丢 1 条时，既不复恢复也不发 UNPARSED 提示，**静默丢步骤**。实测（`.tmp/probe-partial-loss.mjs`）：修前派发 **2/3** 且正文零提示；修后 3/3。**修法是减法不是追加**：`recoverUnparsedCalls` 读 DSML `<invoke>` 骨架，对主解析已拿到的调用**也会**返回一份（实测纯 DSML 下主解析 `read+glob`、恢复层同样 `read+glob`）⇒ 直接追加会**重复派发**。新增纯函数 `callsLostFromParse`，按「名+规范化参数」可消耗配对，只留真丢的。红线不放宽：只走 `read`/`glob`/`grep`。护栏 `test/partial-call-loss.test.mjs` 9 项（含 ② 不得重复派发、④ 写类红线）；变异 P1/P2/P3 全部被抓。⚠ 自曝两坑：首版把 `withheld` 用在**声明之前**（TDZ 当场抛）；首版 ⑤ 的形态下「只比名字」恰好也得到 1 条 ⇒ **P3 逃逸**，改写后 P3 才红。**未做**：该形态在生产日志里的发生率未估计；真截断仍只能靠提示重发。 | 高 | 否 | `lib/index.js`（`valid` 后的 `callsLostFromParse` 调用点）、`lib/agent-preset.js`（`callsLostFromParse`）、`test/partial-call-loss.test.mjs`、`.tmp/probe-partial-loss.mjs`、`.tmp/probe-dedup2.mjs`、`.tmp/mutation-partial-loss.mjs` |
+| 53 | **登录判定对已声明特征的站点会「靠输入框兜底」谎报已登录**（2026-10-11 登记，**未修，待真机对照读数**）——用 0.19.74 新增的按站点验收入口跑**全新空 profile**：`PASS login.loggedIn`（`basis=probe-fallback`）＋`BLOCKED send.text — NEED_LOGIN` ⇒ **登录判定说已登录、真实发送路径说要登录**，面板会把未登录站点显示成「已登录」。**真机 DOM 读数**（`test-mock/probe-kimi-login2.mjs`，Playwright locator）：声明的 `loginProbe.bad` 命中**0** 个可见节点、页面「登录」二字（exact）可见数 **0**、输入框**可见 1**。根因：`judgeLoggedIn` 的兜底是 `visibleComposerCount(p) > 0`，而 kimi 游客页**自带完整输入框**（同族还有 qwen/gemini/doubao/zai）。**为什么本轮不修**：修法需要该站点真实未登录特征，而本机拿不到「已登录 kimi」对照读数；若改成「声明了 bad 却没命中 ⇒ 判未登录」，会**把所有已登录用户误判成未登录**（谎报与误报都要避免）。本轮只把它变成**可复核读数**（验收脚本记 FAIL 而非 PASS）并登记。**怎么修**：先采已登录 kimi 的 DOM（`accountProbe.name` 的 `span.user-name` 可候选 `ok` 特征），有成对读数后补 `loginProbe.ok`（正向特征优先于输入框兜底），再逐站补齐。 | 高 | 否 | `lib/browser-driver.js`（`judgeLoggedIn`）、`lib/providers.js`（`loginProbe` / `accountProbe`）、`test-mock/site-verify.mjs`、`test-mock/probe-kimi-login2.mjs` |
 
 > **一览表完整性（2026-09-16 修正；2026-09-26 补上闸门）**：本表此前**漏登记 #19 与 #20**（正文有、表里没有）。
 > 这两条都是可机检的登记错误，而当时没有任何闸门覆盖「正文条目 ↔ 表格条目」的一致性。
@@ -3381,3 +3384,174 @@ L1 验证的是「输入框**回读内容**与预期内容等价」。它**不�
 `.tmp/lockrace/aba2.mjs`（ABA 确定性交错）、`.tmp/lockrace/rename-semantics.mjs`（平台语义）、
 `.tmp/lockrace/mutation-lock.mjs`（判据层变异）、`.tmp/lockrace/mutation-guard.mjs`（守卫层变异）、
 `.tmp/lockrace/verify-fix.mjs`（修复后多进程对比）。
+
+---
+
+## 51. **适配器看门狗的两个既有缺陷：相位被冻结 + deadline 锚错起点**（2026-10-11 登记，**同日修复 0.19.74**）
+
+> 本条回应的是 GitHub [Issue #1](https://github.com/RSLN-creator/dsh-web-bridge/issues/1)
+> 报错原文里的**自相矛盾**：「判定相位=网页还没开口且驱动不在忙」+「最近驱动活动时间
+> 2s 前」+「页面已有 2172 字回复未回传」。三者并排读起来不可能同时成立——本条把
+> 「为什么它们能同时被印出来」追到了两个**独立的**既有缺陷。
+
+### 缺陷 A：相位在**第一次**判完就冻结整轮 ⇒ 首字节宽限在生产路径上从未生效
+
+`nextWithIdle()` 第一次执行发生在 executor 微任务**之前**（`relay.submit` 只入队，
+executor 由 `lib/relay.js` 的 `Promise.resolve().then(cfg.executor)` 异步起跑），
+而驱动的 `busy = true` 写在 `runTurn` **内部**——**晚于**第一次判相位。旧实现把
+`idleDecision()` 的结果一次性算死（`arm(reject, windowMs, phase)`），于是：
+
+- 第一次（也是唯一一次，因为全程无事件）读到的 `busy` 恒为 `false`
+  ⇒ 相位恒判成「网页还没开口且驱动不在忙」⇒ `idleFirstByteMultiplier` 这一档
+  **永远轮不到**；
+- 而 `idleScene()` 在开火那一刻又去读**新鲜**的 `lastActivityAt` / `domReplyChars`
+  ⇒ 报错里出现「冻结的相位」与「新鲜的现场」并排。
+
+**既有护栏 ① 为什么没抓到**：它用静态桩，驱动**从未被调用**就报 `busy:true`——
+复现不出生产时序。这是本项目记过多次的「判据在、接线没接上」的又一例。
+
+### 缺陷 B：`idleDeadline` 锚在 `submitAtReal` ⇒ 总时长上限冒充静默上限
+
+函数文档与 `index.js` 上方注释一直承诺「自上次收到任何 delta/think/image 起超过
+N 秒」，而实现是 `submitAtReal + pre + windowMs`（**整轮固定、与事件无关**）。
+后果：**任何一轮只要墙钟超过窗口，即使每一拍都在正常交付增量，下一拍也当场判死**。
+
+**实测读数**（`.tmp/probe-deadline-origin.mjs`，窗口压到 1300ms、每 150ms 一个 delta）：
+修前 **1315ms 处判死**，而那时已收到 `chunk0…chunk7`，报错却写「超过 1s 没有任何新内容」。
+真机尺度 = 单个模型调用超过 120s 即被腰斩，**哪怕正文一直在流**——与 README 宣称的
+「DeepSeek 可整天长跑」直接冲突。**该缺陷在 `471efcd` 上同样复现**（先 stash 复核过）。
+
+### 修法（0.19.74）
+
+1. 相位与窗口**每一拍重算**（`arm(reject)` 内调 `idleDecision()`），不再冻结；
+2. `idleDeadline` 起点取 `max(投放时刻, 上一次事件时刻)`——**静默**上限，
+   真卡死时 `lastEventAt` 停在最后一次事件，与旧实现同源，安全线不失守；
+3. 文案改「桥侧已 Ns 没有从网页收到任何新事件」（旧文案替网页侧下了结论，
+   而本看门狗量的是适配器流）；相位文案改「驱动**自报**不在忙」。
+
+### 护栏与变异
+
+`test/watchdog-first-byte.test.mjs` ⑧（生产时序相位）、⑨（持续事件不得判死）、
+⑨b（**反向安全线**：事件真停了仍须在一个窗口内判死 ⇒ 改起点 ≠ 取消看门狗）、
+⑩（文案不得替网页侧断言）。**变异 M1/M2/M3 全部被抓**，且各自被对应护栏抓住
+（M1→⑧、M2→⑨、M3→⑩）。变异脚本 `.tmp/mutation-watchdog.mjs`。
+
+⚠ 诚实记录：该脚本 v1 在 CRLF 仓库里用 `\n` 做字面替换，**0/3 命中**却把结果记成
+「ESCAPED」——那是 harness 自己的假结论。v2 改为「先统一行尾 + 断言真的改动了 N 处 +
+变异体必须过 `--check`」，不容许把「没改成功」读成「护栏逃逸」。
+
+### 仍未做
+
+- 真实网页端的长轮次（>120s 单轮）复现未做——本条已用离线注入证明判据与起点，未跑真机长轮。
+- `idleFirstByteMultiplier` 生效后的真机首字节耗时分布未采集。
+
+---
+
+## 52. **`TOOL_CALL_UNPARSED` 残余：部分丢失的调用被静默丢弃**（2026-10-11 登记，**同日修复 0.19.74**）
+
+> 这是 #25 台账里「若要修」第 2 条点名的形态：*「现有 mismatch 配对只覆盖
+> 「流式块 ↔ 权威调用」同名配对，**不覆盖「流式丢块」**」*。本条把它量出来并收口。
+
+### 缺陷（实测，非推测）
+
+两个恢复调用点（`lib/index.js` 的 `withheld > 0 && !calls.length`）只在
+「**一条调用都没解析出来**」时运行。于是：
+
+> 一轮回复里有 **3 条调用** → 主解析拿到 2 条、丢 1 条
+> ⇒ 恢复层不跑（`calls.length > 0`）、UNPARSED 提示不发（同上）
+> ⇒ **那条调用凭空消失，用户与模型都收不到任何提示**（静默丢步骤）
+
+**实测**（`.tmp/probe-partial-loss.mjs`）：修前派发 **2/3** 且正文零提示；修后 3/3。
+
+### 修法：**减法**，不是追加
+
+把门放宽成 `valid.length` 后**不能直接追加** `recoverUnparsedCalls` 的结果：它读的是
+DSML `<invoke>` 骨架，对主解析**已经拿到**的调用同样会返回一份。实测
+（`.tmp/probe-dedup2.mjs` 用例 A/D）：纯 DSML 文本下主解析得到 `read+glob`，
+恢复层**也**返回 `read+glob` ⇒ 直接追加会**重复派发同一个工具**。
+
+因此新增纯函数 `callsLostFromParse(recovered, parsed)`：按「**工具名 + 规范化参数**」
+做**可消耗**配对（同名多调用按出现序一一抵消，与既有 `nameCounters` 配对口径同源），
+只留下主解析没覆盖到的。
+
+### 红线不放宽
+
+只走既有白名单只读工具（`read`/`glob`/`grep`）——**副作用类工具一条都进不来**，
+与 0.16.12 逐字相同；护栏 ④ 钉住「缺 name 且参数指向写类 ⇒ 不得恢复派发」。
+
+### 护栏与变异
+
+`test/partial-call-loss.test.mjs` 9 项：① 部分丢失被找回、② **反向安全线**（纯 DSML
+两条完整调用必须**恰好各派发一次**，不得被恢复层复制）、③ 零调用不得凭空造、
+④ 写类红线、⑤/⑤b/⑤c/⑤d/⑤e 纯函数配对口径。
+**变异 P1（门退回旧行为）/P2（减法破坏成直接追加）/P3（只比名字）全部被抓**。
+
+⚠ 诚实记录两个自己踩的坑：
+- 首版把 `withheld` 用在了**声明之前**（它是本块之后的 `const`）⇒ 直接抛 TDZ
+  `Cannot access 'withheld' before initialization`，由探针当场抓到；
+- 首版 ⑤ 写的是 `parsed=[a.md]`、`recovered=[a.md, b.md]`——该形态下「只比名字」
+  **恰好也得到 1 条**，分辨不出两种判据，**P3 因此逃逸**；改写 ⑤ 为
+  `parsed=[a.md]`、`recovered=[b.md]` 后 P3 才变红。
+
+### 仍未做
+
+- 真机长跑里该形态的**发生率**未从生产数据估计。
+- 断流**真截断**（参数 JSON 半截、不可恢复）仍只能靠提示让模型重发——本条不动它。
+
+---
+
+## 53. **登录判定对已声明特征的站点会「靠输入框兜底」谎报已登录**（2026-10-11 登记，**未修，待真机读数**）
+
+### 现象（真机实测，空 profile）
+
+用 0.19.74 新增的按站点验收入口跑全新空 profile：
+
+```
+node test-mock/site-verify.mjs --site kimi
+  PASS       login.loggedIn  — <全新空目录>
+  PASS       login.needLogin — basis=probe-fallback
+  BLOCKED    send.text       — NEED_LOGIN: Kimi 会话缺失 — 打开 Web AI 面板登录一次
+```
+
+即 **登录判定说「已登录」、真实发送路径说「需要登录」**——面板会把一个**没登录**的
+站点显示成「已登录」。
+
+### 根因（真机 DOM 读数）
+
+`test-mock/probe-kimi-login2.mjs`（Playwright locator，`--site kimi`、全新空 profile）：
+
+| 读数 | 值 |
+| --- | --- |
+| 地址 | `https://www.kimi.com/` |
+| 声明的 `loginProbe.bad` 命中的可见节点数 | **0** |
+| 页面里「登录」二字（exact）可见数 | **0** |
+| 输入框可见数 | **1（可见）** |
+| 页面可见文本头部 | 「新建会话 Ctrl K 我的 Kimi 插件 定时任务 灵感库 PPT …」 |
+
+`judgeLoggedIn` 的兜底是 `visibleComposerCount(p) > 0`，而 kimi 的**游客页自带完整
+输入框**（同理还有 qwen 的 `message-input-textarea`、gemini 的 `ql-editor`、
+doubao 的 `tiptap`、z.ai 的 `#chat-input`——providers.js 的注释早已记过这一族）。
+声明了 `bad` 特征却一个都不命中时，旧实现标 `probe-fallback` 然后**照样回 true**。
+
+### 为什么本轮不修（诚实边界）
+
+- 修法需要**该站点真实的未登录特征**，而本机拿不到「已登录的 kimi」对照读数
+  （空 profile 上没有登录按钮 = 特征本身与真机不符，属站点改版/区域差异）。
+- 若在此处改成「声明了 bad 却没命中 ⇒ 判未登录」，会**把所有已登录用户误判成未登录**
+  ——那比现状更糟（本仓库对「谎报」与「误报」记过多次，两者都要避免）。
+- 因此本轮只把它**变成可复核的读数**（验收脚本把这条矛盾记成 FAIL 而不是 PASS），
+  并在此登记；不在没有对照读数的情况下改判据。
+
+### 若要修，从哪下手
+
+1. 采一次**已登录 kimi** 的 DOM：确认登录后 `button/a:has-text("登录")` 是否真的消失、
+   以及已登录页是否有稳定正向特征（`accountProbe.name` 的 `span.user-name` 已声明，
+   可候选为 `ok` 特征）；
+2. 有了成对读数再决定：补 `loginProbe.ok`（正向特征优先于「输入框兜底」），
+   而不是收紧 `bad` 的缺失语义；
+3. 同一族站点（qwen / gemini / doubao / zai）逐个补成对读数——它们的游客页同样自带输入框。
+
+### 可复核入口
+
+`node test-mock/site-verify.mjs --site <站点>`（0.19.74 新增），
+`--list` 看全部站点；四态口径见该文件头注释。

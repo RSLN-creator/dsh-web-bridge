@@ -78,6 +78,36 @@ pnpm pack              # produces dsh-webcode-bridge-<version>.tgz
 > **Restart `dsh web` after installing.** Installing only swaps files on disk; the running process
 > still has the old code loaded. This is the single most common "it does not work" report.
 
+### Do not install by repository URL
+
+The plugin lives in the `package/dsh-webcode-bridge` subdirectory of this repository; **the
+repository root has no `package.json`**. Pointing `dsh plugin` at the repository therefore finds no
+manifest, and the plugin ends up installed as a plain dependency with DSH warning:
+
+```
+dsh: warning: dsh-webcode-bridge declares no dsh.bundle — installed as a plain dependency, not a profile layer
+```
+
+and the plugin configuration UI shows *"Plain dependency (no dsh metadata declared), not a profile
+layer plugin"* (已安装，未生效 / installed but not active). That warning means **the wrong directory
+was installed**, not that this package is missing metadata — it does declare `dsh.bundle.patch`
+(see `package/dsh-webcode-bridge/package.json`). Install one of these instead:
+
+```powershell
+# by package name
+dsh plugin --profile web add dsh-webcode-bridge
+
+# or by the package subdirectory / a built tarball
+dsh plugin --profile web add https://github.com/RSLN-creator/dsh-web-bridge/tree/main/package/dsh-webcode-bridge
+dsh plugin --profile web add C:\path\to\dsh-webcode-bridge-<version>.tgz
+```
+
+Nothing needs to be added to the repository root to fix this.
+
+> **This plugin targets the `web` profile.** It declares `dsh.client.platform = "web"` and mounts its
+> panel through the DSH web settings UI. Installing it into the `desktop` profile is not supported —
+> use `--profile web` as shown above.
+
 ## Quick start
 
 1. **Start** — `dsh web`, then open <http://127.0.0.1:3080>.
@@ -135,9 +165,39 @@ global" stay distinguishable in the settings file.
 | --- | --- |
 | DeepSeek `deepseek:deepseek` | **Primary.** Validated over long multi-turn tool loops on a real browser session, with auto-continue, cursor persistence and recovery from Harness history after a restart. |
 | GLM `glm:glm-5.3` / `glm-5.3-flash` | **Usable but unstable.** The end-to-end loop passes on a real session — a random secret that exists only in the tool result is echoed back verbatim. |
-| Kimi / Qwen / Doubao / Z.ai | Wired up, not validated over long runs. Availability depends on your login. |
+| Kimi / Qwen / Doubao / Z.ai | **Wired up, not validated over long runs.** Availability depends on your login. Run the per-site check below to see where your machine stands. |
 | Claude | Region-restricted; the site itself says so. |
 | ChatGPT / Grok / Gemini | Not reachable from our network (502 plus an explanatory page). |
+
+### Checking a site on your own machine
+
+"Wired up" is not the same as "verified", so there is a per-site acceptance entry point that runs
+the same minimum real loop against whichever site you have signed in. It ships in the **source
+checkout**, not in the installed package (it is a development tool, like `test-mock/real-verify.mjs`),
+so run it from a clone:
+
+```powershell
+cd package/dsh-webcode-bridge
+node test-mock/site-verify.mjs --list          # every registered site
+node test-mock/site-verify.mjs --site kimi     # one site
+node test-mock/site-verify.mjs --site kimi --site qwen
+```
+
+It reads the login you already have and never signs in or solves a captcha for you. Each check gets
+one of four verdicts, and only real pages plus real requests can produce `PASS`:
+
+| Verdict | Meaning |
+| --- | --- |
+| `PASS` | A real page and a real request support the conclusion. |
+| `FAIL` | A real page reproduced a failure (with the readings attached). |
+| `BLOCKED` | An external condition got in the way (not signed in, captcha, rate limit) — **not** a product verdict. |
+| `UNVERIFIED` | This entry point does not cover that item, so nothing is claimed. |
+
+It covers the minimum loop — login verdict, composer usable, real send, read-back, body in the
+stream, tool call parsable, turn settles. It does **not** cover long-run stability, multi-turn tool
+convergence, restart recovery, vision upload, or thinking-effort read-back; those need their own
+probes. A `--site kimi` run on a fresh empty profile currently reports a login-verdict inconsistency
+(the panel can show "signed in" for a site that is not), recorded as long-term issue #53.
 
 What "unstable" means for GLM, concretely:
 

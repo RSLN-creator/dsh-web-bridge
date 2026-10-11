@@ -5,6 +5,72 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.74
+
+**从「继续证明锁协议」转向「修用户看得见的故障」：两个看门狗既有缺陷 + 工具调用静默丢失 + 每站点真实验收入口。**
+
+### 适配器看门狗：两个独立缺陷（既有，非本轮引入）
+
+回应 GitHub Issue #1 报错原文的自相矛盾——「判定相位=网页还没开口且驱动不在忙」，
+同一句里却并列「最近驱动活动时间 2s 前」与「页面已有 2172 字回复未回传」。
+
+1. **相位被冻结整轮 ⇒ 首字节宽限在生产路径上从未生效。**
+   `nextWithIdle()` 第一次执行发生在 executor 微任务**之前**（`relay.submit` 只入队），
+   而驱动的 `busy = true` 写在 `runTurn` **内部**（更晚）。旧实现把第一次算出的相位
+   一次性冻结，于是唯一那次读到的 `busy` 恒为 `false`，`idleFirstByteMultiplier`
+   这一档永远轮不到；而报错现场是在开火那一刻**新采**的。既有护栏 ① 用静态桩
+   （驱动从未被调用就报 `busy:true`）复现不出这个时序。
+2. **`idleDeadline` 锚在提交时刻 ⇒ 总时长上限冒充静默上限。**
+   函数文档承诺「自上次收到任何 delta/think/image 起 N 秒」，实现却是整轮固定。
+   实测（窗口压到 1300ms、每 150ms 一个 delta）：**1315ms 处判死**，
+   而那时已收到 `chunk0…chunk7`。真机尺度 = 单轮超过 120s 即腰斩，**哪怕正文一直在流**。
+
+修法：相位与窗口**每一拍重算**；deadline 起点取 `max(投放时刻, 上次事件时刻)`；
+文案改为「桥侧已 Ns 没有从网页收到任何新事件」（旧文案替网页侧下了结论，
+而看门狗量的是适配器流），相位文案改为「驱动**自报**不在忙」。
+护栏 ⑧/⑨/⑨b（反向安全线：事件真停了仍须在一个窗口内判死）/⑩，变异 M1–M3 全部被抓。
+
+### 工具调用：部分丢失不再静默（#25 残余）
+
+两个恢复点的门是 `withheld > 0 && !calls.length`，只在**一条调用都没解析出来**时跑。
+于是一轮 3 条调用、解析出 2 条、丢 1 条时，既不复恢复也不发 `TOOL_CALL_UNPARSED`
+提示——**静默丢步骤**。修后实测 3/3 派发。
+
+修法是**减法**而不是追加：`recoverUnparsedCalls` 读 DSML `<invoke>` 骨架，对主解析
+**已经拿到**的调用也会返回一份，直接追加会**重复派发**同一个工具。新增纯函数
+`callsLostFromParse`，按「工具名 + 规范化参数」可消耗配对，只留下真丢的。
+红线不放宽：仍只走 `read`/`glob`/`grep` 只读白名单。
+
+### 每站点真实验收入口（`test-mock/site-verify.mjs`）
+
+`real-verify.mjs` 把站点写死成 DeepSeek，于是 README 的「Kimi / Qwen / Doubao / Z.ai
+未完成长运行验证」一直没有可重复的验收方式。新增入口把站点变成参数：
+
+```powershell
+node test-mock/site-verify.mjs --list
+node test-mock/site-verify.mjs --site kimi --site qwen
+```
+
+四态口径（`PASS` / `FAIL` / `BLOCKED` / `UNVERIFIED`）——只有真实页面加真实请求
+支持的才是 `PASS`；未登录、验证码、限流一律记 `BLOCKED` 并注明**不是产品结论**。
+
+### 安装文档：不要用仓库地址安装（GitHub Issue #3）
+
+插件包在 `package/dsh-webcode-bridge` 子目录，**仓库根没有 `package.json`**。
+把 `dsh plugin` 指向仓库根会找不到清单，于是被当成普通依赖安装并打
+`declares no dsh.bundle` 警告、界面显示「已安装，未生效」。这条警告意味着
+**装错了目录**，不是本包缺元数据（它本来就声明了 `dsh.bundle.patch`）。
+两份 README 都补上了说明与正确命令，并写明本插件面向 `web` profile。
+
+### 已登记但**未修**（诚实边界）
+
+- **#53**：登录判定对已声明特征的站点会「靠输入框兜底」谎报已登录。真机读数
+  （全新空 profile、kimi）：声明的 `bad` 特征命中 0、页面「登录」可见数 0、
+  输入框可见 1 ⇒ `loggedIn=true`，而真实发送路径回 `NEED_LOGIN`。修法需要
+  「已登录 kimi」的对照读数；贸然收紧会**把已登录用户全判成未登录**，故本轮只把
+  它变成可复核读数（验收脚本记 `FAIL`）并登记。
+- 真机长轮次（单轮 >120s）复现、首字节耗时分布采集、非 Windows 平台验证均未做。
+
 ## 0.19.73
 
 **守卫回收协议：存活判定必须排在移走之前（复审指出的三进程窗口）。**

@@ -2353,6 +2353,61 @@ function resolveRecoverableName(args, tools) {
 const RECOVERABLE_TOOLS = new Set(['read', 'glob', 'grep']);
 
 /**
+ * 「这一轮里丢了哪几条调用」——恢复层结果 **减去** 主解析已拿到的调用。
+ *
+ * ## 为什么需要这个减法（不是可有可无的去重）
+ *
+ * 两个恢复调用点原先的门是 `withheld > 0 && !calls.length`：**只要解析出 ≥1 条调用，
+ * 恢复层就完全不跑**。后果是「部分丢失」形态：一轮回复里 3 条调用、解析出 2 条、
+ * 丢了 1 条 —— 那条既不会被恢复、也不会触发 UNPARSED 提示，**静默丢步骤**
+ * （离线实测 `.tmp/probe-partial-loss.mjs`：回复 3 条、派发 2 条、无任何提示）。
+ *
+ * 但把门放宽成 `withheld > 0` 之后，**不能直接追加**恢复层结果：`recoverUnparsedCalls`
+ * 读的是 DSML `<invoke>` 骨架，它对**主解析已经成功拿到的**那些调用同样会返回一份
+ * （离线实测 `.tmp/probe-dedup2.mjs` 用例 A/D：纯 DSML 文本下主解析拿到 read+glob，
+ * 恢复层**也**返回 read+glob ⇒ 直接追加会重复派发同一个工具）。
+ *
+ * 所以修法是**减法**：按「工具名 + 参数」配对，只保留主解析没覆盖到的那些。
+ *
+ * ## 配对口径（为什么是名+参数，而不是只比名字）
+ *
+ * 同一个工具在一轮里可以被调用多次（真机一轮三个 read 是既有形态），只比名字会把
+ * 第二条同名调用误判成「已覆盖」而丢掉。因此按**规范化参数**配对，并且**同名多调用
+ * 按出现序一一抵消**（与上方 mismatch 修复里 nameCounters 的配对口径同源）。
+ *
+ * @param {Array<{name:string, arguments?:object}>} recovered 恢复层结果
+ * @param {Array<{name:string, arguments?:object}>} parsed    主解析已拿到的调用
+ * @returns {Array<{name:string, arguments?:object}>} 只含真正丢失的调用（保持 recovered 原序）
+ */
+export function callsLostFromParse(recovered, parsed) {
+  const key = (c) => {
+    let args = c?.arguments ?? c?.args ?? {};
+    if (typeof args === 'string') {
+      try { args = JSON.parse(args); } catch { args = {}; }
+    }
+    if (!args || typeof args !== 'object' || Array.isArray(args)) args = {};
+    // 键排序后序列化：参数对象键序不影响等价性（模型产出的键序不保证稳定）。
+    const norm = {};
+    for (const k of Object.keys(args).sort()) norm[k] = args[k];
+    return `${String(c?.name ?? '')}\u0000${JSON.stringify(norm)}`;
+  };
+  // 主解析那一侧做成**可消耗的多重集合**：同名同参数的每一条只能抵消一次。
+  const pool = new Map();
+  for (const c of Array.isArray(parsed) ? parsed : []) {
+    const k = key(c);
+    pool.set(k, (pool.get(k) || 0) + 1);
+  }
+  const out = [];
+  for (const c of Array.isArray(recovered) ? recovered : []) {
+    const k = key(c);
+    const left = pool.get(k) || 0;
+    if (left > 0) { pool.set(k, left - 1); continue; }   // 已被主解析覆盖 ⇒ 不是丢失
+    out.push(c);
+  }
+  return out;
+}
+
+/**
  * 解析 GLM 原生调用体的 `key=value` 行（真机 2026-09-27，变体 A）。
  *
  * 输入是「`<tool_call>` 之后、工具名之后」的原文，例如：

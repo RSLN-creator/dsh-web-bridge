@@ -74,6 +74,33 @@ pnpm pack              # 产出 dsh-webcode-bridge-<版本>.tgz
 > **装完必须重启 `dsh web`。** 安装只换了磁盘上的文件，正在跑的进程里还是旧代码。
 > 这是「装了不起作用」报告里最常见的那一条。
 
+### 不要用仓库地址安装
+
+本插件的包在仓库的 `package/dsh-webcode-bridge` 子目录里，**仓库根目录没有 `package.json`**。
+因此把 `dsh plugin` 指向**仓库根**会找不到任何清单，插件只会被当成普通依赖装进去，并打一条：
+
+```
+dsh: warning: dsh-webcode-bridge declares no dsh.bundle — installed as a plain dependency, not a profile layer
+```
+
+插件配置界面同时显示「普通依赖(未声明 dsh 元数据), 不是 profile 层插件」——也就是**已安装，未生效**。
+这条警告的意思是**装错了目录**，不是本包缺元数据：它本来就声明了 `dsh.bundle.patch`
+（见 `package/dsh-webcode-bridge/package.json`）。请改用下面任一种：
+
+```powershell
+# 按包名装
+dsh plugin --profile web add dsh-webcode-bridge
+
+# 或指向包所在子目录 / 已打好的 tarball
+dsh plugin --profile web add https://github.com/RSLN-creator/dsh-web-bridge/tree/main/package/dsh-webcode-bridge
+dsh plugin --profile web add C:\下载路径\dsh-webcode-bridge-<版本>.tgz
+```
+
+**不需要**往仓库根补任何东西来「修」这个问题。
+
+> **本插件面向 `web` profile。** 它声明 `dsh.client.platform = "web"`，面板挂在 DSH 的网页设置界面里。
+> 装进 `desktop` profile 不受支持——请照上面用 `--profile web`。
+
 ## 初次启动
 
 1. **启动**：`dsh web`，打开 <http://127.0.0.1:3080>。

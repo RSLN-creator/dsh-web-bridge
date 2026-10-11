@@ -33,7 +33,7 @@
 // 钉红。任何把窗口一律乘倍数的偷懒改法都会让 ③ 变红。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -294,4 +294,140 @@ test('⑦ 写入时刻缺失 → 显式说「写入时刻未知」，不猜、�
   assert.equal(r.ok, false);
   const msg = String(r.error?.message || '');
   assert.match(msg, /最近一次收束原因 timeout（写入时刻未知）/, msg);
+});
+
+// ── ⑧ 【真机相位】看门狗判相位那一刻，驱动「还没进轮次」────────────────────
+//
+// 这一条针对 issue #1 报错原文里的自相矛盾，也是 0.16.3 首字节宽限可能在**生产
+// 路径上根本不生效**的原因。
+//
+// 生产时序（不是静态测试桩的时序）：
+//   1. 适配器调用 `relay.submit()` —— 它只是**入队**，executor 由微任务异步起跑
+//      （lib/relay.js: `Promise.resolve().then(() => cfg.executor(…))`）；
+//   2. 适配器同步进入消费循环 → `nextWithIdle()` → `idleDecision()` 在**这一刻**
+//      读 `status().busy`；
+//   3. 驱动真正把 `busy = true` 是在 `runTurn` 内部（browser-driver.js 的
+//      `busy = true`），而那要等 executor 微任务跑起来 —— **在第 2 步之后**。
+//
+// 于是第 2 步读到的 `busy` 恒为 false ⇒ 相位恒判成「网页还没开口且驱动不在忙」
+// ⇒ 首字节宽限**永远轮不到**；而没有事件就不会有第二次 `nextWithIdle()`，这个
+// 判定被**冻结整轮**，而 `idleScene()` 在开火那一刻又去读**新鲜**读数。真机报错
+// 把「驱动不在忙」与「最近驱动活动时间 2s 前 / 页面已有 2172 字回复未回传」并排
+// 印出来，正是「冻结的相位」与「新鲜的现场」互相矛盾的结果。
+//
+// 既有 ① 用的是静态桩（`busyReport` 恒 busy）——它在驱动**从未被调用**时就报
+// busy，因此复现不出这个时序，宽限看起来是生效的（一类假绿）。
+test('⑧ 判相位时驱动还没进轮次（生产时序）→ 首字节宽限仍须生效', async () => {
+  let entered = false;
+  const driver = {
+    calls: [],
+    async sendTurn(key, message, { onDelta }) {
+      entered = true;                    // 进了轮次，从此 busy 才为真（真机语义）
+      this.calls.push({ key, message });
+      await new Promise((r) => setTimeout(r, 2000));   // prefill：迟于常规窗口
+      onDelta?.('网页答复');
+      return { text: '网页答复', sessionId: 'sess-web-1', metrics: {} };
+    },
+    async resetConversation() {},
+    async close() {},
+    status() {
+      return {
+        running: true,
+        // ← 生产语义：**进轮次之前不忙**。静态桩写不出这个形态。
+        busy: entered,
+        preview: true,
+        lastActivityAt: null, domReplyChars: null,
+        lastEndReason: null, lastRecovered: null, lastStalledSettle: null,
+        thinkingOnlyTurns: 0, recoveredTurns: 0,
+      };
+    },
+  };
+  const r = await runTurn({
+    driver,
+    pluginConfig: { wipIdleMs: 200, idleTimeoutMs: 1300, idleFirstByteMultiplier: 4 },
+  });
+  assert.equal(r.ok, true, r.ok ? '' : '生产时序下首字节宽限必须生效，实际报错：' + r.error?.message);
+  assert.equal(r.text, '网页答复');
+  assert.equal(driver.calls.length, 1, '驱动必须真的被调用了一次');
+});
+
+// ── ⑨ 【真机相位】deadline 的起点是「上一次事件」，不是「本次提交」────────────
+//
+// 这一条与 ⑧ 是两个**独立**的缺陷，都已核实为既有缺陷（在 471efcd 上同样复现）。
+// ⑧ 是「相位被冻结」；本条是「起点不跟事件走」。
+//
+// 旧实现 `idleDeadline` 返回 `submitAtReal + pre + windowMs`——**整轮固定**，
+// 与事件无关。那实际上是「总时长上限」，而函数文档与 index.js 上方注释一直承诺的
+// 是「自上次收到任何 delta/think/image 起」的**静默上限**。后果：只要一轮的墙钟
+// 超过窗口，即使每一拍都在正常交付增量，下一拍也当场判死。
+//
+// 离线读数（窗口 1300ms、每 150ms 一个 delta）：旧实现 **1315ms 处判死**，
+// 而那时已经收到 chunk0…chunk7 —— 报错文本却写着「超过 1s 没有任何新内容」。
+// 真机尺度就是「单个模型调用超过 120s 即腰斩，哪怕正文一直在流」。
+//
+// 反向安全线（**必须同时钉住，否则本修法可以退化成「窗口无限」**）：
+// ⑨b 证明「真正不再有事件」时仍然在一个窗口后判死 —— 改起点 ≠ 取消看门狗。
+test('⑨ 持续有事件的轮次不得因『总时长超过窗口』被判死（静默上限 ≠ 总时长上限）', async () => {
+  const driver = scriptedDriver({ busyReport: 'busy' });
+  // 每 150ms 送一个 delta，持续 3s；窗口只有 1300ms。
+  // 若 deadline 仍锚在 submit，会在 ~1315ms 处判死（旧行为）。
+  driver.sendTurn = async (key, message, { onDelta } = {}) => {
+    driver.calls.push({ key, message });
+    const t0 = Date.now();
+    let i = 0;
+    while (Date.now() - t0 < 3000) {
+      await new Promise((r) => setTimeout(r, 150));
+      onDelta?.(`chunk${i++}`);
+    }
+    return { text: 'chunk-done', sessionId: 'sess-web-1', metrics: {} };
+  };
+  const r = await runTurn({
+    driver,
+    pluginConfig: { wipIdleMs: 200, idleTimeoutMs: 1300 },
+  });
+  assert.equal(r.ok, true, r.ok ? '' : '持续有事件时不得判死，实际报错：' + r.error?.message);
+  assert.match(r.text, /chunk0/, '必须真的收到了增量：' + r.text);
+});
+
+test('⑨b 反向安全线：事件真的停了之后，仍必须在一个窗口内判死（改起点 ≠ 取消看门狗）', async () => {
+  const driver = scriptedDriver({ busyReport: 'busy' });
+  // 先吐 10 个 delta（约 1s），然后**永久静默**。
+  // 起点跟事件走之后，deadline 必须从**最后一个事件**算起再给一个窗口。
+  driver.sendTurn = async (key, message, { onDelta } = {}) => {
+    driver.calls.push({ key, message });
+    for (let i = 0; i < 10; i += 1) {
+      await new Promise((r) => setTimeout(r, 100));
+      onDelta?.(`chunk${i}`);
+    }
+    return await new Promise(() => {});   // 之后永不再有事件
+  };
+  const t0 = Date.now();
+  const r = await runTurn({
+    driver,
+    pluginConfig: { wipIdleMs: 200, idleTimeoutMs: 1300 },
+  });
+  const dt = Date.now() - t0;
+  assert.equal(r.ok, false, '静默后必须判死（否则就是「永不失败」的假安全）');
+  assert.match(String(r.error?.message || ''), /WEB_NO_PROGRESS/);
+  // 10 个 delta × 100ms ≈ 1000ms 的活跃期 + 1300ms 窗口 ≈ 2300ms。
+  // 上界给足余量，但必须显著小于「永不判死」。
+  assert.ok(dt < 6000, `必须在静默一个窗口后判死，实际 ${dt}ms`);
+  assert.ok(dt > 1200, `不得在活跃期内提前判死，实际 ${dt}ms`);
+});
+
+// ── ⑩ 报错文案不得把「桥没收到」说成「网页没有」────────────────────────────
+//
+// Issue #1 报错原文的误导之处：`网页侧超过 120s 没有任何新内容`，而同一句里
+// 并列着 `页面已有 2172 字回复未回传` —— 前者替网页侧下了「没有内容」的结论，
+// 后者却证明页面**有**内容。本看门狗量的是适配器流，不是网页 DOM。
+// 文案必须只陈述「桥侧没收到事件」这一件它真正量到的事。
+test('⑩ 报错只陈述「桥侧没收到事件」，不得替网页侧断言「没有任何新内容」', async () => {
+  const driver = scriptedDriver({ busyReport: 'busy', domReplyChars: 2172 });
+  driver.sendTurn = async () => await new Promise(() => {});
+  const r = await runTurn({ driver, pluginConfig: { wipIdleMs: 200, idleTimeoutMs: 1300 } });
+  assert.equal(r.ok, false);
+  const msg = String(r.error?.message || '');
+  assert.ok(!/网页侧超过/.test(msg), '不得再出现「网页侧超过…没有任何新内容」这种替网页侧下的结论：' + msg);
+  assert.match(msg, /桥侧/, '必须说清是桥这一侧没收到事件：' + msg);
+  assert.match(msg, /2172/, '页面上的真实字数仍须带出（它才是「网页有内容」的证据）：' + msg);
 });

@@ -25,7 +25,7 @@ import { zeroProgressDecision } from './zero-progress.js';
 import { findDegenerateRepeat } from './repeat-detect.js';
 import { idleWindowDecision } from './idle-window.js';
 import { createWebControl, buildSessionEvents, mainLineOf } from './web-control.js';
-import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, stripProtocolRegions, proseSafeEnd, readCallAt, partialProtocolAt, unresolvedCallFenceAt, closingFenceAfter, headlessCallTailAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeOfficialToolCalls, normCallArgs, inferToolNameFromArgs, recoverUnparsedCalls, officialToolCallSpecimen, officialCallExampleFor, buildPreset } from './agent-preset.js';
+import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, stripProtocolRegions, proseSafeEnd, readCallAt, partialProtocolAt, unresolvedCallFenceAt, closingFenceAfter, headlessCallTailAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeOfficialToolCalls, normCallArgs, inferToolNameFromArgs, recoverUnparsedCalls, callsLostFromParse, officialToolCallSpecimen, officialCallExampleFor, buildPreset } from './agent-preset.js';
 // 只用 `teachFor`（1146 的续跑重申、3290 的首轮落盘）——那两处是**真调用**，
 // 即计划 Task 1.4 所说的「教学提示按 teachShape 选支」。
 // `transportShapeForSite` 曾一并 import 但全文件零调用（第三轮自审发现），已移除；
@@ -600,7 +600,14 @@ function idleTimeoutError(timeoutMs, scene) {
     : scene?.phase === 'mid-stream'
       ? (scene.firstEventSeen === false
         // 没开流 + 驱动不忙：链路没跑起来，按常规窗口快报（这是安全侧的判定）。
-        ? '，判定相位=网页还没开口且驱动不在忙（按常规窗口未宽限）'
+        //
+        // 措辞刻意只说「驱动自报不在忙」，不替网页侧下「没在写」的结论：这个读数
+        // 是在**开火这一刻**采的（相位每拍重算），它区分不出「网页确实没在生成」
+        // 与「生成已经结束/还没开始」。真机 Issue #1 的报错里它就紧挨着
+        // 「最近驱动活动时间 2s 前」与「页面已有 2172 字回复未回传」——并排读起来
+        // 像自相矛盾，其实三者可以同时成立（巡检器在采页面 ≠ 驱动自报 busy）。
+        // 有 `页面已有 N 字回复未回传` 那句并列时，正文在页面上的事实以它为准。
+        ? '，判定相位=网页还没开口且驱动自报不在忙（按常规窗口未宽限）'
         // 真·开流后静默。
         : '，判定相位=已开流后的静默')
       : '';
@@ -623,7 +630,13 @@ function idleTimeoutError(timeoutMs, scene) {
       + endReason
       + `${phaseNote}${activity}${pendingChars}）`
     : '';
-  const err = new Error(`WEB_NO_PROGRESS: 网页侧超过 ${Math.round(timeoutMs / 1000)}s 没有任何新内容${hint} — 本轮已中止，可重试`);
+  const err = new Error(`WEB_NO_PROGRESS: 桥侧已 ${Math.round(timeoutMs / 1000)}s 没有从网页收到任何新事件${hint} — 本轮已中止，可重试`);
+  // 旧文案是「网页侧超过 Ns 没有任何新内容」，而本看门狗量的是**适配器流**多久
+  // 没收到事件（见上方 nextWithIdle 的注释与 lib/idle-window.js）。两者不是一回事：
+  // 页面 DOM 完全可能早就写满了正文，只是回传链（页内捕获 → 解码器 → relay）没送到。
+  // 旧措辞把「桥没收到」说成「网页没有」，与同一句里并列的「页面已有 2172 字回复
+  // 未回传」当场自相矛盾（GitHub Issue #1 的报错原文），排查方向被带偏到网页侧。
+  // 现在的措辞只陈述**本看门狗真正量到的**那件事，并不替网页侧下结论。
   withWebcodeCode(err, 'WEB_NO_PROGRESS');
   err.scene = scene;
   return err;
@@ -1293,17 +1306,36 @@ export function apply(ctx, config = {}) {
       // 用 Promise.race 而不是独立 setInterval：事件到达即返回，定时器在 finally
       // 里清掉，一次调用一个定时器、零泄漏（旧写法若用常驻 interval，每轮都会
       // 留下一个永不清理的计时器）。
-      const idleSiteId = turn?.meta?.siteId || 'deepseek';
+      // 本轮的**账号槽**（不是裸 siteId）。判相位与采现场都必须问**这一轮真正在跑
+      // 的那个驱动实例**，而 `driverFor` 的入参是 accountKey：
+      //   · 默认槽恰好同形（`glm` 的 accountKey 就是 `glm`），所以旧写法在默认槽上
+      //     看不出问题；
+      //   · 非默认槽（`glm#2`）的 `meta.siteId` 仍是裸 `glm` ⇒ 旧写法拿到的是
+      //     **账户1 的那个驱动**，于是账户2 的相位/现场全读错（两个槽共用同一份代码，
+      //     读数却串了号）。
+      // meta 三条构造路径（主轮 / 辅助轮 / 首轮）都带 accountKey，缺省才回落 siteId。
+      const idleAccountKey = turn?.meta?.accountKey || turn?.meta?.siteId || 'deepseek';
       // 本轮是否已经收到过**任何**事件（delta/think/image）。这是本闭包自己的标记，
       // 刻意**不问驱动**：驱动的 status 是跨轮共享的（该事故里看门狗读到的
       // `lastEndReason=finished` 其实是**上一轮**的收束原因，被当成了本轮线索），
       // 而「网页开口了没有」必须严格属于本轮。null = 还没有，epoch ms = 首个事件时刻。
       let firstEventAt = null;
+      // 本轮**最近一次**收到事件的时刻（delta/think/image/end 都算）。与 `firstEventAt`
+      // 分工不同、缺一不可：
+      //   · firstEventAt —— 相位判据（「网页开口了没有」，一旦开口就永不回退）；
+      //   · lastEventAt  —— 看门狗 deadline 的**起点**（「距上次动静多久」，见 idleDeadline）。
+      // 合并成一个会让「已开流」与「刚刚还在流」不可分——前者决定窗口档位，后者决定
+      // 从哪一刻开始计时。
+      let lastEventAt = null;
       // 驱动此刻是否在忙。status() 是同步的、已存在；懒驱动（glm#2 之类）可能还没建、
       // 或被替换中的实现根本没有 status() ⇒ 取不到一律按「不在忙」，即按旧窗口快报
       // （安全侧：宁可早报，也不给一个可能已经死掉的链路 2 倍宽限）。
+      //
+      // 必须用**只读**查找（driverForRead）：本函数在等待期间会被反复调用，
+      // 若走 `driverFor`，一个尚未创建的驱动会被**当场懒创建**（`ensure()` 拉起
+      // 一整个浏览器 profile）——读一个现场读数不该有这种副作用。
       const idleDriverBusy = () => {
-        try { return driverFor(idleSiteId)?.status?.()?.busy === true; } catch { return false; }
+        try { return driverForRead(idleAccountKey)?.status?.()?.busy === true; } catch { return false; }
       };
       // 相位与窗口在**每次 next() 之前**重算：首个事件一到，窗口立刻回到 IDLE_TIMEOUT_MS，
       // 已经开流的轮次不可能继续享受宽限（判据与安全线见 lib/idle-window.js）。
@@ -1336,7 +1368,7 @@ export function apply(ctx, config = {}) {
           windowCapped: decision?.capped === true,
         };
         try {
-          const st = driverFor(idleSiteId)?.status?.() || null;
+          const st = driverForRead(idleAccountKey)?.status?.() || null;
           if (!st) return base;
           return {
             ...base,
@@ -1426,11 +1458,30 @@ export function apply(ctx, config = {}) {
       /**
        * 本轮的有效 deadline（epoch ms）。
        *
-       * 语义：**从「真正交给网页」那一刻起**再给 `windowMs`。
+       * 语义：**自「上一次事件」（或投放那一刻）起**再给 `windowMs`。
        *   · 正在投放前 ⇒ 此刻还没有 deadline（返回 Infinity），因为消息还没发出去，
        *     「网页不吐字节」这件事还没有任何证据；
-       *   · 已投放     ⇒ `submitAtReal + preDeliverMs + windowMs`，且一旦进入投放后
-       *     就不再变动（preDeliverMs 在投放那一刻定值）。
+       *   · 已投放     ⇒ 起点取 `max(投放时刻, 上一次事件时刻)`，再加上 `windowMs`。
+       *
+       * ## 为什么起点必须跟着事件走（0.19.74 修，本函数旧实现是「提交起算」）
+       *
+       * 旧实现是 `submitAtReal + pre + windowMs`：**整轮固定**，与事件无关。
+       * 那是一个**总时长上限**，不是本函数文档与上方注释一直承诺的「静默上限」——
+       * 于是任何一轮只要墙钟超过窗口，即使**每一拍都在正常交付增量**，下一拍也会
+       * `left <= 0` 当场判死。离线实测（`.tmp/probe-deadline-origin.mjs`，窗口压到
+       * 1300ms、每 150ms 送一个 delta）：
+       *   实际耗时 1315ms、收到 chunk0…chunk7、**仍然抛 WEB_NO_PROGRESS**。
+       * 真机尺度上这就是「单个模型调用超过 120s 即被腰斩，哪怕正文一直在流」——
+       * 与 README 宣称的「DeepSeek 可整天长跑」直接冲突，也正是 issue #1 报错里
+       * 「超过 120s 没有任何新内容」与「最近驱动活动时间 2s 前」并排自相矛盾的另一半。
+       *
+       * 为什么改成跟事件走才是对的口径：看门狗要回答的问题是「链路还活着吗」，
+       * 而不是「这一轮跑了多久」。轮次时长由驱动的整轮预算（`requestTimeoutMs`，
+       * 默认 240s）负责——两层各管一段，不要混成一条 deadline。
+       *
+       * 安全线不变：真要卡死时**不会有新事件**，`lastEventAt` 停在最后一次事件，
+       * 起点因此与旧实现同源（首字节前更没有事件 ⇒ 起点就是投放时刻），
+       * 「网页不说了」照旧在一个窗口后开火。
        *
        * 投放前的等待不是无限豁免：`delivering` 只在 executor 的同步流程里为真，
        * 它对应的每一段等待都各有自己的上限（发送间隔由 clampSendGapMs 夹在 600s 内、
@@ -1441,8 +1492,13 @@ export function apply(ctx, config = {}) {
       const PRE_DELIVER_CEILING_MS = Math.max(1_000, Number(cfg.requestTimeoutMs) || 240_000);
       const idleDeadline = (windowMs) => {
         const pre = preDeliverMs();
-        if (pre > 0) return submitAtReal + pre + windowMs;
-        return isPreDelivering() ? Infinity : submitAtReal + windowMs;
+        if (pre <= 0 && isPreDelivering()) return Infinity;
+        // 投放时刻 = 本轮真正交给网页的那一刻（preDeliverMs 在投放时定值）。
+        const deliveredAt = pre > 0 ? submitAtReal + pre : submitAtReal;
+        // 起点取「投放时刻」与「上一次事件」的**较晚者**：事件比投放新就跟着事件走
+        // （静默上限），否则退回投放时刻（与旧行为同源，安全线不失守）。
+        const origin = lastEventAt == null ? deliveredAt : Math.max(deliveredAt, lastEventAt);
+        return origin + windowMs;
       };
       const nextWithIdle = async () => {
         let timer = null;
@@ -1452,7 +1508,27 @@ export function apply(ctx, config = {}) {
         // 为什么必须这样（本修复第一版实测教训）：若在第一次进本函数时就算死
         // `30000 + windowMs`，那时 preDeliverMs 还是 0，间隔等待照样被算进窗口
         // ——gap≥3000ms 的用例仍然失败。必须等投放那一刻重算。
-        const arm = (reject, windowMs, phase) => {
+        const arm = (reject) => {
+          // 相位与窗口在**每一拍重新算**，而不是把第一次的判定冻结整轮。
+          //
+          // ## 为什么必须重算（这是 issue #1 那句自相矛盾报错的根因）
+          //
+          // 生产时序上，`nextWithIdle()` 第一次跑在 executor 微任务**之前**
+          //（`relay.submit` 只入队，见 lib/relay.js 的 `Promise.resolve().then(cfg.executor)`），
+          // 而驱动的 `busy = true` 发生在 `runTurn` 内部——**在第一次判相位之后**。
+          // 于是第一次（也是唯一一次，因为全程无事件）读到的 `busy` 恒为 false，
+          // 相位被永久判成「网页还没开口且驱动不在忙」，`idleFirstByteMultiplier`
+          // 这一档**在生产路径上从来没生效过**；而 `idleScene()` 在开火那一刻又去读
+          // **新鲜**的 lastActivityAt / domReplyChars —— 真机报错因此把「驱动不在忙」
+          // 与「最近驱动活动 2s 前 / 页面已有 2172 字回复未回传」并排印出。
+          //
+          // 既有护栏 ① 用静态桩（驱动**从未被调用**就报 busy）复现不出这个时序，
+          // 所以它是绿的 —— 这正是「判据在、接线没接上」的又一例（见 ⑧）。
+          //
+          // 安全线 ②③ 不受影响：重算只会得到**同样的**常规窗口（已开流 ⇒
+          // firstEventSeen=true 锁死 base；驱动确实不忙 ⇒ 同样走 base），
+          // 因此「mid-stream 不宽限」「驱动不忙不宽限」逐字不变。
+          const { windowMs, phase } = idleDecision();
           const deadline = idleDeadline(windowMs);
           // 投放前：短步长轮询，等 delivering 翻转 / preDeliverMs 定值。
           // 双保险硬界：投放前累计超过 PRE_DELIVER_CEILING_MS 仍无进展 ⇒ 判死
@@ -1468,20 +1544,19 @@ export function apply(ctx, config = {}) {
             if (prePhase && Date.now() - submitAtReal >= PRE_DELIVER_CEILING_MS) {
               return reject(idleTimeoutError(windowMs, idleScene({ windowMs, phase })));
             }
-            arm(reject, windowMs, phase);
+            arm(reject);
           }, Math.max(1, step));
           timer.unref?.();
         };
         try {
           const ev = await Promise.race([
             ch.next(),
-            new Promise((_, reject) => {
-              const { windowMs, phase } = idleDecision();
-              arm(reject, windowMs, phase);
-            }),
+            new Promise((_, reject) => { arm(reject); }),
           ]);
           // 首个事件到达：置位本轮标记，下一次迭代起窗口立刻回到常规值。
+          // lastEventAt 每拍都刷新（它是 deadline 的起点，不是相位标记）。
           if (firstEventAt === null) firstEventAt = Date.now();
+          lastEventAt = Date.now();
           return ev;
         } finally { if (timer) clearTimeout(timer); }
       };
@@ -2134,6 +2209,35 @@ export function apply(ctx, config = {}) {
       if (!valid.length && thinkAcc) {
         const thinkCalls = parseAgentReply(thinkAcc, { tools }).calls.filter((c) => tools.some((t) => t?.name === c.name));
         if (thinkCalls.length) valid = thinkCalls;
+      }
+      // #25 残余收口（0.19.74）：**部分丢失**形态的恢复。
+      //
+      // 两个既有恢复点（本文件下方两处 `withheld > 0 && !calls.length`）只在
+      // 「一条都没解析出来」时才跑。于是「3 条调用解析出 2 条、丢了 1 条」的轮次
+      // 既不会恢复、也不会给 UNPARSED 提示 —— **静默丢步骤**，正是台账 §25 记的
+      // 「不覆盖流式丢块」。离线实测（.tmp/probe-partial-loss.mjs）：回复 3 条、
+      // 派发 2 条、正文零提示。
+      //
+      // 修法是**减法**而不是追加：`recoverUnparsedCalls` 走 DSML `<invoke>` 骨架，
+      // 对主解析**已经拿到**的调用也会返回一份（.tmp/probe-dedup2.mjs 用例 A/D
+      // 实测：纯 DSML 下主解析 read+glob、恢复层同样 read+glob）⇒ 直接追加会重复
+      // 派发同一个工具。`callsLostFromParse` 按「名+参数」可消耗配对，只留下真丢的。
+      //
+      // 边界（不放宽）：只走既有白名单只读工具（read/glob/grep）——副作用类工具
+      // 一条都不会经由这条路进来，红线与 0.16.12 逐字相同。
+      //
+      // 为什么不需要「先判有没有扣留文本」的门：`callsLostFromParse` 已经把主解析
+      // 拿到的调用**减掉**了，没有真丢失时它返回空数组，本轮行为逐字不变。
+      // （首版曾想复用下方的 `withheld`，但那个 const 声明在**本块之后**，
+      // 在这里引用直接抛 TDZ 的 `Cannot access 'withheld' before initialization`
+      // ——由 `.tmp/probe-partial-loss.mjs` 当场抓到。判据不该跨作用域借未来的绑定。）
+      if (valid.length) {
+        const lost = callsLostFromParse(recoverUnparsedCalls(finalText, tools), valid);
+        if (lost.length) {
+          warn(`recovered ${lost.length} call(s) lost beside ${valid.length} parsed call(s): `
+            + lost.map((c) => c.name).join(', '));
+          valid = valid.concat(lost);
+        }
       }
       // 网页调了本会话没有的工具（真机里模型调过未登记的 write / subagent）。
       // 旧实现静默过滤 → 剩下空回复被当收束 → 任务从此不动。这里**不抛错**而是
@@ -2986,6 +3090,29 @@ function imageMarkdown(images) {
       drivers.set(key, d);
     }
     return drivers.get(key);
+  }
+
+  /**
+   * **只读**取驱动：已经存在的实例才返回，绝不懒创建。
+   *
+   * 与 `driverFor` 的分工是硬的：`driverFor` 会在实例缺席时**建**一个（`createBrowserDriver`
+   * + 后续 `ensure()` 冷启动，可能数十秒并拉起一整个浏览器 profile）。那是「要发一轮」
+   * 的正当代价，但**读一个现场读数**不该有这种副作用——看门狗在等待期间反复判相位、
+   * 在超时那一刻采现场，若走 `driverFor`，单是「报告一下忙不忙」就会凭空启动浏览器。
+   *
+   * 与 `webConversationTitle` 里那条只读取法同一条纪律（那里为此单独写了三元表达式，
+   * 这里抽成函数，免得第三处再各写一份）。取不到返回 undefined，调用方按「不忙/无现场」
+   * 处理——这与既有的安全侧一致（见 `idleDriverBusy` 的注释）。
+   *
+   * @param {string} accountKey 账号槽（`glm` 或 `glm#2`；裸 siteId 即默认槽）
+   * @returns {object|undefined} 已存在的驱动实例，不存在时 undefined
+   */
+  function driverForRead(accountKey) {
+    try {
+      const { siteId, slot } = parseAccountKey(accountKey || 'deepseek');
+      if (isInjectedDefaultSlot(siteId, slot)) return driver;
+      return drivers.get(formatAccountKey(siteId, slot));
+    } catch { return undefined; }
   }
 
   /**
