@@ -17,6 +17,9 @@
 //     看起来「日志空」——所以这里按帧切分再逐帧解。
 //   - 会话文件在同一目录里可能有**多个世代的副本**（v3 + v4）。以**版本号最高**的那份为准，
 //     旧世代不参与判断（它是历史遗留，不是「另一条会话」）。
+//     ⚠ 该判据的实现**只有一个**：`session-read.mjs` 的 `newestGeneration()`（本文件 2026-10-14
+//     起复用它的导出，不再自带一份副本）。两处各写一份必然漂移——`session-read.mjs` 曾经
+//     把文件名钉死在 v3，于是 `user-voice-log.mjs` 静默漏收了 2026-09-24 之后的全部原话。
 //   - **活跃会话**（新近有 mtime）不判成垃圾，标 `active`，由调用方跳过。
 //
 // 用法：
@@ -34,7 +37,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { decodeZstdFrames, listAllSessions } from './session-read.mjs';
+import { decodeZstdFrames, listAllSessions, newestGeneration } from './session-read.mjs';
 
 /** 判定为「活跃、不许动」的 mtime 窗口（毫秒）。 */
 const DEFAULT_ACTIVE_MS = 60 * 60 * 1000;
@@ -49,24 +52,17 @@ export function workspaceLabelOf(dirName) {
 }
 
 /**
- * 一个会话目录里、**版本号最高**的那份日志。
+ * 一个会话目录里、**版本号最高**的那份日志 —— 现在**转发**给
+ * `session-read.mjs` 的同名导出。
+ *
+ * 保留这个再导出而不是让调用方改 import：本文件自 2026-09-30 起就对外导出它
+ * （`dsh-session-cleanup-apply.mjs` 一类调用方按这个名字取），删掉就是**静默改契约**。
+ * 实现挪走的理由见文件头：判据一处定义，两处必然漂移。
  *
  * @param {string} dir 会话目录
- * @returns {{file:string,version:number,bytes:number,mtimeMs:number}|null}
+ * @returns {{file:string,name:string,version:number,bytes:number,mtimeMs:number}|null}
  */
-export function newestGeneration(dir) {
-  let best = null;
-  for (const name of fs.readdirSync(dir)) {
-    const m = /^session(?:\.v([0-9]+))?\.jsonl(?:\.zstd)?$/.exec(name);
-    if (!m) continue;
-    const version = m[1] ? Number(m[1]) : 0;
-    const st = fs.statSync(path.join(dir, name));
-    if (!best || version > best.version) {
-      best = { file: path.join(dir, name), name, version, bytes: st.size, mtimeMs: st.mtimeMs };
-    }
-  }
-  return best;
-}
+export { newestGeneration };
 
 /**
  * 把一次会话的事件流压成「第一轮跑成什么样」的判据。

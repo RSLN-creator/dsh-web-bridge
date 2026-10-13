@@ -1,17 +1,20 @@
-# 代码结构归类：lib 的 48 个模块分几层
+# 代码结构归类：lib 的 53 个模块分几层
 
-本文件把 `package/dsh-webcode-bridge/lib/` 的 **48 个模块 / 34,570 行**按**职责**归类，
+本文件把 `package/dsh-webcode-bridge/lib/` 的 **53 个模块 / 38,662 行**按**职责**归类，
 并给出实测依赖方向。目的：让「改一处要动几个文件」这个问题有确定答案。
 
 **口径（重要）**：行数是 `readFileSync(...).split(/\r?\n/).length` 的读数，与
 `wiki/tools/gen-index.mjs` **同一口径**（比 `Measure-Object -Line` 多 1 行/文件，因为后者
-不计末尾空行）。模块数与测试文件数由机器判：`node scripts/check-ledger.mjs`。
+不计末尾空行）。模块数与测试文件数由机器判：`node scripts/check-ledger.mjs` 与
+`node wiki/tools/gen-index.mjs --check`。
 
-实测时间 2026-09-30，基线 `0.19.49`，宿主 `dsh@0.1.7-alpha.2`。
+实测时间 2026-10-14，基线 `0.19.75`，宿主 `dsh@0.2.1-alpha.2`。
 
-> **本文件此前长期过期**（2026-09-17 的读数：30 个模块 / 15,175 行 / 109 个测试文件）。
-> 2026-09-30 全量重算。凡本节数字与 `check-ledger.mjs` 或 `wiki/modules.md` 冲突，
-> **以后两者为准**——它们是机器判的，本节的数字是人写的。
+> **本文件两次过期，两次都是「人写的数字」先烂**（2026-09-17 读数 30 个模块 / 15,175 行；
+> 2026-09-30 重算为 48 / 34,570；2026-10-14 重算为 **53 / 38,662**）。
+> 因此：**凡本节数字与 `gen-index.mjs` / `check-ledger.mjs` 冲突，一律以后两者为准**
+> ——它们是机器现扫的，本节是人写的。改写本节时**先跑那两条命令，再抄读数**，
+> 不要凭记忆改。
 
 ---
 
@@ -19,11 +22,11 @@
 
 | 项 | 值 | 取法 |
 | --- | --- | --- |
-| `lib/` 模块数 / 总行数 | **48 / 34,570** | 同 `gen-index.mjs` 口径 |
-| 最大模块 | `client.cjs` **6,477 行** | 浏览器侧单文件 bundle（非 ESM） |
-| 次大 | `browser-driver.js` **4,682**、`index.js` **4,424**、`agent-preset.js` **3,018** | 同上 |
-| 再次 | `web-control.js` 1,863、`decoder.js` 1,049、`providers.js` 1,036、`think-effort.js` 1,024 | 同上 |
-| 测试文件 | **116 个** `*.test.mjs` | `check-ledger.mjs` 同一口径 |
+| `lib/` 模块数 / 总行数 | **53 / 38,662** | `node wiki/tools/gen-index.mjs --check` |
+| 最大模块 | `client.cjs` **7,826 行** | 浏览器侧单文件 bundle（非 ESM） |
+| 次大 | `browser-driver.js` **5,108**、`index.js` **4,844**、`agent-preset.js` **3,072** | 同上 |
+| 再次 | `web-control.js` 2,134、`providers.js` 1,081、`think-effort.js` 1,065、`decoder.js` 1,048 | 同上 |
+| 测试文件 | **126 个** `*.test.mjs` | `node scripts/check-ledger.mjs` |
 | 真机夹具 | `test/fixtures/` 下的 `dsml-real-*.txt` 与具名形态 | `test/fixtures/` |
 | 入口 | `main: ./lib/index.js`；`exports` 另含 `./client`、`./cordis.patch.yml` | `package.json` |
 
@@ -35,7 +38,7 @@
 
 ## 二、分层（按职责，不是按目录）
 
-`lib/` 是**扁平目录**——48 个文件同层。下面这张表是**逻辑分层**，
+`lib/` 是**扁平目录**——53 个文件同层（52 个 ESM `.js` + 1 个 CJS `client.cjs`）。下面这张表是**逻辑分层**，
 是新成员理解这份代码的最短路径。分层口径与 [`wiki/architecture.md`](../wiki/architecture.md) §3 的 A–J 一致。
 
 ### A · 声明/真源（「这个站点长什么样」）

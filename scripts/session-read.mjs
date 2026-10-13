@@ -4,6 +4,8 @@
 // 为什么需要这个文件：
 //
 // DSH 的会话落盘是 **多帧拼接** 的 zstd（一条 jsonl 事件一帧，文件里几百帧）。
+// 文件名带世代号（`session.v3.jsonl.zstd` → 2026-09-23 起本机改为 `session.v4.jsonl.zstd`），
+// 因此枚举时按**形状**匹配并取版本号最高的那份，见 `newestGeneration()`。
 // 踩过的坑：`zstdDecompressSync(buf)` 只解**第一帧**，于是文件明明 1.3 MB、
 // 解出来只有 220 字节（那条 `{"type":"session",...}` 头），看起来「日志是空的」。
 // 这个坑在 2026-09-14 的会话里被反复踩了三次，每次都在终端里临时拼一条 node
@@ -19,7 +21,7 @@
 //   node scripts/session-read.mjs --recent 5            # 最近 5 个会话的摘要
 //   node scripts/session-read.mjs f9010b75              # 按 id 片段（必须唯一匹配）
 //   node scripts/session-read.mjs session-f9010b75-258b-4154-833f-832fa399b5b6
-//   node scripts/session-read.mjs <目录|session.v3.jsonl.zstd 路径>
+//   node scripts/session-read.mjs <目录|session.v4.jsonl.zstd 路径>
 //   node scripts/session-read.mjs "http://127.0.0.1:3080/?session=session-f9010b75-..."
 //
 // 导出完整记录（这是「让它自己阅读理解」的主用法）：
@@ -51,8 +53,46 @@ import zlib from 'node:zlib';
 /** zstd 帧魔数：每一帧都以它开头，用来切多帧文件。 */
 const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
 
-/** 会话文件名（DSH v3 落盘格式）。 */
-const SESSION_FILE = 'session.v3.jsonl.zstd';
+/**
+ * 会话文件名形状：`session[.v<N>].jsonl[.zstd]`（无版本号视作 0）。
+ *
+ * 为什么是**形状**而不是一个写死的文件名（2026-10-14 修正）：DSH 会换落盘世代，
+ * 本机 2026-09-23 15:23 起就从 `session.v3.jsonl.zstd` 换成了
+ * `session.v4.jsonl.zstd`。旧写法把名字钉死在 v3，后果**不是报错而是静默少收**：
+ * `scripts/user-voice-log.mjs` 依赖本文件枚举会话，于是 2026-09-24 之后的
+ * 用户原话一条都没进 `doc/user-voice-log.md`（实测：本仓库工作区 181 份 v4、
+ * 其中 179 个目录**只有** v4 ⇒ 对旧判据完全不可见），而脚本照常退出 0。
+ * 这正是本仓库记过多次的「没有任何报错，没有下一步」那一类故障。
+ */
+const SESSION_FILE_RE = /^session(?:\.v([0-9]+))?\.jsonl(?:\.zstd)?$/;
+
+/**
+ * 一个会话目录里、**版本号最高**的那份日志。
+ *
+ * 判据只此一处：`scripts/dsh-session-cleanup-scan.mjs` 从 2026-09-30 起就按
+ * 「同目录多世代副本取版本号最高」处理（它先撞上这个需求），本文件从 2026-10-14 起
+ * 复用**同一个判据**。两处各写一份必然漂移——那是本仓库反复踩过的老路。
+ *
+ * @param {string} dir 会话目录
+ * @returns {{file:string,name:string,version:number,bytes:number,mtimeMs:number}|null} 没有任何世代时返回 null
+ */
+export function newestGeneration(dir) {
+  let names;
+  try { names = fs.readdirSync(dir); } catch { return null; }
+  let best = null;
+  for (const name of names) {
+    const m = SESSION_FILE_RE.exec(name);
+    if (!m) continue;
+    const version = m[1] ? Number(m[1]) : 0;
+    let st;
+    try { st = fs.statSync(path.join(dir, name)); } catch { continue; }
+    if (!st.isFile()) continue;
+    if (!best || version > best.version) {
+      best = { file: path.join(dir, name), name, version, bytes: st.size, mtimeMs: st.mtimeMs };
+    }
+  }
+  return best;
+}
 
 function dshHome() {
   return process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
@@ -129,8 +169,12 @@ function decompressFrame(frame) {
 /**
  * 枚举 sessions 根下**全部工作区**的会话。
  *
- * 目录形状：`<root>/<escaped-cwd>/<sessionId>/session.v3.jsonl.zstd`。
+ * 目录形状：`<root>/<escaped-cwd>/<sessionId>/session[.v<N>].jsonl.zstd`。
  * 只下探两层——再深就不是会话了（历史上有过误把 profile 目录当会话的教训）。
+ *
+ * 一个目录里可能同时躺着多个世代的副本（v3 + v4）⇒ 取**版本号最高**的那份，
+ * 且 `fileAge` 用的是**被选中那份**的时间（不是目录时间戳）：否则一个只被动过目录的
+ * 老会话会被排到最新，摘要就会拿它冒充「最近一个会话」。
  */
 export function listAllSessions(root = sessionsRoot()) {
   const out = [];
@@ -140,14 +184,14 @@ export function listAllSessions(root = sessionsRoot()) {
     for (const d of entries) {
       if (!d.isDirectory()) continue;
       const sub = path.join(dir, d.name);
-      const file = path.join(sub, SESSION_FILE);
-      if (fs.existsSync(file)) {
-        const st = fs.statSync(file);
+      const gen = newestGeneration(sub);
+      if (gen) {
         out.push({
           id: d.name,
-          file,
-          bytes: st.size,
-          mtime: st.mtimeMs,
+          file: gen.file,
+          generation: gen.version,
+          bytes: gen.bytes,
+          mtime: gen.mtimeMs,
           workspace: path.basename(dir),
         });
         continue;
@@ -184,8 +228,8 @@ export function resolveRef(ref, { all = null } = {}) {
   if (ref && fs.existsSync(ref)) {
     const p = path.resolve(ref);
     if (fs.statSync(p).isFile()) return [{ id: path.basename(path.dirname(p)), file: p, bytes: fs.statSync(p).size, mtime: fs.statSync(p).mtimeMs, workspace: '?' }];
-    const direct = path.join(p, SESSION_FILE);
-    if (fs.existsSync(direct)) return [{ id: path.basename(p), file: direct, bytes: fs.statSync(direct).size, mtime: fs.statSync(direct).mtimeMs, workspace: path.basename(path.dirname(p)) }];
+    const gen = newestGeneration(p);
+    if (gen) return [{ id: path.basename(p), file: gen.file, generation: gen.version, bytes: gen.bytes, mtime: gen.mtimeMs, workspace: path.basename(path.dirname(p)) }];
   }
 
   // 2) 链接 / id：先精确、再片段

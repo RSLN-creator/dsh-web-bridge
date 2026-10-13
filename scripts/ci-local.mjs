@@ -21,6 +21,7 @@
 //   1. `scripts/lint-comments.mjs`           注释纪律（§10 的机检部分）
 //   2. `scripts/check-ledger.mjs`            台账与事实一致（版本号 / 测试文件数）
 //   2b. `scripts/check-long-term-issues.mjs` 长期问题台账「一览表 ↔ 正文」自洽
+//   2c. `scripts/gen-progress-index.mjs`     进度台账分节索引与正文一致（--check）
 //   3. `scripts/check-repo-hygiene.mjs`      文件编码无 BOM + 索引无死链 + CI/engines Node 版本相容
 //   4. `scripts/check-plugin-contract.mjs`   DSH 插件契约（仓库指向 / 许可证三处一致 / 运行依赖无死声明 / 边界声明被索引）
 //   5. `scripts/check-commit-msg.mjs`        提交信息判据自检（--self-test）
@@ -146,6 +147,15 @@ const STEPS = [
     args: [path.join('scripts', 'check-long-term-issues.mjs'), '--self-test'],
     cwd: repoRoot,
     hint: '改了 scripts/check-long-term-issues.mjs 的判据就必须同步改自检的正反例——措辞判据会静默失效。',
+  },
+  {
+    id: 'progress-index',
+    title: '进度台账分节索引与正文一致（97 个小节不得漂）',
+    cmd: process.execPath,
+    args: [path.join('scripts', 'gen-progress-index.mjs'), '--check'],
+    cwd: repoRoot,
+    hint: '跑 `node scripts\\gen-progress-index.mjs` 重建索引块。⚠ 加/删 progress.md 的 `##` 小节后必须重建，'
+      + '否则索引行号会指到别的小节上——而「索引指向错地方」比没有索引更坏。',
   },
   {
     id: 'ref-index',

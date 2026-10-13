@@ -199,7 +199,44 @@ function analyze(md) {
     );
   }
 
-  return { body, table, problems, missingRows, orphanRows, contradictions };
+  // ---- 判据 4：正文条目**号不得重复**（2026-10-14 新增）----
+  //
+  // 为什么需要这条：`bodyNums`/`tableNums` 是**集合**，于是「同一个号出现两次」对判据 1/2
+  // 完全不可见。2026-10-11 追加 #48 时就踩了：文件里出现了**两个不同的 `## 48.` 标题**，
+  // 而本闸门照报「正文条目 55 个」（实际不同号只有 54 个）、三条判据全 PASS。
+  // 后果不是好看不好看：读者按号检索会拿到**两段矛盾的历史**（原条目说「像通道丢段」，
+  // 追加节说「该归因已证伪」），而没有任何一行在提示它们同号。
+  const dupBody = [];
+  const bodySeen = new Map();
+  for (const b of body) {
+    if (bodySeen.has(b.num)) {
+      dupBody.push({ num: b.num, firstLine: bodySeen.get(b.num), againLine: b.line });
+      problems.push(
+        '正文条目号重复：`#' + b.num + '` 在第 ' + bodySeen.get(b.num) + ' 行与第 ' + b.line
+        + ' 行各有一个标题——两条会互相冒充，读者按号检索拿到的是两段不同的历史。'
+        + '追加节请用独立后缀号（如 `48b.`），不要复用原号。',
+      );
+    } else {
+      bodySeen.set(b.num, b.line);
+    }
+  }
+
+  // ---- 判据 5：一览表行**号不得重复**（同族，一起加才完整）----
+  const dupTable = [];
+  const tableSeen = new Map();
+  for (const t of table) {
+    if (tableSeen.has(t.num)) {
+      dupTable.push({ num: t.num, firstLine: tableSeen.get(t.num), againLine: t.line });
+      problems.push(
+        '一览表第 ' + t.line + ' 行重复了 `#' + t.num + '`（第 ' + tableSeen.get(t.num) + ' 行已有同号）'
+        + '——表面两行、正文一条，读者会以为是两条不同的欠账。',
+      );
+    } else {
+      tableSeen.set(t.num, t.line);
+    }
+  }
+
+  return { body, table, problems, missingRows, orphanRows, contradictions, dupBody, dupTable };
 }
 
 /**
@@ -276,6 +313,35 @@ function selfTest() {
       expect: ['contradiction:1'],
     },
     {
+      name: '反例：正文条目号重复（两个不同的 `## 48.`）',
+      md: [
+        '## 一览表',
+        '',
+        '| # | 条目 |',
+        '| --- | --- |',
+        '| 48 | 甲 |',
+        '',
+        '## 48. 原条目：像通道丢段',
+        '',
+        '## 48. 追加节：该归因已证伪',
+      ].join('\n'),
+      expect: ['dup:48'],
+    },
+    {
+      name: '反例：一览表行号重复',
+      md: [
+        '## 一览表',
+        '',
+        '| # | 条目 |',
+        '| --- | --- |',
+        '| 1 | 甲 |',
+        '| 1 | 甲（又一条） |',
+        '',
+        '## 1. 甲',
+      ].join('\n'),
+      expect: ['duptable:1'],
+    },
+    {
       name: '反例：表里写「未修」但正文用非终局措辞（大幅收口）——不得误报',
       md: [
         '## 一览表',
@@ -297,6 +363,8 @@ function selfTest() {
     for (const b of r.missingRows) got.push('missing:' + b.num);
     for (const t of r.orphanRows) got.push('orphan:' + t.num);
     for (const x of r.contradictions) got.push('contradiction:' + x.num);
+    for (const d of r.dupBody) got.push('dup:' + d.num);
+    for (const d of r.dupTable) got.push('duptable:' + d.num);
     const want = c.expect.slice().sort();
     const have = got.slice().sort();
     if (JSON.stringify(want) !== JSON.stringify(have)) {
@@ -310,7 +378,7 @@ function selfTest() {
     process.stderr.write('[lti] 判据已经漂移。修 scripts/check-long-term-issues.mjs，不要改用例去迁就实现。\n');
     return 1;
   }
-  process.stdout.write('[lti] ✔ 自检通过（' + CASES.length + ' 个用例：正例 1、反例 4）。\n');
+  process.stdout.write('[lti] ✔ 自检通过（' + CASES.length + ' 个用例：正例 1、反例 6）。\n');
   return 0;
 }
 
@@ -323,28 +391,33 @@ function main() {
     process.stderr.write('[lti] 读不到 ' + DOC + '\n');
     return 2;
   }
-  const { body, table, problems, missingRows, orphanRows, contradictions } = analyze(fs.readFileSync(DOC, 'utf8'));
+  const { body, table, problems, missingRows, orphanRows, contradictions, dupBody, dupTable } = analyze(fs.readFileSync(DOC, 'utf8'));
 
   const summary = {
     ok: problems.length === 0,
     bodyEntries: body.length,
+    distinctBodyNums: new Set(body.map((b) => b.num)).size,
     tableRows: table.length,
     missingRows: missingRows.map((b) => b.num),
     orphanRows: orphanRows.map((t) => t.num),
     contradictions: contradictions.map((c) => c.num),
+    dupBody: dupBody.map((d) => d.num),
+    dupTable: dupTable.map((d) => d.num),
   };
 
   if (json) {
     process.stdout.write(JSON.stringify({ ...summary, problems }, null, 2) + '\n');
   } else {
     process.stdout.write('[lti] 文档：' + DOC + '\n');
-    process.stdout.write('  正文条目 ' + body.length + ' 个；一览表 ' + table.length + ' 行\n');
+    process.stdout.write('  正文条目 ' + body.length + ' 个（不同号 ' + summary.distinctBodyNums + ' 个）；一览表 ' + table.length + ' 行\n');
     process.stdout.write('  ' + (missingRows.length ? 'FAIL' : 'PASS') + '  正文→表（缺行 '
       + missingRows.length + ' 个）\n');
     process.stdout.write('  ' + (orphanRows.length ? 'FAIL' : 'PASS') + '  表→正文（孤儿行 '
       + orphanRows.length + ' 个）\n');
     process.stdout.write('  ' + (contradictions.length ? 'FAIL' : 'PASS') + '  状态不矛盾（矛盾 '
-      + contradictions.length + ' 处）\n\n');
+      + contradictions.length + ' 处）\n');
+    process.stdout.write('  ' + ((dupBody.length || dupTable.length) ? 'FAIL' : 'PASS') + '  号不重复（正文重号 '
+      + dupBody.length + ' / 表重行 ' + dupTable.length + '）\n\n');
   }
 
   if (problems.length) {

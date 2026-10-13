@@ -1,0 +1,17 @@
+{
+  "_why": "「有意退休」清单：结构性重写时**故意**改掉、不允许被当成『内容丢失』的字面量。每条必须能说出理由——没有理由的放行等于把闸门关掉。见 scripts/doc-rewrite-audit.mjs 的 diffFingerprints()。",
+  "_scope": "只对 doc-rewrite-audit.mjs 的 check 生效；不影响任何其它闸门。",
+  "keys": [
+    "$env:PROBE_HEADED='1'; node .tmp-probe/zai/probe-zai-chat-frames.mjs",
+    ".tmp-probe/zai/live-zai-send-tee.mjs",
+    "live-zai-readonly.mjs",
+    "48. **「提示词投递 = 纯文本」档发不完整：归因已更正为「换行规范化误报」**（2026-10-11 更新）"
+  ],
+  "cjk": [],
+  "reasons": {
+    "$env:PROBE_HEADED='1'; node .tmp-probe/zai/probe-zai-chat-frames.mjs": "2026-10-14：该命令指向被 `.gitignore:61` 覆盖的 `.tmp-probe/`，对克隆仓库的人不存在。已换成入库路径 `package/dsh-webcode-bridge/test-mock/zai-capture-frames.mjs`（探针已入库），步骤落在 doc/runbooks/zai-capture-frames.md。这是「有意退休」，不是丢证据。",
+    ".tmp-probe/zai/live-zai-send-tee.mjs": "同上：该脚本只存在于本机 gitignore 目录，入库处不引用它；其用途（在桥自己的浏览器里装 fetch tee）已由入库探针的只读发送路径覆盖。",
+    "live-zai-readonly.mjs": "同上：本机一次性只读检查脚本，读数已逐字记进 long-term-issues.md §14/§29/#30 正文；脚本本体不入库。",
+    "48. **「提示词投递 = 纯文本」档发不完整：归因已更正为「换行规范化误报」**（2026-10-11 更新）": "2026-10-14：这是**重号修复**——原文件有两个不同的 `## 48.` 标题（3015 行与 3130 行），本标题是后者，已改成 `## 48b.`。标题正文逐字保留，只有号变了（`48.` → `48b.`）。放行的是「标题文本的这一次出现」减少 1 次，而它仍以 `48b.` 形式存在。"
+  }
+}

@@ -18,7 +18,8 @@
 | 文档 | 用途 | 什么时候读 |
 | --- | --- | --- |
 | [PROJECT-INTENT.md](PROJECT-INTENT.md) | **项目意图**：要做什么、不要做什么，每条附用户原话与出处 | 判断「这算不算这个项目该做的事」时 |
-| [CODE-STRUCTURE.md](CODE-STRUCTURE.md) | **代码结构归类**：`lib/` 48 个模块（+`lib/sites/` 2 个 = 索引口径 50）的分层、依赖方向、God file 清单、测试分布 | 改动跨模块、决定新模块放哪一层时 |
+| [HISTORY.md](HISTORY.md) | **制作与发展时间线**：两个起点口径（起意 09-06 / 入库 09-07）、九个阶段、长期未闭环的四件事；每条读数附取法 | 接手项目、回答「这东西是怎么长出来的」时 |
+| [CODE-STRUCTURE.md](CODE-STRUCTURE.md) | **代码结构归类**：`lib/` 53 个模块（52 个 ESM + `client.cjs`）的分层、依赖方向、God file 清单、测试分布；规模读数以 `gen-index.mjs` 为准 | 改动跨模块、决定新模块放哪一层时 |
 | [ROADMAP.md](ROADMAP.md) | **未来框架**：阶段划分、每阶段判据与退出条件、与官方 AgentTeams / 外部调度插件的关系 | 决定下一轮做什么、按什么顺序做时 |
 | [REQUIREMENTS-TASKBOARD.md](REQUIREMENTS-TASKBOARD.md) | **任务面板需求**（用户原话逐条）：项目化、graph、审批闸门、参考实现对照 | 动任务面板 / 任务数据层之前 |
 | [PROMPT-ENGINEERING.md](PROMPT-ENGINEERING.md) | **提示词工程立场**：教原生协议、标记词形逐字教学、默认路径零位移；含真机对照读数与「不宣称最优」的元纪律 | 改提示词 / 改协议教学 / 改解析宽容度之前 |
@@ -27,7 +28,7 @@
 | [security-review.md](security-review.md) | 安全审查：攻击面清单、已做的防护、待办 | 动控制面、cookie、镜像转发时 |
 | [comment-style.md](comment-style.md) | 注释风格：为什么这么写、避免什么；错误码与交付规范 | 写新模块或重构前 |
 | [review-guide.md](review-guide.md) | 评审指南：怎么审这份代码、常见陷阱 | 接手评审时 |
-| [progress.md](progress.md) | **进度台账**：当前走到哪、下一步是什么、已知环境约束 | 会话开始 / 中断恢复时 |
+| [progress.md](progress.md) | **进度台账**：当前走到哪、下一步是什么、已知环境约束。⚠ 97 个 `##` 小节是**倒序**堆叠的，文件顶部有 `scripts/gen-progress-index.mjs` 生成的**分节索引**（按时代分组、带行号）；索引过期会被 `--check` 拦下 | 会话开始 / 中断恢复时 |
 | [UNDERSTANDING.md](UNDERSTANDING.md) | **用户意图理解文档**：逐条写「用户原话 + 我的理解 + 核实 + 结论」，未定项集中在一节 | 动手前；对需求有疑问时 |
 | [user-voice-log.md](user-voice-log.md) | **用户原话记录**（脚本自动汇总）：用户本人发出的每一条消息，按时间去重排列；判断意图时的第一手依据 | 判断「这算不算本项目的意图」时；接手本项目前 |
 | [diagnosis-2026-09-16.md](diagnosis-2026-09-16.md) | **全局诊断报告**：进度核对、文档卫生、#19 真根因、#22 前提推翻、#9 重定性、代码质量量化、未来框架与排期 | 想一次掌握「当前状态 + 下一步 + 已证结论」时 |
@@ -81,7 +82,6 @@
 ## 调研（doc/research/）
 
 外部证据与一次性资料。**结论要回写到上面的常读文档**，这里只留原始素材：
-
 - `deepseek-web-behavior.md`、`deepseek-newui-2026-09-10.md` — 站点前端行为与改版记录
 - `reference-projects.md` — 参考实现清单与来源
 - `task-board-vs-agentteams-graph.md` — **Graph Engineering 对照分析**：`dsh-task-board`（cron 驱动的执行台账，无依赖边）与官方 AgentTeams 任务图（`blockedBy` DAG + 全图环检测，但**无调度器**）的逻辑拆解，以及落地一张可自动推进的任务图还需要考虑什么
@@ -106,6 +106,17 @@
 - `2026-09-23-token-density-calibration.md` — **token 密度标定（官方真实数据）**：官方文档给的是平均密度（中文 0.6 / 英文 0.3），本文用本机凭据对**官方端点实测**六类样本，先修掉「上下文缓存让同一段文本两次差 1.86 倍」的测量陷阱，再拟合出「每类都不低于实测」的三类单价（CJK 0.75 / 散文 ASCII 0.30 / 其余 ASCII 0.70）——**旧口径 0.7/0.25 在源码上低估 33%、数字符号低估 63%**，正是编码 agent 的日常流量
 - `2026-10-05-dsh-multi-session-and-client-hot-swap.md` — **官方「多会话」的真实实现 + 客户端插件热换契约（0.2.0-rc.2 实读 + 真机）**：① `main` 是 keyed 槽一次一个 key、面板与单个会话互斥、任何官方导航都 `selectPanel(null)` ⇒ **官方没有多会话同屏**；官方支持的等价构造 = 面板声明 session 子槽 + `sessions.retain` + `SessionProvider` + `renderFactorySlot('conversation.content',{variant:'embedded'})`（`ui-subagent` / `ui-sidebar-right` 在产范例）；② 「面板全空」的两类形状（抛错空盒 vs 塌高）与各自读数；③ `dsh-client-hmr` 热换契约（产物路径 = `exports["./client"]`、内存快照 + `&rev=` 破缓存、`/plugins*` 免 token、宿主半边必须重启）与**正确姿势：原地覆盖**（`Move-Item` 替换会 404，实测）；④ 真页面验证通道——`dsh web` 启动横幅就打印带 token 的 URL，「token 只在内存里 ⇒ 开不了真页面」这个旧判断只对了一半；⑤ 本轮两个真根因（`layout` 未进 inject / `warn` 声明在 `apply()` 里）与「正则判据看不见作用域」这一课
 - `real-probe-*.json`、`sse-samples/` — 真机探针输出与 SSE 样本
+
+## 操作手册（doc/runbooks/）
+
+**需要人配合或按步骤执行**的取证/运维流程。放在 `doc/` 而不是 `.tmp-probe/`，
+是因为它们要被 `lib/` 与台账的注释**引用**——而 `wiki/protocol.md` §5 禁止入库文件引用
+「外面没有它就理解不了」的路径。探针脚本本身入库为
+`package/dsh-webcode-bridge/test-mock/<名字>.mjs`。
+
+| 手册 | 解决什么 | 需要什么 |
+| --- | --- | --- |
+| [runbooks/zai-capture-frames.md](runbooks/zai-capture-frames.md) | 抓 z.ai 真实 completion 帧（长期问题 **#30** 的唯一出路） | 人肉过一次阿里云滑块（#29 风控闸，代码不能绕） |
 - `autonomous-marathon-vs-official-api-*.md`、`thinking-trace-*.md` — 专题调研
 - `awesome-deepseek-harness-README.zh-CN.md` — 外部资料留档
 

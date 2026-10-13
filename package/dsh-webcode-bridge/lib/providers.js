@@ -632,11 +632,19 @@ export const ZAI = withEffort({
   // ——即既不是 OpenAISseDecoder 的 `choices[].delta.content`，也不是 GlmDecoder 的
   // `parts[].content[].type`（任务书里「怀疑 z.ai 用 GLM 帧」这一条**被推翻**）。
   //
-  // 缺的那一半在 lib/decoder.js（**本文件写权限不含它**）：需要新增一个 zai 专属 kind，
+  // 缺的那一半在 lib/decoder.js：需要新增一个 zai 专属 kind，
   // 语义要点是「`delta_content` 是增量、`content` 是快照」，两者混用时要走 GlmDecoder
   // 那种前缀差分（否则整段会播两遍）。在它落地并拿到**真机帧夹具**之前，z.ai 不应
-  // 被当成可用站点；后续取证见 doc/long-term-issues.md 第 14 条与
-  // `.tmp-probe/zai/RESULT.md`（含重新抓帧的确切步骤）。
+  // 被当成可用站点。
+  //
+  // ⚠ 取证步骤的落点（2026-10-14 改正）：本条原先把读者指向 `.tmp-probe/zai/RESULT.md`，
+  // 而 `.tmp-probe/` 被 `.gitignore:61` 覆盖 ⇒ **对克隆仓库的人不存在**。而那句话说的不只是
+  // 「读数在那里」，是「**确切步骤**在那里」——即离开它就无法重跑，正是 `wiki/protocol.md` §5
+  // 禁止的形态。步骤与探针已入库：
+  //   · 步骤 → `doc/runbooks/zai-capture-frames.md`
+  //   · 探针 → `test-mock/zai-capture-frames.mjs`（`PROBE_HEADED=1`，需人工过一次滑块）
+  // 另：本条原先写「见 doc/long-term-issues.md 第 14 条」，**条号是错的**——第 14 条是
+  // 「Z.ai 没有会话地址形状」（0.19.52 已收口）；帧格式的登记条目是 **§30**。
   decoder: 'openai-sse', stream: true, experimental: true,
   loginProbe: {
     bad: 'button:has-text("登录"), a:has-text("登录"), button:has-text("Sign in"), a:has-text("Sign in")',

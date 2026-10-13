@@ -59,7 +59,8 @@
 | 45 | **桌面 profile 的声明与磁盘分叉：声明仍钉 0.19.61，磁盘已是 0.19.64**（2026-10-05 登记）——本轮靠官方 `client-hmr` 通道**原地热换** `lib/client.cjs` 让桌面端立刻用上修复（不改进程、不重启应用），但**没改 profile 声明**。风险：任何一次 pnpm 通道（装别的插件、启动期 reconcile）都可能把客户端静默换回声明里的旧版 ⇒ 缺陷复发。恢复「声明 == 磁盘」必须**完全退出桌面端**后走官方通道装一次（`dsh` CLI 拒绝管理 desktop profile，须用桌面端自己的 carrier），且宿主半边本来就要重启才换 | 中 | 否 | `~/.dsh/profiles/desktop/package.json`、`~/.dsh/profiles/desktop/node_modules/dsh-webcode-bridge/lib/client.cjs`、`doc/progress.md`（2026-10-05 §八）、`doc/research/2026-10-05-dsh-multi-session-and-client-hot-swap.md` §5 |
 | 46 | **npm 发布被账号安全策略挡在「staged 待批」**（2026-10-05 登记，**同日已解决**）——`npm publish` 报成功但 registry 上 `latest` 仍是 0.19.51（`E409 Cannot publish over previously staged version "0.19.64"`）；根因是 npm 收紧「绕过 2FA 的 token 直接发布」，本机 token 属该类 ⇒ 发布被暂存，需账号主人 2FA 批准。**用户本人批准后已上线**：`latest = 0.19.64`、61 files、shasum `8a7aa56f…` 与本地打包 tarball **逐字节相同**（`published 2026-10-05T15:56:43Z`）。留档价值 = 「命令行打印 `+ pkg@ver` 不等于 registry 上线」这条判据（必须直连 registry 读 `dist-tags`） | 中 | 否 | `~/.npmrc`（token）、npm registry `dsh-webcode-bridge`、`package/dsh-webcode-bridge/dsh-webcode-bridge-0.19.64.tgz` |
 | 47 | **官方会话 chrome 在第三方面板内不可达：列顶栏按官方 DOM+官方 CSS module 复刻、右侧 tab 靠官方页签承载**（2026-10-06 登记；10-07 两处更新；**2026-10-08 复刻落地并升级判据**）——① 官方 header 三块 chip 注册进 `conversation.session.header` 的子槽，该槽只由官方会话视图渲染（0.2.1-alpha.1：`ui-conversation:21191-21210`），且 slots 公开投影**不含组件**（`dsh-client-ui-slots/lib/index.js:313` 原文 without components or executable hooks）⇒ 受支持路径下无法原样挂载；② 官方右栏可见性写死 `activePanelId === null`（`ui-sidebar-right:5874`/`:9062`）⇒ 面板开着必无右栏，第三方也不能在自有面板里渲染官方右栏内容（`renderer:330-333` 归属校验）；③ **出路已落地**：右栏改用官方**页签**承载并发列（`sidebarRightTabs.register` + `sidebar.right.pane.tab`，真机 `window.__hwbRail={registered:true}`）；④ **「在官方视图打开」已修通（10-07 轮）**：放行标记由按钮 onClick 置位、而守卫只在 pointerdown 捕获期消费 ⇒ 订阅回调决策时读不到；修法 = `createPanelGuard` 的 panelInfo 订阅回调**同样消费**放行标记，真机 `panelGone:true + headers:4 + lastDecision:"allow:leave"`（10-08 轮该入口从列头按钮挪进官方同款「更多操作」菜单，放行时序一字未改，判据仍钉两个消费点）；⑤ **「列内渲染官方 session header」定案为做不到（10-07 真机取证，10-08 在 0.2.1-alpha.1 复核仍成立）**：两道官方闸——授权（renderSlot 只认本条目 children 声明，`renderer:332`）+ 声明唯一（children 声明遇已声明槽名必抛，`slots:193`；该槽已被官方 registerHeader 声明为 conversation.header 的 child，`ui-conversation:23073-23086`）⇒ 真机逐字 `slot "conversation.session.header" is already declared (by an entry in "conversation.header" (mf))`，**列条目注册整体失败、列体全空**。⇒ 出路不是「自绘一套看着像的」，而是**按官方复刻**（10-08 轮 `ColumnHeader`）：结构逐字照官方 `ConversationHeader`/`ConversationSessionHeader` 那棵树（9 个结构位 + 同组 role/aria）、**样式不自己写**（直接挂官方 CSS module 的哈希类名，前缀由 `officialCssPrefix` 运行时从 `<style data-plugin-css>` 反解 ⇒ 官方改哈希自动跟上；桌面 asar 0.2.0-rc.2 与 web 0.2.1-alpha.1 **前缀不同**，这条设计让两版都拿得到正确样式）、数据与文案照官方投影键与 zh 词典（拿不到就不渲染那块）、「对话/轨迹」页签**真的切官方视图**（读官方 `conversation.view` 注册表 + 经 `conversation.session` 的 `view` owner prop，组件身份按 viewId 缓存防重挂）；⑥ 右栏受官方布局所限（常态 300px～45%、中列保底 400px），3–4 列并排只在全屏下实用 | 中 | 否 | `package/dsh-webcode-bridge/lib/client.cjs`、`test-mock/probe-concurrent-live.mjs`、`scripts/check-official-drift.mjs`、`doc/progress.md`（2026-10-08 轮 §四） |
-| 48 | **「提示词投递 = 纯文本」档在长会话上必然发不完整（`PROMPT_TRUNCATED`）**（2026-10-06 登记；**2026-10-11 归因更正 + 真机实证**）——真机造 jobs 时撞到：用户设置 `promptTransport: inline`（全局），44,202 字符提示词灌进 deepseek 输入框，**两次尝试都恰好丢 126 个字符**（44,202→44,076；压缩重试后 36,253→36,127），`PROMPT_TRUNCATED` 回读校验如实拦下、**该轮直接失败**；同一轮把投递形态切到 `attach`（插件默认值）后立刻成功。⚠ **原登记把归因写成「更像写入通道丢一段固定前缀/后缀」——该归因已证伪**：2026-10-11 用真机 Chromium（HeadlessChrome/151）跑离线 textarea 探针，五项断言全部成立 —— CRLF 输入回读差值 **252 = 252**（等于 CRLF 对数）、LF 对照**零差**、CRLF→LF 规范化后**内容逐字相等**、**尾部保留**、且生产判据 `echoed.length < sent.length - 8` 确实会触发。**结论：丢的 126 个「字符」是 126 个 `\r\n` 被 `textarea.value` 按 HTML 规范规范化为 `\n`，正文内容零丢失；这是桥的判据误报，不是网页截断。** 旁证：本机 prompt-store 与事故同日的 4 个会话提示词文件 `CRLF` 计数**恰为 126**（`session-19e2fa47-…__deepseek.md`，2026/10/6 10:12:56），其 CRLF 区段起点前文正是 `Instructions from: AGENTS.md`，而本机 `AGENTS.md` 恰好 **126 行**（`core.autocrlf=true`）。**本轮已修（L1 编辑器层）**：新增纯函数 `composerEchoVerdict`，判据从「比长度」改成比**内容等价**，规范化白名单刻意极窄（只允许 `\r\n`→`\n`、**行尾**空白、NFC），**不允许**泛化 trim / 折叠中间空白；真正的截断（中间丢字 / 尾部截断 / **等长内容被替换**）依然被拦住。⑦ 条护栏 + 变异 M8–M10 全被抓（M8「退回只比长度」让 ①③④ 一起红）。**L2 提交层仍待做**：`composerCleared()` / `navigatedAway()` 只证明「消息已离开输入框」，**不证明**「提交的正文与输入等价」；证据不足时应记**不确定**。`SITE_COMPOSER_HARD_LIMIT` 仍只有 kimi: 200,000 | 中 | 部分 | `lib/browser-driver.js`（`composerEchoVerdict` / `fillComposer` / `writeFieldNative` / `readComposer`）、`test/composer-write.test.mjs`（回读判据 ①–⑦）、`doc/progress.md`（2026-10-11 节）、`.tmp/evidence/crlf-chromium.json`（真机读数） |
+| 48 | **「提示词投递 = 纯文本」档在长会话上必然发不完整（`PROMPT_TRUNCATED`）**（2026-10-06 登记；**2026-10-11 归因更正 + 真机实证**）——真机造 jobs 时撞到：用户设置 `promptTransport: inline`（全局），44,202 字符提示词灌进 deepseek 输入框，**两次尝试都恰好丢 126 个字符**（44,202→44,076；压缩重试后 36,253→36,127），`PROMPT_TRUNCATED` 回读校验如实拦下、**该轮直接失败**；同一轮把投递形态切到 `attach`（插件默认值）后立刻成功。⚠ **原登记把归因写成「更像写入通道丢一段固定前缀/后缀」——该归因已证伪**：2026-10-11 用真机 Chromium（HeadlessChrome/151）跑离线 textarea 探针，五项断言全部成立 —— CRLF 输入回读差值 **252 = 252**（等于 CRLF 对数）、LF 对照**零差**、CRLF→LF 规范化后**内容逐字相等**、**尾部保留**、且生产判据 `echoed.length < sent.length - 8` 确实会触发。**结论：丢的 126 个「字符」是 126 个 `\r\n` 被 `textarea.value` 按 HTML 规范规范化为 `\n`，正文内容零丢失；这是桥的判据误报，不是网页截断。** 旁证：本机 prompt-store 与事故同日的 4 个会话提示词文件 `CRLF` 计数**恰为 126**（`session-19e2fa47-…__deepseek.md`，2026/10/6 10:12:56），其 CRLF 区段起点前文正是 `Instructions from: AGENTS.md`，而本机 `AGENTS.md` 恰好 **126 行**（`core.autocrlf=true`）。**本轮已修（L1 编辑器层）**：新增纯函数 `composerEchoVerdict`，判据从「比长度」改成比**内容等价**，规范化白名单刻意极窄（只允许 `\r\n`→`\n`、**行尾**空白、NFC），**不允许**泛化 trim / 折叠中间空白；真正的截断（中间丢字 / 尾部截断 / **等长内容被替换**）依然被拦住。⑦ 条护栏 + 变异 M8–M10 全被抓（M8「退回只比长度」让 ①③④ 一起红）。**L2 提交层仍待做**：`composerCleared()` / `navigatedAway()` 只证明「消息已离开输入框」，**不证明**「提交的正文与输入等价」；证据不足时应记**不确定**。`SITE_COMPOSER_HARD_LIMIT` 仍只有 kimi: 200,000 | 中 | 部分 | `lib/browser-driver.js`（`composerEchoVerdict` / `fillComposer` / `writeFieldNative` / `readComposer`）、`test/composer-write.test.mjs`（回读判据 ①–⑦）、`doc/progress.md`（2026-10-11 节）、`.tmp/evidence/crlf-chromium.json`（真机读数；⚠ 本路径被 gitignore，读数已逐字回写在 `lib/browser-driver.js` 的 `composerEchoVerdict` 注释里） |
+| 48b | **（#48 的追加节，不是独立条目）** 归因更正：不是通道丢段，是**换行规范化误报**（2026-10-11 追加）——`\r\n` 被 `textarea.value` 按 HTML 规范规范化为 `\n`，**正文内容零丢失**；判据已从「比长度」改为「比内容等价」（`composerEchoVerdict`）。真因、五项断言读数、护栏与变异见正文 §48b。**更正原因**：2026-10-11 追加时误用了第二个 `## 48.` 标题，导致本文件有两个不同的 `## 48.`（`check-long-term-issues.mjs` 用集合比对**看不见重号**）；2026-10-14 改为 `48b.` 并在 `check-long-term-issues.mjs` 里补上**重号判据** | 中 | 部分 | `lib/browser-driver.js`（`composerEchoVerdict`）、`test/composer-write.test.mjs`、`scripts/check-long-term-issues.mjs`（重号判据） |
 | 50 | **账号锁接管路径非原子：陈旧锁可被多个进程同时「接管」**（2026-10-11 登记，**同日完全修复 0.19.71**）——`acquireBridgeLock` 的接管分支是「读 → 判 → **非独占** `writeFileSync` 覆写」，而正常首建路径用的是 `flag:'wx'`（那条是对的）。⇒ 盘上留有陈旧锁时（强杀/崩溃/重启的常见后果，正是 0.19.22 要解决的场景），多个进程可全部判定可接管并**全部返回 `ok:true`**，破坏「同一账号不得同时桥接」这条用户准则。**实测**：`fresh`（无锁文件）**0/20** 多持；`stale`（盘上有死锁）**20/20** 多持；屏障同步 4 进程 ×8 轮**每轮 4 个进程全 `ok`**。**触发窗口须如实标定**：无屏障自然调度 **0/84**、单次接管全程仅 **2.0–4.2ms** ⇒ 真实竞态缺陷，但**不是高频故障**，且触发率**尚未**从生产数据估计（该试验不是生产启动事件的随机抽样）。**修复（同日完成，两层）**：① **判据层** —— `decideBridgeLock` 加「明确存活 ⇒ 一律 `held`，锁龄不再构成放行理由」，时间上限**降级为仅当存活判据缺席时的有界兜底**，并把 PID 复用出口显式标为 `recoverable`；② **原子层** —— 新增**过渡互斥**（`webcode-bridge.lock.guard.d`，`mkdir` 原子原语），**所有对锁文件的改动（建立/回收/释放）都在临界区内**，且临界区内**重读并重新裁决**（外面那次读只作快速路径，不作权威判据）。**修复后多进程实测：`stale` 2×12 轮与 4×8 轮均 0 多持、每轮恰好 1 个赢家**；`fresh` 无退化。**护栏**：新增 ①e2–①e6、⑤b、**⑧/⑧b（真多进程竞争）**、⑨（守卫回收与只删自己的）⇒ `bridge-lock.test.mjs` **29/29**；**变异测试 M1–M7 全部被抓**（其中 M5「摘掉过渡互斥」直接让 ⑧ 变红 ⇒ 该护栏真实承载修复）。**三个被证伪的候选协议（教训，写给下一个改锁的人）**：`rename` aside 是**按路径**而非**按身份**操作 ⇒ 会移走别人刚建立的**活锁**（ABA；实测 A 移走 `B-LIVE`，两进程同时认为自己持有）；天真的「`mkdir` 当锁 + `rmdir` 回收」**只修首次获取、回收仍删掉新持有者**；非独占覆写则直接静默覆盖。⇒ **「原型 0/N 多持」不构成安全证明**，只说明**该交错**未触发。**平台语义（Windows 实测）**：`rename` 覆盖已存在目标**成功且静默覆盖**、源不存在 `ENOENT`、**目标被打开读取 `EPERM`**、`wx` 落已存在 `EEXIST` ⇒ `EPERM`（进程性失败）与 `ENOENT`（输竞争）**不能一并当「拿到锁」**。**0.19.73（复审三进程窗口，已修复）**：0.19.72 的顺序是**先 rename 移走、后查存活** —— 移走期间路径不存在，第三个进程 C 可趁空档 mkdir 成功，而 A **仍活着、仍在临界区**。确定性注入：guardPathExistsAfterRename:false → C_acquiredInWindow:true → B_putBackSucceeded:false ⇒ A 与 C 同时持有、A 的守卫被永久遗弃。**这不是年龄兜底那类风险**（B 的判断本身正确）。修法 = **先验证后动手**：存活判定排在任何移走之前；认领后复核身份防 ABA；放不回也不继续。护栏 ⑨b2/⑨c2/⑨c3 + 变异 M15–M17 全被抓。**\n\n**已知边界（0.19.72 更新）**：初版（0.19.71）的守卫回收**只看 mtime**，复审指出「通常几毫秒」是概率论证而非不变量——进程可被暂停（调试器/休眠/GC 停顿）超过 15 秒而**仍然活着**。**故障注入已复现**：mtime 改老 + `owner.json` 保留**确定存活**的 pid ⇒ 调用方照样回收成功（`acquiredGuardWhileAAlive: true`），两个进程都认为自己持有守卫。**0.19.72 已修**：回收改成与锁文件同构的三态（明确存活 ⇒ **绝不回收**；明确死亡 ⇒ 回收；判据给不出结论 ⇒ 仅用**显著放宽**的年龄兜底且**留痕说明是猜测**）；释放判据也从「只认 pid」加固为「pid + `startedAt`」（防 pid 复用误删别人的守卫），并明确「标记缺失/损坏 ⇒ 按可能是自己写坏的删除」（不可删除的空守卫会挡住所有人）。护栏 ⑨b–⑨g + 变异 M11–M14 全被抓。**未验**：非 Windows；真实「两个桥互相杀浏览器」的端到端复现（已证明的是**协议不再允许**该状态） | 高 | 是 | `lib/bridge-lock.js`（`decideBridgeLock` / `acquireBridgeLock` / `acquireTransitionGuard` / `recoverStaleGuard` / `releaseTransitionGuard`）、`test/bridge-lock.test.mjs`（①e2–①e6、⑤b、⑧、⑧b、⑨–⑨g）、`doc/progress.md`（2026-10-11 节） |
 | 49 | **0.19.69 的 profile 安装与「重启 dsh web」在本机沙箱内无法执行**（2026-10-08 登记，**等用户在正常环境补做**）——本轮发布链其余各步全部完成并已复核：git 提交 `2b63492` + `1ab845f`、push（`05967a1..1ab845f`，走 HTTPS + `http.sslBackend=openssl`）、tag `v0.19.69`、GitHub Release 带资产 `dsh-webcode-bridge-0.19.69.tgz`（930,799 B）、CI 与 CodeQL success、npm `latest = 0.19.69`（`dist.shasum a6f8b8459dff…` 与本地 tarball 逐字节同源）。**卡住的是最后一步**：`~/.dsh` 整棵树在本沙箱内**只读**（写探针文件即 `Access denied`），`dsh plugin --profile web add <tgz>` 报 `EPERM: operation not permitted, open …\profiles\web\package.json.lock`。⇒ 用户须在正常环境里 `dsh plugin --profile web add .\dsh-webcode-bridge-0.19.69.tgz` 并**重启 dsh web**（「装完不重启 = 等于没装」）。⚠ 注意 #45 同族风险：桌面端是**另一条**通道（`dsh` CLI 拒绝管理 desktop profile），声明与磁盘一致要完全退出桌面端后用桌面端自己的 carrier。 | 中 | 否 | `~/.dsh/profiles/web/package.json`、`doc/progress.md`（0.19.69 节 §四） |
 | 51 | **适配器看门狗的两个既有缺陷**（2026-10-11 登记，**同日修复 0.19.74**）——回应 GitHub Issue #1 报错原文的自相矛盾（「驱动不在忙」+「最近驱动活动 2s 前」+「页面已有 2172 字回复未回传」）。**A：相位被冻结整轮** —— `nextWithIdle()` 首次执行在 executor 微任务**之前**，而驱动的 `busy = true` 在 `runTurn` 内部（更晚）⇒ 第一次读到的 `busy` 恒 false，相位恒判「网页还没开口且驱动不在忙」，`idleFirstByteMultiplier` **在生产路径上从未生效**；而 `idleScene()` 开火时读的是**新鲜**读数 ⇒ 冻结相位与新鲜现场被并排印出。既有护栏 ① 用静态桩（驱动从未被调用就报 busy）复现不出该时序。**B：`idleDeadline` 锚在 `submitAtReal`** —— 文档承诺「自上次事件起 N 秒」，实现却是整轮固定 ⇒ 是**总时长上限**冒充静默上限。实测（窗口 1300ms、每 150ms 一个 delta）：修前 **1315ms 处判死**，而那时已收到 `chunk0…chunk7`；该缺陷在 `471efcd` 上同样复现（stash 复核过）。**修法**：相位每拍重算 + 起点取 `max(投放时刻, 上次事件)` + 文案改「桥侧已 Ns 没有从网页收到任何新事件」/「驱动**自报**不在忙」。护栏 ⑧/⑨/⑨b（反向安全线：事件真停了仍须判死）/⑩；变异 M1/M2/M3 全部被抓且各被对应护栏抓住。**未做**：真机长轮次（>120s 单轮）复现、首字节耗时分布采集。 | 高 | 否 | `lib/index.js`（`nextWithIdle` / `idleDeadline` / `idleTimeoutError` / `driverForRead`）、`lib/idle-window.js`、`test/watchdog-first-byte.test.mjs` ⑧⑨⑨b⑩、`.tmp/probe-deadline-origin.mjs`、`.tmp/mutation-watchdog.mjs` |
@@ -1891,7 +1892,7 @@ node .tmp/icon-source-verify.mjs    # 退出码 0 = 九条逐字相同
 > 悬置滑块）。`WEB_CAPTCHA_REQUIRED` 的如实报错维持。
 >
 > **待办（一条）**：z.ai 自动化轮次要可用，需要一次**有人能看到的**滑块配合
->（有头探针 `$env:PROBE_HEADED='1'; node .tmp-probe/zai/probe-zai-chat-frames.mjs`，
+>（有头探针 `$env:PROBE_HEADED='1'; node package/dsh-webcode-bridge/test-mock/zai-capture-frames.mjs`，
 > 或实时版 `live-zai-send-tee.mjs`）——它同时补 #30 的帧取证。用户本轮选择跳过。
 
 ### 现象（用户原话）
@@ -1940,8 +1941,9 @@ headed×1）**全部 0 帧**；把 UA 从 `HeadlessChrome` 换成正常 Chrome �
 人肉过一次验证之后 `enable_captcha` 是否仍每次触发：`lc` 是每次发送的局部变量、
 `await HN()` 每次发送重跑，但 `HN()` 内部是阿里云无痕验证语义（分低静默通过、分高弹滑块），
 而**我们一次 `HN()` 成功返回都没观测到** ⇒ 答不了。决定性下一步：
-`$env:PROBE_HEADED='1'; node .tmp-probe/zai/probe-zai-chat-frames.mjs`（有头窗停在页面 150s，
-人肉拖过滑块后 fetch tee 自动落盘真机帧）。这条同时能回答 #30。
+`$env:PROBE_HEADED='1'; node package/dsh-webcode-bridge/test-mock/zai-capture-frames.mjs`（有头窗停在页面 150s，
+人肉拖过滑块后 fetch tee 自动落盘真机帧）。这条同时能回答 #30。完整步骤见
+[`runbooks/zai-capture-frames.md`](runbooks/zai-capture-frames.md)。
 
 ---
 
@@ -1949,13 +1951,29 @@ headed×1）**全部 0 帧**；把 UA 从 `HeadlessChrome` 换成正常 Chrome �
 
 > ### 2026-09-30 进展：取证工具链就绪，缺一次人肉滑块配合
 >
-> 新增实时版探针 `.tmp-probe/zai/live-zai-send-tee.mjs`（在桥自己的浏览器里装
-> fetch tee + 无害发送，避开「拷副本丢上下文」的形态）与只读检查
-> `live-zai-readonly.mjs`（档位控件/验证码/地址的实时读数，2026-09-30 已跑：
+> 新增实时版探针（在桥自己的浏览器里装 fetch tee + 无害发送，避开「拷副本丢上下文」的形态）
+> 与只读检查（档位控件/验证码/地址的实时读数，2026-09-30 已跑：
 > pill「深度思考 最高」、零验证码节点、发送后地址 `/c/<uuid>`）。帧仍为零——
-> 闸门（#29）挡在发送之前。**拿帧只差一步**：有头窗里人肉拖一次滑块（两脚本
-> 任一），帧会自动落盘；届时按下方字段形状写 decoder 并存逐字夹具。
-> 用户本轮选择跳过，维持登记。
+> 闸门（#29）挡在发送之前。**拿帧只差一步**：有头窗里人肉拖一次滑块（两脚本任一），
+> 帧会自动落盘；届时按下方字段形状写 decoder 并存逐字夹具。用户本轮选择跳过，维持登记。
+>
+> ### 2026-10-14 进展：取证入口**入库**（工具搬家，不是策略变化）
+>
+> 上面那些探针当时只存在于 `.tmp-probe/zai/`，而该目录被 `.gitignore:61` 覆盖 ⇒
+> **对克隆仓库的人不存在**；同时 `lib/providers.js`（ZAI 条目）与本条正文都在叫读者去那里取
+> **确切步骤**。那是 `wiki/protocol.md` §5 明令禁止的形态（「外面没有它就理解不了」的信息
+> 必须入库）。本轮把入口搬进入库处：
+>
+> | 原位置（gitignore） | 现位置（入库） |
+> | --- | --- |
+> | `.tmp-probe/zai/probe-zai-chat-frames.mjs` | `test-mock/zai-capture-frames.mjs` |
+> | `.tmp-probe/zai/RESULT.md` 的「重新抓帧的确切步骤」 | [`runbooks/zai-capture-frames.md`](runbooks/zai-capture-frames.md) |
+>
+> 并修掉 `providers.js` 里一处**指错条号**的引用（原文写「第 14 条」，而第 14 条是会话地址
+> 形状、0.19.52 已收口；帧格式是本条 §30）。
+>
+> **如实说明：本轮没有取得真机帧**，工具的搬家不改变「需要人工过一次滑块」这个前提。
+> 现状仍是「工具就绪、缺人的一次操作」。
 
 ### 结论来自站点 bundle 的逐字片段（**不是**一次真实响应）
 
@@ -1981,9 +1999,21 @@ headed×1）**全部 0 帧**；把 UA 从 `HeadlessChrome` 换成正常 Chrome �
 
 ### 取帧的方法（已备好，缺一次人肉过验证）
 
-`$env:PROBE_HEADED='1'; node .tmp-probe/zai/probe-zai-chat-frames.mjs`：有头窗停在页面等
-150s，人肉拖过滑块后，页面侧 fetch tee 自动把真机帧落盘。拿到帧后按上面字段形状写 decoder，
+**完整 runbook：[`runbooks/zai-capture-frames.md`](runbooks/zai-capture-frames.md)**
+（含副本 profile 的两个硬要求、判读口诀、拿到帧之后的五步）。一句话版本：
+
+```powershell
+$env:PROBE_HEADED='1'
+node package/dsh-webcode-bridge/test-mock/zai-capture-frames.mjs
+```
+
+有头窗停在页面等 **150s**，人肉拖过滑块后，页面侧 fetch tee 自动把真机帧落盘到
+`test-mock/out/zai-capture/<时间戳>/raw-stream.log`。拿到帧后按上面字段形状写 decoder，
 并把帧样本存成 `test/fixtures/` 的夹具（**逐字**，会话 id 可脱敏）。
+
+> 「帧为零」不等于脚本坏了：探针会在 `summary.json` 的 `verdict` 里写 `NO_FRAMES`，
+> 并让 `network` 里**有没有** `/api/chat/completions` 回答「是风控挡在发送前，
+> 还是捕获层没绑上」——前者重跑并过闸，后者才值得查 tee。
 
 ### 与此条同时被推翻的一条假设
 
@@ -3127,10 +3157,16 @@ dsh plugin --profile web add .\dsh-webcode-bridge-0.19.69.tgz
 制造「装上了但其实装在别处」的假象——那比「如实报告这一步没做」坏得多（本仓库对「不造假状态」
 有成文纪律）。安装本身是可逆、幂等的一条命令，交给用户在正常环境执行即可。
 
-## 48. **「提示词投递 = 纯文本」档发不完整：归因已更正为「换行规范化误报」**（2026-10-11 更新）
+## 48b. **「提示词投递 = 纯文本」档发不完整：归因已更正为「换行规范化误报」**（2026-10-11 更新）
 
 > 原登记（2026-10-06）的标题与归因是「像写入通道丢一段固定前缀/后缀」。**该归因已证伪。**
 > 本条目保留原始读数，只更正归因与状态。
+>
+> 📌 **两节的关系**：上面 `## 48.` 是 2026-10-06 的原登记（当时的现象、读数与两个候选修法），
+> 本节是 2026-10-11 的**归因更正与判据修复**。**结论以本节为准。**
+> 编号说明：2026-10-11 追加时误写成第二个 `## 48.`，于是本文件曾有两个不同的 `## 48.` 标题；
+> 2026-10-14 改为 `48b.`，并给 `check-long-term-issues.mjs` 补上**重号判据**
+> （此前它用集合比对，看不见重号：实测报「正文条目 55 个」而不同号只有 54 个）。
 
 ### 现象（真机，非推测）——读数不变
 
