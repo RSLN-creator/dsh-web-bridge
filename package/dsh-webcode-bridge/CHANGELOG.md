@@ -5,6 +5,85 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.76
+
+**补发 0.19.75 资产里缺的那半个 captcha 修复；并修掉三处「工具/闸门自身」的缺陷。**
+
+### 为什么换号重发（如实）
+
+0.19.75 已经发布（npm `latest` + GitHub Release 资产都在），但**它的资产不含本轮修的
+captcha 可见性修复**——逐字节核实下载回来的 tgz：新判据 `window.getComputedStyle` **不在**、
+旧的 `offsetWidth || offsetHeight || getClientRects` 判据**在**。
+⇒ 装 0.19.75 的人会碰到「正常轮次被误报需要人机验证」。
+npm 不允许覆盖同一版本号 ⇒ 只能换号重发。
+
+### 一、captcha 闸门在**零尺寸容器**上开火（产品缺陷）
+
+判据 `el.offsetWidth || el.offsetHeight || el.getClientRects?.().length` 的最后那个兜底，
+对**零尺寸但仍在布局里**的节点恒为真。z.ai 的 `#chat-captcha-element` 正是这种：
+常驻 DOM、`offsetWidth/Height = 0`，而 `getClientRects()` 仍返回 1 个 0×0 矩形。
+
+真机实测（发送中密集采样 20 拍，逐拍读数）：`0x0 rects=1` —— **20/20 拍**都被判「可见」，
+而真正该判的是那个 332×329 的 `#aliyunCaptcha-window-popup.window-show`。
+⇒ **正常轮次被判 `WEB_CAPTCHA_REQUIRED`**（`site-verify` 那次报 `visible:1`，
+而那一个「可见节点」是 0×0 的空壳）。
+
+修后判据：必须有**真实像素**（宽高都 > 0）且非 `display:none` / `visibility:hidden`。
+两向复算：只有空壳 → 旧 `visible=1`（误报）/ 新 `visible=0`（正确）；
+真弹滑块 → 旧 `visible=2` / 新 `visible=1`（**仍然报，没漏**）。
+
+### 二、模型回读把成功判成失败（产品缺陷，`readback-mismatch` 假红）
+
+原判据 `applied.includes(chosen.name)`，拿**已点击那一项的整行文本**当右侧。
+z.ai 的选项行逐字带营销后缀 `GLM-5.3-Flash NEW 轻量旗舰模型，高质量极速响应`，
+而触发按钮回读只有 `GLM-5.3-Flash` ⇒ 恒 false。
+真机日志逐字：`模型回读不一致：目标 GLM-5.3-Flash，回读 GLM-5.3-Flash`（两者看起来一样）。
+
+代价不只是难听：`selectModelGeneric` 把 `confirmed:false` 降级成 `strict:false`
+⇒ 该站点「严格模式」**静默失效**，而用户以为桥在校验。
+
+修法：抽出纯函数 `readbackConfirms(applied, chosenName, wanted)`；基准取 `wanted`，
+或「是 wanted 前缀」的被点中项；再互相包含（容忍 `… ▾` 装饰与回读更完整两种形态）。
+
+### 三、验收工具自己的假红（`test-mock/site-verify.mjs`）
+
+z.ai 与 GLM 声明**同名 id**（都是 `glm-5.3-flash`）。只传裸 id 时
+`resolveWebModel('glm-5.3-flash')` 解析成 **glm 站点**，驱动抛 `MODEL_SITE_MISMATCH`
+⇒ 工具报 FAIL，而**真实链路根本没被验到**。改成传站点限定形式 `zai:glm-5.3-flash`
+（产品路径本就用这个形状）。
+
+### 四、闸门/工具自身的三处缺陷（三次把 CI 打红，本次全部修复）
+
+1. **`gen-progress-index.mjs --check` 对行尾敏感**：`core.autocrlf=true` 且仓库无
+   `.gitattributes` ⇒ CI 干净 clone 出的是 CRLF 而本机是 LF；重建块恒为 LF ⇒ 与 CRLF 块
+   永不相等 ⇒ **本机绿、CI 红**。改为比较前归一化、写回时用文件原行尾。
+   另修一句**自相矛盾的读数**：旧文案用 `parseSections(cur)` 数「块里的小节」，
+   而该函数跳过整个索引块 ⇒ 对块本身恒为 0 ⇒ 打成「文档 99 节，索引 0 节」。
+2. **新 EOL 闸门收了「依赖本机留档」的检查**：`doc-rewrite-audit check` 需要 `.tmp/` 快照，
+   而 `.tmp/` 被 gitignore ⇒ 干净 clone 上必然失败 ⇒ 闸门在 CI **恒红**。
+   已把范围纪律写进脚本头：**只收能在干净 clone 上独立跑通的检查**。
+3. **`captcha` 修法初版用了裸 `getComputedStyle`**：该代码物理上位于 `runTurn` 函数体内，
+   在 Node 作用域里没有绑定（正是 `nav is not defined` 那一族）⇒ 既有护栏
+   `driver-scope.test.mjs` 当场抓住。已改 `window.getComputedStyle`。
+
+### 判据
+
+- 新增/改动的护栏：`test/model-picker.test.mjs` **8/8**（新增回读确认 4 组、含 4 条反向）、
+  `test/zai-decoder.test.mjs` **7/7**、`test/driver-scope.test.mjs` **7/7**、
+  `test/captcha-gate.test.mjs` **5/5**。
+- **变异全被抓**：回读判据退回旧写法 ⇒ 新用例红；decoder 退回 `openai-sse` ⇒ ⑦ 红；
+  去掉 caption 归一化 ⇒ EOL 闸门在 CRLF 形态下红。三次都逐字节还原后复跑为绿。
+- `node scripts/ci-local.mjs --fast` **12/12 PASS**；CI（含 CodeQL）**success**。
+- 全量单测 **126/127**：唯一失败 `webcode-preset.test.mjs` ②e 是**机器状态依赖**
+  （读本机安装的官方 `standard.patch.yml`），在改动前的 `2368b4a` 上同样红，CI 干净跑器上不红。
+
+### 本轮**未**做（诚实边界）
+
+- **z.ai 未完成端到端真机验收**：`site-verify --site zai` 走通了「登录判定 PASS ×3」，
+  但发送被**真弹的阿里云滑块**拦住（`BLOCKED send.text`）——z.ai 当前持续弹验证，
+  wire 上零帧。`stream.*` / `tool.*` 诸项因此仍 `UNVERIFIED`。**代码不能绕站点风控。**
+- 长运行稳定性、多轮工具循环收敛、非 Windows 平台均未验。
+
 ## 0.19.75
 
 **先让验收工具不能假绿，再谈站点覆盖；并给「内容丢在哪一层」装上逐层取证。**
