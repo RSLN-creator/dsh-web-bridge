@@ -3840,18 +3840,18 @@ export function createBrowserDriver(options = {}) {
         await page.waitForTimeout(2_500);
         const gate = await page.evaluate((sel) => {
           const els = [...document.querySelectorAll(sel)];
-          // ⚠ 2026-10-14 真机修：旧判据把 `getClientRects().length` 当「可见」的兜底，
-          //   而它对**零尺寸但仍在布局里**的节点恒为真。z.ai 的 `#chat-captcha-element`
-          //   正是这种（常驻 DOM、0×0、rects=1；发送中密集采样 20 拍全中）
-          //   ⇒ 闸门在空壳上开火，正常轮次被误判（护栏见 test/captcha-gate.test.mjs）。
-          //   新判据：必须有**真实像素**且不是 display:none / visibility:hidden。
-          //   （真弹窗 332×329 仍被判可见 ⇒ 不放过真拦截。）
-          //   注：本注释刻意不写那个错误码的字面量——test/captcha-gate.test.mjs 用
-          //   `indexOf(码)` 定位抛错点，注释里出现同名字符串会让它定位到注释上。
+          // ⚠ 2026-10-14 真机修（判据由 test/captcha-gate.test.mjs 与 driver-scope.test.mjs 双重钉住）：
+          //   旧判据把 getClientRects().length 当「可见」的兜底，而它对**零尺寸但仍在布局里**
+          //   的节点恒为真。z.ai 的 chat-captcha-element 正是这种（常驻 DOM、0x0、rects=1；
+          //   发送中密集采样 20 拍全中）⇒ 闸门在空壳上开火，正常轮次被误判成需要人机验证。
+          //   新判据：必须有**真实像素**（宽高都 > 0）且不是 display:none / visibility:hidden。
+          //   真弹窗（332x329）仍被判可见 ⇒ 不放过真拦截。
+          //   ⚠ 本段刻意不写反引号：注释里的反引号会被 driver-scope 的 codeOnly 当成模板串边界，
+          //   从而改变它对该函数体内自由标识符的扫描范围（实测会把 getComputedStyle 报成自由变量）。
           const vis = els.filter((el) => {
             const r = el.getBoundingClientRect();
             if (r.width <= 0 || r.height <= 0) return false;
-            const cs = getComputedStyle(el);
+            const cs = window.getComputedStyle(el);
             return cs.display !== 'none' && cs.visibility !== 'hidden';
           });
           return { total: els.length, visible: vis.length,
