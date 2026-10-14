@@ -58,6 +58,7 @@
 | 42 | **「网页桥接」设置分区的导航图标不可自定义**（2026-10-03 登记）——用户报「仍然是默认齿轮」；真因在**官方壳**里：`settings.section` 的注册契约只有 `id/order/label`（**没有 icon**），导航字形由官方 `dsh-client-ui-settings-general` 的 `navIcon(id)` **硬编码**（只认 `account` / `models` / `agent-presets` / `plugins` / `archived-sessions`，其余一律回落齿轮）。插件侧**结构上无解**，除非改官方包或占用一个 shipped id | 低 | 否 | `lib/client.cjs`（`settings.section` 注册处）、官方 `@deepseek-ai/dsh-client-ui-settings-general/lib/client.js`（`navIcon`）、`doc/progress.md`（2026-10-03） |
 | 45 | **桌面 profile 的声明与磁盘分叉：声明仍钉 0.19.61，磁盘已是 0.19.64**（2026-10-05 登记）——本轮靠官方 `client-hmr` 通道**原地热换** `lib/client.cjs` 让桌面端立刻用上修复（不改进程、不重启应用），但**没改 profile 声明**。风险：任何一次 pnpm 通道（装别的插件、启动期 reconcile）都可能把客户端静默换回声明里的旧版 ⇒ 缺陷复发。恢复「声明 == 磁盘」必须**完全退出桌面端**后走官方通道装一次（`dsh` CLI 拒绝管理 desktop profile，须用桌面端自己的 carrier），且宿主半边本来就要重启才换 | 中 | 否 | `~/.dsh/profiles/desktop/package.json`、`~/.dsh/profiles/desktop/node_modules/dsh-webcode-bridge/lib/client.cjs`、`doc/progress.md`（2026-10-05 §八）、`doc/research/2026-10-05-dsh-multi-session-and-client-hot-swap.md` §5 |
 | 46 | **npm 发布被账号安全策略挡在「staged 待批」**（2026-10-05 登记，**同日已解决**）——`npm publish` 报成功但 registry 上 `latest` 仍是 0.19.51（`E409 Cannot publish over previously staged version "0.19.64"`）；根因是 npm 收紧「绕过 2FA 的 token 直接发布」，本机 token 属该类 ⇒ 发布被暂存，需账号主人 2FA 批准。**用户本人批准后已上线**：`latest = 0.19.64`、61 files、shasum `8a7aa56f…` 与本地打包 tarball **逐字节相同**（`published 2026-10-05T15:56:43Z`）。留档价值 = 「命令行打印 `+ pkg@ver` 不等于 registry 上线」这条判据（必须直连 registry 读 `dist-tags`） | 中 | 否 | `~/.npmrc`（token）、npm registry `dsh-webcode-bridge`、`package/dsh-webcode-bridge/dsh-webcode-bridge-0.19.64.tgz` |
+| 55 | **「检查更新 → 立即更新」按钮在没有真实效果：它走的 pnpm 通道在本机是坏的**（2026-10-14 登记）——更新链路的最后一步是 `lib/update.js` 的 `installLocalTarball()` → `spawn('dsh plugin --profile web add <tgz>')`。2026-10-14 实测该命令 **exit `-1073740791`**（进程 `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)` 崩掉），因为 pnpm 在解析 **web profile 的其它依赖**时失败：`ERR_PNPM_FETCH_404 dsh-webview-clipboard`（不在 npm 上）、`dsh-vscode-file-links` / `dshmarket` 报 `UND_ERR_DESTROYED`。⇒ **与待装的那个 tarball 无关**，是整个 profile 的依赖树解析失败，于是「点更新 → 什么也没发生」。**对照**：`scripts/install-profiles.mjs`（绕开 pnpm、只解包 + 改 `node_modules`）能装成功 ⇒ 证明 tarball 本身没问题，是**通道**问题。**为什么不去绕**：pnpm 通道是「声明与内容一起动」的唯一正路；`install-profiles.mjs` 只写 `node_modules`、不改声明 ⇒ 下一次 pnpm 通道（装别的插件 / 启动期 reconcile）会**静默回退**（§0.16.10 七记过这条坑）。正解 = 修 profile 的依赖树（把那三个不在 npm 上的包拿掉或换成可达来源），那要用户决定。**同一根因也解释了本机 `dsh plugin --profile web add` 长期失败**。⚠ **干净环境不受影响**：用隔离 `DSH_HOME` 模拟新电脑（空 profile + 只装本插件）实测 **EXIT=0**（`Packages: +2 … Done in 19.5s`），声明/bundles/磁盘版本三处一致 ⇒ **别人新电脑上装不上**这个报告，根因在本机 profile 而非插件 | 中 | 否 | `lib/update.js`（`installLocalTarball`）、`~/.dsh/profiles/web/package.json`（那三个依赖）、`scripts/install-profiles.mjs`、`doc/progress.md`（2026-10-14 §安装） |
 | 47 | 官方会话 chrome 在第三方面板内不可达：列顶栏按官方 DOM+官方 CSS module 复刻、右侧 tab 靠官方页签承载（2026-10-06 登记；10-07 两处更新；2026-10-08 复刻落地并升级判… | 中 | 否 | `package/dsh-webcode-bridge/lib/client.cjs`、`test-mock/probe-concurrent-live.mjs`、`scripts/check-official-drift.mjs`、`doc/progress.md`（2026-10-08 轮 §四） |
 | 48 | 「提示词投递 = 纯文本」档在长会话上必然发不完整（PROMPT_TRUNCATED）（2026-10-06 登记；2026-10-11 归因更正 + 真机实证） —— 真机造 jobs 时撞到：用户设置 promptT… | 中 | 部分 | `lib/browser-driver.js`（`composerEchoVerdict` / `fillComposer` / `writeFieldNative` / `readComposer`）、`test/composer-write.test.mjs`（回读判据 ①–⑦）、`doc/progress.md`（2026-10-11 节）、`.tmp/evidence/crlf-chromium.json`（真机读数；⚠ 本路径被 gitignore，读数已逐字回写在 `lib/browser-driver.js` 的 `composerEchoVerdict` 注释里） |
 | 48b | **（#48 的追加节，不是独立条目）** 归因更正：不是通道丢段，是**换行规范化误报**（2026-10-11 追加）——`\r\n` 被 `textarea.value` 按 HTML 规范规范化为 `\n`，**正文内容零丢失**；判据已从「比长度」改为「比内容等价」（`composerEchoVerdict`）。真因、五项断言读数、护栏与变异见正文 §48b。**更正原因**：2026-10-11 追加时误用了第二个 `## 48.` 标题，导致本文件有两个不同的 `## 48.`（`check-long-term-issues.mjs` 用集合比对**看不见重号**）；2026-10-14 改为 `48b.` 并在 `check-long-term-issues.mjs` 里补上**重号判据** | 中 | 部分 | `lib/browser-driver.js`（`composerEchoVerdict`）、`test/composer-write.test.mjs`、`scripts/check-long-term-issues.mjs`（重号判据） |
@@ -3871,3 +3872,67 @@ $env:WEBCODE_DELIVERY_TRACE = '1'
 > **独立措辞的第二记录**，与本节正文的重合度实测只有 0～16%。
 
 **Issue #1 的「内容交付」那一半仍未闭环：缺少可定位到层的证据**（2026-10-11 登记；**同日交付取证工具，未做真机定位**）——复审明确指出：0.19.74 修的是**看门狗计时**（相位冻结 + deadline 锚点），而 `lastEventAt` 只在**适配器收到流事件**时推进、`domReplyChars` 只是诊断读数，**都不会**把页面 DOM 里的正文送回流里 ⇒ 「不再误杀」≠「内容完整交付」，那 2172 字仍可能卡在 DOM 且本轮改动不会补回。**处置（工具已交付）**：新增 `lib/delivery-trace.js`，沿 `capture → decoder → driver → relay → adapter` 五层各记**事件数/字符数/首末时刻/内容哈希**（默认**不留原文**；`WEBCODE_DELIVERY_TRACE=1` 开启，`WEBCODE_DELIVERY_TRACE_SAMPLE=N` 才留前 N 字符）。`compareStages()` 给出**首个分叉层**并区分两件下一步完全不同的事：某层**零事件**（丢在「上游→本层」，查上游发送/绑定）vs 某层**有事件但更短**（丢在**本层**，查本层解析/过滤）。⚠ `capture` 是**原始上线帧**（含字段名/转义），与正文长度**不可比**，只判「有没有解出正文」——否则每轮正常生成都报分叉。读数出现在 `status().deliveryTrace` 与 `WEB_NO_PROGRESS` 报错文本里。**仍未做**：**没有**真机复现「页面 2172 字未回传」并据此定位到具体层（需真实 DeepSeek 长会话 + 登录态，只能由用户执行）。**下一步**：`WEBCODE_DELIVERY_TRACE=1` 跑一轮，看 `firstLossAt`；若驱动回读完整、增量也完整而 DSH 收到的正文不完整 ⇒ 查适配器；若驱动本身就丢 ⇒ 从 capture/decoder 查起。
+
+## 55. **「检查更新 → 立即更新」按钮点下去没有真实效果：它走的 pnpm 通道在本机是坏的**（2026-10-14 登记）
+
+### 现象与根因（都是实测读数，不是推测）
+
+更新链路的最后一步是 `lib/update.js` 的 `installLocalTarball()`：
+
+```js
+spawn('dsh plugin --profile ' + profile + ' add <tgz>')   // Windows 下 shell:true
+```
+
+2026-10-14 在本机跑同一条命令，**exit `-1073740791`**（进程崩）：
+
+```
+[ERR_PNPM_FETCH_404] GET https://registry.npmjs.org/dsh-webview-clipboard: Not Found - 404
+[WARN] GET https://registry.npmjs.org/dsh-vscode-file-links error (UND_ERR_DESTROYED)
+[WARN] GET https://registry.npmjs.org/dshmarket error (UND_ERR_DESTROYED)
+Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\win\async.c, line 94
+```
+
+⇒ pnpm 在解析 **web profile 的其它依赖**时失败（那三个包不在 npm 上），安装整体中止，
+于是用户看到的现象是「点了更新，什么也没发生」。
+**与待装的那个 tarball 无关**——同一个 tarball 用 `install-profiles.mjs` 能装成功。
+
+### 为什么**不**改 update.js 去绕开 pnpm（这一条是决定，不是遗漏）
+
+pnpm 通道是「**声明与内容一起动**」的唯一正路。`install-profiles.mjs` 绕开它的代价是
+**只写 `node_modules`、不改声明** ⇒ 下一次任何 pnpm 通道（装别的插件、dshmarket、
+启动期 reconcile）都会按 lockfile 重建，把装好的版本**静默回退**成声明里那个版本。
+这条坑本仓库记过（`doc/progress.md` §0.16.10 七：22:16 装好 0.16.10，22:21 一趟 pnpm
+换回 0.16.5）。⇒ 绕开它会把「装上了但下次会被换回」变成常态，比现在更坏。
+
+### 正解（需要用户决定）
+
+修 **web profile 的依赖树**：把 `dsh-webview-clipboard` / `dsh-vscode-file-links` /
+`dshmarket` 这三个「不在 npm 上或不可达」的包拿掉，或换成可达来源（GitHub / 本地 tgz）。
+之后 `dsh plugin add` 才会恢复可用，更新按钮也就真的有效果。
+
+### 同一根因解释了「别人新电脑上装不上」这个报告 —— **实测：干净环境是通的**
+
+用隔离的 `DSH_HOME` 模拟新电脑（空 profile + 只装本插件）：
+
+```
+dsh: initialized profile web at <tmp>\profiles\web
++ dsh-webcode-bridge file:…/dsh-webcode-bridge-0.19.75.tgz
+Packages: +2 … Done in 19.5s using pnpm v11.25.0
+EXIT=0
+```
+
+核对：声明指向该 tgz ✔、`dsh.profile.bundles` 含本插件 ✔、磁盘版本 0.19.75 ✔
+（测试目录已清理）。
+
+⇒ **新电脑路径没问题**；「装不上」的报告根因在**那台机器的 profile 依赖树**，
+不在插件本身。**若别的新电脑也装不上**，排查顺序应是：
+① 该 profile 里有没有不在 npm 上的第三方插件（同一条 404）；
+② `dsh` 是否在 PATH；③ 网络能否到 registry。
+
+### 判据与边界
+
+- 复现命令：`dsh plugin --profile web add <tgz>`（本机 exit `-1073740791`）；
+  干净环境同一条命令 exit 0。
+- **未做**：没有修那三个依赖，也没改 `update.js`。两件都要用户先决定（前者动 profile 依赖树，
+  后者会把静默回退变成常态）。
+
