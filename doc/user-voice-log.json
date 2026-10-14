@@ -1,5 +1,5 @@
 {
-  "generatedAt": 1791934729076,
+  "generatedAt": 1791958532116,
   "scope": "`dsh-webcode-bridge`",
   "command": "node scripts/user-voice-log.mjs",
   "rows": [
@@ -14032,6 +14032,18 @@
       "round": null,
       "text": "限时1h设立定时",
       "hash": "4140b35f",
+      "also": []
+    },
+    {
+      "sessionId": "session-9232f546-a80f-445e-b5b4-382d40ecd858",
+      "workspace": "D:\\9_Code_Workspace\\dsh-webcode-bridge",
+      "at": 1791934875439,
+      "seq": 1612,
+      "origin": "goal",
+      "goalId": "goal-d9929046-ac1d-4b5d-96bd-dbc509c0a2cb",
+      "round": 1,
+      "text": "dsh-webcode-bridge：完成（1）#30 z.ai 真实流帧录制的探针与 runbook 就绪并如实标注待人工配合；（2）doc/progress.md 与 doc/long-term-issues.md 的结构深度重写且内容零丢失、闸门全绿；（3）记录层事实偏差全修：scripts/session-read.mjs 认 v4 落盘并重跑 user-voice-log、wiki 手写层模块数、doc/CODE-STRUCTURE.md 快照、装机三口径、0.19.75 未 tag/未发；（4）全部改动跑闸门并如实记录未完成项。",
+      "hash": "1760217e",
       "also": []
     }
   ]
