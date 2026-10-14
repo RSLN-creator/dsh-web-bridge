@@ -22,6 +22,12 @@
 //   ② 把文件内容整体转成 CRLF 后，同一条 `--check` 也必须 exit 0。
 // 两者任一失败 ⇒ 退 1，并指出是哪种形态失败（便于区分「真过期」与「行尾敏感」）。
 //
+// ## 范围纪律（2026-10-14 CI 第二次红后补）
+//
+// 只收「**能在干净 clone 上独立跑通**」的检查。依赖本机留档的工具（如
+// `doc-rewrite-audit.mjs check` 需要 `.tmp/doc-audit/` 的快照，而 `.tmp/` 被 gitignore）
+// **不得放进来**——它在 CI 上本来就跑不了，放进来会让本闸门恒红，把真问题淹掉。
+//
 // ⚠ 本闸门**不改**仓库文件：它写 .tmp/ 下的副本、跑完即删（.tmp/ 已被 gitignore）。
 //
 // 用法：node scripts/check-eol-portability.mjs
@@ -36,22 +42,23 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..');
 
 /**
- * 受检项。`prepare` 负责把「CRLF 形态」写到 `targetPath`，并保证检查命令读的是它。
+ * 受检项。`file` 是待转 CRLF 的文件，`args` 是**必须与它同源**的检查命令。
  *
- * 目前两项都用「把文件转 CRLF 写回原路径 → 跑 --check → 还原」的办法：
- * 因为这两个脚本都把路径硬编码成 `doc/<名字>`，没有可传的路径参数。
- * 还原放在 `finally` 里，且**先备份再动**——中途失败也不会把仓库文件留在 CRLF。
+ * ⚠ **只放「能在干净 clone 上跑」的检查**（2026-10-14 CI 第二次红后加这条纪律）：
+ * 本闸门的做法是「把文件转成 CRLF，再跑同一条检查」。若那条检查依赖**本机才有的**状态，
+ * 它在 CI 上本来就会失败（与本闸门要防的行尾问题无关），于是本闸门变成恒红。
+ *
+ * 反例（真实踩到）：`scripts/doc-rewrite-audit.mjs check` 需要 `.tmp/doc-audit/` 里的
+ * **改前留档快照**，而 `.tmp/` 被 gitignore ⇒ 干净 clone 上**没有**那个快照，
+ * 该命令必然 exit 2（`没有改前留档，无法核对`）。把它放进来 ⇒ CI 两条腿都红。
+ * ⇒ 这类「依赖本机留档」的工具**不属于任何一个 CI 闸门**，只能在改前/改后本地跑。
  */
 const TARGETS = [
   {
     name: 'progress-index',
     file: 'doc/progress.md',
+    // 纯函数式：只读 doc/progress.md 并重建索引比对，无任何本机状态依赖
     args: ['scripts/gen-progress-index.mjs', '--check'],
-  },
-  {
-    name: 'doc-audit(long-term-issues)',
-    file: 'doc/long-term-issues.md',
-    args: ['scripts/doc-rewrite-audit.mjs', 'check', 'doc/long-term-issues.md'],
   },
 ];
 
