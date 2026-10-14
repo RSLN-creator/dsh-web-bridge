@@ -58,7 +58,7 @@
 | 42 | **「网页桥接」设置分区的导航图标不可自定义**（2026-10-03 登记）——用户报「仍然是默认齿轮」；真因在**官方壳**里：`settings.section` 的注册契约只有 `id/order/label`（**没有 icon**），导航字形由官方 `dsh-client-ui-settings-general` 的 `navIcon(id)` **硬编码**（只认 `account` / `models` / `agent-presets` / `plugins` / `archived-sessions`，其余一律回落齿轮）。插件侧**结构上无解**，除非改官方包或占用一个 shipped id | 低 | 否 | `lib/client.cjs`（`settings.section` 注册处）、官方 `@deepseek-ai/dsh-client-ui-settings-general/lib/client.js`（`navIcon`）、`doc/progress.md`（2026-10-03） |
 | 45 | **桌面 profile 的声明与磁盘分叉：声明仍钉 0.19.61，磁盘已是 0.19.64**（2026-10-05 登记）——本轮靠官方 `client-hmr` 通道**原地热换** `lib/client.cjs` 让桌面端立刻用上修复（不改进程、不重启应用），但**没改 profile 声明**。风险：任何一次 pnpm 通道（装别的插件、启动期 reconcile）都可能把客户端静默换回声明里的旧版 ⇒ 缺陷复发。恢复「声明 == 磁盘」必须**完全退出桌面端**后走官方通道装一次（`dsh` CLI 拒绝管理 desktop profile，须用桌面端自己的 carrier），且宿主半边本来就要重启才换 | 中 | 否 | `~/.dsh/profiles/desktop/package.json`、`~/.dsh/profiles/desktop/node_modules/dsh-webcode-bridge/lib/client.cjs`、`doc/progress.md`（2026-10-05 §八）、`doc/research/2026-10-05-dsh-multi-session-and-client-hot-swap.md` §5 |
 | 46 | **npm 发布被账号安全策略挡在「staged 待批」**（2026-10-05 登记，**同日已解决**）——`npm publish` 报成功但 registry 上 `latest` 仍是 0.19.51（`E409 Cannot publish over previously staged version "0.19.64"`）；根因是 npm 收紧「绕过 2FA 的 token 直接发布」，本机 token 属该类 ⇒ 发布被暂存，需账号主人 2FA 批准。**用户本人批准后已上线**：`latest = 0.19.64`、61 files、shasum `8a7aa56f…` 与本地打包 tarball **逐字节相同**（`published 2026-10-05T15:56:43Z`）。留档价值 = 「命令行打印 `+ pkg@ver` 不等于 registry 上线」这条判据（必须直连 registry 读 `dist-tags`） | 中 | 否 | `~/.npmrc`（token）、npm registry `dsh-webcode-bridge`、`package/dsh-webcode-bridge/dsh-webcode-bridge-0.19.64.tgz` |
-| 55 | **「检查更新 → 立即更新」按钮在没有真实效果：它走的 pnpm 通道在本机是坏的**（2026-10-14 登记）——更新链路的最后一步是 `lib/update.js` 的 `installLocalTarball()` → `spawn('dsh plugin --profile web add <tgz>')`。2026-10-14 实测该命令 **exit `-1073740791`**（进程 `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)` 崩掉），因为 pnpm 在解析 **web profile 的其它依赖**时失败：`ERR_PNPM_FETCH_404 dsh-webview-clipboard`（不在 npm 上）、`dsh-vscode-file-links` / `dshmarket` 报 `UND_ERR_DESTROYED`。⇒ **与待装的那个 tarball 无关**，是整个 profile 的依赖树解析失败，于是「点更新 → 什么也没发生」。**对照**：`scripts/install-profiles.mjs`（绕开 pnpm、只解包 + 改 `node_modules`）能装成功 ⇒ 证明 tarball 本身没问题，是**通道**问题。**为什么不去绕**：pnpm 通道是「声明与内容一起动」的唯一正路；`install-profiles.mjs` 只写 `node_modules`、不改声明 ⇒ 下一次 pnpm 通道（装别的插件 / 启动期 reconcile）会**静默回退**（§0.16.10 七记过这条坑）。正解 = 修 profile 的依赖树（把那三个不在 npm 上的包拿掉或换成可达来源），那要用户决定。**同一根因也解释了本机 `dsh plugin --profile web add` 长期失败**。⚠ **干净环境不受影响**：用隔离 `DSH_HOME` 模拟新电脑（空 profile + 只装本插件）实测 **EXIT=0**（`Packages: +2 … Done in 19.5s`），声明/bundles/磁盘版本三处一致 ⇒ **别人新电脑上装不上**这个报告，根因在本机 profile 而非插件 | 中 | 否 | `lib/update.js`（`installLocalTarball`）、`~/.dsh/profiles/web/package.json`（那三个依赖）、`scripts/install-profiles.mjs`、`doc/progress.md`（2026-10-14 §安装） |
+| 55 | **「检查更新 → 立即更新」按钮没有真实效果：它走的 pnpm 通道在本机是坏的**（2026-10-14 登记，**同日第二轮定位并修复**）——更新链路的最后一步是 `lib/update.js` 的 `installLocalTarball()` → `spawn('dsh plugin --profile web add <tgz>')`。2026-10-14 实测该命令 **exit `-1073740791`**（进程 `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)` 崩掉），因为 pnpm 解析 **web profile 的依赖树**时失败：`ERR_PNPM_FETCH_404 dsh-webview-clipboard`（不在 npm 上）。⇒ **与待装的那个 tarball 无关**，于是「点更新 → 什么也没发生」。**根因（已更正）**：不在 npm 上的只有 `dsh-webview-clipboard` / `dsh-vscode-file-links` **两个**（`dshmarket` **在** npm 上，`UND_ERR_DESTROYED` 是进程崩溃的连带现象）；它们**不是 npm 包**，而是 VS Code 扩展在激活时**直接写进 `node_modules`** 的内置插件，扩展源码里 `ensureProfileDeclaration(dir, name, null)` 的 `null` 就是「**只登记 bundles、不写 dependencies**」（注释原文：「dependencies 不写入该包（npm 注册表上没有）」）。本机 profile 丢了这个区分 ⇒ pnpm 去解析本不该受它管的包 ⇒ 撞 404 ⇒ 整装中止。**修法**：删掉 `dependencies` 里那两行、**保留 `bundles` 里那两项**（不是「换成可达来源」）。实测：改前 `-1073740791`（隔离目录逐字复现）→ 改后本机 **EXIT=0**，且走**插件自身代码路径**调 `installLocalTarball()` 得 `ok:true`/`needsRestart:true`、两个内置插件与 bundles 均完好；`pnpm install`/`pnpm add` 都**不 prune** 未声明目录（两轮实测），故落盘字节归扩展、声明归 pnpm，两边不再打架。**⚠ 写入者未定位（03:32–07:06 之间，扩展传 `null` 不是它；`dshmarket` 有嫌疑未证实）⇒ 可能复发**，复发判据：`dependencies` 里再出现这两个名字。**未改 `update.js` 去绕 pnpm**（绕开会让「装上了但下次被换回」成为常态，§0.16.10 七）。⚠ **干净环境不受影响**：隔离 `DSH_HOME` 模拟新电脑实测 **EXIT=0** ⇒ 「别人新电脑装不上」根因在那台机器的 profile 而非插件 | 中 | **是**（本机） | `~/.dsh/profiles/web/package.json`（删两行 `dependencies`）、`lib/update.js`（`installLocalTarball`，**未改**）、`scripts/install-profiles.mjs`、`doc/progress.md`（2026-10-14 §安装） |
 | 56 | **本轮新加的闸门/工具自身连出三个缺陷，三次都把 CI 打红**（2026-10-14 登记，**同日全部修复**）——值得单独登记：这是一类**系统性**失败，**「判据/工具自身的缺陷」比被测代码的缺陷更贵**（它一红，所有真问题都被淹掉）。三次逐条：<br>① **captcha 可见性判据把零尺寸节点算可见**（产品缺陷）：`el.offsetWidth \|\| el.offsetHeight \|\| el.getClientRects?.().length` 里最后那个兜底对**零尺寸但仍在布局里**的节点恒为真（z.ai 的 `#chat-captcha-element` 常驻 DOM、`0x0`、`rects=1`；发送中密集采样 **20/20 拍全中**）⇒ 闸门在空壳上开火，正常轮次被判 `WEB_CAPTCHA_REQUIRED`。已改成「必须有真实像素且非 `display:none` / `visibility:hidden`」；真弹窗（332×329）仍被判可见。<br>② **`gen-progress-index.mjs --check` 对行尾敏感**（工具缺陷）：`core.autocrlf=true` 且仓库**无** `.gitattributes` ⇒ CI 干净 clone 出的是 **CRLF**，而本机工作树是 **LF**；重建块由 `join('\n')` 生成恒为 LF ⇒ 与 CRLF 块**永不相等** ⇒ **本机绿、CI 红**。已改为比较前归一化、写回时用文件原行尾。顺带修掉一句**自相矛盾的读数**：旧文案用 `parseSections(cur)` 数「块里的小节」，而该函数**跳过整个索引块** ⇒ 对块本身恒为 0 节 ⇒ 打成「文档 99 节，索引 0 节」（索引明明在却说 0 节）。<br>③ **新 EOL 闸门收了「依赖本机留档」的检查**（工具缺陷）：`doc-rewrite-audit.mjs check` 需要 `.tmp/doc-audit/` 的**改前快照**，而 `.tmp/` 被 gitignore ⇒ 干净 clone 上必然 exit 2 ⇒ 该闸门在 CI **恒红**。已把范围纪律写进脚本头：**只收能在干净 clone 上独立跑通的检查**。<br>**沉淀出的两条纪律**：<br>（a）**新增/修改闸门后，必须先把「CI 的形态」在本机复现一遍**——落点是 `scripts/check-eol-portability.mjs`（把 CRLF 形态搬到本机，对每个受检文件跑两种行尾）；<br>（b）**推送前跑全量单测**（本机 `spawn EPERM` ⇒ 逐文件跑 127 个）。本轮漏了这一步，让 `driver-scope` 的红灯进了 CI。 | 高 | 否 | `lib/browser-driver.js`（captcha 判据）、`scripts/gen-progress-index.mjs`、`scripts/check-eol-portability.mjs`、`scripts/ci-local.mjs`、`test/driver-scope.test.mjs`、`test/captcha-gate.test.mjs` |
 | 47 | 官方会话 chrome 在第三方面板内不可达：列顶栏按官方 DOM+官方 CSS module 复刻、右侧 tab 靠官方页签承载（2026-10-06 登记；10-07 两处更新；2026-10-08 复刻落地并升级判… | 中 | 否 | `package/dsh-webcode-bridge/lib/client.cjs`、`test-mock/probe-concurrent-live.mjs`、`scripts/check-official-drift.mjs`、`doc/progress.md`（2026-10-08 轮 §四） |
 | 48 | 「提示词投递 = 纯文本」档在长会话上必然发不完整（PROMPT_TRUNCATED）（2026-10-06 登记；2026-10-11 归因更正 + 真机实证） —— 真机造 jobs 时撞到：用户设置 promptT… | 中 | 部分 | `lib/browser-driver.js`（`composerEchoVerdict` / `fillComposer` / `writeFieldNative` / `readComposer`）、`test/composer-write.test.mjs`（回读判据 ①–⑦）、`doc/progress.md`（2026-10-11 节）、`.tmp/evidence/crlf-chromium.json`（真机读数；⚠ 本路径被 gitignore，读数已逐字回写在 `lib/browser-driver.js` 的 `composerEchoVerdict` 注释里） |
@@ -3274,7 +3274,7 @@ dsh plugin --profile web add .\dsh-webcode-bridge-0.19.69.tgz
 | 项 | 读数 |
 | --- | --- |
 | `~/.dsh` 可写？ | **可写**。写探针文件成功；`~/.dsh/profiles/web/package.json.lock` 能创建 ⇒ **上文「整棵树只读」的现场已不存在** |
-| `dsh plugin --profile web add` | ❌ 失败，但**原因与本插件无关**：`ERR_PNPM_FETCH_404 GET https://registry.npmjs.org/dsh-webview-clipboard: Not Found`（另 `dshmarket` 报 `UND_ERR_DESTROYED`），随后 dsh 进程 `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)` 退出（`-1073740791`）。⇒ **web profile 的依赖树里有不在 npm 上的包，这条通道目前跑不通** |
+| `dsh plugin --profile web add` | ❌ 失败，但**原因与本插件无关**：`ERR_PNPM_FETCH_404 GET https://registry.npmjs.org/dsh-webview-clipboard: Not Found`（另 `dshmarket` 报 `UND_ERR_DESTROYED`），随后 dsh 进程 `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)` 退出（`-1073740791`）。⇒ **web profile 的依赖树里有不在 npm 上的包，这条通道目前跑不通**。⚠ **同日第二轮已定位并修复**：`dshmarket` **在** npm 上（`UND_ERR_DESTROYED` 是进程崩溃的连带现象，不是 404），真正不在 npm 上的只有 `dsh-webview-clipboard` / `dsh-vscode-file-links` **两个**；它们按设计只该在 `bundles` 里。删掉 `dependencies` 里那两行后同一条命令 **EXIT=0**。详见下方 §「根因更正」 |
 | 失败是否损坏了 web profile？ | **没有**。逐项核对：声明仍 `0.19.75`、bundles 仍含本插件、`node_modules` 完整、`pnpm-lock.yaml` 与 `.modules.yaml` 都在、22 个已装插件都在、运行中进程 `ok=true`。失败发生在**解析依赖阶段** |
 | `dsh plugin --profile headless add` | ✅ 一次通过：0.19.61 → **0.19.75**，声明 + `node_modules` + bundles 三处一致，逐字比对 **54/54** |
 | web 的 `node_modules` | 本轮重打 tarball（为带上 `providers.js` 的注释）后，用 `install-profiles.mjs --profiles web` 刷到与工作树 **54/54** 逐字相同 |
@@ -3287,8 +3287,11 @@ dsh plugin --profile web add .\dsh-webcode-bridge-0.19.69.tgz
 不含任何 kill；安装只写 `node_modules`），但**原因未查明，不猜**。
 装的内容已就位且**逐字校验过**：`web` 与 `headless` 两个 profile 的 `lib/`+`bin/` 与工作树
 **54/54 逐字相同**（sha256 逐个比对）。
-② 若要让 web 的 **pnpm 通道**恢复可用，得先处理 `dsh-webview-clipboard` / `dshmarket`
+② 若要让 web 的 **pnpm 通道**恢复可用，得先处理 `dsh-webview-clipboard` / `dsh-vscode-file-links`
 这两个不在 npm 上的依赖（它们不是本插件的依赖，但与它同装在一个 profile 里）。
+⚠ **同日第二轮已处理**：这两项按设计只该在 `bundles`、不该在 `dependencies`，
+删掉两行后 `dsh plugin --profile web add` **EXIT=0**（详见 §55「根因更正」）。
+⚠ 上文曾把 `dshmarket` 也算进「不在 npm 上」——**读错了**，它在 npm 上。
 
 **一条装机纪律（本轮实测新增）**：**同一个 tarball 路径被重新打包后，`node_modules` 会与它脱节。**
 本轮为带上注释重打了 `dsh-webcode-bridge-0.19.75.tgz`，而 web 的声明指向的**正是这个路径**
@@ -3905,11 +3908,94 @@ pnpm 通道是「**声明与内容一起动**」的唯一正路。`install-profi
 这条坑本仓库记过（`doc/progress.md` §0.16.10 七：22:16 装好 0.16.10，22:21 一趟 pnpm
 换回 0.16.5）。⇒ 绕开它会把「装上了但下次会被换回」变成常态，比现在更坏。
 
-### 正解（需要用户决定）
+### 正解（2026-10-14 第二轮已定位并修好，见下节）
 
-修 **web profile 的依赖树**：把 `dsh-webview-clipboard` / `dsh-vscode-file-links` /
-`dshmarket` 这三个「不在 npm 上或不可达」的包拿掉，或换成可达来源（GitHub / 本地 tgz）。
-之后 `dsh plugin add` 才会恢复可用，更新按钮也就真的有效果。
+修 **web profile 的依赖树**：把不在 npm 上的包从 `dependencies` 里拿掉。
+之后 `dsh plugin add` 就会恢复可用，更新按钮也就真的有效果。
+
+#### 根因更正：是**两个**包，不是三个；而且它们**本来就不该**出现在 `dependencies` 里
+
+上文（以及 §3277 / §3910）写的「三个包不在 npm 上」**有一处是错的**，逐条核实：
+
+| 包 | npm 上有吗 | 证据 |
+| --- | --- | --- |
+| `dsh-webview-clipboard` | ❌ **没有** | `registry.npmjs.org` 直连 **HTTP 404** |
+| `dsh-vscode-file-links` | ❌ **没有** | `registry.npmjs.org` 直连 **HTTP 404** |
+| `dshmarket` | ✅ **有** | `latest = 1.66.21`，本机装的是 1.66.8 |
+
+`dshmarket` 日志里的 `UND_ERR_DESTROYED` 是**进程正在崩**时的连带现象（同批日志里
+`@deepseek-ai/dsh-subagent-claude-code`、`dsh-drop-caret` 也一起报这个），**不是 404**。
+把它算进「不在 npm 上」是读日志读错了——**已更正**。
+
+**那两个包不是 npm 包，而是 VS Code 扩展（`vithrive.deepseek-harness-vscode`）在激活时
+直接写进 `node_modules` 的内置兼容插件。** 扩展源码里写得非常明确
+（`extension.js` 的 `ensureClipboardPlugin` / `ensureFileLinkPlugin`）：
+
+```js
+// dependencies 不写入该包（npm 注册表上没有），只登记 bundles 供 DSH 加载。
+await ensureProfileDeclaration(profileDir, CLIPBOARD_PLUGIN_NAME, null);
+//                                                                      ↑ versionSpec = null
+```
+
+`ensureProfileDeclaration(dir, plugin, versionSpec)` 里 `versionSpec === null` 时
+**只写 `bundles`、不写 `dependencies`**。⇒ 扩展**故意的**：这两个包靠「文件落盘 + bundles 登记」
+加载，**从不经过 pnpm**。
+
+**本机 profile 丢了这个区分**：两个名字同时出现在 `dependencies` 和 `bundles` 里。
+pnpm 要解析 `dependencies` 的每一项 ⇒ 撞上 404 ⇒ **整个 install 中止**（那正是更新按钮的最后一步）。
+⇒ **`dependencies` 里那两项从来不是「载重」的**，删掉它们不损失任何功能。
+
+#### 修法：删两行（实测通过）
+
+`~/.dsh/profiles/web/package.json` 的 `dependencies` 里删掉：
+
+```diff
+     "dsh-webcode-bridge": "file:…dsh-webcode-bridge-0.19.75.tgz",
+-    "dsh-webview-clipboard": "^0.2.1",
+-    "dsh-vscode-file-links": "^0.1.0",
+     "dsh-whale-widget": "0.3.18",
+```
+
+**`dsh.profile.bundles` 里的那两项必须保留**（DSH 靠它加载；删了插件就不加载了）。
+
+实测（每一步都跑真命令，不是推断）：
+
+| 步骤 | 读数 |
+| --- | --- |
+| 改动前 `dsh plugin --profile web add <tgz>` | ❌ `EXIT=-1073740791` + `ERR_PNPM_FETCH_404 dsh-vscode-file-links`（在隔离目录里**逐字复现**） |
+| 同一目录、只把这两项从 `dependencies` 拿掉 | ✅ `EXIT=0`，`Packages: +1 … Done in 2.4s` |
+| **本机 web profile 实改后**跑同一条命令 | ✅ `EXIT=0`，`Done in 1.6s` |
+| 走**插件自己的代码路径**（`.tmp/` 脚本直接 `import { installLocalTarball }`） | ✅ `ok: true`、`needsRestart: true`、`error: (none)` ⇒ **更新按钮真的有效果了** |
+| 两个内置插件改后还在吗 | ✅ 仍在：`dsh-webview-clipboard@0.2.1`、`dsh-vscode-file-links@0.1.0`，各 4 个文件齐全 |
+| bundles 还在吗 | ✅ 两项都在，`dsh-webcode-bridge` 仍在 |
+
+**为什么删 `dependencies` 不会被 pnpm 顺手删掉文件**（这是这个修法唯一需要证明的地方）：
+`pnpm install` / `pnpm add` 都**不 prune** 未声明的目录——实测两轮（`pnpm install` 与
+`pnpm add` 各一次）之后两个目录都在。它们不在 `pnpm-lock.yaml`，也不在
+`node_modules/.modules.yaml` 的 `hoistedLocations` 里 ⇒ pnpm 根本不认它们，也就不会动它们。
+⇒ **落盘的字节归扩展管，声明归 pnpm 管**，两边不再打架。
+
+#### 仍未查明：是谁把这两项写进 `dependencies` 的
+
+**不猜。** 现有证据：`package.json.bak-broken-20261014-033253`（10-14 03:32）
+是 **bundles-only**（正是扩展的形态），而 07:06 的现行文件里 `dependencies` 已经有两项。
+⇒ 写入发生在 **03:32–07:06** 之间，**写入者未定位**（扩展自己传 `null`，不是它）。
+**嫌疑但未证实**：`dshmarket` 有写 `dependencies` 的代码路径（`lib/profile.js`
+的 `restoreProfileManifest` 会改这两处），但**没有抓到它写的现场**。
+⇒ **该修法可能复发**；复发判据一句话：
+`dependencies` 里再出现 `dsh-webview-clipboard` 或 `dsh-vscode-file-links` 就是复发了。
+
+#### 备份与回滚
+
+改动前已备份（含 lockfile）：
+
+```
+~/.dsh/profiles/web/package.json.bak-phantom-2026-10-14-10-43-25
+~/.dsh/profiles/web/pnpm-lock.yaml.bak-phantom-2026-10-14-10-43-25
+```
+
+回滚 = 把备份拷回原名。⚠ 这一步是**本机 profile 的运维操作，不是插件代码改动**，
+所以 `CHANGELOG.md` **不记**（对外发布的插件没有任何变化），只在台账记。
 
 ### 同一根因解释了「别人新电脑上装不上」这个报告 —— **实测：干净环境是通的**
 
