@@ -141,29 +141,38 @@ function snapshotPathFor(absFile) {
 export function diffFingerprints(before, after, { cjkTolerance = DEFAULT_CJK_TOLERANCE, allow = {} } = {}) {
   const allowExact = new Set(allow.keys || []);
   const allowCjk = new Set(allow.cjk || []);
+  // 「被改写的旧文本块」折算成减免额度：只减该块自身贡献的 token（按块放行，不误伤别处）
+  const budget = retiredBudget(allow.retiredBlocks || []);
   const problems = [];
   const allowed = [];
-  const compare = (kind, b, a) => {
+  const compare = (kind, b, a, credit) => {
     for (const [key, n] of b) {
       const now = a.get(key) || 0;
       if (now >= n) continue;
-      const rec = { kind, key, missing: n - now };
+      let miss = n - now;
+      const cr = credit ? (credit.get(key) || 0) : 0;
+      if (cr) miss = Math.max(0, miss - cr);
+      if (miss === 0) continue;
+      const rec = { kind, key, missing: miss };
       if (allowExact.has(key)) { allowed.push(rec); continue; }
       problems.push(rec);
     }
   };
-  compare('标题', before.headings, after.headings);
-  compare('带行号出处', before.filelines, after.filelines);
-  compare('反引号片段', before.codes, after.codes);
-  compare('数字读数', before.numbers, after.numbers);
+  compare('标题', before.headings, after.headings, null);
+  compare('带行号出处', before.filelines, after.filelines, null);
+  compare('反引号片段', before.codes, after.codes, null);
+  compare('数字读数', before.numbers, after.numbers, budget.numbers);
 
   // 中文二元组按阈值判：允许容忍度内的抖动，默认 0。
   let cjkMissingTokens = 0;
   let cjkMissingTotal = 0;
   for (const [key, n] of before.cjk) {
     const now = after.cjk.get(key) || 0;
-    const missing = n - now;
+    let missing = n - now;
     if (missing <= cjkTolerance) continue;
+    const cr = budget.cjk.get(key) || 0;
+    if (cr) missing = Math.max(0, missing - cr);
+    if (missing === 0) continue;
     if (allowCjk.has(key)) { allowed.push({ kind: '中文二元组', key, missing }); continue; }
     cjkMissingTokens += 1;
     cjkMissingTotal += missing;
@@ -186,13 +195,55 @@ export function diffFingerprints(before, after, { cjkTolerance = DEFAULT_CJK_TOL
 /**
  * 读「有意退休」清单。缺失或为空都当空清单（不报错）——
  * 它不是必需文件，只是把「有意的删除」留痕的地方。
+ *
+ * 支持三种粒度（从粗到细，优先用细的）：
+ *   `keys`            —— 逐字面量放行（用于「这条命令的路径改了」这类）。
+ *   `cjk`             —— 逐中文二元组放行。⚠ **危险**：像「格式」「配合」这种常见词一旦放行，
+ *                        以后真丢它们也不会报。只在确实无法更细时用。
+ *   `retiredHeadings` —— **推荐**：给出**被改写的旧标题原文**，脚本会算出「这个标题自身贡献的
+ *                        token」，只把那些减掉。这样放行是**按块**的，不会误伤别处的同一个词。
+ *                        2026-10-14 加：`#30` 关闭时标题按事实改写，逐 token 放行出现了
+ *                        「补 20 个再冒出 11 个」的打地鼠，且被迫放行常见词——那是判据设计错了。
  */
 function loadAllowlist() {
   const p = path.join(repoRoot, 'scripts', 'doc-rewrite-audit.allow.json');
   try {
     const j = JSON.parse(fs.readFileSync(p, 'utf8'));
-    return { keys: Array.isArray(j.keys) ? j.keys : [], cjk: Array.isArray(j.cjk) ? j.cjk : [], reasons: j.reasons || {} };
-  } catch { return { keys: [], cjk: [], reasons: {} }; }
+    return {
+      keys: Array.isArray(j.keys) ? j.keys : [],
+      cjk: Array.isArray(j.cjk) ? j.cjk : [],
+      // 兼容两个名字：retiredBlocks 是正式名，retiredHeadings 是 2026-10-14 的初版名
+      retiredBlocks: [
+        ...(Array.isArray(j.retiredBlocks) ? j.retiredBlocks : []),
+        ...(Array.isArray(j.retiredHeadings) ? j.retiredHeadings : []),
+      ],
+      reasons: j.reasons || {},
+    };
+  } catch { return { keys: [], cjk: [], retiredBlocks: [], reasons: {} }; }
+}
+
+/**
+ * 把「被改写的旧文本块」折算成 token 减免额度。
+ *
+ * 典型用法：某条长期问题**关闭**时，它的 `## N.` 标题与一览表行都要按事实改写
+ * （旧标题写着「未录制 / 9 个 kind 都读不了」，而事实已变）。这类改是**有意**的，
+ * 但逐 token 放行会出现打地鼠（补 20 个再冒 11 个），且被迫放行「格式」「配合」
+ * 这类常见词——那会让闸门以后对它们彻底失效。
+ *
+ * 所以按**块**放行：给出旧文本（标题原文、或整行表行），只减免**该块自身**贡献的
+ * 中文二元组与数字读数。放行的额度以该块的内容为上限，不牵连别处同样的词。
+ *
+ * @param {Array<string>} blocks 旧文本块原文（可含多行）
+ * @returns {{cjk:Map<string,number>, numbers:Map<string,number>}}
+ */
+function retiredBudget(blocks) {
+  const cjk = new Map(); const numbers = new Map();
+  for (const b of blocks) {
+    const fp = fingerprint(b);
+    for (const [k, n] of fp.cjk) cjk.set(k, (cjk.get(k) || 0) + n);
+    for (const [k, n] of fp.numbers) numbers.set(k, (numbers.get(k) || 0) + n);
+  }
+  return { cjk, numbers };
 }
 
 // ------------------------------------------------------------------ CLI

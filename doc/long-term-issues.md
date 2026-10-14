@@ -41,7 +41,7 @@
 | 27 | **站点品牌图标的来源无法在本机复核**（0.16.36 新登记，**0.16.37 已解决**） | 低 | 否 | `lib/client.cjs`（`SITE_ICON_PATHS`） |
 | 28 | **思维链退化重复（同段内容原地打转）**（2026-09-26 新登记，**已修 0.19.26**）——#22 的一个可判定子形态 | 中 | 否 | `lib/repeat-detect.js`、`lib/index.js`（`thinkingOnlyNotice`）、`test/repeat-detect.test.mjs` |
 | 29 | **Z.ai 自带风控闸门（验证通过前不发请求）**（2026-09-27 新登记；2026-09-30 实时复现 + 新读数：**滑块弹在无头浏览器里，用户看不见**——「人工打开没见过验证」与「桥轮次被拦」同时为真）——**代码无法解决**，已改为提前如实报错 | 高 | 否 | `lib/providers.js`（`captchaSelector`）、`lib/browser-driver.js`（`WEB_CAPTCHA_REQUIRED`）、`test/captcha-gate.test.mjs` |
-| 30 | **Z.ai 真实流帧格式未录制**（2026-09-27 新登记）——9 个既有 decoder 都读不了它；**取证工具链已就绪**（有头探针 + 实时 tee，见正文 2026-09-30 段），缺一次人肉滑块配合 | 高 | 否 | `lib/decoder.js`、`lib/providers.js`（ZAI 的 `decoder` 刻意未改） |
+| 30 | ✅ **Z.ai 真实流帧已录制 + 专属 decoder 已落地**（2026-09-27 登记；**2026-10-14 关闭**）——真机帧逐字存于 `test/fixtures/zai-real-frames/zai-chat-2026-10-14.txt`；真实形状是 `{type:'chat:completion',data:{delta_content,phase,done}}`（正文/思考都在 `delta_content`、靠 `phase` 分流、收尾认 `data.done`）。新增 `ZaiDecoder`（注册名 `zai`），`providers.js` 的 `decoder` 由 `openai-sse` 改为 `zai`；顺带改正 `completionPaths` **缺 `/api/v2/…`**（真机实际打 v2，旧声明导致捕获层一个块都接不到而页面照常渲染）。护栏 `test/zai-decoder.test.mjs` 7 项 + 变异 M1–M3 全被抓。**仍未做**：未经真站点端到端验证（只用离线帧夹具） | 高 | 否 | `lib/decoder.js`（`ZaiDecoder`）、`lib/providers.js`（ZAI 的 `decoder` / `completionPaths`）、`test/zai-decoder.test.mjs`、`test/fixtures/zai-real-frames/`、`test-mock/zai-capture-frames.mjs` |
 | 31 | **四站的「思考等级」没有真机读数 ⇒ 刻意不声明**（2026-09-28 新登记；**0.19.52 五站已声明 `defaultEffort`——「Default」行消失**；四站缺口维持）——kimi 的 `标准` 档亦未取证 | 中 | 否 | `lib/think-effort.js`、`lib/providers.js`、`test-mock/probe-think-control.mjs` |
 | 32 | **kimi 的登录态在 localStorage 而非 cookie ⇒ 「拷 profile 副本」式探针拿到的是游客页**（2026-09-28 新登记，**已给出替代取证法**）——会让真机读数与线上现场错位 | 中 | 否 | `lib/providers.js`（kimi 的 `storageState` 相关注释）、`test-mock/probe-think-effort-live.mjs`、`test-mock/probe-think-control.mjs` |
 | 33 | **需要人才能过的验收环节没有「提醒人手动过」的回路**（2026-09-29 新登记）——桥不会自己起浏览器、也不会在取不到读数时明确提示「请手动过一下 z.ai」 | 中 | 否 | `test-mock/probe-think-effort-live.mjs`、`test-mock/probe-think-control.mjs`、`doc/verify.md` |
@@ -1881,6 +1881,33 @@ node .tmp/icon-source-verify.mjs    # 退出码 0 = 九条逐字相同
 
 ## 29. **Z.ai 自带风控闸门：验证通过前根本不发请求**（2026-09-27 新登记）
 
+> ### ⚠ 2026-10-14 部分推翻：那一次**没有**滑块，completion 正常发出
+>
+> 本轮为取 #30 的真机帧，在有头窗口里跑了一次同口径发送（`请只回复三个字：你好呀`），
+> 读数与上面 0.09-30 的结论**不一致**：
+>
+> | 项 | 2026-09-30 读数 | **2026-10-14 读数** |
+> | --- | --- | --- |
+> | completion 请求 | **零发出** | **发出**：`RES 200 text/event-stream … /api/v2/chat/completions?…` |
+> | 页面正文 | 0 字 | **2419 字**（真机渲染出完整回答） |
+> | 滑块窗口 | 全窗弹出 | **未弹**（用户原话：「没有任何验证界面」） |
+> | captcha 节点 | 可见 | **仍可见**（`#chat-captcha-element` / `-trigger`，`shown:true`） |
+>
+> **据此能下的结论**：① 「验证通过前根本不发请求」**不是每次都成立**——至少存在
+> 「节点在、滑块不弹、请求照发」的形态；② 那两个 captcha 节点**不能单独当「本轮被拦」的
+> 判据**（它们显示着，而轮次正常跑完）——这一点**早就写在 `providers.js` 的注释里**
+> （「不能只认 `#aliyunCaptcha-window-popup`」「必须带可见性判定」），本轮给了它一条正面读数；
+> ③ 用户「人为打开从未见过验证」的报告**在这一次得到支持**。
+>
+> **据此不能下的结论（不许过度推断）**：本轮只有**一次**观测，**不能**说风控闸已关闭或
+> 已失效——无头 vs 有头、UA、频率、账号/IP 打分、时间都可能影响它；0.09-30 那次「无头里
+> 拦截」的读数同样是真的（两次的条件不同）。**是否稳定复现，需要多轮读数**，本轮没做。
+>
+> **对代码的影响：无。** `WEB_CAPTCHA_REQUIRED` 的如实报错**维持不变**——它本来就在
+> 「命中可见 captcha」时才抛（宁可早报真因），本轮不构成放宽它的理由。
+> **对本条定性的影响**：条目仍开放（仍可能拦），但「**每次**发送都要过闸」这个强表述
+> 已被推翻。
+>
 > ### 2026-09-30 复核：闸门仍在，且拿到一条解释「用户看不见」的新读数
 >
 > 在**实时浏览器**（桥自己的实例，`DevToolsActivePort` 2070）驱动一次无害发送
@@ -1947,8 +1974,41 @@ headed×1）**全部 0 帧**；把 UA 从 `HeadlessChrome` 换成正常 Chrome �
 
 ---
 
-## 30. **Z.ai 真实流帧格式未录制：现有 9 个 decoder 都读不了它**（2026-09-27 新登记）
+## 30. ✅ **Z.ai 真实流帧已录制，专属 decoder 已落地**（2026-09-27 登记；**2026-10-14 关闭**）
 
+> ### 2026-10-14 收口：真机帧取得 ⇒ 本条关闭
+>
+> **真机帧已取得**（用户人工跑一次，无滑块阻碍）：原始流逐字存为
+> [`../package/dsh-webcode-bridge/test/fixtures/zai-real-frames/zai-chat-2026-10-14.txt`](../package/dsh-webcode-bridge/test/fixtures/zai-real-frames/zai-chat-2026-10-14.txt)
+> （1496 B / 11 帧）。线上形状**逐字**如下（**不是** OpenAI 的 `choices`）：
+>
+> ```
+> data: {"type":"chat:completion","data":{"delta_content":"…","phase":"thinking"}}
+> data: {"type":"chat:completion","data":{"phase":"other","usage":{…}}}
+> data: {"type":"chat:completion","data":{"delta_content":"你好呀","phase":"answer"}}
+> data: {"type":"chat:completion","data":{"phase":"done","done":true}}
+> ```
+>
+> ⇒ 正文与思考**都在 `delta_content`**、靠 `phase` 分流（`thinking` / `answer`），
+> 收尾认 `data.done`（**本流里没有 `[DONE]`**）。2026-09-27 由站点 bundle 推断出的
+> 形状**方向正确**，现由 wire 证据确认。
+>
+> **落地**：`lib/decoder.js` 新增 `ZaiDecoder`（注册名 `zai`），`providers.js` 的
+> `decoder` 从 `'openai-sse'` 改为 `'zai'`。护栏
+> `test/zai-decoder.test.mjs` **7 项**（解得出 / **不重复播**（含合成累积快照帧）/ phase 不混 /
+> 任意切分点 / 认 `data.done` / 注册表接线 / `completionPaths` 覆盖 v2）。
+> **变异 M1–M3 全部被抓**，三次逐字节还原后复跑 7/7。
+>
+> **同时改正两处被真机推翻的声明**：
+> ① **`completionPaths` 缺 `/api/v2/…`** —— 真机实际打到 `/api/v2/chat/completions`，
+> 旧声明只有 v1 与无版本 ⇒ 捕获层按声明匹配时**一个块都接不到**而页面照常渲染（静默）。
+> 本会话第一次抓帧就是被它坑的（tee 命中 0，一度被读成「风控挡在发送前」）。
+> ② 「现有 9 个 kind 没有一个能解它」⇒ 现在有。
+>
+> **仍未做（如实）**：decoder 只经**离线真机帧夹具**验证，**没有**让桥在真站点上跑一轮
+> 完整端到端对话。那需要再跑一次真机（可做，本轮未做）——所以本条标「关闭」依据的是
+> **帧与解码判据**，不是端到端真机通过。
+>
 > ### 2026-09-30 进展：取证工具链就绪，缺一次人肉滑块配合
 >
 > 新增实时版探针（在桥自己的浏览器里装 fetch tee + 无害发送，避开「拷副本丢上下文」的形态）
