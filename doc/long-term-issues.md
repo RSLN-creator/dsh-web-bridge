@@ -3157,6 +3157,31 @@ dsh plugin --profile web add .\dsh-webcode-bridge-0.19.69.tgz
 制造「装上了但其实装在别处」的假象——那比「如实报告这一步没做」坏得多（本仓库对「不造假状态」
 有成文纪律）。安装本身是可逆、幂等的一条命令，交给用户在正常环境执行即可。
 
+### 2026-10-14 复核：**「沙箱只读」这个前提在本轮不成立**，但安装仍未全部完成
+
+同族纪律照旧先写读数，再写结论：
+
+| 项 | 读数 |
+| --- | --- |
+| `~/.dsh` 可写？ | **可写**。写探针文件成功；`~/.dsh/profiles/web/package.json.lock` 能创建 ⇒ **上文「整棵树只读」的现场已不存在** |
+| `dsh plugin --profile web add` | ❌ 失败，但**原因与本插件无关**：`ERR_PNPM_FETCH_404 GET https://registry.npmjs.org/dsh-webview-clipboard: Not Found`（另 `dshmarket` 报 `UND_ERR_DESTROYED`），随后 dsh 进程 `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)` 退出（`-1073740791`）。⇒ **web profile 的依赖树里有不在 npm 上的包，这条通道目前跑不通** |
+| 失败是否损坏了 web profile？ | **没有**。逐项核对：声明仍 `0.19.75`、bundles 仍含本插件、`node_modules` 完整、`pnpm-lock.yaml` 与 `.modules.yaml` 都在、22 个已装插件都在、运行中进程 `ok=true`。失败发生在**解析依赖阶段** |
+| `dsh plugin --profile headless add` | ✅ 一次通过：0.19.61 → **0.19.75**，声明 + `node_modules` + bundles 三处一致，逐字比对 **54/54** |
+| web 的 `node_modules` | 本轮重打 tarball（为带上 `providers.js` 的注释）后，用 `install-profiles.mjs --profiles web` 刷到与工作树 **54/54** 逐字相同 |
+| **重启 `dsh web`** | ❌ **仍未做**。运行中进程 `hash=7533ebdac0a8`，加载的是上一次构建 |
+| **桌面端** | ❌ **仍完全未接**：`bundles` 里没有本插件；磁盘上只有一个被改名的目录 `dsh-webcode-bridge.bak-0.19.51`（版本 0.19.51）。⚠ **更正**：本条目上文与旧行曾写「desktop 声明与磁盘都没有」——**声明确实没有，但磁盘有一个改名目录**。将来接桌面时**重新装当前版本**，不要就地复活那个 0.19.51 目录 |
+
+**仍欠的两步（都很具体）**：① **重启 `dsh web`**（「装完不重启 = 等于没装」）；
+② 若要让 web 的 **pnpm 通道**恢复可用，得先处理 `dsh-webview-clipboard` / `dshmarket`
+这两个不在 npm 上的依赖（它们不是本插件的依赖，但与它同装在一个 profile 里）。
+
+**一条装机纪律（本轮实测新增）**：**同一个 tarball 路径被重新打包后，`node_modules` 会与它脱节。**
+本轮为带上注释重打了 `dsh-webcode-bridge-0.19.75.tgz`，而 web 的声明指向的**正是这个路径**
+⇒ 声明没变、内容变了、`node_modules` 里还是旧字节（`verify-pack` 报 `62/62`，但逐文件比对报
+`providers.js` 不同）。修法是 `node scripts/install-profiles.mjs --profiles web`。
+⚠ 该脚本**只写 `node_modules`、不改声明**（见其文件头），所以两个动作都要做：
+**声明走 pnpm 通道，内容走它**。
+
 ## 48b. **「提示词投递 = 纯文本」档发不完整：归因已更正为「换行规范化误报」**（2026-10-11 更新）
 
 > 原登记（2026-10-06）的标题与归因是「像写入通道丢一段固定前缀/后缀」。**该归因已证伪。**
