@@ -59,6 +59,7 @@
 | 45 | **桌面 profile 的声明与磁盘分叉：声明仍钉 0.19.61，磁盘已是 0.19.64**（2026-10-05 登记）——本轮靠官方 `client-hmr` 通道**原地热换** `lib/client.cjs` 让桌面端立刻用上修复（不改进程、不重启应用），但**没改 profile 声明**。风险：任何一次 pnpm 通道（装别的插件、启动期 reconcile）都可能把客户端静默换回声明里的旧版 ⇒ 缺陷复发。恢复「声明 == 磁盘」必须**完全退出桌面端**后走官方通道装一次（`dsh` CLI 拒绝管理 desktop profile，须用桌面端自己的 carrier），且宿主半边本来就要重启才换 | 中 | 否 | `~/.dsh/profiles/desktop/package.json`、`~/.dsh/profiles/desktop/node_modules/dsh-webcode-bridge/lib/client.cjs`、`doc/progress.md`（2026-10-05 §八）、`doc/research/2026-10-05-dsh-multi-session-and-client-hot-swap.md` §5 |
 | 46 | **npm 发布被账号安全策略挡在「staged 待批」**（2026-10-05 登记，**同日已解决**）——`npm publish` 报成功但 registry 上 `latest` 仍是 0.19.51（`E409 Cannot publish over previously staged version "0.19.64"`）；根因是 npm 收紧「绕过 2FA 的 token 直接发布」，本机 token 属该类 ⇒ 发布被暂存，需账号主人 2FA 批准。**用户本人批准后已上线**：`latest = 0.19.64`、61 files、shasum `8a7aa56f…` 与本地打包 tarball **逐字节相同**（`published 2026-10-05T15:56:43Z`）。留档价值 = 「命令行打印 `+ pkg@ver` 不等于 registry 上线」这条判据（必须直连 registry 读 `dist-tags`） | 中 | 否 | `~/.npmrc`（token）、npm registry `dsh-webcode-bridge`、`package/dsh-webcode-bridge/dsh-webcode-bridge-0.19.64.tgz` |
 | 55 | **「检查更新 → 立即更新」按钮在没有真实效果：它走的 pnpm 通道在本机是坏的**（2026-10-14 登记）——更新链路的最后一步是 `lib/update.js` 的 `installLocalTarball()` → `spawn('dsh plugin --profile web add <tgz>')`。2026-10-14 实测该命令 **exit `-1073740791`**（进程 `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)` 崩掉），因为 pnpm 在解析 **web profile 的其它依赖**时失败：`ERR_PNPM_FETCH_404 dsh-webview-clipboard`（不在 npm 上）、`dsh-vscode-file-links` / `dshmarket` 报 `UND_ERR_DESTROYED`。⇒ **与待装的那个 tarball 无关**，是整个 profile 的依赖树解析失败，于是「点更新 → 什么也没发生」。**对照**：`scripts/install-profiles.mjs`（绕开 pnpm、只解包 + 改 `node_modules`）能装成功 ⇒ 证明 tarball 本身没问题，是**通道**问题。**为什么不去绕**：pnpm 通道是「声明与内容一起动」的唯一正路；`install-profiles.mjs` 只写 `node_modules`、不改声明 ⇒ 下一次 pnpm 通道（装别的插件 / 启动期 reconcile）会**静默回退**（§0.16.10 七记过这条坑）。正解 = 修 profile 的依赖树（把那三个不在 npm 上的包拿掉或换成可达来源），那要用户决定。**同一根因也解释了本机 `dsh plugin --profile web add` 长期失败**。⚠ **干净环境不受影响**：用隔离 `DSH_HOME` 模拟新电脑（空 profile + 只装本插件）实测 **EXIT=0**（`Packages: +2 … Done in 19.5s`），声明/bundles/磁盘版本三处一致 ⇒ **别人新电脑上装不上**这个报告，根因在本机 profile 而非插件 | 中 | 否 | `lib/update.js`（`installLocalTarball`）、`~/.dsh/profiles/web/package.json`（那三个依赖）、`scripts/install-profiles.mjs`、`doc/progress.md`（2026-10-14 §安装） |
+| 56 | **本轮新加的闸门/工具自身连出三个缺陷，三次都把 CI 打红**（2026-10-14 登记，**同日全部修复**）——值得单独登记：这是一类**系统性**失败，**「判据/工具自身的缺陷」比被测代码的缺陷更贵**（它一红，所有真问题都被淹掉）。三次逐条：<br>① **captcha 可见性判据把零尺寸节点算可见**（产品缺陷）：`el.offsetWidth \|\| el.offsetHeight \|\| el.getClientRects?.().length` 里最后那个兜底对**零尺寸但仍在布局里**的节点恒为真（z.ai 的 `#chat-captcha-element` 常驻 DOM、`0x0`、`rects=1`；发送中密集采样 **20/20 拍全中**）⇒ 闸门在空壳上开火，正常轮次被判 `WEB_CAPTCHA_REQUIRED`。已改成「必须有真实像素且非 `display:none` / `visibility:hidden`」；真弹窗（332×329）仍被判可见。<br>② **`gen-progress-index.mjs --check` 对行尾敏感**（工具缺陷）：`core.autocrlf=true` 且仓库**无** `.gitattributes` ⇒ CI 干净 clone 出的是 **CRLF**，而本机工作树是 **LF**；重建块由 `join('\n')` 生成恒为 LF ⇒ 与 CRLF 块**永不相等** ⇒ **本机绿、CI 红**。已改为比较前归一化、写回时用文件原行尾。顺带修掉一句**自相矛盾的读数**：旧文案用 `parseSections(cur)` 数「块里的小节」，而该函数**跳过整个索引块** ⇒ 对块本身恒为 0 节 ⇒ 打成「文档 99 节，索引 0 节」（索引明明在却说 0 节）。<br>③ **新 EOL 闸门收了「依赖本机留档」的检查**（工具缺陷）：`doc-rewrite-audit.mjs check` 需要 `.tmp/doc-audit/` 的**改前快照**，而 `.tmp/` 被 gitignore ⇒ 干净 clone 上必然 exit 2 ⇒ 该闸门在 CI **恒红**。已把范围纪律写进脚本头：**只收能在干净 clone 上独立跑通的检查**。<br>**沉淀出的两条纪律**：<br>（a）**新增/修改闸门后，必须先把「CI 的形态」在本机复现一遍**——落点是 `scripts/check-eol-portability.mjs`（把 CRLF 形态搬到本机，对每个受检文件跑两种行尾）；<br>（b）**推送前跑全量单测**（本机 `spawn EPERM` ⇒ 逐文件跑 127 个）。本轮漏了这一步，让 `driver-scope` 的红灯进了 CI。 | 高 | 否 | `lib/browser-driver.js`（captcha 判据）、`scripts/gen-progress-index.mjs`、`scripts/check-eol-portability.mjs`、`scripts/ci-local.mjs`、`test/driver-scope.test.mjs`、`test/captcha-gate.test.mjs` |
 | 47 | 官方会话 chrome 在第三方面板内不可达：列顶栏按官方 DOM+官方 CSS module 复刻、右侧 tab 靠官方页签承载（2026-10-06 登记；10-07 两处更新；2026-10-08 复刻落地并升级判… | 中 | 否 | `package/dsh-webcode-bridge/lib/client.cjs`、`test-mock/probe-concurrent-live.mjs`、`scripts/check-official-drift.mjs`、`doc/progress.md`（2026-10-08 轮 §四） |
 | 48 | 「提示词投递 = 纯文本」档在长会话上必然发不完整（PROMPT_TRUNCATED）（2026-10-06 登记；2026-10-11 归因更正 + 真机实证） —— 真机造 jobs 时撞到：用户设置 promptT… | 中 | 部分 | `lib/browser-driver.js`（`composerEchoVerdict` / `fillComposer` / `writeFieldNative` / `readComposer`）、`test/composer-write.test.mjs`（回读判据 ①–⑦）、`doc/progress.md`（2026-10-11 节）、`.tmp/evidence/crlf-chromium.json`（真机读数；⚠ 本路径被 gitignore，读数已逐字回写在 `lib/browser-driver.js` 的 `composerEchoVerdict` 注释里） |
 | 48b | **（#48 的追加节，不是独立条目）** 归因更正：不是通道丢段，是**换行规范化误报**（2026-10-11 追加）——`\r\n` 被 `textarea.value` 按 HTML 规范规范化为 `\n`，**正文内容零丢失**；判据已从「比长度」改为「比内容等价」（`composerEchoVerdict`）。真因、五项断言读数、护栏与变异见正文 §48b。**更正原因**：2026-10-11 追加时误用了第二个 `## 48.` 标题，导致本文件有两个不同的 `## 48.`（`check-long-term-issues.mjs` 用集合比对**看不见重号**）；2026-10-14 改为 `48b.` 并在 `check-long-term-issues.mjs` 里补上**重号判据** | 中 | 部分 | `lib/browser-driver.js`（`composerEchoVerdict`）、`test/composer-write.test.mjs`、`scripts/check-long-term-issues.mjs`（重号判据） |
@@ -3935,4 +3936,72 @@ EXIT=0
   干净环境同一条命令 exit 0。
 - **未做**：没有修那三个依赖，也没改 `update.js`。两件都要用户先决定（前者动 profile 依赖树，
   后者会把静默回退变成常态）。
+
+## 56. **本轮新加的闸门/工具自身连出三个缺陷，三次都把 CI 打红**（2026-10-14 登记，**同日全部修复**）
+
+### 为什么值得单独登记
+
+这是一类**系统性**失败，而且比被测代码的缺陷更贵：**闸门一红，所有真问题都被淹掉**。
+本轮三次 CI 红，红点全在「我刚加的判据/工具」上，没有一次是产品代码有问题。
+
+### 三次逐条（都附真机/真 CI 读数）
+
+**① captcha 可见性判据把零尺寸节点算可见**（**产品缺陷**）
+
+判据原文：`el.offsetWidth || el.offsetHeight || el.getClientRects?.().length`。
+最后那个兜底对**零尺寸但仍在布局里**的节点**恒为真**：z.ai 的 `#chat-captcha-element`
+常驻 DOM、`offsetWidth/Height = 0`，而 `getClientRects()` 仍返回 1 个 0×0 矩形。
+真机实测（发送中密集采样 20 拍，逐拍读数）：
+
+```
+chat-captcha-element[0x0 rects=1 driver=true strict=false]   ← 20/20 拍全中
+```
+
+⇒ 闸门**在空壳上开火**，正常轮次被判 `WEB_CAPTCHA_REQUIRED`。
+修后判据：必须有**真实像素**（宽高都 > 0）且非 `display:none` / `visibility:hidden`。
+两向复算：只有空壳 → 旧 `visible=1`（误报）/ 新 `visible=0`（正确）；
+真弹滑块 → 旧 `visible=2` / 新 `visible=1`（**仍然报，没漏**）。
+
+**② `gen-progress-index.mjs --check` 对行尾敏感**（**工具缺陷**）
+
+`core.autocrlf=true`（本机默认）且仓库**没有** `.gitattributes` ⇒
+CI 干净 clone 出来的 `doc/progress.md` 是 **CRLF**，而本机工作树是 **LF**（两种都合法）；
+重建块由 `join('\n')` 生成 ⇒ 恒为 LF ⇒ 与文件里的 CRLF 块**永不相等**
+⇒ **本机绿、CI 红**（CI run 38532045550，两条腿都红）。
+
+修法：比较与解析前把全文归一化成 `\n`；**写回时用文件原有行尾**（否则一次生成就产生整文件 diff）。
+
+顺带修掉一句**自相矛盾的读数**：旧文案用 `parseSections(cur)` 数「块里的小节」，
+而 `parseSections` 会**跳过整个索引块**（`insideIndex`）⇒ 对块本身解析**恒为 0 节**，
+于是打成「文档 99 节，索引 0 节」——索引明明在，却说 0 节，把「块内容不一致」
+误导成「索引不见了」。现在如实报：块内行数 vs 重建行数 + 首个差异行号。
+
+**③ 新 EOL 闸门收了「依赖本机留档」的检查**（**工具缺陷**）
+
+`doc-rewrite-audit.mjs check` 需要 `.tmp/doc-audit/` 里的**改前留档快照**，
+而 `.tmp/` 被 `.gitignore:61` 覆盖 ⇒ 干净 clone 上**没有**那个快照，
+该命令必然 exit 2（`没有改前留档，无法核对`）。本机有快照所以本机绿
+⇒ 闸门在 CI **恒红**（CI run 38532815623 之前那一次）。
+本机复现：把 `.tmp/doc-audit` 挪走 ⇒ exit 2 ⇒ FAIL；放回 ⇒ PASS。**与 CRLF 无关**。
+
+修法：EOL 闸门**只收能在干净 clone 上独立跑通的检查**，并把这条范围纪律写进脚本头。
+
+### 沉淀出的两条纪律（写给下一个加闸门的人）
+
+1. **新增/修改闸门后，必须先把「CI 的形态」在本机复现一遍。**
+   落点：`scripts/check-eol-portability.mjs` —— 把 CI 才有的 CRLF 形态搬到本机，
+   对每个受检文件跑两种行尾，都须 exit 0。**变异已验证**：去掉归一化 ⇒ 它在 CRLF 形态下变红
+   （本机 LF 仍绿，与 CI 特征一致）。
+2. **推送前跑全量单测。** 本机 `spawn EPERM` ⇒ 逐文件跑 127 个文件。
+   本轮我漏了这一步，让 `driver-scope` 的红灯进了 CI（那条护栏本身是**对的**：
+   我写在 `page.evaluate` 回调里的裸 `getComputedStyle` 物理上位于 `runTurn` 体内，
+   在 Node 作用域里没有绑定——正是 `nav is not defined` 那一族）。
+
+### 判据
+
+`node scripts/ci-local.mjs --fast` **12/12 PASS**（本地复现 CI 那一步）；
+CI run 38532815623 **success**（CI + CodeQL）；全量单测 **126/127**
+（唯一失败 `webcode-preset.test.mjs` ②e 是**机器状态依赖**：它读本机安装的官方
+`standard.patch.yml`，在改动前的 2368b4a 上同样红，CI 干净跑器上不红）。
+
 
