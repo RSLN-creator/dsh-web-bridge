@@ -174,19 +174,41 @@ test('★ zai 声明的 captchaSelector 必须命中真机风控节点，且不�
   }
 });
 
-test('zai 的 decoder 声明与证据一致：现有 kind 没有能解它真实帧的，因此**刻意不改**', () => {
-  // 真机帧形状来自站点自带前端代码（index-p_7VciLU.js 的帧处理器 di 解构）：
-  //   { id, done, content, delta_content, edit_content, sources, selected_model_id, error,
-  //     usage, files, phase="other", …, metadata, content_blocks }
-  // 既不是 OpenAiSseDecoder 的 `choices[].delta.content`，也不是 GlmDecoder 的
-  // `parts[].content[].type`。**没有真机帧夹具之前不许猜着换 kind** —— 这条断言就是那句
-  // 「宁可不动」的机器化表达：改 decoder 必须连带改这一行，于是改动者一定会读到上面那段。
-  assert.equal(resolveWebModel('zai:auto').decoder, 'openai-sse');
+test('zai 的 decoder 声明与**真机帧**一致：#30 已取得帧，decoder 换成为它写的 zai kind', () => {
+  // ## 这条断言在 2026-10-14 变过一次方向（留档，不要以为它一直长这样）
+  //
+  // **旧断言**（2026-09-27 起）：`decoder === 'openai-sse'`，理由是「现有 kind 没有一个能解
+  // 它真实帧，没有真机帧夹具之前不许猜着换 kind」——那是「宁可不动」的机器化表达。
+  //
+  // **为什么现在换成 `zai`**：2026-10-14 取得了**真机帧**（用户人工跑
+  // `test-mock/zai-capture-frames.mjs`，帧逐字存于
+  // `test/fixtures/zai-real-frames/zai-chat-2026-10-14.txt`）。有了 wire 证据，
+  // 「不许猜着换」这条约束就不再适用——`lib/decoder.js` 新增了按真帧写的 `ZaiDecoder`，
+  // 护栏 `test/zai-decoder.test.mjs` 钉住「解得出 + 不重复播」。
+  //
+  // 旧断言最后一句自己就预告了这次改动：「拿到真机帧后应新建 zai-real-frames/ 并在这里登记」。
+  assert.equal(resolveWebModel('zai:auto').decoder, 'zai');
   const kinds = Object.keys(globalThis.WebCodeStreamDecoders);
-  assert.ok(kinds.includes('openai-sse') && kinds.includes('glm'));
-  // 夹具目录里此刻**没有**真机帧（completion 请求被风控拦在发出之前），所以也不该有帧夹具。
-  const dir = new URL('./fixtures/zai-real-dom/', import.meta.url);
-  const names = fs.readdirSync(dir);
-  assert.deepEqual(names, ['zai-chat-dom-inventory.json'],
-    'zai-real-dom 下只应有 DOM 清单；拿到真机帧后应新建 zai-real-frames/ 并在这里登记');
+  assert.ok(kinds.includes('zai'), '注册表必须有 zai kind');
+  assert.ok(kinds.includes('openai-sse') && kinds.includes('glm'), '其余 kind 不受影响');
+
+  // 真机帧夹具**已存在**（这正是本次换 kind 的前提），且与 DOM 清单分开放
+  const domDir = new URL('./fixtures/zai-real-dom/', import.meta.url);
+  assert.deepEqual(fs.readdirSync(domDir), ['zai-chat-dom-inventory.json'],
+    'zai-real-dom 只放 DOM 清单');
+  const framesDir = new URL('./fixtures/zai-real-frames/', import.meta.url);
+  const frames = fs.readdirSync(framesDir);
+  assert.ok(frames.includes('zai-chat-2026-10-14.txt'),
+    '真机帧夹具必须在；没有它就不该把 decoder 换成 zai（那就成了「猜着换」）');
+});
+
+test('zai 的 completionPaths 覆盖真机的 /api/v2（2026-10-14 真机更正）', () => {
+  // 真机读数（那一轮 summary.network 逐字）：
+  //   `RES 200 text/event-stream; charset=utf-8
+  //    https://chat.z.ai/api/v2/chat/completions?timestamp=…&requestId=…`
+  // 旧声明只有 v1 与无版本两条 ⇒ 捕获层按声明匹配时**一个块都接不到**，
+  // 而页面照常渲染（静默、极难发现）。这条断言把 v2 钉住。
+  const zai = SITES.find((s) => s.id === 'zai');
+  assert.ok(zai.completionPaths.includes('/api/v2/chat/completions'),
+    'completionPaths 必须含 /api/v2/chat/completions，实际为 ' + JSON.stringify(zai.completionPaths));
 });

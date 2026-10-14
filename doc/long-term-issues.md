@@ -50,23 +50,23 @@
 | 36 | **`ref-index` 既有红**（2026-09-29 复核：**已解决**）——登记的是「曾被记为欠账、实测已不在」这次更正本身 | 低 | 否 | `reference/README.md`、`scripts/gen-reference-index.mjs` |
 | 37 | **两条既有常红是同一条行为：网页会话丢失 → 整段重放**（2026-09-30 复核归因：**已修——根因是测试隔离缺陷，不是重放分支**；2026-09-30 晚登记）——`regression` 53/1 与 `aux-delta-compact` 4/1 的 60s 压线来自裸测试读到真实 profile 的发送间隔与基准 | 高 | 否 | `lib/index.js`（profile 落盘守卫）、`test/profile-isolation.test.mjs`、`doc/progress.md`（2026-09-30 段） |
 | 38 | **`NODE_TEST_CONTEXT` 守卫在裸跑形态的残余洞：prompt store 读写通道**（2026-10-02 登记；regression 用例本轮已补隔离）——同族于 #37 的第二条通道；且由此暴露**生产缺陷候选：真实轮重放读回首轮正本会丢后续增量（红线二形状）**，见正文 §38 | 高 | 否 | `lib/index.js`（`readSessionPrompt`、executor 重建分支）、`lib/prompt-store.js`、`test/regression.test.mjs` |
-| 39 | **错误码在 harness 边界全部退化成 `UNKNOWN`**（2026-10-02 登记；**同轮已修，0.19.54**）——本插件给普通 `Error` 挂 `.code`，而官方 `normalizeLlmFailure` 只认 `instanceof HarnessError`；实测 284 份会话里归因本插件的 **137/137** 条 error finishes 全是 `code:"UNKNOWN"`（官方 provider 丢码 0 条）。后果：官方 `llm-retry` 自动重试与 `compaction-basic` 超限自动压缩修复**对本插件从未生效且不报错**；UI 一律显示 `UNKNOWN`。另含 `RATE_LIMITED` ≠ 官方 `RATE_LIMIT` 的码名不符 | 高 | 否 | `lib/error-codes.js`（新增，错误码真源）、`lib/index.js`、`lib/browser-driver.js`、`lib/think-effort.js`、`lib/upstream.js`、`lib/zero-progress.js`、`test/error-codes.test.mjs`、`scripts/scan-error-codes.mjs`、`doc/research/2026-10-02-dsh-official-error-and-repair.md` |
-| 40 | **并发会话的「一组一行」：三轮结论反转，终局 = 不自建工作区**（2026-10-03 登记；10-06 反转一次「为每组建 git worktree」；**2026-10-08 再反转并删除该机制**）——10-06 的「反转」当时以为找到了正解（官方左栏按工作区一行、折叠时不投影会话行 `ui-workspace:661`/`:492/:502`，会话归属是宿主硬判据 `SessionHeader.cwd === workspace.path` `dsh-workspace:122` ⇒ 给每组一个真目录就能「一行」）。**真机否掉了它**：每组一个 `<repo>-hwb-<组id>` 完整检出，跑几轮就在磁盘上堆出 **41 个**重复 worktree 目录（本轮清理：37 个 `dsh-webcode-bridge-hwb-*` + 4 个 `A0-Robocup-hwb-*` + 51 个孤儿会话目录），官方左栏把它们当**独立工作区**各占一行，会话标题还被目录名污染成 `A0-Robocup-hwb-muym5osw00v6`——与用户要的恰好相反（原话「看好官方怎么管理工作区的！！文件夹内一个会话一行！！不是每个会话一个文件夹！」）。⇒ **终局**：并发列就在**当前工作区**里普通新建会话（`sessions.create({ workspaceId: currentWorkspaceId() })`，与官方「新会话」同路径），官方左栏天然呈现「一个文件夹内一条会话一行」；`lib/concurrent-workspace.js`、两条服务端路由、`provisionGroupWorkspace`、`inject` 的 `'workspaces'` 全部删除。**教训**：「能做到」不等于「该做」——一个机制即使用户拍过板，若真机副作用与用户的根本意图相反，就该撤，而不是继续在上面加东西 | 低 | 否 | `lib/client.cjs`、`lib/web-control.js`、`test/team-compare.test.mjs`、`doc/progress.md`（2026-10-08 轮 §二/§三） |
-| 41 | **CI 在 `main` 上长期恒红（2026-09-26 起）**（2026-10-03 登记，**同轮已修**）——每条都是**判据/环境**问题、与产品行为无关：① `site-prompt-transport.test.mjs` 把 profile 建在**被 gitignore 的** `.tmp/` 下，干净 clone 里不存在 ⇒ `ENOENT ...\.tmp\siteprompt-cp-XXXXXX`（④/⑥a/⑥b/session-import 四条一起红）；② `column-fs.test.mjs` 拿**未规范化**的 `columnRootOf()` 去比**已规范化**的写入返回值，在「临时目录带 8.3 短名」的机器（CI `C:\Users\RUNNER~1\…`）必然为假；③ `pre-deliver-window.test.mjs` ①b 用「两轮墙钟之差」量间隔，而 `end-to-start` 基准下该差值恒 = gap − 上一轮稳态收尾（CI 实测 `4302 vs 1514`）；④ `column-fs.test.mjs` 另一条用例用 `new URL(import.meta.url).pathname.slice(1)` 拼源码路径，在 POSIX 上把 `/home/…` 削成 `home/…`（相对路径）⇒ ubuntu 腿 `ENOENT: open 'home/runner/…'`；⑤ `site-mount.test.mjs` 那条「白名单内 + 存在」的断言用 `path.join(os.homedir(),'.dsh')`，而 CI runner 上**没装 DSH** ⇒ 先撞「目录不存在」（两条腿都红）。修完前三条推上去 CI 又红，才暴露出④⑤——被前三条的噪声盖住了 | 中 | 否 | `test/site-prompt-transport.test.mjs`、`test/column-fs.test.mjs`、`test/pre-deliver-window.test.mjs`、`test/site-mount.test.mjs`、`doc/progress.md`（2026-10-03） |
+| 39 | 错误码在 harness 边界全部退化成 UNKNOWN（2026-10-02 登记；同轮，0.19.54） —— 本插件给普通 Error 挂 .code，而官方 normalizeLlmFailure 只认 inst… | 高 | 否 | `lib/error-codes.js`（新增，错误码真源）、`lib/index.js`、`lib/browser-driver.js`、`lib/think-effort.js`、`lib/upstream.js`、`lib/zero-progress.js`、`test/error-codes.test.mjs`、`scripts/scan-error-codes.mjs`、`doc/research/2026-10-02-dsh-official-error-and-repair.md` |
+| 40 | 并发会话的「一组一行」：三轮结论反转，终局 = 不自建工作区（2026-10-03 登记；10-06 反转一次「为每组建 git worktree」；2026-10-08 再反转并删除该机制） —— 10-06 的「反转… | 低 | 否 | `lib/client.cjs`、`lib/web-control.js`、`test/team-compare.test.mjs`、`doc/progress.md`（2026-10-08 轮 §二/§三） |
+| 41 | CI 在 main 上长期恒红（2026-09-26 起）（2026-10-03 登记，同轮） —— 每条都是判据/环境问题、与产品行为无关：① site-prompt-transport.test.mjs 把 prof… | 中 | 否 | `test/site-prompt-transport.test.mjs`、`test/column-fs.test.mjs`、`test/pre-deliver-window.test.mjs`、`test/site-mount.test.mjs`、`doc/progress.md`（2026-10-03） |
 | 43 | **deepseek 与 z.ai 的账号昵称在驱动页面上读不到**（2026-10-03 登记，本轮**不修**）——deepseek 昵称候选 **0 条**（账号区不可见；但头像照样读到，因为读取不判可见性）；z.ai 头像候选 `rect.x = -12`（侧栏在视口外，同为折叠态）且是 Svelte 哈希类名。两站**没有昵称节点的真机读数 ⇒ 不声明选择器**；出路见正文（展开侧栏后取证 / 改成以头像为锚的结构感知读取） | 中 | 否 | `lib/providers.js`（`accountProbe`）、`lib/browser-driver.js`（`readAccountIdentity`）、`test-mock/probe-account-identity-live.mjs`、`lib/account-candidates.js` |
-| 44 | **「检查更新」恒报「已是最新」：仓库没跟上 `package.json` 的 tag**（2026-10-04 登记；**2026-10-06 已解决并复核**）——最新 tag 是 **v0.19.55** 而 `package.json` 已是 0.19.60/0.19.61 ⇒ `latest < current` ⇒ 判据如实给出「已是最新」。真因是 `release.yml` 只在**打 tag** 时产出 tarball，而 0.19.56–0.19.61 几轮只改版本号没打 tag ⇒ Releases 上最后一个是 0.19.55。发版是对外不可逆动作，登记不代做；出路 = `git tag v0.19.x && git push origin v0.19.x`，且 tag 必须打在 `package.json` 已是同版本的 commit 上。**2026-10-06 复核收口**：tag `v0.19.67` 已存在且指向的 `package.json` 就是 `"version": "0.19.67"`（`git show v0.19.67:package/dsh-webcode-bridge/package.json` 实读），Release 带 tarball 资产 905,459 字节；`fetchReleases` → `updateDecision` 以 0.19.61 为 current 的实跑读数 = `{status:"outdated", latest:"0.19.67", asset:{…releases/download/v0.19.67/…tgz}}` ⇒ 「恒报已是最新」不再成立。**留档判据**：只有 `updateDecision` 返回 `outdated` 才算修好，「命令行打印 +pkg@ver」不算（见 #46） | 低 | 否 | `package/dsh-webcode-bridge/package.json`、`.github/workflows/release.yml`、`lib/update.js` |
+| 44 | 「检查更新」恒报「已是最新」：仓库没跟上 package.json 的 tag（2026-10-04 登记；2026-10-06 并复核） —— 最新 tag 是 v0.19.55 而 package.json 已是 0… | 低 | 否 | `package/dsh-webcode-bridge/package.json`、`.github/workflows/release.yml`、`lib/update.js` |
 | 42 | **「网页桥接」设置分区的导航图标不可自定义**（2026-10-03 登记）——用户报「仍然是默认齿轮」；真因在**官方壳**里：`settings.section` 的注册契约只有 `id/order/label`（**没有 icon**），导航字形由官方 `dsh-client-ui-settings-general` 的 `navIcon(id)` **硬编码**（只认 `account` / `models` / `agent-presets` / `plugins` / `archived-sessions`，其余一律回落齿轮）。插件侧**结构上无解**，除非改官方包或占用一个 shipped id | 低 | 否 | `lib/client.cjs`（`settings.section` 注册处）、官方 `@deepseek-ai/dsh-client-ui-settings-general/lib/client.js`（`navIcon`）、`doc/progress.md`（2026-10-03） |
 | 45 | **桌面 profile 的声明与磁盘分叉：声明仍钉 0.19.61，磁盘已是 0.19.64**（2026-10-05 登记）——本轮靠官方 `client-hmr` 通道**原地热换** `lib/client.cjs` 让桌面端立刻用上修复（不改进程、不重启应用），但**没改 profile 声明**。风险：任何一次 pnpm 通道（装别的插件、启动期 reconcile）都可能把客户端静默换回声明里的旧版 ⇒ 缺陷复发。恢复「声明 == 磁盘」必须**完全退出桌面端**后走官方通道装一次（`dsh` CLI 拒绝管理 desktop profile，须用桌面端自己的 carrier），且宿主半边本来就要重启才换 | 中 | 否 | `~/.dsh/profiles/desktop/package.json`、`~/.dsh/profiles/desktop/node_modules/dsh-webcode-bridge/lib/client.cjs`、`doc/progress.md`（2026-10-05 §八）、`doc/research/2026-10-05-dsh-multi-session-and-client-hot-swap.md` §5 |
 | 46 | **npm 发布被账号安全策略挡在「staged 待批」**（2026-10-05 登记，**同日已解决**）——`npm publish` 报成功但 registry 上 `latest` 仍是 0.19.51（`E409 Cannot publish over previously staged version "0.19.64"`）；根因是 npm 收紧「绕过 2FA 的 token 直接发布」，本机 token 属该类 ⇒ 发布被暂存，需账号主人 2FA 批准。**用户本人批准后已上线**：`latest = 0.19.64`、61 files、shasum `8a7aa56f…` 与本地打包 tarball **逐字节相同**（`published 2026-10-05T15:56:43Z`）。留档价值 = 「命令行打印 `+ pkg@ver` 不等于 registry 上线」这条判据（必须直连 registry 读 `dist-tags`） | 中 | 否 | `~/.npmrc`（token）、npm registry `dsh-webcode-bridge`、`package/dsh-webcode-bridge/dsh-webcode-bridge-0.19.64.tgz` |
-| 47 | **官方会话 chrome 在第三方面板内不可达：列顶栏按官方 DOM+官方 CSS module 复刻、右侧 tab 靠官方页签承载**（2026-10-06 登记；10-07 两处更新；**2026-10-08 复刻落地并升级判据**）——① 官方 header 三块 chip 注册进 `conversation.session.header` 的子槽，该槽只由官方会话视图渲染（0.2.1-alpha.1：`ui-conversation:21191-21210`），且 slots 公开投影**不含组件**（`dsh-client-ui-slots/lib/index.js:313` 原文 without components or executable hooks）⇒ 受支持路径下无法原样挂载；② 官方右栏可见性写死 `activePanelId === null`（`ui-sidebar-right:5874`/`:9062`）⇒ 面板开着必无右栏，第三方也不能在自有面板里渲染官方右栏内容（`renderer:330-333` 归属校验）；③ **出路已落地**：右栏改用官方**页签**承载并发列（`sidebarRightTabs.register` + `sidebar.right.pane.tab`，真机 `window.__hwbRail={registered:true}`）；④ **「在官方视图打开」已修通（10-07 轮）**：放行标记由按钮 onClick 置位、而守卫只在 pointerdown 捕获期消费 ⇒ 订阅回调决策时读不到；修法 = `createPanelGuard` 的 panelInfo 订阅回调**同样消费**放行标记，真机 `panelGone:true + headers:4 + lastDecision:"allow:leave"`（10-08 轮该入口从列头按钮挪进官方同款「更多操作」菜单，放行时序一字未改，判据仍钉两个消费点）；⑤ **「列内渲染官方 session header」定案为做不到（10-07 真机取证，10-08 在 0.2.1-alpha.1 复核仍成立）**：两道官方闸——授权（renderSlot 只认本条目 children 声明，`renderer:332`）+ 声明唯一（children 声明遇已声明槽名必抛，`slots:193`；该槽已被官方 registerHeader 声明为 conversation.header 的 child，`ui-conversation:23073-23086`）⇒ 真机逐字 `slot "conversation.session.header" is already declared (by an entry in "conversation.header" (mf))`，**列条目注册整体失败、列体全空**。⇒ 出路不是「自绘一套看着像的」，而是**按官方复刻**（10-08 轮 `ColumnHeader`）：结构逐字照官方 `ConversationHeader`/`ConversationSessionHeader` 那棵树（9 个结构位 + 同组 role/aria）、**样式不自己写**（直接挂官方 CSS module 的哈希类名，前缀由 `officialCssPrefix` 运行时从 `<style data-plugin-css>` 反解 ⇒ 官方改哈希自动跟上；桌面 asar 0.2.0-rc.2 与 web 0.2.1-alpha.1 **前缀不同**，这条设计让两版都拿得到正确样式）、数据与文案照官方投影键与 zh 词典（拿不到就不渲染那块）、「对话/轨迹」页签**真的切官方视图**（读官方 `conversation.view` 注册表 + 经 `conversation.session` 的 `view` owner prop，组件身份按 viewId 缓存防重挂）；⑥ 右栏受官方布局所限（常态 300px～45%、中列保底 400px），3–4 列并排只在全屏下实用 | 中 | 否 | `package/dsh-webcode-bridge/lib/client.cjs`、`test-mock/probe-concurrent-live.mjs`、`scripts/check-official-drift.mjs`、`doc/progress.md`（2026-10-08 轮 §四） |
-| 48 | **「提示词投递 = 纯文本」档在长会话上必然发不完整（`PROMPT_TRUNCATED`）**（2026-10-06 登记；**2026-10-11 归因更正 + 真机实证**）——真机造 jobs 时撞到：用户设置 `promptTransport: inline`（全局），44,202 字符提示词灌进 deepseek 输入框，**两次尝试都恰好丢 126 个字符**（44,202→44,076；压缩重试后 36,253→36,127），`PROMPT_TRUNCATED` 回读校验如实拦下、**该轮直接失败**；同一轮把投递形态切到 `attach`（插件默认值）后立刻成功。⚠ **原登记把归因写成「更像写入通道丢一段固定前缀/后缀」——该归因已证伪**：2026-10-11 用真机 Chromium（HeadlessChrome/151）跑离线 textarea 探针，五项断言全部成立 —— CRLF 输入回读差值 **252 = 252**（等于 CRLF 对数）、LF 对照**零差**、CRLF→LF 规范化后**内容逐字相等**、**尾部保留**、且生产判据 `echoed.length < sent.length - 8` 确实会触发。**结论：丢的 126 个「字符」是 126 个 `\r\n` 被 `textarea.value` 按 HTML 规范规范化为 `\n`，正文内容零丢失；这是桥的判据误报，不是网页截断。** 旁证：本机 prompt-store 与事故同日的 4 个会话提示词文件 `CRLF` 计数**恰为 126**（`session-19e2fa47-…__deepseek.md`，2026/10/6 10:12:56），其 CRLF 区段起点前文正是 `Instructions from: AGENTS.md`，而本机 `AGENTS.md` 恰好 **126 行**（`core.autocrlf=true`）。**本轮已修（L1 编辑器层）**：新增纯函数 `composerEchoVerdict`，判据从「比长度」改成比**内容等价**，规范化白名单刻意极窄（只允许 `\r\n`→`\n`、**行尾**空白、NFC），**不允许**泛化 trim / 折叠中间空白；真正的截断（中间丢字 / 尾部截断 / **等长内容被替换**）依然被拦住。⑦ 条护栏 + 变异 M8–M10 全被抓（M8「退回只比长度」让 ①③④ 一起红）。**L2 提交层仍待做**：`composerCleared()` / `navigatedAway()` 只证明「消息已离开输入框」，**不证明**「提交的正文与输入等价」；证据不足时应记**不确定**。`SITE_COMPOSER_HARD_LIMIT` 仍只有 kimi: 200,000 | 中 | 部分 | `lib/browser-driver.js`（`composerEchoVerdict` / `fillComposer` / `writeFieldNative` / `readComposer`）、`test/composer-write.test.mjs`（回读判据 ①–⑦）、`doc/progress.md`（2026-10-11 节）、`.tmp/evidence/crlf-chromium.json`（真机读数；⚠ 本路径被 gitignore，读数已逐字回写在 `lib/browser-driver.js` 的 `composerEchoVerdict` 注释里） |
+| 47 | 官方会话 chrome 在第三方面板内不可达：列顶栏按官方 DOM+官方 CSS module 复刻、右侧 tab 靠官方页签承载（2026-10-06 登记；10-07 两处更新；2026-10-08 复刻落地并升级判… | 中 | 否 | `package/dsh-webcode-bridge/lib/client.cjs`、`test-mock/probe-concurrent-live.mjs`、`scripts/check-official-drift.mjs`、`doc/progress.md`（2026-10-08 轮 §四） |
+| 48 | 「提示词投递 = 纯文本」档在长会话上必然发不完整（PROMPT_TRUNCATED）（2026-10-06 登记；2026-10-11 归因更正 + 真机实证） —— 真机造 jobs 时撞到：用户设置 promptT… | 中 | 部分 | `lib/browser-driver.js`（`composerEchoVerdict` / `fillComposer` / `writeFieldNative` / `readComposer`）、`test/composer-write.test.mjs`（回读判据 ①–⑦）、`doc/progress.md`（2026-10-11 节）、`.tmp/evidence/crlf-chromium.json`（真机读数；⚠ 本路径被 gitignore，读数已逐字回写在 `lib/browser-driver.js` 的 `composerEchoVerdict` 注释里） |
 | 48b | **（#48 的追加节，不是独立条目）** 归因更正：不是通道丢段，是**换行规范化误报**（2026-10-11 追加）——`\r\n` 被 `textarea.value` 按 HTML 规范规范化为 `\n`，**正文内容零丢失**；判据已从「比长度」改为「比内容等价」（`composerEchoVerdict`）。真因、五项断言读数、护栏与变异见正文 §48b。**更正原因**：2026-10-11 追加时误用了第二个 `## 48.` 标题，导致本文件有两个不同的 `## 48.`（`check-long-term-issues.mjs` 用集合比对**看不见重号**）；2026-10-14 改为 `48b.` 并在 `check-long-term-issues.mjs` 里补上**重号判据** | 中 | 部分 | `lib/browser-driver.js`（`composerEchoVerdict`）、`test/composer-write.test.mjs`、`scripts/check-long-term-issues.mjs`（重号判据） |
-| 50 | **账号锁接管路径非原子：陈旧锁可被多个进程同时「接管」**（2026-10-11 登记，**同日完全修复 0.19.71**）——`acquireBridgeLock` 的接管分支是「读 → 判 → **非独占** `writeFileSync` 覆写」，而正常首建路径用的是 `flag:'wx'`（那条是对的）。⇒ 盘上留有陈旧锁时（强杀/崩溃/重启的常见后果，正是 0.19.22 要解决的场景），多个进程可全部判定可接管并**全部返回 `ok:true`**，破坏「同一账号不得同时桥接」这条用户准则。**实测**：`fresh`（无锁文件）**0/20** 多持；`stale`（盘上有死锁）**20/20** 多持；屏障同步 4 进程 ×8 轮**每轮 4 个进程全 `ok`**。**触发窗口须如实标定**：无屏障自然调度 **0/84**、单次接管全程仅 **2.0–4.2ms** ⇒ 真实竞态缺陷，但**不是高频故障**，且触发率**尚未**从生产数据估计（该试验不是生产启动事件的随机抽样）。**修复（同日完成，两层）**：① **判据层** —— `decideBridgeLock` 加「明确存活 ⇒ 一律 `held`，锁龄不再构成放行理由」，时间上限**降级为仅当存活判据缺席时的有界兜底**，并把 PID 复用出口显式标为 `recoverable`；② **原子层** —— 新增**过渡互斥**（`webcode-bridge.lock.guard.d`，`mkdir` 原子原语），**所有对锁文件的改动（建立/回收/释放）都在临界区内**，且临界区内**重读并重新裁决**（外面那次读只作快速路径，不作权威判据）。**修复后多进程实测：`stale` 2×12 轮与 4×8 轮均 0 多持、每轮恰好 1 个赢家**；`fresh` 无退化。**护栏**：新增 ①e2–①e6、⑤b、**⑧/⑧b（真多进程竞争）**、⑨（守卫回收与只删自己的）⇒ `bridge-lock.test.mjs` **29/29**；**变异测试 M1–M7 全部被抓**（其中 M5「摘掉过渡互斥」直接让 ⑧ 变红 ⇒ 该护栏真实承载修复）。**三个被证伪的候选协议（教训，写给下一个改锁的人）**：`rename` aside 是**按路径**而非**按身份**操作 ⇒ 会移走别人刚建立的**活锁**（ABA；实测 A 移走 `B-LIVE`，两进程同时认为自己持有）；天真的「`mkdir` 当锁 + `rmdir` 回收」**只修首次获取、回收仍删掉新持有者**；非独占覆写则直接静默覆盖。⇒ **「原型 0/N 多持」不构成安全证明**，只说明**该交错**未触发。**平台语义（Windows 实测）**：`rename` 覆盖已存在目标**成功且静默覆盖**、源不存在 `ENOENT`、**目标被打开读取 `EPERM`**、`wx` 落已存在 `EEXIST` ⇒ `EPERM`（进程性失败）与 `ENOENT`（输竞争）**不能一并当「拿到锁」**。**0.19.73（复审三进程窗口，已修复）**：0.19.72 的顺序是**先 rename 移走、后查存活** —— 移走期间路径不存在，第三个进程 C 可趁空档 mkdir 成功，而 A **仍活着、仍在临界区**。确定性注入：guardPathExistsAfterRename:false → C_acquiredInWindow:true → B_putBackSucceeded:false ⇒ A 与 C 同时持有、A 的守卫被永久遗弃。**这不是年龄兜底那类风险**（B 的判断本身正确）。修法 = **先验证后动手**：存活判定排在任何移走之前；认领后复核身份防 ABA；放不回也不继续。护栏 ⑨b2/⑨c2/⑨c3 + 变异 M15–M17 全被抓。**\n\n**已知边界（0.19.72 更新）**：初版（0.19.71）的守卫回收**只看 mtime**，复审指出「通常几毫秒」是概率论证而非不变量——进程可被暂停（调试器/休眠/GC 停顿）超过 15 秒而**仍然活着**。**故障注入已复现**：mtime 改老 + `owner.json` 保留**确定存活**的 pid ⇒ 调用方照样回收成功（`acquiredGuardWhileAAlive: true`），两个进程都认为自己持有守卫。**0.19.72 已修**：回收改成与锁文件同构的三态（明确存活 ⇒ **绝不回收**；明确死亡 ⇒ 回收；判据给不出结论 ⇒ 仅用**显著放宽**的年龄兜底且**留痕说明是猜测**）；释放判据也从「只认 pid」加固为「pid + `startedAt`」（防 pid 复用误删别人的守卫），并明确「标记缺失/损坏 ⇒ 按可能是自己写坏的删除」（不可删除的空守卫会挡住所有人）。护栏 ⑨b–⑨g + 变异 M11–M14 全被抓。**未验**：非 Windows；真实「两个桥互相杀浏览器」的端到端复现（已证明的是**协议不再允许**该状态） | 高 | 是 | `lib/bridge-lock.js`（`decideBridgeLock` / `acquireBridgeLock` / `acquireTransitionGuard` / `recoverStaleGuard` / `releaseTransitionGuard`）、`test/bridge-lock.test.mjs`（①e2–①e6、⑤b、⑧、⑧b、⑨–⑨g）、`doc/progress.md`（2026-10-11 节） |
-| 49 | **0.19.69 的 profile 安装与「重启 dsh web」在本机沙箱内无法执行**（2026-10-08 登记，**等用户在正常环境补做**）——本轮发布链其余各步全部完成并已复核：git 提交 `2b63492` + `1ab845f`、push（`05967a1..1ab845f`，走 HTTPS + `http.sslBackend=openssl`）、tag `v0.19.69`、GitHub Release 带资产 `dsh-webcode-bridge-0.19.69.tgz`（930,799 B）、CI 与 CodeQL success、npm `latest = 0.19.69`（`dist.shasum a6f8b8459dff…` 与本地 tarball 逐字节同源）。**卡住的是最后一步**：`~/.dsh` 整棵树在本沙箱内**只读**（写探针文件即 `Access denied`），`dsh plugin --profile web add <tgz>` 报 `EPERM: operation not permitted, open …\profiles\web\package.json.lock`。⇒ 用户须在正常环境里 `dsh plugin --profile web add .\dsh-webcode-bridge-0.19.69.tgz` 并**重启 dsh web**（「装完不重启 = 等于没装」）。⚠ 注意 #45 同族风险：桌面端是**另一条**通道（`dsh` CLI 拒绝管理 desktop profile），声明与磁盘一致要完全退出桌面端后用桌面端自己的 carrier。 | 中 | 否 | `~/.dsh/profiles/web/package.json`、`doc/progress.md`（0.19.69 节 §四） |
-| 51 | **适配器看门狗的两个既有缺陷**（2026-10-11 登记，**同日修复 0.19.74**）——回应 GitHub Issue #1 报错原文的自相矛盾（「驱动不在忙」+「最近驱动活动 2s 前」+「页面已有 2172 字回复未回传」）。**A：相位被冻结整轮** —— `nextWithIdle()` 首次执行在 executor 微任务**之前**，而驱动的 `busy = true` 在 `runTurn` 内部（更晚）⇒ 第一次读到的 `busy` 恒 false，相位恒判「网页还没开口且驱动不在忙」，`idleFirstByteMultiplier` **在生产路径上从未生效**；而 `idleScene()` 开火时读的是**新鲜**读数 ⇒ 冻结相位与新鲜现场被并排印出。既有护栏 ① 用静态桩（驱动从未被调用就报 busy）复现不出该时序。**B：`idleDeadline` 锚在 `submitAtReal`** —— 文档承诺「自上次事件起 N 秒」，实现却是整轮固定 ⇒ 是**总时长上限**冒充静默上限。实测（窗口 1300ms、每 150ms 一个 delta）：修前 **1315ms 处判死**，而那时已收到 `chunk0…chunk7`；该缺陷在 `471efcd` 上同样复现（stash 复核过）。**修法**：相位每拍重算 + 起点取 `max(投放时刻, 上次事件)` + 文案改「桥侧已 Ns 没有从网页收到任何新事件」/「驱动**自报**不在忙」。护栏 ⑧/⑨/⑨b（反向安全线：事件真停了仍须判死）/⑩；变异 M1/M2/M3 全部被抓且各被对应护栏抓住。**未做**：真机长轮次（>120s 单轮）复现、首字节耗时分布采集。 | 高 | 否 | `lib/index.js`（`nextWithIdle` / `idleDeadline` / `idleTimeoutError` / `driverForRead`）、`lib/idle-window.js`、`test/watchdog-first-byte.test.mjs` ⑧⑨⑨b⑩、`.tmp/probe-deadline-origin.mjs`、`.tmp/mutation-watchdog.mjs` |
-| 52 | **`TOOL_CALL_UNPARSED` 残余：部分丢失的调用被静默丢弃**（2026-10-11 登记，**同日修复 0.19.74**）——#25「若要修」第 2 条点名的形态（现有 mismatch 配对不覆盖「流式丢块」）。两个恢复点的门是 `withheld > 0 && !calls.length`，只在**一条都没解析出来**时跑 ⇒ 一轮 3 条调用、解析出 2 条、丢 1 条时，既不复恢复也不发 UNPARSED 提示，**静默丢步骤**。实测（`.tmp/probe-partial-loss.mjs`）：修前派发 **2/3** 且正文零提示；修后 3/3。**修法是减法不是追加**：`recoverUnparsedCalls` 读 DSML `<invoke>` 骨架，对主解析已拿到的调用**也会**返回一份（实测纯 DSML 下主解析 `read+glob`、恢复层同样 `read+glob`）⇒ 直接追加会**重复派发**。新增纯函数 `callsLostFromParse`，按「名+规范化参数」可消耗配对，只留真丢的。红线不放宽：只走 `read`/`glob`/`grep`。护栏 `test/partial-call-loss.test.mjs` 9 项（含 ② 不得重复派发、④ 写类红线）；变异 P1/P2/P3 全部被抓。⚠ 自曝两坑：首版把 `withheld` 用在**声明之前**（TDZ 当场抛）；首版 ⑤ 的形态下「只比名字」恰好也得到 1 条 ⇒ **P3 逃逸**，改写后 P3 才红。**未做**：该形态在生产日志里的发生率未估计；真截断仍只能靠提示重发。 | 高 | 否 | `lib/index.js`（`valid` 后的 `callsLostFromParse` 调用点）、`lib/agent-preset.js`（`callsLostFromParse`）、`test/partial-call-loss.test.mjs`、`.tmp/probe-partial-loss.mjs`、`.tmp/probe-dedup2.mjs`、`.tmp/mutation-partial-loss.mjs` |
-| 53 | **登录判定对已声明特征的站点会「靠输入框兜底」谎报已登录**（2026-10-11 登记；**同日加三态收窄：probe-fallback → uncertain**）——用 0.19.74 新增的按站点验收入口跑**全新空 profile**：`PASS login.loggedIn`（`basis=probe-fallback`）＋`BLOCKED send.text — NEED_LOGIN` ⇒ **登录判定说已登录、真实发送路径说要登录**，面板会把未登录站点显示成「已登录」。**真机 DOM 读数**（`test-mock/probe-kimi-login2.mjs`，Playwright locator）：声明的 `loginProbe.bad` 命中**0** 个可见节点、页面「登录」二字（exact）可见数 **0**、输入框**可见 1**。根因：`judgeLoggedIn` 的兜底是 `visibleComposerCount(p) > 0`，而 kimi 游客页**自带完整输入框**（同族还有 qwen/gemini/doubao/zai）。**0.19.75 处置**：加**第三态**而不是收紧判定——`probe-ok`/`probe-bad`=已验证、`input-fallback`=按 `loggedIn` 照旧（**DeepSeek 路径，降级会让主站点长期显示「不确定」**）、`probe-fallback`/`stale`/未知=**`uncertain`**；不确定时**不改写** `loggedIn`（改了会把站点改版导致的已登录用户判成未登录 = 用误报换谎报），护栏 `test/login-state.test.mjs` 6 项钉住。**仍未做**：没有「已登录 kimi」对照读数，故**未**为任何站点补 `loginProbe.ok`——三态只是把猜测如实标出，**并没有让判定更准**；qwen/gemini/doubao/zai 成对读数同样未采。 | 高 | 否 | `lib/browser-driver.js`（`judgeLoggedIn` / `loginState` / `loginVerified`）、`lib/providers.js`（`loginProbe` / `accountProbe`）、`test/login-state.test.mjs`、`test-mock/site-verify.mjs` |
-| 54 | **Issue #1 的「内容交付」那一半仍未闭环：缺少可定位到层的证据**（2026-10-11 登记；**同日交付取证工具，未做真机定位**）——复审明确指出：0.19.74 修的是**看门狗计时**（相位冻结 + deadline 锚点），而 `lastEventAt` 只在**适配器收到流事件**时推进、`domReplyChars` 只是诊断读数，**都不会**把页面 DOM 里的正文送回流里 ⇒ 「不再误杀」≠「内容完整交付」，那 2172 字仍可能卡在 DOM 且本轮改动不会补回。**处置（工具已交付）**：新增 `lib/delivery-trace.js`，沿 `capture → decoder → driver → relay → adapter` 五层各记**事件数/字符数/首末时刻/内容哈希**（默认**不留原文**；`WEBCODE_DELIVERY_TRACE=1` 开启，`WEBCODE_DELIVERY_TRACE_SAMPLE=N` 才留前 N 字符）。`compareStages()` 给出**首个分叉层**并区分两件下一步完全不同的事：某层**零事件**（丢在「上游→本层」，查上游发送/绑定）vs 某层**有事件但更短**（丢在**本层**，查本层解析/过滤）。⚠ `capture` 是**原始上线帧**（含字段名/转义），与正文长度**不可比**，只判「有没有解出正文」——否则每轮正常生成都报分叉。读数出现在 `status().deliveryTrace` 与 `WEB_NO_PROGRESS` 报错文本里。**仍未做**：**没有**真机复现「页面 2172 字未回传」并据此定位到具体层（需真实 DeepSeek 长会话 + 登录态，只能由用户执行）。**下一步**：`WEBCODE_DELIVERY_TRACE=1` 跑一轮，看 `firstLossAt`；若驱动回读完整、增量也完整而 DSH 收到的正文不完整 ⇒ 查适配器；若驱动本身就丢 ⇒ 从 capture/decoder 查起。 | 高 | 否 | `lib/delivery-trace.js`、`lib/browser-driver.js`（`active.trace` / `status().deliveryTrace`）、`lib/index.js`（relay/adapter 两层 + 报错文本）、`test/delivery-trace.test.mjs`（12 项）、`test/delivery-trace-wiring.test.mjs`（5 项） |
+| 50 | 账号锁接管路径非原子：陈旧锁可被多个进程同时「接管」（2026-10-11 登记，同日完全修复 0.19.71） —— acquireBridgeLock 的接管分支是「读 → 判 → 非独占 writeFileSync… | 高 | 是 | `lib/bridge-lock.js`（`decideBridgeLock` / `acquireBridgeLock` / `acquireTransitionGuard` / `recoverStaleGuard` / `releaseTransitionGuard`）、`test/bridge-lock.test.mjs`（①e2–①e6、⑤b、⑧、⑧b、⑨–⑨g）、`doc/progress.md`（2026-10-11 节） |
+| 49 | 0.19.69 的 profile 安装与「重启 dsh web」在本机沙箱内无法执行（2026-10-08 登记，等用户在正常环境补做） —— 本轮发布链其余各步全部完成并已复核：git 提交 2b63492 + 1a… | 中 | 否 | `~/.dsh/profiles/web/package.json`、`doc/progress.md`（0.19.69 节 §四） |
+| 51 | 适配器看门狗的两个既有缺陷（2026-10-11 登记，同日修复 0.19.74） —— 回应 GitHub Issue #1 报错原文的自相矛盾（「驱动不在忙」+「最近驱动活动 2s 前」+「页面已有 2172 字回复… | 高 | 否 | `lib/index.js`（`nextWithIdle` / `idleDeadline` / `idleTimeoutError` / `driverForRead`）、`lib/idle-window.js`、`test/watchdog-first-byte.test.mjs` ⑧⑨⑨b⑩、`.tmp/probe-deadline-origin.mjs`、`.tmp/mutation-watchdog.mjs` |
+| 52 | TOOL_CALL_UNPARSED 残余：部分丢失的调用被静默丢弃（2026-10-11 登记，同日修复 0.19.74） —— #25「若要修」第 2 条点名的形态（现有 mismatch 配对不覆盖「流式丢块」）。… | 高 | 否 | `lib/index.js`（`valid` 后的 `callsLostFromParse` 调用点）、`lib/agent-preset.js`（`callsLostFromParse`）、`test/partial-call-loss.test.mjs`、`.tmp/probe-partial-loss.mjs`、`.tmp/probe-dedup2.mjs`、`.tmp/mutation-partial-loss.mjs` |
+| 53 | 登录判定对已声明特征的站点会「靠输入框兜底」谎报已登录（2026-10-11 登记；同日加三态收窄：probe-fallback → uncertain） —— 用 0.19.74 新增的按站点验收入口跑全新空 prof… | 高 | 否 | `lib/browser-driver.js`（`judgeLoggedIn` / `loginState` / `loginVerified`）、`lib/providers.js`（`loginProbe` / `accountProbe`）、`test/login-state.test.mjs`、`test-mock/site-verify.mjs` |
+| 54 | Issue #1 的「内容交付」那一半仍未闭环：缺少可定位到层的证据（2026-10-11 登记；同日交付取证工具，未做真机定位） —— 复审明确指出：0.19.74 修的是看门狗计时（相位冻结 + deadline 锚… | 高 | 否 | `lib/delivery-trace.js`、`lib/browser-driver.js`（`active.trace` / `status().deliveryTrace`）、`lib/index.js`（relay/adapter 两层 + 报错文本）、`test/delivery-trace.test.mjs`（12 项）、`test/delivery-trace-wiring.test.mjs`（5 项） |
 
 > **一览表完整性（2026-09-16 修正；2026-09-26 补上闸门）**：本表此前**漏登记 #19 与 #20**（正文有、表里没有）。
 > 这两条都是可机检的登记错误，而当时没有任何闸门覆盖「正文条目 ↔ 表格条目」的一致性。
@@ -2579,6 +2579,14 @@ function harnessErrorCode(error) {
 **验收判据（唯一可证伪的）**：`node scripts/scan-error-codes.mjs` 的
 「本插件错误码存活率」从 **0.0%** 上升。改前改后各跑一次对照。
 
+### 一览表登记原文（2026-10-14 自一览表迁入，**逐字保留**）
+
+> 这一段原先挤在**一览表的标题格**里（表格行最长 2375 字，读者先看到的那份反而最难读）。
+> 搬迁时**一个字都没有改**：内容只是从表格挪到本条正文。原先为什么不直接删——它是一份
+> **独立措辞的第二记录**，与本节正文的重合度实测只有 0～16%。
+
+**错误码在 harness 边界全部退化成 `UNKNOWN`**（2026-10-02 登记；**同轮已修，0.19.54**）——本插件给普通 `Error` 挂 `.code`，而官方 `normalizeLlmFailure` 只认 `instanceof HarnessError`；实测 284 份会话里归因本插件的 **137/137** 条 error finishes 全是 `code:"UNKNOWN"`（官方 provider 丢码 0 条）。后果：官方 `llm-retry` 自动重试与 `compaction-basic` 超限自动压缩修复**对本插件从未生效且不报错**；UI 一律显示 `UNKNOWN`。另含 `RATE_LIMITED` ≠ 官方 `RATE_LIMIT` 的码名不符
+
 ## 40. **并发会话的「一组一行」：三轮结论反转，终局 = 不自建工作区**（2026-10-03 登记）
 
 ### 终局（2026-10-08 轮，读这一段就够；下面是历史）
@@ -2654,6 +2662,14 @@ function harnessErrorCode(error) {
 2. ~~给每组一个真目录（worktree）~~ —— 10-06 做过、10-08 删了，理由见上「终局」；
 3. 若将来官方给出「会话分组」的公开入口，直接用它；**不要**再造第四种自造机制。
 
+### 一览表登记原文（2026-10-14 自一览表迁入，**逐字保留**）
+
+> 这一段原先挤在**一览表的标题格**里（表格行最长 2375 字，读者先看到的那份反而最难读）。
+> 搬迁时**一个字都没有改**：内容只是从表格挪到本条正文。原先为什么不直接删——它是一份
+> **独立措辞的第二记录**，与本节正文的重合度实测只有 0～16%。
+
+**并发会话的「一组一行」：三轮结论反转，终局 = 不自建工作区**（2026-10-03 登记；10-06 反转一次「为每组建 git worktree」；**2026-10-08 再反转并删除该机制**）——10-06 的「反转」当时以为找到了正解（官方左栏按工作区一行、折叠时不投影会话行 `ui-workspace:661`/`:492/:502`，会话归属是宿主硬判据 `SessionHeader.cwd === workspace.path` `dsh-workspace:122` ⇒ 给每组一个真目录就能「一行」）。**真机否掉了它**：每组一个 `<repo>-hwb-<组id>` 完整检出，跑几轮就在磁盘上堆出 **41 个**重复 worktree 目录（本轮清理：37 个 `dsh-webcode-bridge-hwb-*` + 4 个 `A0-Robocup-hwb-*` + 51 个孤儿会话目录），官方左栏把它们当**独立工作区**各占一行，会话标题还被目录名污染成 `A0-Robocup-hwb-muym5osw00v6`——与用户要的恰好相反（原话「看好官方怎么管理工作区的！！文件夹内一个会话一行！！不是每个会话一个文件夹！」）。⇒ **终局**：并发列就在**当前工作区**里普通新建会话（`sessions.create({ workspaceId: currentWorkspaceId() })`，与官方「新会话」同路径），官方左栏天然呈现「一个文件夹内一条会话一行」；`lib/concurrent-workspace.js`、两条服务端路由、`provisionGroupWorkspace`、`inject` 的 `'workspaces'` 全部删除。**教训**：「能做到」不等于「该做」——一个机制即使用户拍过板，若真机副作用与用户的根本意图相反，就该撤，而不是继续在上面加东西
+
 
 ## 41. **CI 在 `main` 上长期恒红**（2026-09-26 起；2026-10-03 登记，**同轮已修**）
 
@@ -2722,6 +2738,14 @@ function harnessErrorCode(error) {
 「假红的闸门比没有闸门更坏」是本仓库写进 `doc/comment-style.md` 的立场，而这次红的是**全量单测**
 这一步——它对任何人都恒红，于是所有人都学会了忽略它。修它不是在「让 CI 变绿」，
 而是**把这一步的信号重新接通**。
+
+### 一览表登记原文（2026-10-14 自一览表迁入，**逐字保留**）
+
+> 这一段原先挤在**一览表的标题格**里（表格行最长 2375 字，读者先看到的那份反而最难读）。
+> 搬迁时**一个字都没有改**：内容只是从表格挪到本条正文。原先为什么不直接删——它是一份
+> **独立措辞的第二记录**，与本节正文的重合度实测只有 0～16%。
+
+**CI 在 `main` 上长期恒红（2026-09-26 起）**（2026-10-03 登记，**同轮已修**）——每条都是**判据/环境**问题、与产品行为无关：① `site-prompt-transport.test.mjs` 把 profile 建在**被 gitignore 的** `.tmp/` 下，干净 clone 里不存在 ⇒ `ENOENT ...\.tmp\siteprompt-cp-XXXXXX`（④/⑥a/⑥b/session-import 四条一起红）；② `column-fs.test.mjs` 拿**未规范化**的 `columnRootOf()` 去比**已规范化**的写入返回值，在「临时目录带 8.3 短名」的机器（CI `C:\Users\RUNNER~1\…`）必然为假；③ `pre-deliver-window.test.mjs` ①b 用「两轮墙钟之差」量间隔，而 `end-to-start` 基准下该差值恒 = gap − 上一轮稳态收尾（CI 实测 `4302 vs 1514`）；④ `column-fs.test.mjs` 另一条用例用 `new URL(import.meta.url).pathname.slice(1)` 拼源码路径，在 POSIX 上把 `/home/…` 削成 `home/…`（相对路径）⇒ ubuntu 腿 `ENOENT: open 'home/runner/…'`；⑤ `site-mount.test.mjs` 那条「白名单内 + 存在」的断言用 `path.join(os.homedir(),'.dsh')`，而 CI runner 上**没装 DSH** ⇒ 先撞「目录不存在」（两条腿都红）。修完前三条推上去 CI 又红，才暴露出④⑤——被前三条的噪声盖住了
 
 ## 42. **「网页桥接」设置分区的导航图标不可自定义**（2026-10-03 登记，本轮**不修**）
 
@@ -2860,6 +2884,14 @@ git tag v0.19.61 && git push origin v0.19.61
 本条是第三个、**纯仓库流程**的缺口。
 
 ---
+
+### 一览表登记原文（2026-10-14 自一览表迁入，**逐字保留**）
+
+> 这一段原先挤在**一览表的标题格**里（表格行最长 2375 字，读者先看到的那份反而最难读）。
+> 搬迁时**一个字都没有改**：内容只是从表格挪到本条正文。原先为什么不直接删——它是一份
+> **独立措辞的第二记录**，与本节正文的重合度实测只有 0～16%。
+
+**「检查更新」恒报「已是最新」：仓库没跟上 `package.json` 的 tag**（2026-10-04 登记；**2026-10-06 已解决并复核**）——最新 tag 是 **v0.19.55** 而 `package.json` 已是 0.19.60/0.19.61 ⇒ `latest < current` ⇒ 判据如实给出「已是最新」。真因是 `release.yml` 只在**打 tag** 时产出 tarball，而 0.19.56–0.19.61 几轮只改版本号没打 tag ⇒ Releases 上最后一个是 0.19.55。发版是对外不可逆动作，登记不代做；出路 = `git tag v0.19.x && git push origin v0.19.x`，且 tag 必须打在 `package.json` 已是同版本的 commit 上。**2026-10-06 复核收口**：tag `v0.19.67` 已存在且指向的 `package.json` 就是 `"version": "0.19.67"`（`git show v0.19.67:package/dsh-webcode-bridge/package.json` 实读），Release 带 tarball 资产 905,459 字节；`fetchReleases` → `updateDecision` 以 0.19.61 为 current 的实跑读数 = `{status:"outdated", latest:"0.19.67", asset:{…releases/download/v0.19.67/…tgz}}` ⇒ 「恒报已是最新」不再成立。**留档判据**：只有 `updateDecision` 返回 `outdated` 才算修好，「命令行打印 +pkg@ver」不算（见 #46）
 
 ## 45. **桌面 profile 的声明与磁盘分叉（0.19.63 客户端已热换，声明仍钉 0.19.61）**
 
@@ -3041,6 +3073,14 @@ npm notice Your package is being processed and may take a few minutes to become 
   新增的复刻判据钉的是「结构/类名/数据/文案四条口径逐项成立」。
 - ⑥ 右栏受官方布局所限（常态 300px～45%、中列保底 400px）⇒ 3–4 列并排只在全屏下实用。
 
+### 一览表登记原文（2026-10-14 自一览表迁入，**逐字保留**）
+
+> 这一段原先挤在**一览表的标题格**里（表格行最长 2375 字，读者先看到的那份反而最难读）。
+> 搬迁时**一个字都没有改**：内容只是从表格挪到本条正文。原先为什么不直接删——它是一份
+> **独立措辞的第二记录**，与本节正文的重合度实测只有 0～16%。
+
+**官方会话 chrome 在第三方面板内不可达：列顶栏按官方 DOM+官方 CSS module 复刻、右侧 tab 靠官方页签承载**（2026-10-06 登记；10-07 两处更新；**2026-10-08 复刻落地并升级判据**）——① 官方 header 三块 chip 注册进 `conversation.session.header` 的子槽，该槽只由官方会话视图渲染（0.2.1-alpha.1：`ui-conversation:21191-21210`），且 slots 公开投影**不含组件**（`dsh-client-ui-slots/lib/index.js:313` 原文 without components or executable hooks）⇒ 受支持路径下无法原样挂载；② 官方右栏可见性写死 `activePanelId === null`（`ui-sidebar-right:5874`/`:9062`）⇒ 面板开着必无右栏，第三方也不能在自有面板里渲染官方右栏内容（`renderer:330-333` 归属校验）；③ **出路已落地**：右栏改用官方**页签**承载并发列（`sidebarRightTabs.register` + `sidebar.right.pane.tab`，真机 `window.__hwbRail={registered:true}`）；④ **「在官方视图打开」已修通（10-07 轮）**：放行标记由按钮 onClick 置位、而守卫只在 pointerdown 捕获期消费 ⇒ 订阅回调决策时读不到；修法 = `createPanelGuard` 的 panelInfo 订阅回调**同样消费**放行标记，真机 `panelGone:true + headers:4 + lastDecision:"allow:leave"`（10-08 轮该入口从列头按钮挪进官方同款「更多操作」菜单，放行时序一字未改，判据仍钉两个消费点）；⑤ **「列内渲染官方 session header」定案为做不到（10-07 真机取证，10-08 在 0.2.1-alpha.1 复核仍成立）**：两道官方闸——授权（renderSlot 只认本条目 children 声明，`renderer:332`）+ 声明唯一（children 声明遇已声明槽名必抛，`slots:193`；该槽已被官方 registerHeader 声明为 conversation.header 的 child，`ui-conversation:23073-23086`）⇒ 真机逐字 `slot "conversation.session.header" is already declared (by an entry in "conversation.header" (mf))`，**列条目注册整体失败、列体全空**。⇒ 出路不是「自绘一套看着像的」，而是**按官方复刻**（10-08 轮 `ColumnHeader`）：结构逐字照官方 `ConversationHeader`/`ConversationSessionHeader` 那棵树（9 个结构位 + 同组 role/aria）、**样式不自己写**（直接挂官方 CSS module 的哈希类名，前缀由 `officialCssPrefix` 运行时从 `<style data-plugin-css>` 反解 ⇒ 官方改哈希自动跟上；桌面 asar 0.2.0-rc.2 与 web 0.2.1-alpha.1 **前缀不同**，这条设计让两版都拿得到正确样式）、数据与文案照官方投影键与 zh 词典（拿不到就不渲染那块）、「对话/轨迹」页签**真的切官方视图**（读官方 `conversation.view` 注册表 + 经 `conversation.session` 的 `view` owner prop，组件身份按 viewId 缓存防重挂）；⑥ 右栏受官方布局所限（常态 300px～45%、中列保底 400px），3–4 列并排只在全屏下实用
+
 
 ## 48. **「提示词投递 = 纯文本」档发不完整：L1 判据已修，L2 待做**（2026-10-06 登记；2026-10-11 归因更正 + L1 修复）
 
@@ -3114,6 +3154,14 @@ attachTransport: {transport:'attach', reason:'over-limit', chars:44202, truncate
 本轮**只做验收、不改行为**：临时切换的设置已逐字还原
 （`promptTransport=inline`、`promptTransportBySite={"glm":"inline"}`，与验收前快照一致）。
 
+### 一览表登记原文（2026-10-14 自一览表迁入，**逐字保留**）
+
+> 这一段原先挤在**一览表的标题格**里（表格行最长 2375 字，读者先看到的那份反而最难读）。
+> 搬迁时**一个字都没有改**：内容只是从表格挪到本条正文。原先为什么不直接删——它是一份
+> **独立措辞的第二记录**，与本节正文的重合度实测只有 0～16%。
+
+**「提示词投递 = 纯文本」档在长会话上必然发不完整（`PROMPT_TRUNCATED`）**（2026-10-06 登记；**2026-10-11 归因更正 + 真机实证**）——真机造 jobs 时撞到：用户设置 `promptTransport: inline`（全局），44,202 字符提示词灌进 deepseek 输入框，**两次尝试都恰好丢 126 个字符**（44,202→44,076；压缩重试后 36,253→36,127），`PROMPT_TRUNCATED` 回读校验如实拦下、**该轮直接失败**；同一轮把投递形态切到 `attach`（插件默认值）后立刻成功。⚠ **原登记把归因写成「更像写入通道丢一段固定前缀/后缀」——该归因已证伪**：2026-10-11 用真机 Chromium（HeadlessChrome/151）跑离线 textarea 探针，五项断言全部成立 —— CRLF 输入回读差值 **252 = 252**（等于 CRLF 对数）、LF 对照**零差**、CRLF→LF 规范化后**内容逐字相等**、**尾部保留**、且生产判据 `echoed.length < sent.length - 8` 确实会触发。**结论：丢的 126 个「字符」是 126 个 `\r\n` 被 `textarea.value` 按 HTML 规范规范化为 `\n`，正文内容零丢失；这是桥的判据误报，不是网页截断。** 旁证：本机 prompt-store 与事故同日的 4 个会话提示词文件 `CRLF` 计数**恰为 126**（`session-19e2fa47-…__deepseek.md`，2026/10/6 10:12:56），其 CRLF 区段起点前文正是 `Instructions from: AGENTS.md`，而本机 `AGENTS.md` 恰好 **126 行**（`core.autocrlf=true`）。**本轮已修（L1 编辑器层）**：新增纯函数 `composerEchoVerdict`，判据从「比长度」改成比**内容等价**，规范化白名单刻意极窄（只允许 `\r\n`→`\n`、**行尾**空白、NFC），**不允许**泛化 trim / 折叠中间空白；真正的截断（中间丢字 / 尾部截断 / **等长内容被替换**）依然被拦住。⑦ 条护栏 + 变异 M8–M10 全被抓（M8「退回只比长度」让 ①③④ 一起红）。**L2 提交层仍待做**：`composerCleared()` / `navigatedAway()` 只证明「消息已离开输入框」，**不证明**「提交的正文与输入等价」；证据不足时应记**不确定**。`SITE_COMPOSER_HARD_LIMIT` 仍只有 kimi: 200,000
+
 ## 49. **0.19.69 的 profile 安装与「重启 dsh web」在本机沙箱内无法执行**（2026-10-08 登记）
 
 ### 现象与读数
@@ -3181,6 +3229,14 @@ dsh plugin --profile web add .\dsh-webcode-bridge-0.19.69.tgz
 `providers.js` 不同）。修法是 `node scripts/install-profiles.mjs --profiles web`。
 ⚠ 该脚本**只写 `node_modules`、不改声明**（见其文件头），所以两个动作都要做：
 **声明走 pnpm 通道，内容走它**。
+
+### 一览表登记原文（2026-10-14 自一览表迁入，**逐字保留**）
+
+> 这一段原先挤在**一览表的标题格**里（表格行最长 2375 字，读者先看到的那份反而最难读）。
+> 搬迁时**一个字都没有改**：内容只是从表格挪到本条正文。原先为什么不直接删——它是一份
+> **独立措辞的第二记录**，与本节正文的重合度实测只有 0～16%。
+
+**0.19.69 的 profile 安装与「重启 dsh web」在本机沙箱内无法执行**（2026-10-08 登记，**等用户在正常环境补做**）——本轮发布链其余各步全部完成并已复核：git 提交 `2b63492` + `1ab845f`、push（`05967a1..1ab845f`，走 HTTPS + `http.sslBackend=openssl`）、tag `v0.19.69`、GitHub Release 带资产 `dsh-webcode-bridge-0.19.69.tgz`（930,799 B）、CI 与 CodeQL success、npm `latest = 0.19.69`（`dist.shasum a6f8b8459dff…` 与本地 tarball 逐字节同源）。**卡住的是最后一步**：`~/.dsh` 整棵树在本沙箱内**只读**（写探针文件即 `Access denied`），`dsh plugin --profile web add <tgz>` 报 `EPERM: operation not permitted, open …\profiles\web\package.json.lock`。⇒ 用户须在正常环境里 `dsh plugin --profile web add .\dsh-webcode-bridge-0.19.69.tgz` 并**重启 dsh web**（「装完不重启 = 等于没装」）。⚠ 注意 #45 同族风险：桌面端是**另一条**通道（`dsh` CLI 拒绝管理 desktop profile），声明与磁盘一致要完全退出桌面端后用桌面端自己的 carrier。
 
 ## 48b. **「提示词投递 = 纯文本」档发不完整：归因已更正为「换行规范化误报」**（2026-10-11 更新）
 
@@ -3449,6 +3505,14 @@ L1 验证的是「输入框**回读内容**与预期内容等价」。它**不�
 
 ---
 
+### 一览表登记原文（2026-10-14 自一览表迁入，**逐字保留**）
+
+> 这一段原先挤在**一览表的标题格**里（表格行最长 2375 字，读者先看到的那份反而最难读）。
+> 搬迁时**一个字都没有改**：内容只是从表格挪到本条正文。原先为什么不直接删——它是一份
+> **独立措辞的第二记录**，与本节正文的重合度实测只有 0～16%。
+
+**账号锁接管路径非原子：陈旧锁可被多个进程同时「接管」**（2026-10-11 登记，**同日完全修复 0.19.71**）——`acquireBridgeLock` 的接管分支是「读 → 判 → **非独占** `writeFileSync` 覆写」，而正常首建路径用的是 `flag:'wx'`（那条是对的）。⇒ 盘上留有陈旧锁时（强杀/崩溃/重启的常见后果，正是 0.19.22 要解决的场景），多个进程可全部判定可接管并**全部返回 `ok:true`**，破坏「同一账号不得同时桥接」这条用户准则。**实测**：`fresh`（无锁文件）**0/20** 多持；`stale`（盘上有死锁）**20/20** 多持；屏障同步 4 进程 ×8 轮**每轮 4 个进程全 `ok`**。**触发窗口须如实标定**：无屏障自然调度 **0/84**、单次接管全程仅 **2.0–4.2ms** ⇒ 真实竞态缺陷，但**不是高频故障**，且触发率**尚未**从生产数据估计（该试验不是生产启动事件的随机抽样）。**修复（同日完成，两层）**：① **判据层** —— `decideBridgeLock` 加「明确存活 ⇒ 一律 `held`，锁龄不再构成放行理由」，时间上限**降级为仅当存活判据缺席时的有界兜底**，并把 PID 复用出口显式标为 `recoverable`；② **原子层** —— 新增**过渡互斥**（`webcode-bridge.lock.guard.d`，`mkdir` 原子原语），**所有对锁文件的改动（建立/回收/释放）都在临界区内**，且临界区内**重读并重新裁决**（外面那次读只作快速路径，不作权威判据）。**修复后多进程实测：`stale` 2×12 轮与 4×8 轮均 0 多持、每轮恰好 1 个赢家**；`fresh` 无退化。**护栏**：新增 ①e2–①e6、⑤b、**⑧/⑧b（真多进程竞争）**、⑨（守卫回收与只删自己的）⇒ `bridge-lock.test.mjs` **29/29**；**变异测试 M1–M7 全部被抓**（其中 M5「摘掉过渡互斥」直接让 ⑧ 变红 ⇒ 该护栏真实承载修复）。**三个被证伪的候选协议（教训，写给下一个改锁的人）**：`rename` aside 是**按路径**而非**按身份**操作 ⇒ 会移走别人刚建立的**活锁**（ABA；实测 A 移走 `B-LIVE`，两进程同时认为自己持有）；天真的「`mkdir` 当锁 + `rmdir` 回收」**只修首次获取、回收仍删掉新持有者**；非独占覆写则直接静默覆盖。⇒ **「原型 0/N 多持」不构成安全证明**，只说明**该交错**未触发。**平台语义（Windows 实测）**：`rename` 覆盖已存在目标**成功且静默覆盖**、源不存在 `ENOENT`、**目标被打开读取 `EPERM`**、`wx` 落已存在 `EEXIST` ⇒ `EPERM`（进程性失败）与 `ENOENT`（输竞争）**不能一并当「拿到锁」**。**0.19.73（复审三进程窗口，已修复）**：0.19.72 的顺序是**先 rename 移走、后查存活** —— 移走期间路径不存在，第三个进程 C 可趁空档 mkdir 成功，而 A **仍活着、仍在临界区**。确定性注入：guardPathExistsAfterRename:false → C_acquiredInWindow:true → B_putBackSucceeded:false ⇒ A 与 C 同时持有、A 的守卫被永久遗弃。**这不是年龄兜底那类风险**（B 的判断本身正确）。修法 = **先验证后动手**：存活判定排在任何移走之前；认领后复核身份防 ABA；放不回也不继续。护栏 ⑨b2/⑨c2/⑨c3 + 变异 M15–M17 全被抓。**\n\n**已知边界（0.19.72 更新）**：初版（0.19.71）的守卫回收**只看 mtime**，复审指出「通常几毫秒」是概率论证而非不变量——进程可被暂停（调试器/休眠/GC 停顿）超过 15 秒而**仍然活着**。**故障注入已复现**：mtime 改老 + `owner.json` 保留**确定存活**的 pid ⇒ 调用方照样回收成功（`acquiredGuardWhileAAlive: true`），两个进程都认为自己持有守卫。**0.19.72 已修**：回收改成与锁文件同构的三态（明确存活 ⇒ **绝不回收**；明确死亡 ⇒ 回收；判据给不出结论 ⇒ 仅用**显著放宽**的年龄兜底且**留痕说明是猜测**）；释放判据也从「只认 pid」加固为「pid + `startedAt`」（防 pid 复用误删别人的守卫），并明确「标记缺失/损坏 ⇒ 按可能是自己写坏的删除」（不可删除的空守卫会挡住所有人）。护栏 ⑨b–⑨g + 变异 M11–M14 全被抓。**未验**：非 Windows；真实「两个桥互相杀浏览器」的端到端复现（已证明的是**协议不再允许**该状态）
+
 ## 51. **适配器看门狗的两个既有缺陷：相位被冻结 + deadline 锚错起点**（2026-10-11 登记，**同日修复 0.19.74**）
 
 > 本条回应的是 GitHub [Issue #1](https://github.com/RSLN-creator/dsh-web-bridge/issues/1)
@@ -3509,6 +3573,14 @@ N 秒」，而实现是 `submitAtReal + pre + windowMs`（**整轮固定、与�
 
 ---
 
+### 一览表登记原文（2026-10-14 自一览表迁入，**逐字保留**）
+
+> 这一段原先挤在**一览表的标题格**里（表格行最长 2375 字，读者先看到的那份反而最难读）。
+> 搬迁时**一个字都没有改**：内容只是从表格挪到本条正文。原先为什么不直接删——它是一份
+> **独立措辞的第二记录**，与本节正文的重合度实测只有 0～16%。
+
+**适配器看门狗的两个既有缺陷**（2026-10-11 登记，**同日修复 0.19.74**）——回应 GitHub Issue #1 报错原文的自相矛盾（「驱动不在忙」+「最近驱动活动 2s 前」+「页面已有 2172 字回复未回传」）。**A：相位被冻结整轮** —— `nextWithIdle()` 首次执行在 executor 微任务**之前**，而驱动的 `busy = true` 在 `runTurn` 内部（更晚）⇒ 第一次读到的 `busy` 恒 false，相位恒判「网页还没开口且驱动不在忙」，`idleFirstByteMultiplier` **在生产路径上从未生效**；而 `idleScene()` 开火时读的是**新鲜**读数 ⇒ 冻结相位与新鲜现场被并排印出。既有护栏 ① 用静态桩（驱动从未被调用就报 busy）复现不出该时序。**B：`idleDeadline` 锚在 `submitAtReal`** —— 文档承诺「自上次事件起 N 秒」，实现却是整轮固定 ⇒ 是**总时长上限**冒充静默上限。实测（窗口 1300ms、每 150ms 一个 delta）：修前 **1315ms 处判死**，而那时已收到 `chunk0…chunk7`；该缺陷在 `471efcd` 上同样复现（stash 复核过）。**修法**：相位每拍重算 + 起点取 `max(投放时刻, 上次事件)` + 文案改「桥侧已 Ns 没有从网页收到任何新事件」/「驱动**自报**不在忙」。护栏 ⑧/⑨/⑨b（反向安全线：事件真停了仍须判死）/⑩；变异 M1/M2/M3 全部被抓且各被对应护栏抓住。**未做**：真机长轮次（>120s 单轮）复现、首字节耗时分布采集。
+
 ## 52. **`TOOL_CALL_UNPARSED` 残余：部分丢失的调用被静默丢弃**（2026-10-11 登记，**同日修复 0.19.74**）
 
 > 这是 #25 台账里「若要修」第 2 条点名的形态：*「现有 mismatch 配对只覆盖
@@ -3561,6 +3633,14 @@ DSML `<invoke>` 骨架，对主解析**已经拿到**的调用同样会返回一
 - 断流**真截断**（参数 JSON 半截、不可恢复）仍只能靠提示让模型重发——本条不动它。
 
 ---
+
+### 一览表登记原文（2026-10-14 自一览表迁入，**逐字保留**）
+
+> 这一段原先挤在**一览表的标题格**里（表格行最长 2375 字，读者先看到的那份反而最难读）。
+> 搬迁时**一个字都没有改**：内容只是从表格挪到本条正文。原先为什么不直接删——它是一份
+> **独立措辞的第二记录**，与本节正文的重合度实测只有 0～16%。
+
+**`TOOL_CALL_UNPARSED` 残余：部分丢失的调用被静默丢弃**（2026-10-11 登记，**同日修复 0.19.74**）——#25「若要修」第 2 条点名的形态（现有 mismatch 配对不覆盖「流式丢块」）。两个恢复点的门是 `withheld > 0 && !calls.length`，只在**一条都没解析出来**时跑 ⇒ 一轮 3 条调用、解析出 2 条、丢 1 条时，既不复恢复也不发 UNPARSED 提示，**静默丢步骤**。实测（`.tmp/probe-partial-loss.mjs`）：修前派发 **2/3** 且正文零提示；修后 3/3。**修法是减法不是追加**：`recoverUnparsedCalls` 读 DSML `<invoke>` 骨架，对主解析已拿到的调用**也会**返回一份（实测纯 DSML 下主解析 `read+glob`、恢复层同样 `read+glob`）⇒ 直接追加会**重复派发**。新增纯函数 `callsLostFromParse`，按「名+规范化参数」可消耗配对，只留真丢的。红线不放宽：只走 `read`/`glob`/`grep`。护栏 `test/partial-call-loss.test.mjs` 9 项（含 ② 不得重复派发、④ 写类红线）；变异 P1/P2/P3 全部被抓。⚠ 自曝两坑：首版把 `withheld` 用在**声明之前**（TDZ 当场抛）；首版 ⑤ 的形态下「只比名字」恰好也得到 1 条 ⇒ **P3 逃逸**，改写后 P3 才红。**未做**：该形态在生产日志里的发生率未估计；真截断仍只能靠提示重发。
 
 ## 53. **登录判定对已声明特征的站点会「靠输入框兜底」谎报已登录**（2026-10-11 登记，**未修，待真机读数**）
 
@@ -3637,6 +3717,14 @@ doubao 的 `tiptap`、z.ai 的 `#chat-input`——providers.js 的注释早已�
 
 ---
 
+### 一览表登记原文（2026-10-14 自一览表迁入，**逐字保留**）
+
+> 这一段原先挤在**一览表的标题格**里（表格行最长 2375 字，读者先看到的那份反而最难读）。
+> 搬迁时**一个字都没有改**：内容只是从表格挪到本条正文。原先为什么不直接删——它是一份
+> **独立措辞的第二记录**，与本节正文的重合度实测只有 0～16%。
+
+**登录判定对已声明特征的站点会「靠输入框兜底」谎报已登录**（2026-10-11 登记；**同日加三态收窄：probe-fallback → uncertain**）——用 0.19.74 新增的按站点验收入口跑**全新空 profile**：`PASS login.loggedIn`（`basis=probe-fallback`）＋`BLOCKED send.text — NEED_LOGIN` ⇒ **登录判定说已登录、真实发送路径说要登录**，面板会把未登录站点显示成「已登录」。**真机 DOM 读数**（`test-mock/probe-kimi-login2.mjs`，Playwright locator）：声明的 `loginProbe.bad` 命中**0** 个可见节点、页面「登录」二字（exact）可见数 **0**、输入框**可见 1**。根因：`judgeLoggedIn` 的兜底是 `visibleComposerCount(p) > 0`，而 kimi 游客页**自带完整输入框**（同族还有 qwen/gemini/doubao/zai）。**0.19.75 处置**：加**第三态**而不是收紧判定——`probe-ok`/`probe-bad`=已验证、`input-fallback`=按 `loggedIn` 照旧（**DeepSeek 路径，降级会让主站点长期显示「不确定」**）、`probe-fallback`/`stale`/未知=**`uncertain`**；不确定时**不改写** `loggedIn`（改了会把站点改版导致的已登录用户判成未登录 = 用误报换谎报），护栏 `test/login-state.test.mjs` 6 项钉住。**仍未做**：没有「已登录 kimi」对照读数，故**未**为任何站点补 `loginProbe.ok`——三态只是把猜测如实标出，**并没有让判定更准**；qwen/gemini/doubao/zai 成对读数同样未采。
+
 ## 54. **Issue #1 的「内容交付」那一半未闭环：取证工具已交付，真机定位未做**（2026-10-11 登记）
 
 ### 复审的判断（本轮据此实施）
@@ -3710,3 +3798,11 @@ $env:WEBCODE_DELIVERY_TRACE = '1'
 `.tmp/probe-trace-readings.mjs`（两种交付形状的实测）、
 `.tmp/probe-trace-live.mjs`、`test/delivery-trace.test.mjs`（12 项）、
 `test/delivery-trace-wiring.test.mjs`（5 项接线级）。
+
+### 一览表登记原文（2026-10-14 自一览表迁入，**逐字保留**）
+
+> 这一段原先挤在**一览表的标题格**里（表格行最长 2375 字，读者先看到的那份反而最难读）。
+> 搬迁时**一个字都没有改**：内容只是从表格挪到本条正文。原先为什么不直接删——它是一份
+> **独立措辞的第二记录**，与本节正文的重合度实测只有 0～16%。
+
+**Issue #1 的「内容交付」那一半仍未闭环：缺少可定位到层的证据**（2026-10-11 登记；**同日交付取证工具，未做真机定位**）——复审明确指出：0.19.74 修的是**看门狗计时**（相位冻结 + deadline 锚点），而 `lastEventAt` 只在**适配器收到流事件**时推进、`domReplyChars` 只是诊断读数，**都不会**把页面 DOM 里的正文送回流里 ⇒ 「不再误杀」≠「内容完整交付」，那 2172 字仍可能卡在 DOM 且本轮改动不会补回。**处置（工具已交付）**：新增 `lib/delivery-trace.js`，沿 `capture → decoder → driver → relay → adapter` 五层各记**事件数/字符数/首末时刻/内容哈希**（默认**不留原文**；`WEBCODE_DELIVERY_TRACE=1` 开启，`WEBCODE_DELIVERY_TRACE_SAMPLE=N` 才留前 N 字符）。`compareStages()` 给出**首个分叉层**并区分两件下一步完全不同的事：某层**零事件**（丢在「上游→本层」，查上游发送/绑定）vs 某层**有事件但更短**（丢在**本层**，查本层解析/过滤）。⚠ `capture` 是**原始上线帧**（含字段名/转义），与正文长度**不可比**，只判「有没有解出正文」——否则每轮正常生成都报分叉。读数出现在 `status().deliveryTrace` 与 `WEB_NO_PROGRESS` 报错文本里。**仍未做**：**没有**真机复现「页面 2172 字未回传」并据此定位到具体层（需真实 DeepSeek 长会话 + 登录态，只能由用户执行）。**下一步**：`WEBCODE_DELIVERY_TRACE=1` 跑一轮，看 `firstLossAt`；若驱动回读完整、增量也完整而 DSH 收到的正文不完整 ⇒ 查适配器；若驱动本身就丢 ⇒ 从 capture/decoder 查起。

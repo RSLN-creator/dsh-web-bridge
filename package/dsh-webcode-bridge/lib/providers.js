@@ -537,7 +537,12 @@ export const ZAI = withEffort({
   // 已由镜像改写成带前缀的绝对路径，运行时根相对请求由 bootstrap 钩子补前缀）
   // 后立刻恢复成正常界面（输入框出现）。GLM 不需要这个开关。
   rootPathForSpa: true,
-  completionPaths: ['/api/chat/completions', '/api/v1/chat/completions'],
+  // ⚠ 2026-10-14 真机更正：真机 completion 打到 **`/api/v2/chat/completions`**，
+  //   而原声明只有 v1 与无版本两条 ⇒ **缺 v2**。逐字读数（那一轮 summary.network）：
+  //     `RES 200 text/event-stream; charset=utf-8
+  //      https://chat.z.ai/api/v2/chat/completions?timestamp=…&requestId=…`
+  //   这条漏声明是**静默**的：捕获层按声明匹配 ⇒ 一个块都接不到，而页面正常渲染。
+  completionPaths: ['/api/v2/chat/completions', '/api/v1/chat/completions', '/api/chat/completions'],
   input: 'textarea#chat-input, textarea[placeholder], textarea',
   // z.ai 对程序化 Enter 不响应，必须点发送按钮（真机 2026-09-12：轮次静默挂死正因如此）。
   sendButton: '#send-message-button',
@@ -618,24 +623,23 @@ export const ZAI = withEffort({
   //   ② 有头轮次里滑块窗口未显（只有 `#chat-captcha-element`/`#chat-captcha-trigger` 可见），
   //      所以**不能**只认 `#aliyunCaptcha-window-popup`，否则会漏掉那一种形态。
   captchaSelector: '#chat-captcha-element, #aliyunCaptcha-window-popup.window-show',
-  // ⚠ decoder 现状（2026-09-27 取证结论，**刻意不改**）：`openai-sse` 对 z.ai 的真实帧
-  // **一个字段都对不上**，但**本仓库现有 9 个 decoder kind 里没有任何一个能解它**，
-  // 所以这里不改成另一个同样解不出的 kind（那是把「已知解不出」换成「猜着解不出」）。
+  // ✅ decoder 已落地（2026-10-14）：**真机帧已取得**，`decoder: 'zai'`（`lib/decoder.js` 的
+  // `ZaiDecoder`）。此前长期挂「没有 wire 证据 ⇒ 刻意不改」，理由是「已知解不出好过猜着解不出」。
   //
-  // 真实帧形状来自**站点自带前端代码**（同一份 index-p_7VciLU.js，帧处理器 di 的解构）：
-  //   { id, done, content, delta_content, edit_content, sources, selected_model_id, error,
-  //     usage, files, phase="other", edit_index=0, scope="legacy", agent_id, delta_name,
-  //     subagent_type, task_id, tool_name, parent_message_id, delta_arguments, status,
-  //     metadata, content_blocks }
-  // 正文增量在 `delta_content`，全量快照在 `content`，阶段在 `phase`（含 "tool_response"），
-  // 收尾看 `done`。该 bundle 里 `choices` / `parts` / `reasoning_content` 出现次数**均为 0**
-  // ——即既不是 OpenAISseDecoder 的 `choices[].delta.content`，也不是 GlmDecoder 的
-  // `parts[].content[].type`（任务书里「怀疑 z.ai 用 GLM 帧」这一条**被推翻**）。
+  // 真机帧逐字夹具：`test/fixtures/zai-real-frames/zai-chat-2026-10-14.txt`（护栏
+  // `test/zai-decoder.test.mjs`）。线上形状（每个事件一行，**不是** OpenAI 的 choices）：
+  //   data: {"type":"chat:completion","data":{"delta_content":"…","phase":"thinking"}}
+  //   data: {"type":"chat:completion","data":{"phase":"other","usage":{…}}}
+  //   data: {"type":"chat:completion","data":{"delta_content":"你好呀","phase":"answer"}}
+  //   data: {"type":"chat:completion","data":{"phase":"done","done":true}}
   //
-  // 缺的那一半在 lib/decoder.js：需要新增一个 zai 专属 kind，
-  // 语义要点是「`delta_content` 是增量、`content` 是快照」，两者混用时要走 GlmDecoder
-  // 那种前缀差分（否则整段会播两遍）。在它落地并拿到**真机帧夹具**之前，z.ai 不应
-  // 被当成可用站点。
+  // 先前**只有**站点 bundle 的代码证据（帧处理器 di 的解构 `{id, done, content, delta_content,
+  // …phase…}`），当时据此推断的形状**方向正确**：正文/思考都在 `delta_content`、靠 `phase` 分流、
+  // 收尾看 `done`；`choices` / `parts` / `reasoning_content` 在该 bundle 里均为 0 次
+  // ⇒ 既不是 `choices[].delta.content`（OpenAISseDecoder）也不是 `parts[].content[].type`
+  // （GlmDecoder）——「z.ai 用 GLM 帧」这条假设**被推翻**（现由真机帧确认）。
+  //
+  // 真机帧还改正了本条目**另一处**声明缺陷：`completionPaths` 原缺 `/api/v2/…`（见上方注释）。
   //
   // ⚠ 取证步骤的落点（2026-10-14 改正）：本条原先把读者指向 `.tmp-probe/zai/RESULT.md`，
   // 而 `.tmp-probe/` 被 `.gitignore:61` 覆盖 ⇒ **对克隆仓库的人不存在**。而那句话说的不只是
@@ -645,7 +649,7 @@ export const ZAI = withEffort({
   //   · 探针 → `test-mock/zai-capture-frames.mjs`（`PROBE_HEADED=1`，需人工过一次滑块）
   // 另：本条原先写「见 doc/long-term-issues.md 第 14 条」，**条号是错的**——第 14 条是
   // 「Z.ai 没有会话地址形状」（0.19.52 已收口）；帧格式的登记条目是 **§30**。
-  decoder: 'openai-sse', stream: true, experimental: true,
+  decoder: 'zai', stream: true, experimental: true,
   loginProbe: {
     bad: 'button:has-text("登录"), a:has-text("登录"), button:has-text("Sign in"), a:has-text("Sign in")',
     ok: '.user-avatar, [class*="avatar"], button[aria-label*="User"]',

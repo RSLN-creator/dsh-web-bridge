@@ -26,7 +26,7 @@
 | 最大模块 | `client.cjs` **7,826 行** | 浏览器侧单文件 bundle（非 ESM） |
 | 次大 | `browser-driver.js` **5,108**、`index.js` **4,844**、`agent-preset.js` **3,072** | 同上 |
 | 再次 | `web-control.js` 2,134、`providers.js` 1,081、`think-effort.js` 1,065、`decoder.js` 1,048 | 同上 |
-| 测试文件 | **126 个** `*.test.mjs` | `node scripts/check-ledger.mjs` |
+| 测试文件 | **127 个** `*.test.mjs` | `node scripts/check-ledger.mjs` |
 | 真机夹具 | `test/fixtures/` 下的 `dsml-real-*.txt` 与具名形态 | `test/fixtures/` |
 | 入口 | `main: ./lib/index.js`；`exports` 另含 `./client`、`./cordis.patch.yml` | `package.json` |
 

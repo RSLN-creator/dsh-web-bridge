@@ -121,7 +121,15 @@ try {
   }
   note(`[2] 打开既有会话 → page.url() = ${opened || page.url()}`);
 
-  // ---- ③ 装自己的 fetch tee（只 tee /api/chat/completions） ----
+  // ---- ③ 装自己的 fetch tee（只 tee z.ai 的 completion 流） ----
+  //
+  // ⚠ 2026-10-14 真机更正：tee 的正则**必须覆盖版本段**。第一版写死 `/api/chat/completions`，
+  //   而真机上 completion 实际发到 **`/api/v2/chat/completions`**。逐字读数（那一轮 summary.network）：
+  //     `RES 200 text/event-stream; charset=utf-8
+  //      https://chat.z.ai/api/v2/chat/completions?timestamp=…&requestId=…`
+  //   ⇒ 请求确实发出去了、页面也渲染了 **2419 字**，但 tee **一个块都没接住**（hits=0），
+  //   探针于是把结论写成 `NO_FRAMES`，读起来像「被风控挡在发送之前」——**那是误判**。
+  //   现在按「任意版本段」匹配（覆盖 /api/v1|v2/chat/completions 与 /api/chat/completions）。
   const tee = await page.evaluate((pat) => {
     if (window.__probeTee) return 'exists';
     window.__probeChunks = [];
@@ -149,8 +157,8 @@ try {
     };
     window.__probeTee = true;
     return 'installed';
-  }, '/api/chat/completions');
-  note(`[3] fetch tee = ${tee}`);
+  }, '/api/(?:v\\d+/)?chat/completions');
+  note(`[3] fetch tee = ${tee}  （正则 /api/(?:v\\d+/)?chat/completions）`);
 
   // ---- ④ 用 providers.js 声明的同一组选择器填字 + 点发送 ----
   const inputSel = zai.input;

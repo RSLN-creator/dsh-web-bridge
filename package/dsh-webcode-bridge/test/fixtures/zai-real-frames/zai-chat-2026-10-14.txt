@@ -1,0 +1,22 @@
+data: {"type":"chat:completion","data":{"delta_content":"The user is asking me to reply with only three characters/words in Chinese: \"你好","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":"呀\" (which means \"Hello\" in a friendly way).\n\nThis is","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" a simple request. The user wants me to respond with exactly \"你好呀\" - three Chinese","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" characters.\n\nLet me check: 你 (you) 好 (good","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":") 呀 (particle) - that's exactly","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" three characters.\n\nThe instruction is clear: \"请只回复三个字：","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":"你好呀\" which means \"Please reply with only three characters: 你好呀\"\n\nSo I should just respond with \"你好呀\"","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" and nothing else.","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"phase":"other","usage":{"prompt_tokens":20,"completion_tokens":126,"total_tokens":146,"prompt_tokens_details":{}}}}
+
+data: {"type":"chat:completion","data":{"delta_content":"你好呀","phase":"answer"}}
+
+data: {"type":"chat:completion","data":{"phase":"done","done":true}}
+

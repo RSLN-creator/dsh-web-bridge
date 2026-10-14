@@ -1030,6 +1030,120 @@
     }
   }
 
+  // ---------- Z.ai（chat.z.ai /api/v2/chat/completions）----------
+  //
+  // ## 真机帧证据（2026-10-14 首次取得；此前长期问题 #30 挂了一个月）
+  //
+  // 原始流**逐字**存于 `test/fixtures/zai-real-frames/zai-chat-2026-10-14.txt`。
+  // 帧形状（每个事件一行 `data: {...}`，**不是** OpenAI 的 `choices[].delta`）：
+  //
+  //   data: {"type":"chat:completion","data":{"delta_content":"…","phase":"thinking"}}
+  //   data: {"type":"chat:completion","data":{"phase":"other","usage":{…}}}
+  //   data: {"type":"chat:completion","data":{"delta_content":"你好呀","phase":"answer"}}
+  //   data: {"type":"chat:completion","data":{"phase":"done","done":true}}
+  //
+  // 三条要点（都从那一份夹具读出来的，不是推测）：
+  //   ① **正文/思考增量都在 `delta_content`**，靠 `phase` 分流
+  //      （`thinking` → onThink，其余含 `answer` → onDelta）；
+  //   ② 这一份流里 `delta_content` **始终是增量**，没有出现过全量快照
+  //      —— 但仍按 `GlmDecoder` 那套**前缀差分**兜底：若某帧的 `delta_content`
+  //      以已累积文本开头，只外发新增后缀。两种形态都兼容 ⇒ 「整段播两遍」不会发生。
+  //   ③ 收尾认 `data.done === true`；**不能只认 `[DONE]`**（本流里没有它）。
+  //
+  // ⚠ 这条 decoder 落地**推翻了 `providers.js` 里原来的两条判断**（都已改正）：
+  //   · 原写「现有 9 个 decoder kind 没有任何一个能解它」——现在有了；
+  //   · 原写 `completionPaths: ['/api/chat/completions','/api/v1/chat/completions']`
+  //     ——真机实际打到 **`/api/v2/chat/completions`**，声明里缺 v2。
+  class ZaiDecoder extends JsonLinesDecoder {
+    constructor(options) {
+      super(options);
+      // 按 phase 分别做前缀差分（思考与正文两条独立的累积串）
+      this.zaiTextSent = '';
+      this.zaiThinkSent = '';
+    }
+    /**
+     * 从**一个 SSE 帧**里取出 `data:` 内容。
+     *
+     * 为什么不直接用基类的 `line()`：基类是 `JSON.parse(l)`，而缓冲区里躺的是原始 SSE
+     * 文本 `data: {...}` ⇒ `JSON.parse('data: {...}')` 必抛 `Unexpected token 'd'`，
+     * 然后被**静默吞掉**（本文件 §GlmDecoder 的 `finish()` 注释记过这个坑，真机代价是
+     * 整段最后一句消失）。所以本类照 GLM 的做法自己切帧、自己剥前缀。
+     */
+    frameData(frame) {
+      const dataLines = [];
+      for (const line of String(frame || '').split('\n')) {
+        if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
+      }
+      return dataLines.join('\n');
+    }
+    push(chunk) {
+      this.buf += chunk;
+      this.buf = this.buf.replace(/\r\n/g, '\n');
+      let idx;
+      while ((idx = this.buf.indexOf('\n\n')) >= 0) {
+        const frame = this.buf.slice(0, idx);
+        this.buf = this.buf.slice(idx + 2);
+        const data = this.frameData(frame);
+        if (data) this.line(data);
+      }
+    }
+    /** 收尾时把**残缺尾帧**也按同一规则解掉（GLM 同款理由：正常收尾末帧常缺空行）。 */
+    finish() {
+      const tail = this.buf.trim();
+      this.buf = '';
+      if (tail) {
+        const data = this.frameData(tail);
+        if (data) { try { this.line(data); } catch { /* 残缺到解不出 JSON：如实丢弃 */ } }
+      }
+      return super.finish();
+    }
+    /** 前缀差分：只外发**新增后缀**。累积流与纯增量流在它下面语义一致。 */
+    zaiDelta(full, sent) {
+      if (!full) return '';
+      if (full === sent) return '';
+      if (sent && full.startsWith(sent)) return full.slice(sent.length);
+      // 不是累积形态（或前缀被改写）⇒ 整段当增量发出
+      return full;
+    }
+    obj(j) {
+      if (!isRecord(j)) return;
+      // 站点错误帧：原话优先（与基类 failureReason 同一考虑）
+      if (j.error) {
+        this.failed = true;
+        this.failureReason = typeof j.error === 'string' ? j.error
+          : (j.error && (j.error.message || j.error.code)) || 'zai_error';
+        return;
+      }
+      // 帧外壳：`{type:'chat:completion', data:{…}}`；容错也接受「data 就在顶层」的形状
+      const payload = isRecord(j.data) ? j.data : j;
+      const phase = typeof payload.phase === 'string' ? payload.phase : '';
+
+      // 收尾：`done:true`（真机最后一帧 `{phase:'done',done:true}`）
+      if (payload.done === true || phase === 'done') this.done = true;
+
+      const dc = typeof payload.delta_content === 'string' ? payload.delta_content : '';
+      if (dc) {
+        if (phase === 'thinking') {
+          const d = this.zaiDelta(dc, this.zaiThinkSent);
+          this.zaiThinkSent = dc.startsWith(this.zaiThinkSent) ? dc : this.zaiThinkSent + d;
+          this.emitThink(d);
+        } else {
+          const d = this.zaiDelta(dc, this.zaiTextSent);
+          this.zaiTextSent = dc.startsWith(this.zaiTextSent) ? dc : this.zaiTextSent + d;
+          this.emitText(d);
+        }
+      }
+
+      // 会话身份（有就记，没有不编）
+      const cid = payload.conversation_id || payload.chat_id || payload.id;
+      if (!this.conversationId && typeof cid === 'string' && cid) this.conversationId = cid;
+
+      // 站点自己说还在生成（没有这个信号时保持基类 false，行为与既有站点一致）
+      if (phase === 'thinking' || phase === 'answer') this.generating = true;
+      if (phase === 'done') this.generating = false;
+    }
+  }
+
   // 注册表：driver 按 providers.js 里站点的 decoder 字段取用。
   // 'dom' 站点（Gemini 等）没有稳定网络流，由 driver 在页面里做终态抓取。
   globalThis.WebCodeDeepSeekStreamDecoder = DeepSeekStreamDecoder;
@@ -1043,6 +1157,7 @@
     doubao: DoubaoDecoder,
     grok: GrokDecoder,
     claude: ClaudeSseDecoder,
+    zai: ZaiDecoder,
     dom: null,
   });
 })();

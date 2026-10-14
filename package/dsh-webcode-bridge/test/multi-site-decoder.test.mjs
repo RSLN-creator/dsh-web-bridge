@@ -51,13 +51,18 @@ test('z.ai：站点契约（origin / SSE 端点 / 解码器 / 静态域）', () 
   const z = resolveWebModel('zai:auto');
   assert.equal(z.siteId, 'zai');
   assert.equal(z.origin, 'https://chat.z.ai');
-  assert.equal(z.decoder, 'openai-sse');
+  // 2026-10-14：`openai-sse` → `zai`。真机帧已取得（`test/fixtures/zai-real-frames/`），
+  // 站点真实帧是 `{type:'chat:completion',data:{delta_content,phase,done}}`，`openai-sse`
+  // 一个字段都对不上。见 `test/zai-decoder.test.mjs` 与 long-term-issues §30。
+  assert.equal(z.decoder, 'zai');
   const st = SITES.find(s => s.id === 'zai');
   assert.ok(st, 'SITES 必须包含 zai');
   assert.ok(st.completionPaths.includes('/api/chat/completions'));
+  // 真机实际打到 v2（那一轮 summary.network 逐字），v1/无版本作为兼容保留
+  assert.ok(st.completionPaths.includes('/api/v2/chat/completions'), '必须覆盖真机的 /api/v2/…');
   assert.deepEqual([...st.staticOrigins], ['https://z-cdn.chatglm.cn', 'https://api.z.ai']);
   // 解码器注册表里确实有这个 kind（否则驱动会静默拿不到 decoder）
-  assert.equal(typeof D['openai-sse'], 'function');
+  assert.equal(typeof D.zai, 'function');
 });
 
 test('glm：parts[].content[] 嵌套结构的正文与图片（glm-free-api 同构帧）', () => {
