@@ -333,6 +333,29 @@ security: 导入登录态目录白名单 + 两个状态文件统一 0o600
 `scripts\check-commit-msg.mjs` 的 `TYPES` 并在注释里写下理由**——白名单的意义就是它不会
 自己长大。
 
+⚠ **发版提交用 `chore(release)`，没有 `release` 这个 type**（2026-10-14 真实事故：
+一条 `release: 0.19.76 —— …` 让 CI 的「提交信息规范（阻断）」两条腿都红，run 38548507379）。
+
+### 9.2b 提交前怎么自检（这一条也是真实事故换来的）
+
+`scripts\check-commit-msg.mjs` **默认读 `.git/COMMIT_EDITMSG`**，**不读命令行参数**：
+
+```powershell
+# ✅ 正确：把信息写进文件再查
+node scripts\check-commit-msg.mjs --message-file .tmp\msg.txt
+node scripts\check-commit-msg.mjs                              # 查已写好的 COMMIT_EDITMSG
+
+# ❌ 无效：参数被忽略，它校验的是**上一次**留下的 COMMIT_EDITMSG ⇒ 假绿
+node scripts\check-commit-msg.mjs "fix(x): 我想试的这条信息"
+```
+
+2026-10-14 就是栽在这里：提交前我用第二种写法「试过」一次、看到绿就推了，
+而它校验的其实是更早那条信息 ⇒ **假绿**，CI 随即红。
+
+（`--message-file <路径>` 与 `--stdin` 是仅有的两种「喂外部信息」方式，
+两者都会在输出里写明它读的是哪个来源——**看那一行**，别看退出码就以为查过了。）
+
+
 ### 9.3 判据（每条都有对应的真实反例）
 
 | 判据 | 为什么 |
