@@ -150,12 +150,22 @@ const STEPS = [
   },
   {
     id: 'progress-index',
-    title: '进度台账分节索引与正文一致（97 个小节不得漂）',
+    title: '进度台账分节索引与正文一致（99 个小节不得漂）',
     cmd: process.execPath,
     args: [path.join('scripts', 'gen-progress-index.mjs'), '--check'],
     cwd: repoRoot,
     hint: '跑 `node scripts\\gen-progress-index.mjs` 重建索引块。⚠ 加/删 progress.md 的 `##` 小节后必须重建，'
       + '否则索引行号会指到别的小节上——而「索引指向错地方」比没有索引更坏。',
+  },
+  {
+    id: 'eol-portability',
+    title: '机器生成的索引在 LF 与 CRLF 下都成立（防「本机绿、CI 红」）',
+    cmd: process.execPath,
+    args: [path.join('scripts', 'check-eol-portability.mjs')],
+    cwd: repoRoot,
+    hint: '这条防的是「判据对行尾敏感」：core.autocrlf=true 且仓库无 .gitattributes ⇒ CI 干净 clone 出来是 CRLF。'
+      + '修法是把比较两侧都归一化成 \\n、写回时用文件原有行尾；**不要**在 CI 上放宽判据。'
+      + '（2026-10-14 真实事故：progress-index --check 本机绿、CI 红，两条腿都红。）',
   },
   {
     id: 'ref-index',

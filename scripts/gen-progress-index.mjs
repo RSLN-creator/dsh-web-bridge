@@ -199,32 +199,52 @@ function main(argv) {
   if (!fs.existsSync(DOC)) { process.stderr.write('[progress-index] 读不到 ' + DOC + '\n'); return 2; }
 
   const original = fs.readFileSync(DOC, 'utf8');
+
+  // ⚠ 行尾归一化（2026-10-14 CI 红后修）：本文件在**干净 clone** 上可能是 CRLF。
+  //   `core.autocrlf=true`（本机默认）且仓库**没有** `.gitattributes` ⇒ git checkout
+  //   出来的 progress.md 是 CRLF，而本机工作树是 LF（两种都合法）。
+  //   重建出的索引块由 `join('\n')` 生成 ⇒ 恒为 LF；若比较前不归一化，
+  //   `--check` 在 CRLF 形态下**恒红**（首个差异就是每行末尾多一个 `\r`）。
+  //   实测（2026-10-14，CI run 38530563959）：本机绿、CI 红，真因就是这个。
+  //   归一化只用于比较与解析；**写回时用文件原有的行尾**（见 writeEol）。
+  const writeEol = original.includes('\r\n') ? '\r\n' : '\n';
+  const md = original.replace(/\r\n/g, '\n');
+
   if (json) {
-    const secs = parseSections(original);
+    const secs = parseSections(md);
     process.stdout.write(JSON.stringify({ sections: secs.length, secs }, null, 2) + '\n');
     return 0;
   }
 
-  const { body } = stripIndexBlock(original);
+  const { body } = stripIndexBlock(md);
   const secs = parseSections(body);
   // 行号要按**插入后**的真实位置算：插入点之前有多少行，就整体下移多少。
   const probe = insertIndex(body, renderIndex(secs));
   const finalSecs = parseSections(probe);
   const block = renderIndex(finalSecs);
   const next = insertIndex(body, block);
-  const hadBlock = currentIndexBlock(original) !== null;
+  const hadBlock = currentIndexBlock(md) !== null;
 
   if (check) {
-    const cur = currentIndexBlock(original);
+    const cur = currentIndexBlock(md);
     if (!hadBlock) {
       process.stderr.write('[progress-index] ✖ 索引块不存在（缺 ' + BEGIN.slice(0, 40) + '…）\n');
       process.stderr.write('[progress-index] 跑 `node scripts/gen-progress-index.mjs` 生成。\n');
       return 1;
     }
     if (cur !== block) {
-      const curSecs = parseSections(cur);
-      process.stderr.write('[progress-index] ✖ 索引已过期：文档 ' + finalSecs.length
-        + ' 节，索引 ' + curSecs.length + ' 节。\n');
+      // ⚠ 这里**不要**用 `parseSections(cur)` 当读数：`parseSections` 会跳过整个索引块
+      //   （`insideIndex`），对「块本身」解析**恒为 0 节**。旧文案因此打成
+      //   「文档 99 节，索引 0 节」——一个自相矛盾的读数（索引明明在，却说 0 节），
+      //   把「块内容与重建块不一致」误导成「索引不见了」。
+      const a = cur.split('\n'); const c = block.split('\n');
+      let firstDiff = -1;
+      for (let i = 0; i < Math.max(a.length, c.length); i += 1) {
+        if (a[i] !== c[i]) { firstDiff = i + 1; break; }
+      }
+      process.stderr.write('[progress-index] ✖ 索引块与重建结果不一致：文档 ' + finalSecs.length
+        + ' 个小节；块内 ' + a.length + ' 行 vs 重建 ' + c.length + ' 行；首个差异在第 '
+        + (firstDiff === -1 ? '（无）' : firstDiff) + ' 行。\n');
       process.stderr.write('[progress-index] 跑 `node scripts/gen-progress-index.mjs` 重建。\n');
       return 1;
     }
@@ -232,10 +252,11 @@ function main(argv) {
     return 0;
   }
 
-  if (next !== original) {
-    fs.writeFileSync(DOC, next);
+  if (next !== md) {
+    // 写回时恢复**文件原有的行尾**，避免把 CRLF 文件改成 LF（那会产生全文件 diff）
+    fs.writeFileSync(DOC, writeEol === '\r\n' ? next.replace(/\n/g, '\r\n') : next);
     process.stdout.write('[progress-index] ✔ 已写入索引：' + finalSecs.length + ' 个小节' +
-      (hadBlock ? '（替换旧索引块）' : '（新建索引块）') + '。\n');
+      (hadBlock ? '（替换旧索引块）' : '（新建索引块）') + '（行尾 ' + (writeEol === '\r\n' ? 'CRLF' : 'LF') + '）。\n');
   } else {
     process.stdout.write('[progress-index] ✔ 索引已是最新（' + finalSecs.length + ' 个小节）。\n');
   }
