@@ -23,7 +23,47 @@
 //
 // 契约缺失 = 该站点的模型 UI 未真机校准 → 返回 unverified，绝不猜着点。
 
-/** 归一化模型名用于比较：去掉空白、大小写、以及尾部的营销标记。 */
+/**
+ * 回读是否算「确认切换成功」——**纯函数**，便于反向护栏直接打它。
+ *
+ * ⚠ 2026-10-14 真机修（z.ai）：原判据是 `applied.includes(chosen.name)`，
+ * 拿**已点击那一项的整行文本**当右侧。而选项行可能带营销后缀
+ * （z.ai 逐字：`GLM-5.3-Flash NEW 轻量旗舰模型，高质量极速响应`），
+ * 触发按钮回读的却只有模型名（`GLM-5.3-Flash`）
+ * ⇒ `'GLM-5.3-Flash'.includes('GLM-5.3-Flash NEW …')` 恒为 false。
+ * 后果：**明明切换成功却记成 `readback-mismatch`**（真机日志逐字
+ * `模型回读不一致：目标 GLM-5.3-Flash，回读 GLM-5.3-Flash`，两个字符串看起来一样），
+ * 于是 `selectModelGeneric` 降级为 `strict:false`——「严格模式」对该站点静默失效。
+ *
+ * ## 判据（两半都要，缺一半就成了恒真或恒假）
+ *
+ *   ① **基准必须是目标名或它的前缀**：取 `wanted` 与 `chosenName` 中较短者当基准，
+ *      但**不是无条件**——短的必须是**长的那个的前缀**。否则会出现这种情况：
+ *      回读 `GLM-5.2`、点中 `GLM-5.2-Flash`、目标 `GLM-5.3-Flash`，
+ *      拿 `GLM-5.2-Flash` 当基准 ⇒ `GLM-5.2` 被「包含」⇒ **放行了一个完全错的切换**
+ *      （这条是我自己第一版的自测用例抓出来的，见 `test/model-picker.test.mjs` 最后一条）。
+ *   ② **回读与基准互相包含**：容忍触发按钮带装饰（`… ▾`）与回读更完整两种形态。
+ *
+ * @param {string|null} applied 从页面回读到的当前模型名
+ * @param {string} chosenName 被点击那一项的名字（可能带后缀）
+ * @param {string} wanted 我们要的目标名
+ * @returns {boolean}
+ */
+export function readbackConfirms(applied, chosenName, wanted) {
+  if (!applied) return false;
+  const a = normalizeModelName(applied);
+  const c = normalizeModelName(chosenName || '');
+  const w = normalizeModelName(wanted || '');
+  if (!a || !w) return false;
+  // ① 基准候选：目标名，或「是目标名前缀」的被点中项（后者解决选项名比目标短的情况）
+  let base = w;
+  if (c && c.length < w.length && w.startsWith(c)) base = c;
+  // ② 互相包含（装饰 / 更完整两种形态）
+  return a.includes(base) || base.includes(a);
+}
+
+/**
+ * 归一化模型名用于比较：去掉空白、大小写、以及尾部的营销标记。 */
 export function normalizeModelName(s) {
   return String(s ?? '')
     .replace(/\s+/g, ' ')
@@ -333,7 +373,8 @@ export async function selectWebModel(page, model, contractPicker) {
       applied = await page.evaluate(READ_CURRENT, selForCurrent).catch(() => null);
     }
   }
-  const confirmed = applied ? normalizeModelName(applied).includes(normalizeModelName(chosen.name)) : false;
+  // 回读确认：判据抽成纯函数 `readbackConfirms`（真机 z.ai 的营销后缀 bug 见它的 JSDoc）
+  const confirmed = readbackConfirms(applied, chosen.name, wanted);
   return {
     ok: true, requested: wanted, applied, confirmed,
     clicked: clicked.clicked,

@@ -114,7 +114,7 @@ const toolSchema = [
 ];
 
 /**
- * 选一个**本站点真实声明过**的模型 id。
+ * 选一个**本站点真实声明过**的模型 id，并返回**站点限定**形式 `<siteId>:<modelId>`。
  *
  * 为什么不能写死 `'auto'`：那是桥早期自己发明的「不切换」档，**各站点的模型表并不
  * 都有它**。真机实测（`--site kimi`，空 profile）第一版就是这么错的：
@@ -122,12 +122,21 @@ const toolSchema = [
  * `auto` 已在 0.19.43 **刻意真删**（原因写在 providers.js：`modelPicker` 已声明，
  * 网页真实档位是 快速 / K3 / K2.8 Preview 三条，留一个桥发明的档位只会让人以为切了）。
  *
+ * ⚠ **为什么要加站点前缀（2026-10-14 真机踩到）**：不同站点可以声明**同名的模型 id**。
+ * 实测 z.ai 的模型表是 `glm-5.3-flash` / `glm-5.3` / `glm-5.2`，而 GLM 站点也有
+ * `glm-5.3` / `glm-5.3-flash`。只传裸 id 时 `resolveWebModel('glm-5.3-flash')` 解析成
+ * **glm 站点的模型**，驱动随即抛
+ * `MODEL_SITE_MISMATCH: 模型 glm-5.3-flash 属于站点glm，当前驱动为 zai`
+ * ⇒ 工具报 FAIL，而**真实链路根本没被验到**（那是工具的假红，不是产品缺陷）。
+ * 传 `<siteId>:<modelId>` 才是桥产品路径实际使用的形状（见 index.js 的 resolveWebModel 调用点）。
+ *
  * 取第一项而不是「最便宜的那项」：本脚本验的是**链路能不能通**（发送 → 回读 → 流 →
  * 解析），不是模型能力对比。模型选谁不影响这个结论，但选错会直接假红。
  */
 function pickModel(site) {
   const m = Array.isArray(site.models) ? site.models[0] : null;
-  return m?.id ? String(m.id) : null;
+  if (!m?.id) return null;
+  return `${site.id}:${m.id}`;
 }
 
 /** 单站验收。返回 { siteId, status, checks[] }。 */

@@ -3840,7 +3840,20 @@ export function createBrowserDriver(options = {}) {
         await page.waitForTimeout(2_500);
         const gate = await page.evaluate((sel) => {
           const els = [...document.querySelectorAll(sel)];
-          const vis = els.filter((el) => el.offsetWidth || el.offsetHeight || el.getClientRects?.().length);
+          // ⚠ 2026-10-14 真机修：旧判据把 `getClientRects().length` 当「可见」的兜底，
+          //   而它对**零尺寸但仍在布局里**的节点恒为真。z.ai 的 `#chat-captcha-element`
+          //   正是这种（常驻 DOM、0×0、rects=1；发送中密集采样 20 拍全中）
+          //   ⇒ 闸门在空壳上开火，正常轮次被误判（护栏见 test/captcha-gate.test.mjs）。
+          //   新判据：必须有**真实像素**且不是 display:none / visibility:hidden。
+          //   （真弹窗 332×329 仍被判可见 ⇒ 不放过真拦截。）
+          //   注：本注释刻意不写那个错误码的字面量——test/captcha-gate.test.mjs 用
+          //   `indexOf(码)` 定位抛错点，注释里出现同名字符串会让它定位到注释上。
+          const vis = els.filter((el) => {
+            const r = el.getBoundingClientRect();
+            if (r.width <= 0 || r.height <= 0) return false;
+            const cs = getComputedStyle(el);
+            return cs.display !== 'none' && cs.visibility !== 'hidden';
+          });
           return { total: els.length, visible: vis.length,
             head: vis[0] ? String(vis[0].className || '').slice(0, 120) : null };
         }, String(site.captchaSelector)).catch(() => null);

@@ -12,7 +12,7 @@
 // 本文件把匹配规则钉死，任何放松都会在这里红。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { pickExactOption, normalizeModelName, pickerUsable } from '../lib/model-picker.js';
+import { pickExactOption, normalizeModelName, pickerUsable, readbackConfirms } from '../lib/model-picker.js';
 import { listAllModels, resolveWebModel, getSite } from '../lib/providers.js';
 
 const zaiOptions = [
@@ -53,6 +53,34 @@ test('匹配要容忍大小写与空白差异，但不做模糊猜测', () => {
 test('候选名比目标短时（目标带后缀）也能命中', () => {
   // 反向容忍：目标写成 "GLM-5.3-Flash NEW" 而节点只给 "GLM-5.3-Flash"
   assert.equal(pickExactOption([{ name: 'GLM-5.3-Flash' }], 'GLM-5.3-Flash NEW'), 0);
+});
+
+test('回读确认：选项带营销后缀时不得误判为「没切换成功」（真机 z.ai 2026-10-14）', () => {
+  // ## 这条护栏是照真机日志写的（逐字）
+  //
+  // 现场：`模型回读不一致：目标 GLM-5.3-Flash，回读 GLM-5.3-Flash`
+  // —— 两个字符串**看起来一样**，却判了不一致。真因是判据拿
+  // **已点击那一项的整行文本**当右侧：
+  //   选项行（真机逐字）= 'GLM-5.3-Flash NEW 轻量旗舰模型，高质量极速响应'
+  //   触发回读           = 'GLM-5.3-Flash'
+  // 于是 `'GLM-5.3-Flash'.includes('GLM-5.3-Flash NEW …')` 恒为 false。
+  //
+  // 代价不只是难听：`selectModelGeneric` 会把 `confirmed:false` 降级成
+  // `strict:false` ⇒ 该站点的「严格模式」**静默失效**，而用户以为桥在校验。
+  const ROW = 'GLM-5.3-Flash NEW 轻量旗舰模型，高质量极速响应';
+  assert.equal(readbackConfirms('GLM-5.3-Flash', ROW, 'GLM-5.3-Flash'), true,
+    '选项行带营销后缀时，回读到模型名必须算确认成功');
+
+  // 正向：常规形态
+  assert.equal(readbackConfirms('GLM-5.3-Flash', 'GLM-5.3-Flash', 'GLM-5.3-Flash'), true);
+  assert.equal(readbackConfirms('GLM-5.3-Flash ▾', 'GLM-5.3-Flash', 'GLM-5.3-Flash'), true, '触发按钮带装饰也算');
+  assert.equal(readbackConfirms('GLM-5.3-Flash NEW', 'GLM-5.3-Flash', 'GLM-5.3-Flash'), true, '回读更完整也算');
+
+  // 反向（**这半条不能丢**）：真的不一致必须仍判 false，否则判据就成了「恒真」
+  assert.equal(readbackConfirms('GLM-5.2', 'GLM-5.3-Flash', 'GLM-5.3-Flash'), false, '回读到别的模型必须 false');
+  assert.equal(readbackConfirms(null, 'GLM-5.3-Flash', 'GLM-5.3-Flash'), false, '读不到必须 false');
+  assert.equal(readbackConfirms('', 'GLM-5.3-Flash', 'GLM-5.3-Flash'), false);
+  assert.equal(readbackConfirms('GLM-5.2', 'GLM-5.2-Flash', 'GLM-5.3-Flash'), false, '两边都不是目标名时不得放行');
 });
 
 test('picker 契约可用性：弹层式必须有 trigger，分段式故意不需要', () => {

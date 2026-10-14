@@ -38,7 +38,7 @@ node scripts/user-voice-log.mjs        # 重新生成 doc/user-voice-log.md
 | `wiki/README.md`       | 项目是什么、目录地图、三个找东西的动作                     |
 | `wiki/protocol.md`     | **硬约束**（下面 §2 是摘要，细则在那里）            |
 | `wiki/architecture.md` | 分层、数据流、provider/分组、三条红线                      |
-| `wiki/modules.md`      | **46 个模块**的一句话角色 + 导出符号行号（自动生成） |
+| `wiki/modules.md`      | **53 个模块**的一句话角色 + 导出符号行号（自动生成；数字以 `gen-index --check` 为准） |
 | `wiki/tasks.md`        | 常见改动（加站点 / 网页改版 / 加护栏 / 改协议）的配方      |
 | `wiki/glossary.md`     | 账户槽、车道、兼容空壳、只读立面……                       |
 
