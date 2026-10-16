@@ -512,12 +512,26 @@ test('④ applyEffort：kimi 全流程（点开模型菜单 → 点档位 → �
   for (const e of selReads) assert.equal(e.argType, 'string', 'READ_SELECTOR_TEXT 必须拿到站点声明的选择器字符串');
 });
 
-test('④b applyEffort：doubao 空触发路径（按 selectors 点开 + aria-checked 回读）', async () => {
-  // 真机形状：菜单条目的文本是「豆包 2.1 Turbo专家」，档位 id 是它的后缀；
-  // 条目的浮层是由 radix 渲染的 `[role="menuitem"]`，因此这里必须把父子关系建起来
-  //（`applyEffort` 靠祖先判「已打开的浮层」，扁平列表里没有 parentElement）。
+test('④b applyEffort：doubao 空触发路径（按 selectors 点开 + 触发钮文本回读）', async () => {
+  // ## 为什么回读口径是「触发钮文本」而不是「弹层里的 aria-checked」（0.19.77 真机改正）
+  //
+  // 旧判据 `readback:'aria-checked'` 被真机证伪（2026-10-14，有头冷启页）：
+  //   · 两条目 `aria-checked` / `data-state` **皆为 null**（全页 TRUE 计数 = 0）；
+  //   · 且豆包的 radix 菜单**点完条目即刻关闭** ⇒ 回读那一刻 `role="menuitem"` 已不在 DOM，
+  //     「读弹层选中项」这一类口径（含我中途试过的 `menuitem-svg`）**读的时机窗口不存在**。
+  //   修正为读触发钮文本：真机 trace 显示点完后触发钮文本从 `豆包 快速` → `豆包 专家`。
+  //
+  // ⚠ 本用例因此**必须让触发钮文本在点击后真的变化**——否则它验的是「回读一个不动的旧值」，
+  //   那正是这次真机事故的形态（旧用例把 checked 态写死在 fixture 里，所以红不了）。
   const trigger = el({ text: '豆包 快速', x: 1200, y: 840, w: 84, h: 32, attrs: { 'data-testid': 'chat_input_action_model' } });
-  const menuItem = el({ text: '豆包 2.1 Turbo专家', attrs: { role: 'menuitem', 'data-state': 'checked' } });
+  // 真机行为：点了档位条目之后，触发钮文本变成「豆包 <档位>」，且菜单关闭（条目脱离 DOM）。
+  // ⚠ `onClick` 必须走 `el()` 的工厂参数——它在工厂里是闭包捕获的形参，事后再赋值
+  // `menuItem.onClick = …` 不会生效（第一版就是这么写的，红灯由此而来）。
+  const menuItem = el({
+    text: '豆包 专家',
+    attrs: { role: 'menuitem' },
+    onClick: () => { trigger.textContent = '豆包 专家'; menuItem.parentElement = null; },
+  });
   const menu = el({ text: '', attrs: { role: 'menu' }, __tag: 'div', kids: [menuItem] });
   const page = fakePage({
     domGroups: { button: [trigger], div: [menu, menuItem] },
@@ -525,7 +539,7 @@ test('④b applyEffort：doubao 空触发路径（按 selectors 点开 + aria-ch
     textMode: 'any',
   });
   const out = await applyEffort(page, { siteId: 'doubao', target: '专家' });
-  assert.equal(out.applied, true, '回读口径是 aria-checked ⇒ 应确认成功');
+  assert.equal(out.applied, true, '回读口径是触发钮文本 ⇒ 点击后文本变成「豆包 专家」，应确认成功');
   // 豆包走的是「按坐标点开触发钮」那条路：触发钮文本拼了模型名，token 匹配不到档位，
   // 所以站点知识只提供 testid，点开用坐标（与真人一致），档位条目再按**浮层里的可点元素**点。
   assert.equal(page.calls.clicks.length, 0, '触发钮按坐标点，不按 locator（它身上没有档位文本）');

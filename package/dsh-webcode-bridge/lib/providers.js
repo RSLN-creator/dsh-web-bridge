@@ -193,8 +193,48 @@ export const GLM = withEffort({
   staticOrigins: ['https://sdata.chatglm.cn', 'https://at.alicdn.com', 'https://o.alicdn.com', 'https://lf3-data.volccdn.com', 'https://res.wx.qq.com'],
   completionPaths: ['/chatglm/backend-api/assistant/stream'],
   input: 'textarea#chat-input, textarea[placeholder], textarea',
+  // ## 0.19.79（用户操作轨迹取证修出）：`attachSelector` 本来就对，**错的是 `attachPreview`**
+  //
+  // ### 我第一次修错了（留档）
+  // 我曾把 `attachSelector` 改成 `input[type='file']:not(.img-input)`，理由是
+  // 「0 号 input 上传后没有 blob、1 号有（2 个）」。**那个推理是错的**：1 号的父容器是
+  // `head-icon head-icon-isBeta` → 它是**「修改头像」入口**。用户截图铁证
+  // （`.tmp/image-verify/glm-input1-*.png`）：上传后弹出「**修改头像**」对话框，
+  // 我传的图**变成了用户的账号头像**，根本没进对话框。
+  // 已撤回。**教训**：`img[src^='blob:']` 只证明「某个 input 的图被渲染了」，
+  // 不证明「它渲染进了 composer」——判据必须落在 **composer 作用域内**（`scoped`）。
+  //
+  // ### 真机读数（用户亲手操作 + Lead 只读记录，2026-10-15 01:04）
+  // 方法：用户按平时习惯在对话框里传图并发送，Lead 用
+  // `.tmp/human-trace/human-trace-recorder.mjs` 附着 CDP **只读**记录（不点击/不代操作）。
+  // 你传图并正在打字那一刻的快照（`snap`，17:04:42）：
+  //
+  //   INPUT #0  cls='img-input'  accept='.wbmp,.gif,.jpeg,.png,.jpg,.webp'
+  //             inComposer=True   parent='upload-container'      ← **就是它**
+  //   INPUT #1  cls=''           parent='head-icon head-icon-isBeta' inComposer=False（头像）
+  //   INPUT #2  cls='el-upload__input' parent='el-upload el-upload--text' inComposer=False
+  //
+  //   IMG cls='limitSize' src='https://t1.chatglm.cn/file/6acfb624869ee90d3c668c8…' 49x49@595,609
+  //   ↑ **上传成功后的预览节点**（同一位置先出现 `data:image/png;base64,…`，再换成 CDN 直链）
+  //
+  // ⇒ **`attachSelector` 的通用回退本来就能选中 `.img-input`（`.first()` 命中它、
+  //   `inComposer=True`）——这里是好的，不需要改。**
+  //   真正错的是 `attachPreview`：原串 `[class*='file'], [class*='attachment'], [data-file]`
+  //   在 GLM 上**一个都不匹配预览节点**（预览是 `img.limitSize`）；
+  //   更糟的是 `[class*='file']` 会命中那 **3 个隐藏 `<input type=file>`**（class 含 "file"）
+  //   ⇒ 候选计数非 0 却全是不可见 ⇒ `waitForAttachment` 找不到 `visible>0` ⇒
+  //   抛 `ATTACH_NOT_CONFIRMED` ⇒ 按 0.19.5 设计**静默降级成纯文本** ⇒
+  //   模型回「我没有收到任何图片」（用户和 Lead 都实测到过这句话）。
+  //
+  // 修法：把真机预览类名 `limitSize` 加进声明（**只加不换**，保留原有条目兼容其它形态）。
+  //   `img.limitSize` 落在 composer 作用域内 ⇒ 同时满足 `scoped` 判据，不会重现
+  //   「全页 blob 当证据」那类假阳性。
+  //
+  // ⚠ 注：`.limitSize` 是**阿里系上传组件的通用类名**，但它是本站在 composer 作用域内
+  //   的实测命中项；若 GLM 改版后失效，正确做法是**重取轨迹读数**（同一条命令），
+  //   不是换个猜的选择器。
   attachSelector: "input[type='file']",
-  attachPreview: "[class*='file'], [class*='attachment'], [data-file]",
+  attachPreview: "img.limitSize, [class*='file'], [class*='attachment'], [data-file]",
   // 助手回复节点选择器（0.19.19，审计 §三 C1 的收口）。
   //
   // 为什么必须有这个字段：在此之前全站共用一个写死 DeepSeek 类名的串
@@ -408,9 +448,24 @@ export const QWEN = withEffort({
   // （textarea.message-input-textarea 可见），旧判定「有输入框=已登录」于是把
   // 未登录记成已登录——用户看到的正是「qwen 没有登录却直接显示登录了」。
   // 游客页右上角有可见的「登录 / 注册」按钮，命中即判未登录。
+  //
+  // ## 0.19.78：`ok` 补 `img.user-img`（真机读数，与 doubao 同型缺陷）
+  //
+  // 旧 `ok` 是 `.user-avatar, [class*="user-avatar"], [class*="userAvatar"],
+  // .header-user-avatar` —— **四条在真机上全部命中 0**（2026-10-14 有头窗口实测）：
+  // qwen 登录后的头像元素是 **`<img class="user-img" src="data:image/png;base64,…">`**
+  // （在侧栏左下角 `.user-menu-btn-content-left` 里，30x30）。
+  // ⇒ 已登录的 qwen 拿不到 `probe-ok`，只能落到 `probe-fallback`（按 #53 三态 = `uncertain`），
+  //   面板显示不出「已登录」——**与 doubao 的 #59 是同一条缺陷**（声明与真机元素名不符）。
+  //
+  // 判据来自同一页面两次对照：**游客壳 `img.user-img` = 0，水合后 = 1**
+  // （见 `doc/long-term-issues.md` #62 的时间线表），因此它是可靠的**正向**特征。
+  // ⚠ 保留原有四条（别的版本/布局可能仍用 `.user-avatar` 一族），只**追加**不替换：
+  //   多一条真机命中的候选只会让判定更准，不会把未登录判成已登录
+  //   （`bad` 仍在**前面**先判，且未登录时这些头像元素本就不存在）。
   loginProbe: {
     bad: 'button:has-text("登录"), button:has-text("注册"), a:has-text("登录"), button:has-text("Sign in"), a:has-text("Sign in")',
-    ok: '.user-avatar, [class*="user-avatar"], [class*="userAvatar"], .header-user-avatar',
+    ok: 'img.user-img, .user-avatar, [class*="user-avatar"], [class*="userAvatar"], .header-user-avatar',
   },
   models: [
     { id: 'auto', name: 'Qwen', labels: ['Qwen'], context: 1_000_000 },
@@ -427,6 +482,34 @@ export const DOUBAO = withEffort({
   attachSelector: "input[type='file']",
   attachPreview: "[class*='file'], [class*='attachment'], [data-file]",
   decoder: 'doubao', stream: true, experimental: true,
+  // 助手回复节点（0.19.89 补声明；真机读数见 long-term-issues #76）。
+  //
+  // ## 为什么必须声明（补之前它落在 DeepSeek 兜底串上 ⇒ **恒假读数**）
+  //
+  // 未声明时驱动用 `answerSelectorFor` 的兜底串
+  // `.markdown, [data-message-author-role="assistant"], .ds-markdown`
+  // ——那是 **DeepSeek 形状**，在 doubao 会话页命中 **0 个节点** ⇒
+  //   `replyChars:0` / `selectorHit:false` 是**与页面实际内容无关的恒假读数**。
+  // 真机现场（2026-10-17，**只读**导航 + DOM 双证据，零发送）：
+  //   页面上**确有一段完整模型回复**（截图可见），而驱动报 `replyChars:0`。
+  //   ⇒ 后果不只是日志难看：`browser-driver.js` 的看门狗与「捕获停摆兜底」
+  //     都拿这个读数当「页面有没有说话」，于是**网页正常回复也会等到超时**。
+  //
+  // ## 选择器的依据（逐条只读实测，`test-mock/doubao-answer-precise.mjs` / `-pop-check.mjs`）
+  //
+  //   · doubao 用 **两个类名族**区分轮次：助手 = `receiveMessage`，用户 = `sendMessage`；
+  //     ⇒ 该选择器**只命中助手轮**（实测 3 个可见），**不会**把用户提问读成回复；
+  //   · 驱动用 `[...querySelectorAll(sel)].pop()` 取**最后一个**匹配 ⇒
+  //     实测读到的是**最后一条助手消息**（150 字，正是那段回复），
+  //     且该节点内**不含** `sendMessage` 结构（`hasSendInside:0`）⇒ 判定为助手成立；
+  //   · 刻意用 **`[class*="…"]` 属性包含匹配**而不是 `.receiveMessage`：
+  //     实测后者命中 **0**（类名是 `receiveMessage` 与一串 Tailwind 工具类**空格分隔**，
+  //     `querySelector('.receiveMessage')` 应当也能命中，但真机上确实为 0
+  //     ⇒ 以**实测**为准，取包含匹配）。这是「选择器必须来自真机读数」那条纪律的一次应用。
+  //
+  // ⚠ 与 zai / glm 的答案不同是**正常的**：那两家的容器类名完全不同
+  //（zai=`div.chat-assistant`；glm=`div.markdown-body` 一族）。本条**只**服务 doubao。
+  answerSelector: '[class*="receiveMessage"]',
   // 未登录特征：游客页有可见的「登录」按钮；登录后该按钮消失。
   loginProbe: {
     bad: 'button:has-text("登录"), a:has-text("登录"), button:has-text("Sign in"), a:has-text("Sign in")',
@@ -905,7 +988,27 @@ export function listAllModels(accounts) {
   // 兼容别名条目：它指向默认槽（历史值语义），槽信息不参与。
   // 显示名刻意写死为「无槽后缀」——它与 `deepseek:deepseek` 同名是**过滤的前提**
   // （见 MODEL_ALIAS_IDS 注释），一旦带上槽后缀这个前提就没了。
-  out.push({ id: 'deepseek-web', siteId: 'deepseek', slot: DEFAULT_SLOT, siteName: DEEPSEEK.name, name: modelDisplayName(DEEPSEEK, DEEPSEEK.models[0]), labels: [], thinking: true, vision: false, imageOut: false, experimental: false, context: DEEPSEEK.models[0].context || null, budget: DEEPSEEK.models[0].budget || DEEPSEEK.models[0].context || null });
+  //
+  // ⚠ 0.19.86 修缺陷：**别名条目漏了 `acceptsImages`**（本条原为 `vision: false` 起、
+  //   **没有** `acceptsImages` 字段）。而 `deepseek-web` 是 `DEFAULT_MODEL_ID`
+  //   （`providers.js:1024`），并且被**消费**：`web-control.js` 的
+  //   `GET models`（`:968`）与 `GET context-windows`（`:999`）都原样返回
+  //   `listAllModels()` 的条目 ⇒ 界面上这个 id 的 `acceptsImages` 是 `undefined`
+  //   （= 假），而 `resolveWebModel('deepseek-web')` 解析到的**同一个模型**是 `true`
+  //   ⇒ **同一个模型的两条路径给出相反答案**。
+  //   修法：别名条目与真条目**同源取值**，不手写第二份（照抄 `DEEPSEEK.models[0]`
+  //   的字段，包含 `acceptsImages`）。新增字段时不会再漏——两者从此同一处投影。
+  //   护栏：`test/provider-surface.test.mjs` 的「别名与真条目字段同源」一条。
+  const dsMain = DEEPSEEK.models[0];
+  out.push({
+    id: 'deepseek-web', siteId: 'deepseek', slot: DEFAULT_SLOT, siteName: DEEPSEEK.name,
+    name: modelDisplayName(DEEPSEEK, dsMain), labels: [],
+    context: dsMain.context || null, budget: dsMain.budget || dsMain.context || null,
+    thinking: true, vision: false, imageOut: false,
+    // 与真条目同源（0.19.86）：漏了这一格就是「别名说不能带图、真 id 说能带图」。
+    acceptsImages: dsMain.acceptsImages === true,
+    experimental: false,
+  });
   return out;
 }
 

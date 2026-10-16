@@ -3,9 +3,42 @@
 // 模型目录在挂载时注入，保持与 DSH 原生设置面板（client.cjs）互不干扰。
 // 注意：新增设置项时两处都要改（原生面板 client.cjs / 本页），字段名以
 // configManager 的 defaultConfig 为准。
+//
+// ## 0.19.80：本页**不再手写协议文本**（红线 3 的一次真实违反，已修）
+//
+// 本页原先在 `native-spec-card` 里**手写**了各模型的「首轮教学提示词」，而它与
+// `lib/agent-preset.js`（**唯一协议真源**）实际发送的文本**不一致** —— 真机复核读数：
+//
+//   | 站点 | 本页原先教的 | 真源实际教的 | 后果 |
+//   | --- | --- | --- | --- |
+//   | GLM | ````json` 代码块 | 同（正确） | — |
+//   | Doubao | `<seed:tool_call>{"name":…}</seed:tool_call>` **或** `<tool_call>…` | `<tool_call>{"mcp_action":"call",…}</tool_call>` | **教了真源从不教的 `seed:tool_call`**，且缺 `mcp_action` |
+//   | Kimi | `<tool_call>{"name":…,"arguments":…}</tool_call>` | 同上（带 `mcp_action`） | 缺 `mcp_action` |
+//   | Qwen | `# Tools` + `<tool_call>{"name":…}` | 同上（带 `mcp_action`） | 缺 `mcp_action`、多教 `# Tools` |
+//
+// 而 `agent-preset.js:2553` 的**唯一解析判据**是 `tagged || obj.mcp_action === 'call'`
+// ⇒ 本页教的裸 JSON 形状（无 `mcp_action`）**解析不了**。用户照抄会得到「调用了但没执行」。
+//
+// `seed:tool_call` 的三处分布（决定性）：解析器认它（`agent-preset.js:2712` 的宽容外壳）、
+// 本页教它、而**教学侧（`transportNoteFor`）零出现** —— 即「桥自己不教、却在设置页教用户写」。
+//
+// **修法**：把真源的教学文本**从外面传进来**（`teaching` 参数），本页只做展示。
+// 这与 `lib/tool-transport.js`、`lib/prompt-variants.js` 是同一条纪律：
+// **只读立面只许调用真源，不许自己拼协议文本**。
 
-/** @param {Array<{id:string,name:string,siteName:string,experimental?:boolean}>} models 模型目录 */
-export function renderSettingsPage(models) {
+/**
+ * @param {Array<{id:string,name:string,siteName:string,experimental?:boolean}>} models 模型目录
+ * @param {object} [teaching] 真源教学文本（由调用方从 `lib/agent-preset.js` 取）。
+ *   `{ default: string, glm: string, trainDefault: string, trainGlm: string }`
+ *   缺省时该区块**如实显示「未提供」**，而不是回落到本页手写的旧文本
+ *   （回落就等于把刚修掉的第二份协议又请回来）。
+ */
+export function renderSettingsPage(models, teaching = null) {
+  // 转义：教学文本要进 <pre>，必须处理 & < >
+  const esc = (s) => String(s ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const t = teaching || {};
+  const pre = (s) => `<pre class="preset">${esc(s || '（未提供：请从 lib/agent-preset.js 取真源文本）')}</pre>`;
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -256,60 +289,56 @@ pre.preset {
         <div class="form-row-header">
           <label>各模型原生工具调用规范与教学参考</label>
         </div>
-        <div class="hint">汇总各大模型官方训练模板、原生标签/JSON 结构与网页端调用教学规范。</div>
+        <div class="hint">网页端<b>实际发送</b>的教学文本（运行时取自协议真源 <code>lib/agent-preset.js</code>，本页只展示、不撰写）；下方另有各站原生训练模板供对照。</div>
         <div class="native-spec-box">
-          <details class="native-spec-card">
-            <summary>GLM & Z.ai <span class="native-spec-tag">XML 标签 / JSON 代码块</span></summary>
+          <details class="native-spec-card" open>
+            <summary>本桥实际教学文本 <span class="native-spec-tag">取自 agent-preset.js（唯一真源）</span></summary>
             <div class="native-spec-desc">
-              <b>官方 Chat Template：</b><code>&lt;tool_call&gt;{name}&lt;arg_key&gt;{k}&lt;/arg_key&gt;&lt;arg_value&gt;{v}&lt;/arg_value&gt;&lt;/tool_call&gt;</code><br>
-              <b>网页避拦截推荐：</b>使用 <code>\`\`\`json {"mcp_action":"call","name":"...","arguments":{...}} \`\`\`</code> 代码块（避免被网页内置沙箱抢夺）。<br>
-              <b>首轮教学提示词：</b>
-              <pre class="preset">[本地工具传输协议]
-必须使用 \`\`\`json 代码块发起工具调用：
-先写一行 \`\`\`json，下一行是单个 JSON 对象 {"mcp_action":"call","name":"实际工具名","purpose":"原因","arguments":{…}}，再以一行 \`\`\` 结束。
-警告：不要使用 &lt;tool_call&gt;…&lt;/tool_call&gt; 或任何 XML 标签包裹调用——本网页会把这类标签当成它自己的内置工具抢走执行并报 unknown tool call；只有 \`\`\`json 代码块能到达本地工具网关。
-工具名和参数必须严格匹配 schema。一旦判定需要真实数据，立即发起调用并停止输出，等待真实工具结果；拿到结果后直接给出最终答复。</pre>
-              <b>增量轮再教学：</b>
-              <pre class="preset">[系统提示] 请保持工具调用格式：先写一行 \`\`\`json，其内为单个 JSON 对象 {"mcp_action":"call","name":"工具名","purpose":"原因","arguments":{…}}，再以一行 \`\`\` 结束；不要用 &lt;tool_call&gt; 等标签包裹。</pre>
+              <b>默认形状（<code>&lt;tool_call&gt;</code> 标签）—— 除 GLM / DeepSeek 外的站点：</b>
+              ${pre(t.default)}
+              <b>该形状的增量轮再教学：</b>
+              ${pre(t.trainDefault)}
+              <b>GLM 形状（代码块，起始行是三个反引号加 json）—— GLM 网页有内置执行器会抢走标签：</b>
+              ${pre(t.glm)}
+              <b>GLM 的增量轮再教学：</b>
+              ${pre(t.trainGlm)}
+              <div class="hint">⚠ 本区块文本运行时取自真源，与桥真正发给网页的逐字相同。
+                不要再在本页手写协议文本（红线 3：工具协议只有一处定义）。</div>
             </div>
           </details>
 
           <details class="native-spec-card">
-            <summary>Doubao <span class="native-spec-tag">Doubao-Seed 2.0 / &lt;seed:tool_call&gt;</span></summary>
+            <summary>GLM & Z.ai <span class="native-spec-tag">原生 XML / JSON 代码块</span></summary>
             <div class="native-spec-desc">
-              <b>官方训练规范：</b><code>&lt;seed:tool_call&gt;{"name":"...","arguments":{...}}&lt;/seed:tool_call&gt;</code> 或标准 <code>&lt;tool_call&gt;</code><br>
-              <b>首轮教学提示词：</b>
-              <pre class="preset">[本地工具传输协议]
-必须使用 &lt;seed:tool_call&gt;{"name":"实际工具名","arguments":{…}}&lt;/seed:tool_call&gt; 或 &lt;tool_call&gt;{"mcp_action":"call","name":"实际工具名","arguments":{…}}&lt;/tool_call&gt; 发起工具调用。
-工具名和参数必须严格匹配 schema。一旦判定需要真实数据，立即发起调用并停止输出，等待真实工具结果；拿到全部所需结果后，直接给出简洁答复。</pre>
-              <b>增量轮再教学：</b>
-              <pre class="preset">[系统提示] 请保持工具调用格式：以 &lt;tool_call&gt; 或 &lt;seed:tool_call&gt; 开始、闭合标签结束，其内为单个 JSON 对象。</pre>
+              <b>官方 Chat Template：</b><code>&lt;tool_call&gt;{name}&lt;arg_key&gt;{k}&lt;/arg_key&gt;&lt;arg_value&gt;{v}&lt;/arg_value&gt;&lt;/tool_call&gt;</code><br>
+              <b>本桥为何改用代码块：</b>GLM 网页对正文里的调用标签有<b>原生执行器</b>（只认它内置的 search/open/click/find）
+              ⇒ 标签形状会被它抢走执行并回灌 unknown tool call，故该站点只教代码块（见上方 GLM 段）。
+            </div>
+          </details>
+
+          <details class="native-spec-card">
+            <summary>Doubao <span class="native-spec-tag">Doubao-Seed / seed:tool_call</span></summary>
+            <div class="native-spec-desc">
+              <b>网页原生标签：</b><code>&lt;seed:tool_call&gt;{"name":"...","arguments":{...}}&lt;/seed:tool_call&gt;</code><br>
+              <b>解析器是否认它：</b>认 —— 标签正则把它列在宽容外壳里（与 tool_call/function/stories 同族）。<br>
+              <b>桥是否教它：</b><b>不教</b> —— 教学侧对 doubao 发的是默认 <code>&lt;tool_call&gt;</code> 形状。
+              <div class="hint">⚠ 如实标注：doubao 网页是否接受默认形状、或是否会像 GLM 那样抢标签，
+                <b>本轮无真机读数</b>（long-term-issues #66）⇒ 未做站点化变体。</div>
             </div>
           </details>
 
           <details class="native-spec-card">
             <summary>Kimi <span class="native-spec-tag">Kimi-K2 / Connect-RPC 流式</span></summary>
             <div class="native-spec-desc">
-              <b>官方规范：</b><code>&lt;tool_call&gt;\n{"name":"...","arguments":{...}}\n&lt;/tool_call&gt;</code><br>
-              <b>网页传输特征：</b>Connect-RPC 二进制流（<code>[flags(1)][len(4BE)][json]</code>），正文与思考分流。<br>
-              <b>首轮教学提示词：</b>
-              <pre class="preset">[本地工具传输协议]
-必须使用 &lt;tool_call&gt;{"name":"实际工具名","arguments":{…}}&lt;/tool_call&gt; 发起工具调用。
-工具名和参数必须严格匹配声明的 schema。调用输出后立即停止生成，等待返回结果后继续。</pre>
-              <b>增量轮再教学：</b>
-              <pre class="preset">[系统提示] 请保持工具调用格式：以 &lt;tool_call&gt; 开始、&lt;/tool_call&gt; 结束，内含 JSON 工具调用声明。</pre>
+              <b>官方规范：</b><code>&lt;tool_call&gt;{"name":"...","arguments":{...}}&lt;/tool_call&gt;</code><br>
+              <b>网页传输特征：</b>Connect-RPC 二进制流（<code>[flags(1)][len(4BE)][json]</code>），正文与思考分流。
             </div>
           </details>
 
           <details class="native-spec-card">
-            <summary>Qwen <span class="native-spec-tag">ChatML # Tools / &lt;tool_call&gt;</span></summary>
+            <summary>Qwen <span class="native-spec-tag">ChatML # Tools</span></summary>
             <div class="native-spec-desc">
-              <b>官方 ChatML 规范：</b><code>&lt;|im_start|&gt;assistant&lt;tool_call&gt;...&lt;/tool_call&gt;&lt;|im_end|&gt;</code><br>
-              <b>首轮教学提示词：</b>
-              <pre class="preset">[本地工具传输协议]
-# Tools
-必须使用 &lt;tool_call&gt;{"name":"实际工具名","arguments":{…}}&lt;/tool_call&gt; 格式发起工具调用。
-请严格根据提供的工具函数定义进行调用，参数名称与类型必须匹配。输出调用后立即结束当前回复，等待工具执行结果注入。</pre>
+              <b>官方 ChatML 规范：</b><code>&lt;|im_start|&gt;assistant&lt;tool_call&gt;...&lt;/tool_call&gt;&lt;|im_end|&gt;</code>
             </div>
           </details>
 

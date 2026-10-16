@@ -93,3 +93,63 @@ test('判据 5：解析结果对全部站点都是非空字符串', () => {
     assert.ok(v.trim().length > 0, s.id + ' 的解析结果不得为空——空的采样选择器 = DOM 采样恒空 = 收束器腰斩回复');
   }
 });
+
+// ── 判据 6（0.19.89）：**真机跑过的站点**必须真的声明 answerSelector（#76）──────────
+//
+// ## 本条防的是哪一次真缺陷（2026-10-17 实测，零发送取证）
+//
+// doubao **没有**声明 `answerSelector` ⇒ 落在 DeepSeek 形状的兜底串上
+// （`.markdown, [data-message-author-role="assistant"], .ds-markdown`），
+// 而该串在 doubao 会话页**命中 0 个节点** ⇒ `replyChars:0 / selectorHit:false`
+// 是**与页面实际内容无关的恒假读数**。
+//
+// **只读**导航到同一会话页（零发送）拿到对照读数（逐字复刻驱动那段 `page.evaluate`）：
+//
+//   修前（旧兜底串）：{"replyChars":0,"selectorHit":false}   ← 驱动超时读数就是这个
+//   修后（新声明）  ：{"replyChars":150,"selectorHit":true}
+//
+// ⇒ 代价不只是日志难看：看门狗与「捕获停摆兜底」都拿这个读数判断「页面有没有说话」，
+//   于是**网页正常回复也会等到超时**（第 ③ 项 doubao FAIL 的真因）。
+//
+// ## 判据
+//
+// 有一个**明确的真机名单**：在该站真机跑过、且**确认页面会出现助手回复**的站点，
+// 必须声明 `answerSelector`（不许留在兜底串上）。
+// ⚠ **不是**要求「所有站点都声明」——按本仓库纪律，**没有真机读数就不声明**；
+//   本名单只登记**已经有读数**的那些。新增站点经真机确认后，把它加进名单即可。
+//
+// ⚠ 本判据是**名单级**的（证明「有读数的站点确实声明了」），
+//   **不能**证明「声明的选择器真的能命中」——后者必须真机读数
+//   （见 `test-mock/verify-doubao-answer-read.mjs`，它逐字复刻驱动那段读数）。
+const MUST_DECLARE_ANSWER_SELECTOR = Object.freeze({
+  // glm / zai 早已声明（0.19.50 起）。
+  glm: 'div.markdown-body, .markdown-body, [class*="answer-content"], [class*="chatglm"], main',
+  zai: 'div.chat-assistant, #response-content-container',
+  // 0.19.89 补声明：真机取证证明旧兜底串在 doubao 命中 0 个节点（#76）。
+  doubao: '[class*="receiveMessage"]',
+});
+
+test('判据 6：真机确认过「页面会有助手回复」的站点必须声明 answerSelector（#76）', () => {
+  const bad = [];
+  for (const [siteId, expected] of Object.entries(MUST_DECLARE_ANSWER_SELECTOR)) {
+    const site = SITES.find((s) => s.id === siteId);
+    if (!site) { bad.push(`${siteId}: 站点不存在（名单过期）`); continue; }
+    if (!site.answerSelector) {
+      bad.push(`${siteId}: 未声明 ⇒ 落在 DeepSeek 兜底串上；真机实测该串在该站命中 0 个节点 `
+        + '⇒ replyChars:0 / selectorHit:false 是恒假读数（网页正常回复也会等到超时）');
+      continue;
+    }
+    assert.equal(site.answerSelector, expected,
+      `${siteId} 的 answerSelector 与真机读数记录不一致 —— 改动它必须先去真机重取读数`
+      + '（本条刻意逐字钉住：换选择器不许凭印象）');
+    assert.equal(answerSelectorFor(siteId), expected, `${siteId} 解析结果必须等于声明值`);
+  }
+  assert.deepEqual(bad, [], '真机名单里的站点必须声明 answerSelector：' + JSON.stringify(bad));
+
+  // 反向：**没有**真机读数的站点不在这份名单里（防止有人顺手给全部站点加声明）
+  const inList = new Set(Object.keys(MUST_DECLARE_ANSWER_SELECTOR));
+  const declaredButNotListed = SITES.filter((s) => s.answerSelector && !inList.has(s.id)).map((s) => s.id);
+  assert.deepEqual(declaredButNotListed, [],
+    '有站点声明了 answerSelector 却不在真机名单里 —— '
+    + '要么补上它的真机读数并登记，要么撤掉声明（没有读数的声明违反本仓库纪律）');
+});

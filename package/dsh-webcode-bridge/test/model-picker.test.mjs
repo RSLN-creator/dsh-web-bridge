@@ -12,7 +12,7 @@
 // 本文件把匹配规则钉死，任何放松都会在这里红。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { pickExactOption, normalizeModelName, pickerUsable, readbackConfirms } from '../lib/model-picker.js';
+import { pickExactOption, normalizeModelName, pickerUsable, readbackConfirms, currentModelIsTarget } from '../lib/model-picker.js';
 import { listAllModels, resolveWebModel, getSite } from '../lib/providers.js';
 
 const zaiOptions = [
@@ -147,4 +147,79 @@ test('目录与别名：真实条目可解析，旧设置值仍可用', () => {
   assert.equal(resolveWebModel('zai-glm-5.3-flash').id, 'glm-5.3-flash');
   // 未知模型必须抛，不得静默回落
   assert.throws(() => resolveWebModel('zai:definitely-not-a-model'), /不支持的网页模型/);
+});
+
+// ── 幂等快路判据（0.19.81，z.ai 真机修出）──────────────────────────────────
+//
+// ## 真机背景（为什么会有这个判据）
+//
+// z.ai 在**发过一条消息之后**把模型按钮 `disabled=true`（60/60 采样、持续 ≥47s），
+// 而 `selectModel` 每轮都调 ⇒ 第二轮点禁用按钮 → 菜单不开 → 0 选项
+// ⇒ 报 `MODEL_UNAVAILABLE …（no-options）`（**误导**：真因是按钮不可用）。
+//
+// 修法：**页面已经是目标模型时不动 UI**（幂等快路）。但这条快路有个**方向性风险**，
+// 必须被护栏钉住 —— 见下面第 ② 条。
+
+test('幂等快路 ①：页面已是目标模型（含营销后缀）⇒ 判为「无需动作」', () => {
+  assert.equal(currentModelIsTarget('GLM-5.3-Flash', 'GLM-5.3-Flash'), true, '逐字相等');
+  assert.equal(currentModelIsTarget('GLM-5.3-Flash NEW', 'GLM-5.3-Flash'), true, '带 NEW 徽章');
+  assert.equal(currentModelIsTarget('glm-5.3-flash', 'GLM-5.3-Flash'), true, '大小写不敏感');
+  assert.equal(currentModelIsTarget(' GLM-5.3-Flash ', 'GLM-5.3-Flash'), true, '前后空白');
+});
+
+test('幂等快路 ②：★ 页面是更短的前缀（GLM-5.3 vs 目标 GLM-5.3-Flash）⇒ **必须判否**', () => {
+  // 这条是**红线 1「绝不静默降级模型」**的护栏：
+  // 若这里判成 true，快路就会跳过本该发生的切换 ⇒ 用户选了 Flash、网页停在 5.3，
+  // 而界面上完全看不出来。`pickExactOption` 的规则③（候选是目标前缀）正是这样判的，
+  // 所以快路**刻意不复用**它，改用只允许「候选 ≥ 目标」的 currentModelIsTarget。
+  assert.equal(currentModelIsTarget('GLM-5.3', 'GLM-5.3-Flash'), false,
+    '页面比目标更短 ⇒ 必须去点，不许跳过（否则就是静默降级）');
+  assert.equal(currentModelIsTarget('GLM-5.2', 'GLM-5.3-Flash'), false, '完全不同的模型');
+  assert.equal(currentModelIsTarget('GLM-5.3-Flas', 'GLM-5.3-Flash'), false, '目标的前缀但不是完整名');
+});
+
+test('幂等快路 ③：读不到当前模型 ⇒ 判否（不猜、照常走原路径）', () => {
+  assert.equal(currentModelIsTarget(null, 'GLM-5.3-Flash'), false, 'null 不得当成命中');
+  assert.equal(currentModelIsTarget('', 'GLM-5.3-Flash'), false, '空串不得当成命中');
+  assert.equal(currentModelIsTarget('GLM-5.3-Flash', ''), false, '目标为空不得命中');
+});
+
+test('幂等快路 ④：分隔符边界 —— 更长的名字必须是**分隔符**衔接，不是字母', () => {
+  // 防止 `GLM-5.3X` 被当成 `GLM-5.3` 的合法「带后缀」形态
+  assert.equal(currentModelIsTarget('GLM-5.3X', 'GLM-5.3'), false, '字母直接相接 ⇒ 不是同族后缀');
+  assert.equal(currentModelIsTarget('GLM-5.3 旗舰', 'GLM-5.3'), true, '空格分隔 ⇒ 允许');
+  assert.equal(currentModelIsTarget('GLM-5.3-Flash', 'GLM-5.3'), true, '连字符分隔 ⇒ 允许');
+});
+
+// ── ★ 红线 1 洞（长期问题 #67）已在 0.19.82 修掉：readbackConfirms 不再是双向包含 ──
+//
+// 这条原先是个 `todo`（不阻断 CI），把洞钉成可复现用例。**0.19.82 已修**，所以它现在
+// 是正式断言：判据删掉了「基准是回读的超串」那半个方向（理由与误判代价的不对称性
+// 写在 `readbackConfirms` 的 JSDoc 里）。同文件下面还有一条「修法必须仍然容忍更完整的
+// 回读」的对照——两半都不能丢。
+test('#67 页面名比目标短 ⇒ 切换没生效，readbackConfirms 必须 false（修前是 true＝静默降级）', () => {
+  // 真机场景：用户选 GLM-5.3-Flash，切换没生效，页面仍停在 GLM-5.3
+  assert.equal(readbackConfirms('GLM-5.3', 'GLM-5.3-Flash', 'GLM-5.3-Flash'), false,
+    '页面比目标短 ⇒ 切换没生效，不得判 confirmed（旧双向包含在这里给 true）');
+  // 同族的第二条：被点中项比目标短（选项名就是更笼统的那个）时，也不得因为
+  // 「基准取短的」而把更短的页面名放行。
+  assert.equal(readbackConfirms('GLM-5.3', 'GLM-5.3', 'GLM-5.3-Flash'), false,
+    '点了 GLM-5.3（目标是 Flash）却回读到 GLM-5.3 ⇒ 不得 confirmed');
+  // z.ai 真实模型表上的同一形态（三条档位：Flash / 5.3 / 5.2）
+  assert.equal(readbackConfirms('GLM-5.2', 'GLM-5.3-Flash', 'GLM-5.3-Flash'), false,
+    '回读到更低档必须 false');
+});
+
+test('★ 对照 #67：修法是**收窄**不是变严——装饰与「回读更完整」必须继续放行', () => {
+  // 这半条是 readbackConfirms 存在的理由（真机 z.ai 曾因它误判「切换失败」，
+  // 把 strict 静默降级成 false）。修 #67 时若把这半条一起删掉，就是从一个错
+  // 换到另一个错。
+  assert.equal(readbackConfirms('GLM-5.3-Flash NEW', 'GLM-5.3-Flash', 'GLM-5.3-Flash'), true,
+    '回读更完整（选项行带营销后缀）必须继续放行');
+  assert.equal(readbackConfirms('GLM-5.3-Flash ▾', 'GLM-5.3-Flash', 'GLM-5.3-Flash'), true,
+    '触发按钮带装饰（回读更长）必须继续放行');
+  // 与 currentModelIsTarget 的关系：两者现在同方向（候选 ≥ 目标），但用途不同——
+  // 后者问「要不要动手」，前者问「动完手有没有生效」。
+  assert.equal(currentModelIsTarget('GLM-5.3', 'GLM-5.3-Flash'), false);
+  assert.equal(currentModelIsTarget('GLM-5.3-Flash', 'GLM-5.3-Flash'), true);
 });

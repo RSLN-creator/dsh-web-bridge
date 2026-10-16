@@ -30,7 +30,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   SITES, providerIdsForRegistration, providerIdForSite, siteIdForProvider,
-  providerGroupName, listAllModels,
+  providerGroupName, listAllModels, resolveWebModel,
 } from '../lib/providers.js';
 
 /** 站点 id 与顺序（顺序即 OpenAI /models 的列表顺序）。 */
@@ -173,4 +173,48 @@ test('判据 7：站点显示名 = 网站原名，且客户端 `SITE_NAMES` 与�
   assert.deepEqual(client, EXPECTED_SITE_NAMES,
     'client.cjs 的 SITE_NAMES 与 providers.js 的 name 漂移了——同一个站点会在右栏与设置页显示成两个名字，'
     + '而任何只渲染一侧的单测都不会红（这正是用户报过的症状）');
+});
+
+// ── 判据 8（0.19.86）：目录条目与 resolveWebModel 的**带图能力**必须同值 ──────────
+//
+// ## 本条防的是哪一次真缺陷（2026-10-16 实测）
+//
+// 同一个模型有**两条取数路径**，而它们对「能不能带图」给出了**相反**的答案：
+//   · **目录路径**：`listAllModels()` 的条目 → 被 `web-control.js` 的
+//     `GET models`（`:968`）与 `GET context-windows`（`:999`）**原样返回**；
+//   · **解析路径**：`resolveWebModel(id)` → `index.js:1270` 的
+//     `inputModalities`（**护栏**：宿主只在它不含 'image' 时把图片换成文字占位）。
+//
+// 冲突实例：兼容别名 `deepseek-web`（**且它就是 `DEFAULT_MODEL_ID`**）的目录条目
+// **漏了 `acceptsImages` 字段**（显式为 undefined ⇒ 假），而
+// `resolveWebModel('deepseek-web')` 解析到**同一个** DeepSeek 模型是 `true`。
+//
+// 为什么它危险（不是「差一个字段」）：`index.js:1263-1266` 的注释写得很清楚——
+// `inputModalities` 声明错方向时，**harness 截图会在到达桥之前就被剥离**，
+// 症状是「网页端说没图」，而**桥这边看不到任何异常**。⇒ 一个漏掉的字段
+// 会让那条护栏在**默认模型**上静默失效。
+//
+// ⚠ 本判据只查「两条路径同值」，不查「该值是否符合真机事实」——后者要真机读数
+//   （见 `.tmp/image-verify/IMAGE-VERIFY-RESULTS.md` 的四态）。
+test('判据 8：每个目录条目的 acceptsImages 必须等于 resolveWebModel 的解析值', () => {
+  const items = listAllModels();
+  const bad = [];
+  for (const m of items) {
+    const viaCatalog = m.acceptsImages === true;
+    const resolved = resolveWebModel(m.id);
+    const viaResolve = resolved?.acceptsImages === true;
+    if (viaCatalog !== viaResolve) bad.push({ id: m.id, catalog: viaCatalog, resolve: viaResolve });
+  }
+  assert.deepEqual(bad, [],
+    '目录条目与 resolveWebModel 对「能不能带图」给出了不同答案 —— 同一个模型两条取数路径自相矛盾：'
+    + JSON.stringify(bad)
+    + '。\n目录条目会被 web-control 的 GET models / GET context-windows 原样返回，'
+    + '而 resolveModel 的 inputModalities 是**护栏**（声明错方向 ⇒ harness 在到达桥之前就把图剥掉）。');
+
+  // 正向对照：`deepseek-web`（默认模型）也必须一致 —— 它曾正是这条判据抓到的那个洞。
+  const alias = items.find((m) => m.id === 'deepseek-web');
+  assert.ok(alias, 'deepseek-web 别名条目必须仍在目录里（历史设置值依赖它解析）');
+  assert.equal(alias.acceptsImages, resolveWebModel('deepseek-web').acceptsImages === true,
+    'deepseek-web 是 DEFAULT_MODEL_ID，它的目录条目必须与解析值同源'
+    + '（修前这个字段整个漏掉 ⇒ 目录说 false、解析说 true）');
 });

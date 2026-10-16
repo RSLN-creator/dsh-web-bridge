@@ -94,6 +94,47 @@ export function verdictOf(checks, opts = {}) {
 }
 
 /**
+ * 「这两轮是不是同一个会话」——**两个判据取其一成立即算成立**（纯函数）。
+ *
+ * ## 为什么需要第二个判据（真机读数逼出来的）
+ *
+ * `sendTurn` 返回的 `sessionId` 来自 `turnSessionId(url) = conversationIdFromUrl(...)`，
+ * 而**没有地址形状的站点**（zai / doubao / qwen…）地址里解不出 id ⇒ **恒为 `null`**。
+ * 2026-10-16 真机（zai，三轮全程同一会话、工具闭环成立）实测三个 `sessionId` 全是
+ * `null` ⇒ 若只认 `sessionId`，就会把「明明停在同一个网页会话上」记成 UNVERIFIED。
+ * 上一轮 Phase 2 里 qwen 的 `tool.resultRoundTrip` 记 UNVERIFIED 正是同型成因。
+ *
+ * 0.19.52 起驱动为这类站点维护**落地地址锚**（槽里的 `landedUrl`），`sendTurn` 的
+ * `conversationStay` 判据用的就是它，且**换会话会被判 `WEB_SESSION_LOST`**（红线 2）
+ * ⇒ 它是可信的第二身份。
+ *
+ * ⚠ 两个判据**都拿不到**时才记 UNVERIFIED —— 那时确实没有证据，不许猜成通过；
+ * 也**不许**因为「同一个 key 复用」就判成立：key 是 DSH 侧的槽名，网页会话是否真
+ * 停在那一个，正是要验的东西（用 key 当证据等于把假设当结论）。
+ *
+ * @param {{kind:string, value:string|null}} a 第 N 轮的槽锚（来自 `driver.status().sessionSlot`）
+ * @param {{kind:string, value:string|null}} b 第 N+1 轮的槽锚
+ * @param {string|null} sidA 第 N 轮 `sendTurn` 返回的 sessionId
+ * @param {string|null} sidB 第 N+1 轮 `sendTurn` 返回的 sessionId
+ * @returns {{ok:boolean, basis:'sessionId'|'slot-anchor'|null, detail:string}}
+ */
+export function sameSessionVerdict(a, b, sidA, sidB) {
+  if (sidA && sidB && String(sidA) === String(sidB)) {
+    return { ok: true, basis: 'sessionId', detail: `sessionId 逐字相同（${String(sidA).slice(0, 24)}）` };
+  }
+  const ka = a && a.kind && a.kind !== 'none' ? String(a.value || '') : '';
+  const kb = b && b.kind && b.kind !== 'none' ? String(b.value || '') : '';
+  if (ka && kb && ka === kb) {
+    return { ok: true, basis: 'slot-anchor', detail: `槽锚（${a.kind}）逐字相同（${ka.slice(0, 60)}）` };
+  }
+  return {
+    ok: false, basis: null,
+    detail: `两个判据都拿不到：sessionId ${sidA ?? 'null'} / ${sidB ?? 'null'}；`
+      + `槽锚 ${a?.kind ?? '(无)'}=${ka ? ka.slice(0, 40) : '(空)'} → ${b?.kind ?? '(无)'}=${kb ? kb.slice(0, 40) : '(空)'}`,
+  };
+}
+
+/**
  * 「全文」与「流式增量」必须**分开**判——这是复审指出的第三个缺陷。
  *
  * 旧写法是 `String(text || sent?.text || '')`：没有收到任何增量时，只要

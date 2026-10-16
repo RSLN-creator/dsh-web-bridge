@@ -59,17 +59,48 @@ const BOUND = '=== webcode-bridge raw reply ===';
  * @param {string} text 原始回复全文（调用方保证是收到的原样，不做归一化）
  * @param {{sessionId?: string|null, siteId?: string|null, chars?: number, calls?: number, note?: string}} [meta]
  *   头行元信息；一行管道分隔，供 grep 定位（正文里不写元信息）。
- * @param {{dir?: string, basename?: string, maxBytes?: number, now?: Date}} [opts]
+ * @param {object} [opts]
  *   目录 / 文件名 / 轮转阈值 / 时钟，测试用；默认见上。
  * @returns {string|null}
  */
 export function appendReplyLog(text, meta = {}, opts = {}) {
   try {
-    // 测试进程守卫：node --test 会跑大量驱动 index.js 生成器的用例（glm-session-replay、
-    // empty-response 等真接线测试），没有这条它们会把测试回复写进真实
-    // `~/.dsh/logs/`，污染取证数据。模块自身的行为测试显式传 opts.dir，不受影响。
+    // ── 测试进程守卫（0.19.83 加固；long-term-issues #73）─────────────────────
+    //
+    // 旧判据只有 `process.env.NODE_TEST_CONTEXT`，而它**只在 `node --test` 下由 runner
+    // 设置**。本仓库因为「本机 `spawnSync` 调外部程序 EPERM」而**文档化要求逐文件跑**
+    // （`node test/xxx.test.mjs`）——**那种跑法根本不设这个变量** ⇒ 守卫不生效。
+    //
+    // 真机后果（2026-10-16 实测，逐条可复核）：
+    //   · 跑一次 `node test/auto-continue.test.mjs` ⇒ 真实取证日志
+    //     `~/.dsh/logs/webcode-bridge-replies.deepseek.log` 里
+    //     `session=auto-cont-1` 的条目 **34 → 36（+2）**；
+    //   · 全量统计：**3644 条里 2065 条来自非真机会话**（`auto-*`、`fence-tail`、
+    //     `headless-tail`…），真机会话（`session-<uuid>`）只有 1579 条。
+    //
+    // 为什么这不是「测试自己的小毛病」：这份日志是**真机取证的唯一原始记录**，
+    // 而本轮的 ④ 项审计**真的**先被它误导了一次——把一条**测试合成形状**（`D:/x.js`
+    // 占位值、9 个 `auto-*` 会话、201 条只有 4 个逐字片段）当成「deepseek 真机的
+    // 反复失败形态」，差点照它去改解析器。**假读数比没有读数更贵。**
+    //
+    // 新判据（三条任一命中即拒写，**宁可少写也不污染**）：
+    //   ① `NODE_TEST_CONTEXT`（原判据，`node --test` 下由 runner 设置）；
+    //   ② `WEBCODE_REPLY_LOG_TEST_DIR` **未显式给目录**——本仓库的测试要写日志时
+    //      一律显式传 `opts.dir`（模块行为测试就是这么做的），因此「测试上下文出现在
+    //      命令行上、又没给目录」这个组合可以判；
+    //   ③ **调用栈里出现本仓库自己的测试文件**（`test/` 或 `test-mock/` 路径）——
+    //      这是**与跑法无关**的判据，逐文件跑同样命中。
+    // ⚠ ③ 用调用栈判，代价是**慢一点**（只在真要写盘时算一次），收益是**不依赖环境变量**。
     const explicit = opts.dir || process.env.WEBCODE_REPLY_LOG_DIR;
-    if (!explicit && process.env.NODE_TEST_CONTEXT) return null;
+    if (!explicit) {
+      if (process.env.NODE_TEST_CONTEXT) return null;
+      // ③ 调用栈判定：只在没有显式目录时才算（有显式目录 = 测试自己要写临时目录，放行）
+      try {
+        const stack = new Error().stack || '';
+        // 本仓库的测试与探针目录名；用路径分隔符两种形状都覆盖（Windows `\` 与 POSIX `/`）
+        if (/[\\/](test|test-mock)[\\/][^\\/\s]+\.mjs/.test(stack)) return null;
+      } catch { /* 取不到栈就当没有这条判据（保守放行，与原行为一致） */ }
+    }
     const dir = explicit || DEFAULT_REPLY_LOG_DIR;
     // 0.19.30：站点段。站点 id 是小写 slug（getSite 校验），这里再收一道
     // [a-z0-9-] 并截 24 字符，防调用方传入任意字符串拼进文件名。

@@ -35,31 +35,50 @@
  * `模型回读不一致：目标 GLM-5.3-Flash，回读 GLM-5.3-Flash`，两个字符串看起来一样），
  * 于是 `selectModelGeneric` 降级为 `strict:false`——「严格模式」对该站点静默失效。
  *
- * ## 判据（两半都要，缺一半就成了恒真或恒假）
+ * ## 判据（现在只有一个方向：**回读必须覆盖目标名**）
  *
- *   ① **基准必须是目标名或它的前缀**：取 `wanted` 与 `chosenName` 中较短者当基准，
- *      但**不是无条件**——短的必须是**长的那个的前缀**。否则会出现这种情况：
- *      回读 `GLM-5.2`、点中 `GLM-5.2-Flash`、目标 `GLM-5.3-Flash`，
- *      拿 `GLM-5.2-Flash` 当基准 ⇒ `GLM-5.2` 被「包含」⇒ **放行了一个完全错的切换**
- *      （这条是我自己第一版的自测用例抓出来的，见 `test/model-picker.test.mjs` 最后一条）。
- *   ② **回读与基准互相包含**：容忍触发按钮带装饰（`… ▾`）与回读更完整两种形态。
+ * 基准**恒为目标名 `wanted`**，回读必须是它的超串：`a.includes(w)`。这一条同时覆盖
+ * 两种真实形态（都只会让回读**更长**）：触发按钮带装饰（`GLM-5.3-Flash ▾`）与选项行
+ * 带营销后缀（`GLM-5.3-Flash NEW 轻量旗舰模型…`）。
+ *
+ * ## 0.19.82：删掉两个「更短也放行」的方向（长期问题 #67，红线 1 洞）
+ *
+ * 旧实现有两处会让**比目标更短**的回读被放行，两处都是「绝不静默降级模型」的洞：
+ *
+ *   ① 第二半判据 `base.includes(a)`（**基准是回读的超串**）：页面回读 `GLM-5.3`、
+ *      目标 `GLM-5.3-Flash` ⇒ `'glm-5.3-flash'.includes('glm-5.3')` 为真 ⇒
+ *      **切换没生效却判 `confirmed:true`**，用户选了 Flash 却跑在 5.3 上。
+ *   ② 基准候选 `if (c.length < w.length && w.startsWith(c)) base = c`（**被点中项比目标短**）：
+ *      菜单里一旦没有精确项、只有更笼统的 `GLM-5.3`（`pickExactOption` 规则 ③ 会挑中它），
+ *      base 就缩成 `GLM-5.3`，于是回读 `GLM-5.3` 又被放行 —— 同一个洞的第二次入口。
+ *      这一条在**生产数据下无法成立为「合法宽容」**：`wanted` 取的是 `providers.js` 的
+ *      `labels[0]`（`GLM-5.3` / `GLM-Flash` / `K3`…），**从来自带后缀**，所以「选项名比目标短」
+ *      从来不是缩写的正义形态，而正是「网页提供了更笼统的档位」。它的注释原本举的例子
+ *      （目标写成 `GLM-5.3-Flash NEW`）在目录里不存在。
+ *
+ * ## 误判方向是刻意选的（不对称代价）
+ *
+ * 判 false 的代价只是 `strict:false` ⇒ `readback-mismatch` + warn（切换本身仍然发生，
+ * 见 `browser-driver.js:4440`）；判 true 的代价是**静默降级**。两者不对称，宁少放行。
+ * 因此本判据与 `currentModelIsTarget` 现在**同方向**（候选 ≥ 目标），只是用途不同：
+ * 后者问「要不要动手」，前者问「动完手有没有生效」。
+ *
+ * 反向护栏见 `test/model-picker.test.mjs` 的 #67 三条 + 对照两条（页面更短必须 false、
+ * 回读更完整必须 true、装饰必须 true）。
  *
  * @param {string|null} applied 从页面回读到的当前模型名
- * @param {string} chosenName 被点击那一项的名字（可能带后缀）
+ * @param {string} chosenName 被点击那一项的名字（可能带后缀，仅用于诊断，不参与放行）
  * @param {string} wanted 我们要的目标名
  * @returns {boolean}
  */
 export function readbackConfirms(applied, chosenName, wanted) {
   if (!applied) return false;
   const a = normalizeModelName(applied);
-  const c = normalizeModelName(chosenName || '');
   const w = normalizeModelName(wanted || '');
   if (!a || !w) return false;
-  // ① 基准候选：目标名，或「是目标名前缀」的被点中项（后者解决选项名比目标短的情况）
-  let base = w;
-  if (c && c.length < w.length && w.startsWith(c)) base = c;
-  // ② 互相包含（装饰 / 更完整两种形态）
-  return a.includes(base) || base.includes(a);
+  // 单方向：回读必须覆盖目标名。装饰与营销后缀只会让回读更长，因此这一条足够；
+  // 「回读更短」只可能意味着页面上停着一个更笼统的型号 ⇒ 红线 1，必须报未生效。
+  return a.includes(w);
 }
 
 /**
@@ -109,6 +128,41 @@ export function pickExactOption(candidates, wanted) {
     if (want.startsWith(n) && /^[\s\-–—·|/]/.test(want.slice(n.length))) return i;
   }
   return -1;
+}
+
+/**
+ * 「页面上当前显示的模型**就是**目标模型吗」——幂等快路的判据（**纯函数**）。
+ *
+ * ## 为什么不能复用 `pickExactOption`
+ *
+ * `pickExactOption` 的三条规则里有两条**方向相反**的宽容：
+ *   ② 候选**以目标开头** + 分隔符（候选更长：`GLM-5.3-Flash NEW` ← 目标 `GLM-5.3-Flash`）
+ *   ③ 目标**以候选开头** + 分隔符（候选更短：目标 `GLM-5.3-Flash` → 候选 `GLM-5.3`）
+ * 对「在菜单里挑一项」这两个方向都无害（挑出来的仍是同族项，且后面还有回读确认）；
+ * 但对「**要不要动手**」这个判断，规则 ③ 是**危险的**：
+ *   页面当前 = `GLM-5.3`、目标是 `GLM-5.3-Flash` ⇒ 规则 ③ 说「命中」
+ *   ⇒ 快路判定「已经是目标」⇒ **跳过本该发生的切换**
+ *   ⇒ 用户选了 Flash、网页停在 5.3 —— 这正是**红线 1「绝不静默降级模型」**禁止的。
+ *
+ * ## 因此本函数只允许「候选 ≥ 目标」这一个方向
+ *
+ *   ① 规范化后**逐字相等**；
+ *   ② 候选**以目标开头**，且紧跟一个分隔符（容忍 `GLM-5.3-Flash NEW` 这类营销后缀）。
+ *
+ * **不允许**候选比目标短（那意味着要切到更具体的档位，必须真的去点）。
+ *
+ * @param {string|null} current 页面上当前显示的模型名
+ * @param {string} wanted 目标模型名（providers 的 labels[0]）
+ * @returns {boolean} true = 已经是目标，无需任何 UI 动作
+ */
+export function currentModelIsTarget(current, wanted) {
+  const c = normalizeModelName(current);
+  const w = normalizeModelName(wanted);
+  if (!c || !w) return false;
+  if (c === w) return true;
+  // 只允许「候选更长」：以目标开头 + 紧跟分隔符（不是字母数字，避免 GLM-5.3X 这类误判）
+  if (c.startsWith(w) && /^[\s\-–—·|/]/.test(c.slice(w.length))) return true;
+  return false;
 }
 
 /** 把契约里的选择器字段（字符串或数组）拍成有序数组。 */
@@ -189,11 +243,27 @@ const OPEN_AND_READ = async (cfg) => {
     const trigger = firstMatch(scope, cfg.trigger) || firstMatch(document, cfg.trigger);
     if (!trigger) return { ok: false, reason: 'trigger-not-found' };
     triggerText = text(trigger);
+    // 0.19.81：**触发器被禁用**要如实报「不可用」，不要报成「菜单里没有这一项」。
+    //
+    // 真机（z.ai，2026-10-15）：站点在「发过一条消息之后」把模型按钮
+    // `disabled=true`（60/60 采样、持续 ≥47s）。旧实现照点不误，菜单不开，
+    // 读到 0 选项 ⇒ 上层报 `MODEL_UNAVAILABLE …（no-options）`
+    // ⇒ **把「按钮此刻不可用」误导成「模型不在菜单里」**，排障方向全错。
+    // 这里区分两者：禁用时立刻返回 `trigger-disabled`（附按钮文本，便于归因），
+    // 让调用方与用户看到真因。
+    if (trigger.disabled === true || trigger.getAttribute('aria-disabled') === 'true') {
+      return { ok: false, reason: 'trigger-disabled', triggerText, disabled: true };
+    }
     trigger.click();
     // 轮询等待异步渲染的弹层（最多 ~3s）
     for (let i = 0; i < 20 && !options.length; i++) {
       await sleep(150);
       options = readOptions();
+    }
+    // 点完仍无选项、且此刻按钮已变禁用 ⇒ 同样是「不可用」而非「菜单缺项」。
+    // （点击与禁用可能同时发生：站点在生成中把按钮置灰。）
+    if (!options.length && (trigger.disabled === true || trigger.getAttribute('aria-disabled') === 'true')) {
+      return { ok: false, reason: 'trigger-disabled', triggerText, disabled: true };
     }
   }
   return { ok: true, triggerText, options };
@@ -302,6 +372,41 @@ export async function selectWebModel(page, model, contractPicker) {
   // （webName）——**不能用 name**：0.14.0 起 name 是 `z.ai/glm-5.3` 这种带站点
   // 短键的显示名，而网页上永远不会出现这个前缀，拿它比对必然 option-not-in-list。
   const wanted = (model.labels && model.labels[0]) || model.webName || model.name;
+
+  // ── 幂等快路（0.19.81，真机修出）───────────────────────────────────────────
+  //
+  // ## 缺陷（z.ai 真机，2026-10-15，60/60 采样）
+  //
+  // **站点在「发过一条消息之后」把模型按钮 `disabled=true`**（实测持续 ≥47s 全程禁用），
+  // 而 `selectModel` 是**每一轮都调**的（`browser-driver.js:3515`，不分 fresh/resume）。
+  // ⇒ 第二轮（回填工具结果）走到这里 → 点禁用按钮 → 菜单不开 → 读到 0 选项
+  // ⇒ 报 `MODEL_UNAVAILABLE: 未能切换到 GLM-5.3-Flash（no-options）`。
+  //
+  // ⚠ **那个报错是误导的**：真实原因不是「菜单里没有这一项」，而是「按钮此刻不可用」。
+  //   排障时会往「模型表过期 / 选项改名」方向查，全都查错方向。
+  //
+  // ## 为什么快路能修好它（且不是绕过判据）
+  //
+  // 真机读数：**禁用期间触发按钮的文本仍可读**（`GLM-5.3`），而 `picker.selected`
+  // 本来就是「页面上常驻显示当前模型名」的节点（z.ai 的触发按钮就在其中）。
+  // ⇒ 若**当前已经是目标模型**，就**根本不需要动 UI**——不点、不开菜单、不看 disabled。
+  //   这与 `think-effort.js` 的「幂等快路」是同一形状（那里注释写着：网页现在就已经是
+  //   目标档 ⇒ 一眼判定成功，任何控件都不动），也与本仓库「同站重复下发要幂等」的既有纪律一致。
+  //
+  // **判据仍然是回读**（不是「我们曾经选过」）：只在**读到的当前模型名确认等于目标**时才走快路；
+  // 读不到（`null`）就照常走原有路径 ⇒ 对读不到读数的站点**零位移**。
+  //
+  // ⚠ 判据用 `currentModelIsTarget`（**只允许候选 ≥ 目标**这一个方向），
+  //   刻意**不**复用 `pickExactOption` —— 后者的「候选是目标前缀」那条会在
+  //   「页面 GLM-5.3 / 目标 GLM-5.3-Flash」时误判为「已是目标」而**跳过本该发生的切换**
+  //   （红线 1：绝不静默降级模型）。理由写在 `currentModelIsTarget` 的注释里，并有反向护栏。
+  const selForCurrentEarly = selList(picker.selected);
+  if (selForCurrentEarly.length && !picker.readbackInMenu && !picker.selectedStateClass) {
+    const current = await page.evaluate(READ_CURRENT, selForCurrentEarly).catch(() => null);
+    if (currentModelIsTarget(current, wanted)) {
+      return { ok: true, reason: 'already-current', requested: wanted, applied: current, confirmed: true, ui: 'noop' };
+    }
+  }
 
   const opened = await page.evaluate(OPEN_AND_READ, cfg).catch((e) => ({ ok: false, reason: 'evaluate-failed: ' + (e?.message || e) }));
   if (!opened.ok) {

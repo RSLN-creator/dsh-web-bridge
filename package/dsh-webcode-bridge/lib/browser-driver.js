@@ -41,6 +41,15 @@ import { acquireBridgeLock, releaseBridgeLock, describeBridgeLockHolder } from '
 // 不 import pickAttachEvidence 本身——那是给单测直接驱动用的，在这里 import 会成死导入
 // （本仓库对死导入有过明确处置：0.19.0 删过 transportNoteFor）。
 import { ATTACH_PICK_SRC } from './attach-scope.js';
+// 人机验证「页面自己说了什么」的**词表唯一真源**（纯函数 + 供页面侧重建的模式源码）。
+// 为什么不再内联在 page.evaluate 里：内联的词表不可离线验证，且导航期/发送后/超时点
+// 三处各写一份必然漂移——#63（doubao 图片选择式验证）正是「导航期认不出 + 发送后不采样」
+// 两个缺口叠出来的。词表是**站点无关的自然语言事实**；「哪个选择器属于哪个站点」仍是
+// 站点知识，继续收口在 providers.js。
+import { CHALLENGE_PATTERN_SOURCES, looksLikeChallengeText } from './challenge-heuristics.js';
+// 「逐 frame 扫验证」的**编排层**（纯函数）：遍历、命中即停、probe 汇总、frameError 如实记。
+// 抽出来是为了**可离线驱动**——源码级护栏只能证明「字符串在场」（见 #75 的教训）。
+import { scanFramesForChallenge } from './captcha-gate-scan.js';
 import child_process from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -374,6 +383,72 @@ export function composerWritePlan({ length = 0, chunkChars = 20_000, kind = 'fie
   const chunks = total === 0 ? 0 : Math.ceil(total / size);
   return { mode: total <= size ? 'single' : 'chunked', chunkChars: size, kind, chunks, total };
 }
+
+/**
+ * 页面侧：把 **contenteditable 编辑器**的内容读成「与写入文本可比」的字符串。
+ *
+ * ## 为什么不直接用浏览器内建读数（真机实证，2026-10-14）
+ *
+ * 同一个输入框、同一段写入文本，三个读数各不相同（doubao/tiptap，只写不发送）：
+ *
+ * | 写入 | `innerText` | `textContent` | 本函数 |
+ * | --- | --- | --- | --- |
+ * | `a\nb`（3） | `a\n\nb`（4） | `ab`（2） | `a\nb`（3）✓ |
+ * | `甲\n\n乙`（4） | `甲\n\n\n\n\n乙`（7） | `甲乙`（2） | `甲\n\n乙`（4）✓ |
+ *
+ * 根因：tiptap/ProseMirror 把**每个换行渲染成一个块级 `<p>`**，空行渲染成
+ * `<p class="is-empty"><br></p>`：
+ *   · `innerText` 在**块与块之间**补 `\n\n`（块间距 + 段间距）⇒ 换行数翻倍；
+ *   · `textContent` 不补任何块间分隔 ⇒ 换行被吞掉。
+ * ⇒ 两者都**不可**作为「网页收到了什么」的判据；用它俩都会得出
+ *   `content-mismatch` ⇒ 每轮含换行的提示词被 `PROMPT_TRUNCATED` 拦住。
+ *
+ * ## 判据（v4，真机 7/7 逐字精确；doubao 与 kimi 两个编辑器都验过）
+ *
+ *   ① 有块级子节点时：**按顶层子节点切分**，每段取其「行内文本」，再用**单个 `\n`** 连接；
+ *      裸文本节点也算一段（编辑器可能把文本直接挂在根上）。
+ *   ② 行内文本递归拼接；行内 `<br>` 记一个 `\n`（那是用户按的硬换行）。
+ *   ③ **只含换行的段视为空串**：空块里的 `<br>` 是 ProseMirror 的**占位断行**，
+ *      不是用户写的换行（把 `甲\n\n乙` 的中间空块当 `'\n'` 会多出一个换行）。
+ *   ④ 去掉**首尾**空段（编辑器常在首尾留一个空 `<p>`），**中间空段保留**（那是真空行）。
+ *
+ * ⚠ 本函数是**纯函数**、且会被 `page.evaluate` 序列化后单独执行：
+ *   **不得引用模块作用域**（0.19.48 真机 `ReferenceError` 的教训）。
+ *
+ * ⚠ 它**只**服务「回读校验」这一个用途（与写入内容比等价性）。**不要**拿它当
+ *   「网页上显示了什么」的通用读数——那该用 `innerText`（块间距对人眼是对的）。
+ *
+ * @param {Element} el 编辑器根节点
+ * @returns {string} 与写入文本可直接比较的字符串
+ */
+export const EDITOR_BLOCK_TEXT = (el) => {
+  const BLOCK = new Set(['P', 'DIV', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'BLOCKQUOTE', 'PRE', 'TR', 'SECTION', 'ARTICLE']);
+  /** 行内文本：递归拼接；行内 `<br>` 记一个 `\n`。 */
+  const inlineText = (n) => {
+    let s = '';
+    for (const c of n.childNodes) {
+      if (c.nodeType === 3) { s += c.nodeValue; continue; }
+      if (c.nodeType !== 1) continue;
+      if (c.tagName === 'BR') { s += '\n'; continue; }
+      s += inlineText(c);
+    }
+    return s;
+  };
+  const tops = [...el.childNodes].filter((c) => c.nodeType === 1 && BLOCK.has(c.tagName));
+  // 没有块级子节点：整段按行内读（普通 contenteditable / 已扁平化的编辑器）
+  if (!tops.length) return inlineText(el);
+  const lines = [...el.childNodes].map((c) => {
+    if (c.nodeType === 3) return c.nodeValue;
+    if (c.nodeType !== 1) return '';
+    const seg = inlineText(c);
+    // ③ 只含换行 ⇒ 空串（占位 <br> 不贡献内容）
+    return /^\n*$/.test(seg) ? '' : seg;
+  });
+  // ④ 去首尾空段、留中间空段
+  while (lines.length && lines[0] === '') lines.shift();
+  while (lines.length && lines[lines.length - 1] === '') lines.pop();
+  return lines.join('\n');
+};
 
 /**
  * 回读校验（**纯函数**，便于离线断言）：这一次写入的正文是否**内容等价**。
@@ -1101,18 +1176,18 @@ export function createBrowserDriver(options = {}) {
    */
   async function detectChallenge(p) {
     try {
-      return await p.evaluate(() => {
+      return await p.evaluate((PAT) => {
         const t = String(document.title || '');
         const body = String(document.body?.innerText || '');
         const html = String(document.documentElement?.innerHTML || '');
-        // 1. 标题命中滑块/验证/风控
-        if (/滑动验证|访问验证|安全验证|验证页面|人机验证|人机身份验证|系统安全验证/.test(t)) return 'waf-title';
-        // 2. 可见文案命中滑块、手势、点击、高频限制
-        if (/访问验证|请按住滑块|拖动到最右边|向右拖动滑块|拖动滑块完成验证|请完成下方验证|请点击下方图形|请依次点击|操作过于频繁|系统繁忙，请稍后再试|访问受限|请求过于频繁|验证码错误/.test(body)) return 'waf-body';
-        // 3. WAF、极验、腾讯防水墙、阿里滑块脚本/容器指纹
-        if (/CF_APP_WAF|aliyun_waf|_waf_[0-9a-f]+|baxia-punish|baxia-dialog|geetest|TencentCaptcha|sec_def_pc|sec_def_h5|cf-turnstile/.test(html)) return 'waf-script';
+        // 词表判据的唯一真源：lib/challenge-heuristics.js（以 source 传参在页面侧重建）。
+        // ⚠ 这三条正则**不得带 g/y 标志**（会因 lastIndex 递进交替返回真假）——
+        // CHALLENGE_PATTERN_SOURCES 已保证，别在这里手写 `…/g`。
+        if (new RegExp(PAT.title).test(t)) return 'waf-title';
+        if (new RegExp(PAT.body).test(body)) return 'waf-body';
+        if (new RegExp(PAT.html).test(html)) return 'waf-script';
         return null;
-      });
+      }, CHALLENGE_PATTERN_SOURCES);
     } catch { return null; }
   }
 
@@ -1164,7 +1239,51 @@ export function createBrowserDriver(options = {}) {
     if (probe?.bad) {
       try {
         const bad = p.locator(probe.bad).first();
-        if (await bad.count() && await bad.isVisible().catch(() => false)) { lastLoginBasis = 'probe-bad'; return false; }
+        if (await bad.count() && await bad.isVisible().catch(() => false)) {
+          // ## 0.19.78（真机修出）：`bad` 命中**不一定是终局** —— SPA 会先渲染「游客壳」
+          //
+          // 真机实证（qwen，2026-10-14，同一副本页多次采样）：
+          //   +1.4s（domcontentloaded）：「登录 / 注册」**可见**、账号名**无**、`img.user-img` 0
+          //   +2.2s                      ：仍同上
+          //   +3.8s                      ：按钮**归零**、账号名 `QwenUser2147` 出现、`img.user-img` 1
+          // ⇒ qwen 先渲染游客壳、再水合成已登录态；而 `gotoFreshChat` 等的是 `SEL.input`，
+          //   qwen 的**游客壳自带 composer** ⇒ 1.4s 就返回 ⇒ 本函数撞上瞬时游客壳
+          //   ⇒ 旧实现**立即** `return false` ⇒ 缓存 `loggedIn=false` ⇒ 整轮被拒
+          //   （`site-verify --site qwen` 得到 `BLOCKED profile 未登录`，而页面其实已登录）。
+          //
+          // 与下面 :118x 那条「水合重探」的**关系**：那一条处理的是「bad 还没出现」
+          // （kimi 真机：domcontentloaded 一瞬头部未水合），本处补的是**对称的另一半**
+          // ——「bad 出现了但可能是瞬时的」。两条合起来才是完整的「水合窗口」处置。
+          //
+          // 代价与边界（刻意收窄，别放宽）：**只在「有可见 composer」时才做这次有界重探**
+          // （qwen / gemini / doubao / zai 这一族游客页自带输入框；deepseek 未声明 bad、
+          // 完全不进这里）。无 composer 时旧行为逐字不变，因此不会给「真的未登录」的
+          // 站点普遍加延迟；有 composer 的站点最坏多等 2.5s，换来的是**不把已登录判成未登录**。
+          if (await visibleComposerCount(p) > 0) {
+            // ## 窗口取 6_000ms 的依据（不是拍脑袋）
+            //
+            // 真机时间线（qwen，2026-10-14，两轮独立采样）：
+            //   · 上一轮（探针内 `goto` 后主动等 composer）：+1.4s / +2.2s 仍是游客壳，
+            //     **+3.8s 已水合**（按钮归零、账号名出现、userImg=1）
+            //   · 本轮（复刻 `gotoFreshChat` 的 `waitForSelector(SEL.input)`）：
+            //     `inputWaitMs=252`（**游客壳自带 composer，等 0.25s 就返回了**）
+            //     +1.2s / +3.8s 仍是游客壳；**+7.8s 才归零**
+            //   ⇒ 水合完成时刻落在 **3.8s ~ 7.8s** 之间（两轮都证明它**晚于**任何
+            //     「等 composer」的判据）。取 **6_000ms** 覆盖观测下界并留余量；
+            //     若 `bad` 在窗口内消失 ⇒ 判为瞬时游客壳、继续走 ok 判定。
+            //
+            // ⚠ 这是**有界等待**：窗口耗尽仍未消失 ⇒ 维持旧的 `probe-bad`（真的未登录）。
+            //   「真的未登录」的站点因此最多多等 6s，换来的是**不把已登录判成未登录**
+            //   —— 这个交换对本项目的主用途（网页 AI 当 provider）是划算的：
+            //   误报未登录会让整轮被 `NEED_LOGIN` 拒绝（用户上次就是这么被挡的），
+            //   而多等 6s 只是慢一点。
+            const gone = await bad.waitFor({ state: 'hidden', timeout: 6_000 }).then(() => true, () => false);
+            // `bad` 在窗口内消失 ⇒ 那是瞬时游客壳，**不**据此判未登录，继续往下走 ok 判定。
+            if (!gone) { lastLoginBasis = 'probe-bad'; return false; }
+          } else {
+            lastLoginBasis = 'probe-bad'; return false;
+          }
+        }
       } catch { /* bad 特征坏了不阻塞判定 */ }
     }
     if (probe?.ok) {
@@ -2588,12 +2707,30 @@ export function createBrowserDriver(options = {}) {
   }
 
   /** 回读 composer 里的文本，用于「网页端有没有截断」校验。
-   *  表单控件读 value；contenteditable 读 innerText（textarea 的 inputValue()
-   *  对富文本编辑器必抛错，旧实现因此把 doubao/kimi 判成截断）。 */
+   *  表单控件读 value；contenteditable 读**块感知文本**（见 EDITOR_BLOCK_TEXT）。
+   *
+   *  ## 0.19.78：contenteditable 从 `innerText` 改成块感知读取（doubao 真机修出）
+   *
+   *  真机实证（doubao/tiptap，2026-10-14，只写不发送）：
+   *
+   *  | 写入（17 字） | `innerText` | `textContent` | 块感知 |
+   *  | --- | --- | --- | --- |
+   *  | `[本地工具传输协议]\n请回复：收到` | **18**（`\n`→`\n\n`） | **16**（换行被吞） | **17 ✓** |
+   *
+   *  tiptap 把**每个换行**渲染成一个 `<p>`，于是 `innerText` 在两个块之间补出两个换行
+   *  （`a\nb` ⇒ `<p>a</p><p>b</p>` ⇒ innerText `a\n\nb`），而 `textContent` 完全不补。
+   *  ⇒ **两个浏览器内建读数都不等于写入内容**，`composerEchoVerdict` 必然报
+   *  `content-mismatch` ⇒ **每一轮含换行的提示词都被 `PROMPT_TRUNCATED` 拦住**
+   *  （DSH 的真实轮次必然含换行 ⇒ 这是 doubao 全线不可用的量级；
+   *   kimi 真机同样是 18/16 两种错读，同一根因）。
+   *
+   *  **修读取，而不是放宽判据**：`composerEchoVerdict` 的白名单一个字都没动
+   *  —— 真正的截断在块感知读取下**依然**不等，照旧被拦住。
+   */
   async function readComposer(locator) {
     const kind = await composerKind(locator);
     if (kind === 'field') return await locator.inputValue().catch(() => null);
-    return await locator.evaluate((el) => el.innerText || el.textContent || '').catch(() => null);
+    return await locator.evaluate(EDITOR_BLOCK_TEXT).catch(() => null);
   }
 
   /** 上传后的**可见证据**选择器：附件真进了网页才会出现这些节点。
@@ -3513,6 +3650,131 @@ export function createBrowserDriver(options = {}) {
         // 现场同时落进 status：只 warn 到控制台的话，用户与事后排查都取不到，
         // 而这正是「页面早有全文、捕获从未建立」这类事故的唯一直接证据。
         lastTimeoutScene = scene ? { ...scene, at: Date.now() } : { at: Date.now(), page: 'unavailable' };
+        // ── 0.19.83：把「等一下」的假故障归因到**真原因**（long-term-issues #63）──────
+        //
+        // 真机（doubao，2026-10-14）：消息**发送成功**后网页弹出**图片选择式**人机验证
+        // （「请选择所有符合上文描述的图片，并拖拽到下方」+ 提交按钮），验证通过前
+        // 网页**不生成回复** ⇒ 桥等 110s 报 `turn timeout scene {captureAlive:true,
+        // replyChars:0, selectorHit:false}`。**报错方向是误导的**：用户会以为是桥/网页
+        // 卡住，而实际是「需要你去过验证」。
+        //
+        // 为什么修在这里（超时点）而不是发送后那一次采样：这种验证**不在发送那一刻**
+        // 出现，它在发送**之后**才弹出（z.ai 那类「发送前 await HN()」是另一形态，
+        // 发送后 2.5s 的采样对它有效）。只在发送后查一次，对这种**延迟弹出**的验证
+        // 是瞎的——本缺陷就是这么漏掉的。超时点离弹出最近，是能稳定抓住它的位置。
+        //
+        // 判据（两条独立证据，任一命中即归因）：
+        //   ① 站点声明位 `captchaSelector` 命中**可见**节点（复用发送后那一段的
+        //      「真实像素」判据：宽高都 > 0 且非 display:none / visibility:hidden）；
+        //   ② **可见文案指纹**命中（不依赖站点声明）——图片选择式验证的措辞是通用的，
+        //      而 doubao 没有声明 `captchaSelector`，只靠 ① 会继续漏。
+        // ⚠ 文案指纹只用来**归因**（把超时说成「大概是验证」），**不**代替站点声明：
+        //   站点知识仍收口在 providers.js；这里只是「页面自己说了什么」。
+        let challengeAtTimeout = null;
+        try {
+          // ⚠ 必须**逐 frame** 查，不能只查主框架（0.19.83 真机教训）。
+          //   `page.evaluate` 只跑在**主框架**，而风控/人机验证在业界普遍渲染在
+          //   独立 iframe 里（隔离自己的 CSS/JS）⇒ 主框架 `document.body.innerText`
+          //   **一个字都看不到**，词表再全也抓不到。
+          //   0.19.83 真机复验正是这样：修完重跑 doubao 仍是 `web turn timed out`
+          //   （**不是**验证归因）⇒ 只查主框架的实现在那种形态下必然漏。
+          //   这里对 `page.frames()` 逐个查；跨域 frame 的 `evaluate` 抛错就跳过
+          //   （跳过是**如实**的：抓不到就不假装命中，`probe` 会记下来）。
+          // ⚠⚠ **0.19.87 修掉一处致命形状**（long-term-issues #75）。
+          //   本段原先给 `evaluate` 传了**四个顶层实参**（一个回调 + 三个值），
+          //   而 Playwright 的契约只允许「回调 + **一个** arg」——
+          //   多传时它**同步抛出** `Too many arguments`（原文：多值必须包进一个对象）。
+          //   （离线实证：仓库自带 chromium，见 `.tmp/audit-adaptation/verify-evaluate-argc.mjs`。）
+          //
+          //   ⚠ 危害不在「参数写错」，而在**它抛得早、又紧接着 `.catch`**：
+          //   表达式抛 ⇒ 异常被吞成 `null` ⇒ 调用方看到的是「没命中」，
+          //   与「页面本来没有验证码」**完全一样**，而真相是**那段判据从未执行**。
+          //   ⇒ 这正解释了 0.19.83 的真机复验：报错仍是 `web turn timed out`、
+          //     连 `probe` 诊断行都没打出来——那是「代码没跑」的指纹。
+          //   ⇒ 教训同「工具自己制造假结论」：**改了代码 + 加了护栏 ≠ 那段代码真的在跑**；
+          //     当时的源码级护栏只覆盖「源码里有某个字符串」，覆盖不到「运行时会抛」。
+          //   ⇒ 修法：把全部参数收进**一个对象**（契约内唯一的多值形态）。
+          // 单 frame 探测：**写成函数声明**而不是箭头函数。
+          //
+          // ⚠ 这不是风格偏好，是 `test/driver-scope.test.mjs` 的一条真实边界（#72）：
+          //   它的绑定表**不收集箭头函数的形参**，只收 `runTurn` 自身形参与
+          //   **`function X(` 声明的形参**。写成 `const checkFrame = async (f) => f.evaluate(…)`
+          //   时，`f` 不在绑定表里 ⇒ 判据说「`f` 是跨作用域自由标识符」并变红。
+          //   ⇒ 与 0.19.83 面对 `PAT.body` 时的处置**同一条纪律**：**改代码形状，不放宽扫描器**
+          //   （它当前能抓 `nav` / `sleep` 两个真实家族，放宽的代价大于收益）。
+          //   函数声明让它真的看得见这个绑定，而且读起来也更清楚「这是探测器」。
+          async function probeFrame(frame) {
+            // ⚠ **单对象实参**（#75）：Playwright 的 `evaluate` 只接受一个 arg，
+            //   传多了会**同步抛** `Too many arguments…`；而这类调用几乎总带 `.catch`
+            //   ⇒ 异常被吞成「没命中」，那段判据**从来没跑过**。见本节上方的 #75 说明。
+            return frame.evaluate((o) => {
+              const txt = String(document.body?.innerText || '');
+              const patBody = o.patBody;
+              const patTitle = o.patTitle;
+              const sel = o.sel;
+              // 词表判据的唯一真源：lib/challenge-heuristics.js（以 source 传参重建）。
+              // 图片选择式 / 点选式 / 滑块式的措辞都在这两份模式里；真机 doubao 原文逐字见上。
+              // ⚠ **没命中时要把「为什么没命中」也带出来**（0.19.83 真机教训）：有了下面
+              //   这份 `probe`，下一次能立刻分清「页面本来就没有验证码」与「有验证码但抓不到」
+              //   ——两者下一步完全不同，而只记一句「没命中」会把它们印成同一件事。
+              //   刻意**不落整页正文**（只落关键词命中与长度）：这类页面可能含账号信息。
+              const probe = {
+                bodyLen: txt.length,
+                // 与词表同族但**更宽**的关键词，用来判断「形态漏了」还是「本来没有」
+                kws: ['验证', '请选择', '拖拽', '图片', '滑块', '拖动', '人机', '安全', '提交']
+                  .filter((k) => txt.includes(k)),
+                titleLen: String(document.title || '').length,
+              };
+              if (new RegExp(patBody).test(txt)) return { basis: 'body-text', head: txt.slice(0, 160), probe };
+              if (new RegExp(patTitle).test(String(document.title || ''))) {
+                return { basis: 'title', head: String(document.title || '').slice(0, 120), probe };
+              }
+              if (!sel) return { basis: null, probe };
+              const vis = [...document.querySelectorAll(sel)].filter((el) => {
+                const r = el.getBoundingClientRect();
+                if (r.width <= 0 || r.height <= 0) return false;
+                const cs = window.getComputedStyle(el);
+                return cs.display !== 'none' && cs.visibility !== 'hidden';
+              });
+              if (vis.length) return { basis: 'site-selector', head: String(vis[0].className || '').slice(0, 120), probe };
+              // 走到这里 = **没命中**：把 probe 带出来（否则「没有验证码」与「抓不到」不可分）
+              return { basis: null, probe };
+            }, {
+              sel: site.captchaSelector ? String(site.captchaSelector) : null,
+              patBody: CHALLENGE_PATTERN_SOURCES.body,
+              patTitle: CHALLENGE_PATTERN_SOURCES.title,
+            }).catch((e) => ({ basis: null, frameError: String(e?.message || e).slice(0, 80) }));
+          }
+          // 编排逻辑抽到 `lib/captcha-gate-scan.js`（纯函数，可离线驱动）。
+          // 为什么必须抽：0.19.83 这段写在超时回调里、依赖真实 `page` ⇒ 只能写**源码级**护栏，
+          // 而源码级护栏只证明「字符串在场」、不证明「跑得起来」——#75 因此全程没被发现
+          // （`evaluate` 传 4 个实参 ⇒ Playwright 同步抛 ⇒ 被 `.catch` 吞 ⇒ 判据从未运行）。
+          // 抽出来后用**假 frame** 直接驱动，命中即停 / probe 汇总 / frameError 都变成可断言的行为。
+          challengeAtTimeout = await scanFramesForChallenge(page.frames?.() || [], probeFrame);
+        } catch { challengeAtTimeout = null; }
+        // 没命中时的**诊断**：只落关键词命中与长度，不落整页正文（页面可能含账号信息）。
+        // 它的价值在 0.19.83 真机上就体现过：修完重跑 doubao 读数仍是 timeout，
+        // 这一格让人能一眼分清「页面本来没有验证码」与「有验证码但我不认」。
+        if (challengeAtTimeout && !challengeAtTimeout.basis) {
+          warn('captcha probe at timeout (no hit): ' + JSON.stringify(challengeAtTimeout.probe || null));
+        }
+        if (challengeAtTimeout && challengeAtTimeout.basis) {
+          await page.bringToFront?.().catch(() => {});
+          const err = new Error('WEB_CAPTCHA_REQUIRED: 网页弹出人机验证（判据='
+            + challengeAtTimeout.basis + '，现场 ' + JSON.stringify(challengeAtTimeout.head) + '，'
+            + 'frame ' + JSON.stringify(challengeAtTimeout.frameUrl || 'main') + '），'
+            + '消息**未被网页受理**（站点在验证通过前不会生成回复）。'
+            + '处理：在弹出的浏览器窗口里手动完成验证后重试本轮。'
+            + '（这不是解码器问题，也不是「网页没回传」——本轮零回复是验证闸门造成的）');
+          withWebcodeCode(err, 'WEB_CAPTCHA_REQUIRED');
+          err.captcha = challengeAtTimeout;
+          err.timeoutScene = lastTimeoutScene;
+          warn('captcha gate hit at timeout: ' + JSON.stringify(challengeAtTimeout) + ' site=' + siteId);
+          lastEndReason = 'captcha';
+          lastEndReasonAt = Date.now();
+          if (a) a.reject(err); else warn(err.message);
+          return;
+        }
         lastEndReason = 'timeout';
         lastEndReasonAt = Date.now();
         // 0.16.28 自愈降级的第二个签名：附件轮整轮超时、页面无回复文本——真机复验
@@ -4290,11 +4552,25 @@ export function createBrowserDriver(options = {}) {
     if (!result.ok) {
       selectedModel = null;
       const detail = result.options?.length ? ' — 弹层可选：' + result.options.join('、') : '';
-      const err = new Error(`MODEL_UNAVAILABLE: 未能切换到 ${result.requested}（${result.reason}）${detail}`);
+      // 0.19.81：`trigger-disabled` 的报错要与 `no-options` **分开**（真机 z.ai）。
+      // 站点在「发过一条消息之后」把模型按钮置灰（60/60 采样、持续 ≥47s），
+      // 旧实现照点不误 → 菜单不开 → 报 `no-options`，把「按钮此刻不可用」
+      // **误导**成「模型不在菜单里」。这里换成一句指向真因的话。
+      const reasonText = result.reason === 'trigger-disabled'
+        ? '当前页面的模型按钮不可用（站点在生成中/生成后把它禁用了，按钮文本：'
+          + JSON.stringify(result.triggerText ?? null) + '）— 这不是「模型不在菜单里」'
+        : result.reason;
+      const err = new Error(`MODEL_UNAVAILABLE: 未能切换到 ${result.requested}（${reasonText}）${detail}`);
       withWebcodeCode(err, 'MODEL_UNAVAILABLE');
+      err.reason = result.reason;
       throw err;
     }
     selectedModel = model.id;
+    if (result.ui === 'noop') {
+      // 幂等快路命中：页面**已经是**目标模型 ⇒ 一个 UI 动作都没做。
+      // 与 think-effort 的 `already:` 同形（`reason` 里带 `already-current`）。
+      return { strict: true, ui: 'noop', applied: result.applied, note: '页面已是目标模型，未做任何 UI 动作' };
+    }
     if (!result.confirmed && result.applied) {
       // 点了、也回读到了，但读出来的不是目标名 —— 这是一次**可能没生效**的
       // 切换，必须让上层知道（旧实现会把这种情况记成成功）。

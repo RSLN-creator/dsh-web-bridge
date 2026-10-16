@@ -1095,8 +1095,21 @@ test('风控/验证页必须在判定登录态之前识别，并如实报成 cha
   const src = bridgeSrc('browser-driver.js');
   assert.match(src, /async function detectChallenge\(/, '应有风控页识别');
   const body = regionFrom(src, 'async function detectChallenge(', ['\nasync function ', '\nfunction ']);
-  assert.ok(/滑动验证|访问验证/.test(body), '必须认站点验证页的文案');
-  assert.ok(/CF_APP_WAF|aliyun_waf/.test(body), '必须认 WAF 脚本指纹');
+  // ⚠ 0.19.83：词表**不再内联在 detectChallenge 里**——它是
+  // `lib/challenge-heuristics.js` 的唯一真源（驱动以 source 传参在页面侧重建）。
+  // 所以这里断言的是**接线**（真的注入那三份模式），而不是「函数体里有没有某个字面量」。
+  // 判据的真源侧断言在 `test/challenge-heuristics.test.mjs`（真机原文命中 / 不误报 /
+  // 合并前清单逐条仍在 / 正则不得带 g）——两处分工：这里管接线，那里管词表。
+  assert.match(body, /CHALLENGE_PATTERN_SOURCES/, 'detectChallenge 必须注入 challenge-heuristics 的三份模式');
+  // ⚠ 三条都要，不是「任一条」：首版写成 `/title)|(body)|(html)/` 的**任一**匹配 ⇒
+  //   反向变异（把 title 一行改回内联字面量）**仍然 PASS**（因为 body/html 还留着）。
+  //   三条各自对应一类证据（标题 / 正文 / 脚本指纹），少一条就等于那一类退回瞎判。
+  assert.match(body, /new RegExp\(PAT\.title\)/, '必须用注入的**标题**模式（滑块页 title）');
+  assert.match(body, /new RegExp\(PAT\.body\)/, '必须用注入的**正文**模式（验证页文案）');
+  assert.match(body, /new RegExp\(PAT\.html\)/, '必须用注入的**脚本指纹**模式（WAF/极验等）');
+  const HEUR = bridgeSrc('../lib/challenge-heuristics.js');
+  assert.ok(/滑动验证|访问验证/.test(HEUR), '词表真源必须认站点验证页的文案');
+  assert.ok(/CF_APP_WAF|aliyun_waf/.test(HEUR), '词表真源必须认 WAF 脚本指纹');
 
   // 调用点：resume 分支里 detectChallenge 必须早于 judgeLoggedIn。
   // 定位用**结构边界**（从记录 challenge 的锚点到该分支的下一个闭合），

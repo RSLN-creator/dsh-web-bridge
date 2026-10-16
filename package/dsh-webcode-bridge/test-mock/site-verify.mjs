@@ -65,8 +65,12 @@
 //     它**不**等于 DSH 适配器层的完整工具闭环（那要 `real-verify.mjs` 那条链路）。
 import { createBrowserDriver } from '../lib/browser-driver.js';
 import { getSite, SITES } from '../lib/providers.js';
+// 槽目录必须与产品**同源**取（见下方 profileDir 的注释：手写一份 `<root>/<siteId>`
+// 会与产品真实的 `sites/<siteId>` 布局分叉，登录态读不到）。
+import { slotProfileDir, DEFAULT_SLOT } from '../lib/accounts.js';
 import { serializeFirstTurn, parseAgentReply } from '../lib/agent-preset.js';
 import { verdictOf, streamDeliveryVerdict } from './site-verify-verdict.mjs';
+import { planSendGap, sleepMs, MIN_SEND_GAP_MS } from './site-verify-pacing.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -81,6 +85,22 @@ function flagValues(name) {
     if (argv[i] === name && i + 1 < argv.length) out.push(argv[i + 1]);
   }
   return out;
+}
+
+/**
+ * 读产品的 settings（`<profile 根>/webcode-settings.json`），失败就返回 null。
+ *
+ * 为什么要读它而不是写死 30s：发送间隔是**用户设置**（回落链
+ * 「槽 → 站点 → 全局」，见 `lib/accounts.js` 的 `sendGapForSlot`）。验收脚本
+ * 必须按用户当前设置来发，否则读数与产品行为不可比；同时它另有 ≥20s 地板
+ * （见 `site-verify-pacing.mjs`）。读不到文件时退回 null ⇒ 走地板值，**不会**零等待。
+ */
+function readSettingsQuiet(profileRoot) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(profileRoot, 'webcode-settings.json'), 'utf8'));
+  } catch {
+    return null;
+  }
 }
 
 if (argv.includes('--list')) {
@@ -170,7 +190,48 @@ async function verifySite(siteId) {
   }
 
   // 每个站点一份独立 profile 子目录（登录态按站点各自持久，与产品行为一致）。
-  const profileDir = path.join(PROFILE, siteId === 'deepseek' ? '.' : siteId);
+  //
+  // ⚠ **0.19.82 修缺陷**：旧实现在这里手写了 `path.join(PROFILE, siteId)`，而产品
+  //   （`index.js` 的三处调用点）用的是 `slotProfileDir(...)`，非 primary 站点的默认槽
+  //   落在 **`<root>/sites/<siteId>`**（多一层 `sites/`）。两者的差集恰好是**全部非
+  //   deepseek 站点** ⇒ 验收工具一直在读一个不存在的空目录，只会得到一堆假的
+  //   `BLOCKED 未登录`（deepseek 因为 primary=true 恰好相同，所以这个错误只会在
+  //   其余站点上显形，容易漏过）。
+  //   ⇒ 现在**复用产品那一个真源**（`lib/accounts.js` 的 slotProfileDir），不再手写第二份。
+  const profileDir = slotProfileDir(PROFILE, siteId, DEFAULT_SLOT, { primary: site.mountAtRelayRoot === true });
+
+  // ---- 发送间隔闸门（0.19.82 修出的第二个「验收工具自己违规」）------------------
+  //
+  // 修前：三轮发送**背靠背连发**（本文件连一处 `setTimeout`/`sleep` 都没有），
+  // 而 `.tmp/real-lane/PHASE2-RUNBOOK.md` §3 却写着「本脚本内部三轮间隔由
+  // `sendGapMs` 控制」——**文档比实现多了一条不存在的护栏**。真实后果是验收脚本
+  // 用比产品严苛得多的节奏打站点 ⇒ 自造风控 ⇒ 四态记成 `BLOCKED`，
+  // **外部原因掩盖工具自己的违规**。
+  //
+  // 现在：每一轮真实发送前都过一次 `planSendGap`（设置值与 ≥20s 地板取较大者），
+  // 读取上一次发出/结束时刻由**本进程内存**记录（`sendState`），与
+  // `lib/metrics.js` 的 `computeSendGap` 同一口径，不另写一份判定。
+  const settings = readSettingsQuiet(PROFILE);
+  const gapState = { send: null, end: null };
+  /** 距离上一轮结束/发出的实际毫秒（本次运行内自行记账）。 */
+  const mark = (kind) => { gapState[kind] = Date.now(); };
+  const waitForSendGap = async (label) => {
+    const plan = planSendGap({
+      settings, accountKey: siteId, siteId,
+      now: Date.now(), lastSendAt: gapState.send, lastEndAt: gapState.end,
+    });
+    add('send.gap', 'PASS',
+      `第 ${label} 次发送前间隔闸门：等待 ${Math.round(plan.waitMs / 1000)}s`
+      + `（设置 ${Math.round(plan.configuredMs / 1000)}s / 地板 ${Math.round(plan.floorMs / 1000)}s，`
+      + `基准 ${plan.basis}）`
+      + (plan.sincePrevMs == null ? '（本次运行首轮，无基准）' : `，距上次 ${Math.round(plan.sincePrevMs / 1000)}s`));
+    if (plan.waitMs > 0) {
+      console.log(`    [gap] 等待 ${Math.round(plan.waitMs / 1000)}s（防自造风控：不是赶进度能压缩的）`);
+      await sleepMs(plan.waitMs);
+    }
+    mark('send');
+    return plan;
+  };
 
   const driver = createBrowserDriver({
     siteId,
@@ -221,6 +282,7 @@ async function verifySite(siteId) {
     let text = '';
     let sent = null;
     try {
+      await waitForSendGap('1/3');
       sent = await driver.sendTurn(
         'site-verify-text',
         serializeFirstTurn({ messages: [{ role: 'user', content: '请只回一行：收到。' }], tools: [], model: { id: modelId } }),
@@ -245,6 +307,7 @@ async function verifySite(siteId) {
     add('login.verdictConsistent', 'PASS', '登录判定与真实发送路径一致');
     // 「发出去了」= 驱动返回了结果对象（回读成功）；正文是否非空单独判。
     add('send.text', 'PASS', '已投递并回读（驱动返回了结果对象）');
+    mark('end');   // 本轮收束：end-to-start 基准的锚点
 
     // ---- ②b 交付形状：**全文**与**流式增量**必须分开判（复审指出的第三个缺陷）----
     //
@@ -268,6 +331,7 @@ async function verifySite(siteId) {
     let loopText = '';
     let loopResult = null;
     try {
+      await waitForSendGap('2/3');
       loopResult = await driver.sendTurn(
         'site-verify-loop',
         serializeFirstTurn({
@@ -283,6 +347,7 @@ async function verifySite(siteId) {
       return finalize();
     }
     const authoritative = String(loopResult?.text || loopText || '');
+    mark('end');   // 第二轮收束：下一次调用的 end-to-start 锚点
     const parsed = parseAgentReply(authoritative, { tools: toolSchema });
     const calls = parsed?.calls || [];
     add('tool.callParsed', calls.length > 0 ? 'PASS' : 'UNVERIFIED',
@@ -312,6 +377,7 @@ async function verifySite(siteId) {
       let secondText = '';
       let secondResult = null;
       try {
+        await waitForSendGap('3/3（回填工具结果）');
         secondResult = await driver.sendTurn(
           'site-verify-loop',
           resultMsg + '\n请基于以上真实工具结果给一行结论并收束，不要再调用工具。',

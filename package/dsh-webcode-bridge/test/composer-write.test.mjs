@@ -17,7 +17,7 @@
 // 为什么这些用例不是空转：它们钉住的是**边界与反例**，即「改坏了会怎样」。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { composerWritePlan, stallStep, composerStrategy, composerEchoVerdict } from '../lib/browser-driver.js';
+import { composerWritePlan, stallStep, composerStrategy, composerEchoVerdict, EDITOR_BLOCK_TEXT } from '../lib/browser-driver.js';
 
 // ---------------------------------------------------------- composerWritePlan
 
@@ -179,4 +179,63 @@ test('回读判据 ⑦：读不到回读时不断言截断（既有行为，不�
   assert.equal(v.ok, true);
   assert.equal(v.reason, 'echo-unavailable');
   assert.equal(v.echoedLength, -1, '读不到用 -1 表达，不伪装成 0');
+});
+
+// ------------------------------------------------- EDITOR_BLOCK_TEXT（0.19.78）
+//
+// 真机背景（doubao/tiptap，2026-10-14，只写不发送）：写入 17 字
+// `[本地工具传输协议]\n请回复：收到`，`innerText` 回读 **18**（`\n`→`\n\n`）、
+// `textContent` 回读 **16**（换行被吞）⇒ 两者都判 content-mismatch
+// ⇒ **每一轮含换行的提示词都被 PROMPT_TRUNCATED 拦住**（doubao 全线不可用）。
+//
+// 下面用最小 DOM 桩钉住「块感知读取」的判据。桩只实现本函数真正用到的 API
+// （childNodes / tagName / nodeType / nodeValue），不引 jsdom——与同目录其它测试一致。
+
+/** 造一个元素节点。`kids` 给子节点（文本用字符串简写）。 */
+function el(tag, kids = []) {
+  const node = { nodeType: 1, tagName: tag, childNodes: [] };
+  node.childNodes = kids.map((k) => (typeof k === 'string' ? { nodeType: 3, nodeValue: k } : k));
+  return node;
+}
+
+test('块感知 ①：tiptap 每个换行一个 <p> ⇒ 必须还原成单个 \\n（真机 17 字原案）', () => {
+  const dom = el('DIV', [el('P', ['[本地工具传输协议]']), el('P', ['请回复：收到'])]);
+  assert.equal(EDITOR_BLOCK_TEXT(dom), '[本地工具传输协议]\n请回复：收到',
+    'innerText 会给出 \\n\\n（18 字）、textContent 给出无换行（16 字），两者都不对');
+});
+
+test('块感知 ②：★ 空行 = 空 <p>（占位 <br>）⇒ 必须还原成一个空行', () => {
+  // 真机 DOM：`甲\n\n乙` ⇒ <p>甲</p><p class="is-empty"><br></p><p>乙</p>
+  const br = el('BR');
+  const dom = el('DIV', [el('P', ['甲']), el('P', [br]), el('P', ['乙'])]);
+  assert.equal(EDITOR_BLOCK_TEXT(dom), '甲\n\n乙',
+    '把占位 <br> 当换行会多出一个 \\n（v3 的 5/7 就栽在这里）');
+});
+
+test('块感知 ③：行内 <br> 是用户的硬换行 ⇒ 必须保留', () => {
+  const dom = el('DIV', [el('P', ['a', el('BR'), 'b'])]);
+  assert.equal(EDITOR_BLOCK_TEXT(dom), 'a\nb');
+});
+
+test('块感知 ④：无块级子节点时按行内读（普通 contenteditable 不回归）', () => {
+  const dom = el('DIV', ['纯文本', el('SPAN', ['拼接'])]);
+  assert.equal(EDITOR_BLOCK_TEXT(dom), '纯文本拼接');
+});
+
+test('块感知 ⑤：首尾空段必须去掉、中间空段必须保留（编辑器边界空 <p>）', () => {
+  const dom = el('DIV', [el('P', []), el('P', ['正文']), el('P', [])]);
+  assert.equal(EDITOR_BLOCK_TEXT(dom), '正文');
+  const mid = el('DIV', [el('P', ['上']), el('P', []), el('P', ['下'])]);
+  assert.equal(EDITOR_BLOCK_TEXT(mid), '上\n\n下', '中间空段是用户真写的空行');
+});
+
+test('块感知 ⑥：与写入文本比对时**逐字相等** ⇒ 判据才能通过（端到端意义）', () => {
+  const sent = '第一行\n\n第四行';
+  const dom = el('DIV', [el('P', ['第一行']), el('P', [el('BR')]), el('P', ['第四行'])]);
+  const echoed = EDITOR_BLOCK_TEXT(dom);
+  assert.equal(echoed, sent);
+  assert.equal(composerEchoVerdict(sent, echoed).ok, true, '块感知读取 + 既有白名单 = 通过');
+  // 反向：真截断在块感知读取下**依然**被拦住（判据没被放宽）
+  const truncated = EDITOR_BLOCK_TEXT(el('DIV', [el('P', ['第一行'])]));
+  assert.equal(composerEchoVerdict(sent, truncated).ok, false, '真截断必须失败');
 });

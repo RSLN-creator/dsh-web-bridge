@@ -263,6 +263,66 @@ function findKey(value, key, depth = 0) {
   return out;
 }
 
+// ── ⑦ 设置页不得手写协议文本（红线 3 的展示面判据，0.19.80）──────────────────
+//
+// ## 这条判据的来历（真缺陷，不是假想）
+//
+// `settings-page.js` 原先在 `native-spec-card` 里**手写**了各模型的「首轮教学提示词」。
+// 2026-10-15 真机复核发现它与 `lib/agent-preset.js`（**唯一协议真源**）实际发送的**不一致**：
+//
+//   | 站点 | 设置页原先教的 | 真源实际发的 | 后果 |
+//   | --- | --- | --- | --- |
+//   | GLM | 代码块 | 代码块 | 一致 |
+//   | Doubao | `<seed:tool_call>{"name":…}` | `<tool_call>{"mcp_action":"call",…}` | 教了**真源从不教**的壳，且缺 `mcp_action` |
+//   | Kimi | `<tool_call>{"name":…}` | 同上（带 `mcp_action`） | 缺 `mcp_action` |
+//   | Qwen | `# Tools` + `<tool_call>{"name":…}` | 同上（带 `mcp_action`） | 缺 `mcp_action` |
+//
+// 而 `agent-preset.js:2553` 的**唯一解析判据**是 `tagged || obj.mcp_action === 'call'`
+// ⇒ 设置页教的裸 JSON 形状（无 `mcp_action`）**解析不了**；用户照抄会得到「调用了但没执行」。
+// `seed:tool_call` 的三处分布是决定性读数：解析器认它、设置页教它、**教学侧零出现**。
+//
+// ## 判据（两侧都钉，缺一不可）
+//   ① **正向**：真源文本必须真的上屏（拿 `transportNoteFor` 现算，去 HTML 里找）
+//   ② **反向**：旧的手写教学形状必须**不再**出现（否则等于第二份协议又回来了）
+test('⑦ 设置页只展示真源教学文本，不手写第二份协议（红线 3 的展示面）', async () => {
+  const { renderSettingsPage } = await import(pathToFileURL(path.join(LIB, 'settings-page.js')).href);
+  const { transportNoteFor, trainNoteFor } = await import(pathToFileURL(path.join(LIB, 'agent-preset.js')).href);
+
+  const tools = [{ name: 'read', description: '读取本地文件文本内容。',
+    parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } }];
+  const teaching = {
+    default: transportNoteFor('kimi', tools),
+    glm: transportNoteFor('glm', tools),
+    trainDefault: trainNoteFor('kimi', '', tools),
+    trainGlm: trainNoteFor('glm', '', tools),
+  };
+  const html = renderSettingsPage([{ id: 'kimi:k3', name: 'kimi/k3', siteName: 'Kimi' }], teaching);
+  const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  // ① 正向：真源文本上屏
+  assert.ok(html.includes(esc(teaching.default).slice(0, 120)),
+    '设置页没有展示「默认形状」的真源文本——展示层没接真源');
+  assert.ok(html.includes(esc(teaching.glm).slice(0, 120)),
+    '设置页没有展示 GLM 形状的真源文本');
+  assert.ok(html.includes('mcp_action'),
+    '设置页连 mcp_action 都不出现 ⇒ 展示的形状缺唯一解析凭据');
+
+  // ② 反向：旧手写教学形状必须消失
+  assert.ok(!/必须使用 &lt;seed:tool_call&gt;/.test(html),
+    '设置页仍在教 seed:tool_call —— 桥的教学侧从不发它（agent-preset 零出现），照抄会解析不了');
+  assert.ok(!/网页避拦截推荐/.test(html),
+    '旧的「网页避拦截推荐」手写文案仍在 ⇒ 第二份协议文本没删干净');
+  assert.ok(!/># Tools\s*\n\s*必须使用/.test(html),
+    '旧的 qwen「# Tools」手写教学仍在');
+
+  // ③ 缺省参数必须**如实显示未提供**，不得回落旧手写文本（回落＝把刚删的第二份请回来）
+  const bare = renderSettingsPage([{ id: 'x', name: 'x', siteName: 'X' }]);
+  assert.ok(bare.includes('未提供：请从 lib/agent-preset.js 取真源文本'),
+    '缺省 teaching 时应如实显示「未提供」，而不是静默给别的文本');
+  assert.ok(!/必须使用 &lt;tool_call&gt;/.test(bare),
+    '缺省 teaching 时回落到了手写文本 ⇒ 第二份协议会随缺省路径复活');
+});
+
 // ── ⑥ 动作名契约：面板侧引用的每个动作都必须在服务端动作表里 ──────────────────
 
 test('⑥ 设置页 / 客户端引用的动作名都必须在服务端动作表里（真机 405 的那一族）', () => {

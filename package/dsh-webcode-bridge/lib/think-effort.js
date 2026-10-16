@@ -185,6 +185,28 @@ export const THINK_EFFORT = Object.freeze({
       // 不靠「就近 + 最短文本」的启发式。
       triggerSelectors: ['.think-mode-trigger', '.mode-button'],
       readbackSelector: '.think-mode-trigger',
+      // ## 0.19.77：补 `optionSelector` —— 缺它时档位根本点不到
+      //
+      // 真机实证（2026-10-14，`glm` 冷启页，只读探针 + 生产函数复现）：
+      //   `applyEffort(page, { siteId:'glm', target:'快速' })`
+      //   → 抛 `THINK_EFFORT_UI_CHANGED: 站点 glm 的思考档位子菜单入口「思考强度」不可点`
+      //
+      // 两层原因，**缺一不可**：
+      //   ① 本段原先没有 `optionSelector` ⇒ 计划落到 `click-option`，它用页面侧
+      //      `CLICK_EFFORT_OPTION` 的 `CLICKABLE` 白名单找条目。那份白名单要求候选带
+      //      `role` / `data-state` 之一；
+      //   ② 而 GLM 真机的三条档位是**裸 `<div class="think-mode-item …">`**：
+      //      无 `role`、无 `data-state`、无 `aria-checked` ⇒ 候选池 `poolSize = 0`
+      //      ⇒ 三个档位全部返回 false。
+      //
+      // 补上显式 `optionSelector` 后走「选择器优先」分支（不依赖 role/data-state），
+      // 与 kimi 的 `[data-testid="model-effort-option"]` 同一形状。
+      // 真机逐字读数：子菜单入口是 `<span class="item-think think-mode-item has-submenu …">`
+      // （文本「思考强度」），三条档位是 `div.think-mode-item`。
+      //
+      // ⚠ 不改成放宽 `CLICKABLE` 白名单：那会同时影响所有站点，而 `role`/`data-state`
+      // 是其它站点正在依赖的判据。站点差异收口在**本声明层**。
+      optionSelector: '.think-mode-item',
       itemLabel: '思考强度',
       readback: 'effort-text',
     },
@@ -295,7 +317,33 @@ export const THINK_EFFORT = Object.freeze({
       triggerSelectors: ['[data-testid="chat_input_action_model"]'],
       triggerText: '豆包',
       allowEmptyTrigger: true,
-      readback: 'aria-checked',
+      // ## 0.19.77：`aria-checked` → `effort-text`（含一次**我自己改法的证伪**，请读完）
+      //
+      // 真机实证（2026-10-14，有头冷启页，只读探针 + 生产函数复现）：
+      //   `probe-think-effort-live.mjs doubao` → `FAIL（0/2）`；Lead 回归同形（0/2）。
+      //
+      // **第一版改法（`menuitem-svg`：读弹层里带对勾 svg 的那条）经实测证伪**：
+      //   豆包的 radix 菜单**点完条目后立刻关闭**，回读那一刻 `role="menuitem"` 的条目
+      //   **已不在 DOM**（Lead trace：`afterClick_*` 各采样点 menuitem 数 = 0）。
+      //   ⇒「读弹层选中项」这一类口径（`aria-checked` / `menuitem-svg`）对豆包
+      //   **结构性不可用**：不是判据不对，是**读的时机窗口不存在**。
+      //   教训：**口径对不对，必须连「读的时机」一起证**；只证「判据能区分选中/未选中」
+      //   是不够的——那正是第一版的错。
+      //
+      // 真机读数（**菜单开着时**，供核对）：条目 `豆包 快速` svgCount=1（对勾 M20.2246…）、
+      //   `豆包 专家` svgCount=0；两条 `aria-checked` / `data-state` 均为 **null**。
+      //   注意 svg 那条**不能**用作回读：菜单那时已关。
+      //
+      // **改为 `effort-text`（读触发钮文本）**：真机 trace 显示点完之后触发钮
+      //   `[data-testid="chat_input_action_model"]` 的文本**从 `豆包 快速` 变成 `豆包 专家`**
+      //   —— 那是用户眼睛看到的读数，也是本模块一贯的回读口径。本段已声明
+      //   `triggerText:'豆包'`，`effortFromTriggerLabel` 剥掉锚点后得到 `快速` / `专家`，
+      //   与 `knownIds` 逐字可比 ⇒ 无需新增页面侧函数。
+      //
+      // ⚠ 与 kimi 同族的坑这里**不存在**：kimi 触发钮文本是「快速 进阶」（模型名 + 档位），
+      //   必须靠 `readbackSelector` 指到只持档位的节点；豆包触发钮文本**只有**「豆包 + 档位」，
+      //   无模型名干扰，故 `effort-text` 直接可用。
+      readback: 'effort-text',
     },
   },
 });
@@ -490,13 +538,27 @@ export const FIND_EFFORT_CONTROL = (cfg) => {
  * 这样写的，真机症状是「菜单明明开着（截图可见 低/高/最高），却报档位菜单里没有这一档」，
  * 报错还带着「当前读数：深度思考」这种自相矛盾的现场。
  *
- * 这里的判据：在**浮层里**的可点元素中，取文本**恰好**是档位（或末尾是档位）的那个，
+ * 这里的判据：在候选池里取文本**恰好**是档位（或末尾是档位、或**以档位开头**）的那个，
  * 且文本最短——父容器（如整个 menu）文本更长，因此不会被选中。
  *
- * @param {string} want 档位文本（网页菜单里的逐字文本）
+ * ## 0.19.77：新增「前缀形态」与「候选池限定」（GLM 真机修出）
+ *
+ * GLM 真机菜单（2026-10-14 trace）三级文本形态，**必须支持前缀**：
+ *   · 子菜单入口行：`思考强度极致快速深度处理复杂任务极致全力推理，耗时更长`（聚合了全部档位）
+ *   · 真实档位条目：`快速` / `深度处理复杂任务` / `极致全力推理，耗时更长`
+ *     —— 档位 id 是这些文本的**前缀**，不是结尾（旧的 `endsWith` 判据恒 false
+ *     ⇒ 真机症状「菜单明明开着，却报档位菜单里没有这一档」）。
+ * 同时那些条目的 class 是裸 `div.think-mode-item`：**无 `role`、无 `data-state`**，
+ * 因此不在 `CLICKABLE` 白名单里（候选池为空 ⇒ 恒 false）。⇒ 需要 `selector` 参数
+ * 把候选池换成站点声明的形状（GLM 传 `.think-mode-item`）。
+ *
+ * @param {string|{want:string, selector?:string|null}} arg 档位文本，或 `{want, selector}`
  * @returns {boolean} 是否点到了一次（false = 没找到那条，调用方据此报 UNAVAILABLE）
  */
-export const CLICK_EFFORT_OPTION = (want) => {
+export const CLICK_EFFORT_OPTION = (arg) => {
+  const spec = typeof arg === 'string' || arg == null ? { want: arg } : arg;
+  const want = String(spec.want ?? '');
+  const pool = spec.selector ? String(spec.selector) : null;
   const vis = (el) => {
     const r = el.getBoundingClientRect();
     if (r.width <= 0 || r.height <= 0) return false;
@@ -516,16 +578,25 @@ export const CLICK_EFFORT_OPTION = (want) => {
     }
     return false;
   };
-  const cands = [...document.querySelectorAll(CLICKABLE)]
-    .filter((el) => vis(el) && inOverlay(el))
+  // 候选池：站点声明了 `selector` 就用它（GLM 的裸 `div.think-mode-item` 不在 CLICKABLE 里），
+  // 否则退回 CLICKABLE + 浮层判据（kimi / zai / qwen 等有 role/data-state 的站点走这条）。
+  const base = pool
+    ? [...document.querySelectorAll(pool)]
+    : [...document.querySelectorAll(CLICKABLE)].filter((el) => inOverlay(el));
+  const cands = base
+    .filter((el) => vis(el))
     .map((el) => ({ el, t: txt(el) }))
     .filter((c) => {
       if (!c.t) return false;
+      // 前缀形态（GLM 的 `深度处理复杂任务` 对应 id `深度`）：只在 `selector` 限定过候选池时
+      // 启用——不限池时前缀会误命中父容器（它的文本以第一个档位开头）。
+      if (pool && c.t.startsWith(want)) return true;
       if (c.t === want || c.t.endsWith(want)) return true;
       // 条目文本可能带**选中标记**（真机 kimi 的 `进阶 已选`）或状态徽章，所以还要按词判。
       // 它同时覆盖豆包那种拼接文本（`豆包 2.1 Turbo专家` ⇒ 词 `2.1 Turbo专家` 以「专家」结尾）。
       return c.t.split(' ').filter(Boolean).some((w) => w.endsWith(want));
     })
+    // 最短优先：父行聚合了全部档位、文本最长，因此永远排在真实条目之后。
     .sort((a, b) => a.t.length - b.t.length);
   if (!cands.length) return false;
   cands[0].el.click();
@@ -691,6 +762,15 @@ export async function applyEffort(page, { siteId, target } = {}) {
    * 这一条判据是**修出来的**，不是设计出来的：0.19.48 首版只看 `itemLabel`，于是 kimi
    * 每轮都去点「思考强度」那一步、档位菜单永远不开，最后死在回读上（报错还指向「没有
    * 生效」，与真因「菜单根本没打开」不符）。
+   *
+   * ## 0.19.77：GLM 的入口在**尚未打开的弹层里**（真机修出）
+   *
+   * 真机实证（2026-10-14，`glm` 冷启页 trace）：`page.getByText('思考强度')` 在弹层
+   * **没打开**时命中 0；先点一次 `.think-mode-trigger` 打开模型弹层后，同一个
+   * `getByText` 立刻 `count=1 / visible=true`（该行是
+   * `<span class="item-think think-mode-item has-submenu …">`）。
+   * ⇒ 旧实现在本分支直接 `fail`，而 GLM 每次都是「弹层未开就去找入口」⇒ 恒失败。
+   * 修法：入口不可见时**先点触发控件打开那一层**，再重新评估（不改本判据的语义）。
    */
   const useSubmenu = (snap) => Boolean(ctl.itemLabel)
     && !plan.knownIds.some((id) => String(snap?.found?.text ?? '').split(' ').filter(Boolean).includes(id));
@@ -753,6 +833,26 @@ export async function applyEffort(page, { siteId, target } = {}) {
         // 触发控件是弹层里的**父条目**（glm「思考强度」）：先点它展开子菜单。
         const item = page.getByText(ctl.itemLabel, { exact: false }).first();
         if (await visible(item)) { await item.click({ timeout: 4000 }); await page.waitForTimeout(700); continue; }
+        // ## 0.19.77：入口在**尚未打开的**弹层里 ⇒ 先开那一层，再重新评估（真机修出）
+        //
+        // 真机实证（2026-10-14，`glm` 冷启页 trace）：
+        //   · 弹层未开时 `page.getByText('思考强度')` 命中 **0**，旧实现在这里直接 `fail`
+        //     ⇒ GLM 的非默认档位**每次**都失败（`快速`/`深度` 恒抛 UI_CHANGED，
+        //     而 `极致` 因走幂等快路恰好通过——所以这个缺陷能长期躲过真机复跑）。
+        //   · 先点一次 `.think-mode-trigger` 打开模型弹层后，同一 `getByText` 立刻
+        //     `count=1 / visible=true`（该行是
+        //     `<span class="item-think think-mode-item has-submenu …">`，文本「思考强度」）。
+        //
+        // 修法：入口不可见时**先点触发控件打开承载它的那一层**，然后 `continue` 重走本轮
+        // 计划（下一轮进来时 `snap.menuOpen` 为真、入口可见 ⇒ 走上面那条分支点开子菜单）。
+        // 这里刻意**不改** `useSubmenu` 的语义：它的判据是「触发控件是不是档位控件本身」，
+        // 与本缺陷无关（我曾误改它、并因此引入新行为，已回退——见下方 note）。
+        const opener = page.locator((ctl.triggerSelectors || [])[0] || '').first();
+        if (await visible(opener)) {
+          await opener.click({ timeout: 4000 });
+          await page.waitForTimeout(900);
+          continue;
+        }
         fail('THINK_EFFORT_UI_CHANGED', `站点 ${siteId} 的思考档位子菜单入口「${ctl.itemLabel}」不可点`);
       }
       await page.mouse.click(snap.found.x + (snap.found.w || 0) / 2, snap.found.y + (snap.found.h || 0) / 2);
@@ -778,12 +878,46 @@ export async function applyEffort(page, { siteId, target } = {}) {
             await page.mouse.click(again.found.x + (again.found.w || 0) / 2, again.found.y + (again.found.h || 0) / 2);
             await page.waitForTimeout(900);
           }
+          // ## 0.19.77：有子菜单入口的站点（GLM）必须**重新展开子菜单**
+          //
+          // 真机读数（2026-10-14，GLM 回归）：`快速` 通过后紧接着 `深度` 失败，报
+          // `UNAVAILABLE`；而回读显示网页上一个档位是 `GLM-Flash快速`——说明上一轮**生效了**，
+          // 只是这一轮点开模型弹层后**子菜单没有随之展开**（档位列未挂载），
+          // 于是候选池里没有条目。
+          //
+          // 修法：重试时若站点声明了 `itemLabel`，在重开模型弹层之后再点一次子菜单入口。
+          // 这与上面的主路径同一判据（`getByText(itemLabel)`），失败不抛错——下一轮循环
+          // 还会再试，最终由 `!clicked` 那条出口如实报 UNAVAILABLE。
+          if (ctl.itemLabel) {
+            const sub = page.getByText(ctl.itemLabel, { exact: false }).first();
+            if (await visible(sub)) { await sub.click({ timeout: 4000 }).catch(() => {}); await page.waitForTimeout(700); }
+          }
         }
         if (ctl.optionSelector) {
+          // ① 站点给了**精确**选择器（kimi 的 `[data-testid="model-effort-option"]`）时，
+          //    Playwright locator 这条最直接：它按 testid 命中唯一元素，语义清晰。
+          //    护栏 `test/think-effort.test.mjs` ④ 钉住「kimi 只在点档位那一步用 locator」。
           const cand = page.locator(ctl.optionSelector).filter({ hasText: target });
           if (await visible(cand)) { await cand.first().click({ timeout: 4000 }); clicked = true; }
-        } else {
-          clicked = await page.evaluate(CLICK_EFFORT_OPTION, target).catch(() => false);
+        }
+        if (!clicked) {
+          // ② 兜底走页面侧实现（0.19.77，GLM 真机修出）。
+          //
+          // 为什么 GLM 走不到 ①（真机 2026-10-14 trace）：`.think-mode-item` 同时命中
+          // **左列模型行**（`GLM-Flashnew5.3-Flash，回复速度快` —— 含子串「快」）与
+          // **右列档位条目**（`快速`）。`filter({hasText:'快速'})` 因此匹配 **2 个**元素，
+          // Playwright 的 `isVisible()` 在严格模式下**抛错**，被 `visible()` 的 catch
+          // 吞成 `false` ⇒ ① 永远不成立 ⇒ 旧代码直接误报 `THINK_EFFORT_UNAVAILABLE`
+          // （菜单其实开着、条目就在那儿）。
+          //
+          // 页面侧实现按「精确相等 / 后缀 / 限池后的前缀 + 最短优先」判，不会被
+          // 「左列模型行含子串」骗到：`GLM-Flashnew5.3-Flash，回复速度快` 不以 `快速` 开头、
+          // 也不以它结尾，而真实条目 `快速` 恰好相等且最短。
+          // `optionSelector` 在这里作为**候选池**传入（限定范围），语义不变。
+          clicked = await page.evaluate(
+            CLICK_EFFORT_OPTION,
+            ctl.optionSelector ? { want: target, selector: ctl.optionSelector } : target,
+          ).catch(() => false);
         }
       }
       if (!clicked) {

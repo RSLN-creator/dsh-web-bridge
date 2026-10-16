@@ -5,6 +5,652 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.87（2026-10-16 第六轮，**版本号不变**）★★ 找到 #63 真机复验失败的**真因**：判据从未跑过（#75）
+
+### ★★ `page.evaluate` 只接受**一个** arg，而 #63 的修复传了 4 个
+
+Playwright 契约：`evaluate(pageFunction, arg)` —— **pageFunction 之外只许再有一个 arg**。
+传多了它**同步抛** `Too many arguments`（离线实证，用仓库自带 chromium）。
+
+**危险在于它抛得早、又紧接着 `.catch`**：表达式抛 ⇒ 异常被吞成 `null` ⇒
+调用方看到「没命中」，与「页面本来没有验证码」**完全一样**，而真相是**那段判据从未执行**。
+
+⇒ 这正解释了 0.19.83 的真机复验：报错仍是 `web turn timed out`、
+**连 `probe` 诊断行都没打出来** —— 那是「代码没跑」的指纹。
+
+⚠ **最刺眼的一点**：当时**源码级护栏全绿**（只断言「源码里有 `page.frames?.()` 这个字符串」）。
+**护栏只证明「字符串在场」，不证明「跑得起来」** —— 这次付了**真机**代价。
+
+**全仓普查**：`evaluate` 传 ≥3 顶层实参的调用 = **恰好 1 处，就是它**。
+⚠ 普查首版把阈值写成「>1」⇒ 把 **32 处正确**写法报成缺陷（**假读数**）；正确阈值是 **3**
+（pageFunction 自己占第一个位置）。接收者正则首版也漏掉了 `f.evaluate` —— 而那正是缺陷点。
+
+**修法**：参数收进**一个对象**。**护栏双判据** `test/evaluate-argc.test.mjs`：
+① 源码级（顶层实参不得 ≥3）；② **行为级**（真的起浏览器，钉住「传 3 个必抛」+「单对象正常」
++「#63 的 doubao 真机原文在正确传参下必须命中」——最后一条证明**修完之后那段判据真的跑得起来**）。
+
+### 另一个产物：逐 frame 扫描的编排抽成纯函数 `lib/captcha-gate-scan.js`
+
+抽它的**唯一理由**就是 #75：编排原写在超时回调里、依赖真实 `page` ⇒ 只能写源码级护栏。
+抽出来后用**假 frame** 离线驱动：`test/captcha-gate-scan.test.mjs` **7/7**
+（命中即停 / probe 汇总 / `frameError` 如实记 / 跨域抛错不挡真命中 / 空列表不抛）。
+**反向变异全部变红**：静默吞 frameError ⇒ 5/7；命中不即停 ⇒ 5/7；未命中不汇总 probe ⇒ 3/7。
+
+### 诚实边界
+
+**doubao 真机仍未复验** —— 本修让那段代码**第一次真的跑得起来**，
+但「跑起来能否命中 doubao 的验证码」**仍需真机读数**，**不许写成通过**。**本轮零真机发送**。
+
+## 0.19.86（2026-10-16 第五轮，**版本号不变**）修掉 #74：默认模型的「带图能力」两条路径给相反答案
+
+### ★ 别名 `deepseek-web` 的目录条目漏了 `acceptsImages`
+
+同一个模型有**两条取数路径**（都真实被消费）：
+
+| 路径 | 取数 | 谁消费 |
+| --- | --- | --- |
+| **目录路径** | `listAllModels()` 的条目 | `web-control.js` 的 `GET models`（`:968`）与 `GET context-windows`（`:999`）原样返回 |
+| **解析路径** | `resolveWebModel(id)` | `index.js:1270` 的 `inputModalities` —— **护栏** |
+
+修前实测：`listAllModels()` 17 条里 **1 条两路径不一致** ——
+`deepseek-web: catalog=false resolve=true`（`providers.js:963` 手写的别名条目
+**漏了 `acceptsImages`**；而 `deepseek-web` 正是 **`DEFAULT_MODEL_ID`**）。
+
+**为什么危险**：`inputModalities` 是**护栏**，宿主**只在它明确不含 `'image'` 时**
+把图片换成文字占位 ⇒ 声明错方向时 **harness 截图在到达桥之前就被剥离**，
+症状是「网页端说没图」，而**桥这边看不到任何异常**。
+
+**修法**：别名条目与真条目**同源取值**（照抄 `DEEPSEEK.models[0]`），不再手写第二份
+⇒ 将来加字段不会再漏。**实测**：不一致 **1 → 0**。
+**护栏** `test/provider-surface.test.mjs` 判据 8；**反向变异**：再删该字段 ⇒ **7/8 红**。
+
+**边界**：本判据只查「两条路径同值」，**不查**「该值是否符合真机事实」
+⇒ 本修是「消除自相矛盾」，**不是**「证明图片能力」。
+
+### 第 ① 项离线侧读数
+
+`acceptsImages` 声明分布：deepseek / glm / kimi(k3,k2.8) / doubao / zai 全 `true`；
+**chatgpt / qwen / grok / claude / gemini 的 auto 未声明**；
+⚠ **全仓零个模型被显式声明为 `false`** ⇒「不能带图」在声明层是**缺席**表达。
+⇒ 方向安全（不会误放图片）。真机四态沿用上一轮：zai **PASS** / doubao **UNVERIFIED** /
+kimi **BLOCKED** / glm **BLOCKED**（其 `attachPreview` 修复仍未在真页面验证）。**本轮零真机发送**。
+
+## 0.19.85（2026-10-16 第四轮，**版本号不变**）第 ④ 项「解析覆盖」补上逐站闭环（含穷尽性证明）
+
+### 一、缺口：没有任何测试**逐站**断言「教什么就解析什么」
+
+第 ④ 项三件事里「**解析覆盖**」此前分在两侧、中间那条缝没人管：
+教学侧（`tool-transport`）只断言「文本里有没有那段话」，解析侧（`official-tool-calls` 等）
+只用**手写夹具** ⇒ 没有一条把「教学产出的形状」与「回读」接起来。
+
+新增 `test/teach-parse-closure.test.mjs`：遍历 `providers.js` 的**全部站点**，
+断言「教学文本含该形状标志物」+「按该形状回帖解析出恰好 1 条」。**10 站全 PASS**。
+
+### 二、★ 护栏的**确切**增量（四个反向变异，其中一个否掉了我的说法）
+
+| 变异 | 结果 |
+| --- | --- |
+| **M1** glm 教学改成标签形状 | 本护栏 2/4 红；⚠ **既有护栏也红**（四道一起）|
+| **M2** 删判据②的 `mcp_action` | **全部吞掉**（解析器另有宽容路径）⇒ **变异无效，不算证据** |
+| **M3** 官方骨架失去 invoke 闭 token | **本护栏也吸掉** ⇒ 在该形态上不敏感 |
+| **M4** 往 `SITES` **注入第 11 个假站点** | ★ 本护栏**自动覆盖**（日志出现 `zfakeprobe=tag`），而既有护栏**全绿、根本没看它** |
+
+⇒ **诚实结论**：本护栏**不是**「既有护栏漏掉的那条缝」的独家守卫。
+真实价值两条：① **穷尽性**（遍历 `SITES`，新增站点不会静默跳过；M4 已证）；
+② **机读的逐站四态表**（正是用户第 ④ 项要的「给出每站四态」那一格）。
+⚠ **不把 M1 的红读成独家覆盖**：那是四道护栏一起红。
+
+### 三、方法论：本轮我自己的判据错了两次（读数对、构造错）
+
+1. 首版断言 deepseek 解析 **1** 条，实际 **2** 条 ⇒ 查证发现**是我的构造错**：
+   官方骨架有**两行**占位符，我用 `.replace()` 只换了第一处。
+   `official-tool-calls.test.mjs:101` 早已钉住「两条相同占位示例按签名去重合成 1 条」是**按设计**。
+   ⇒ **与既有设计冲突时，先查设计，别先改产品**。
+2. M2/M3 没红时，我先记成「护栏不敏感」；读解析器实际输出后才发现是**变异被宽容路径吸收**
+   ⇒ **无效变异与漏检是两件事，不能混记**。
+
+### 四、诚实边界
+
+- 本闭环是**离线**判据（教学 ↔ 解析自洽），**不等于真机适配**；
+  真机 5 站里只有 glm 有形状读数，zai/qwen/doubao 仍零条；
+- **本轮零真机发送**；第 ① 项沿用上一轮四态；#63 真机复验仍**未通过**；kimi #70 未修。
+
+## 0.19.84（2026-10-16 第三轮，**版本号不变**）修掉**取证日志被测试污染**（#73）+ 第 ④ 项拿到**真机读数**
+
+### 一、★ 一片「假读数」差点让第 ④ 项改错代码（#73）
+
+做第 ④ 项（不同厂家工具调用适配）时，先从真机取证日志 `~/.dsh/logs/` 现算各站形状，
+读出「deepseek **321 条 UNPARSED**」，其中一条形状占 **88 条**。
+
+**动手前先查了来源**（这一步是本轮最有价值的动作）——决定性判据：
+
+| 判据 | 读数 |
+| --- | --- |
+| 占位值 | `D:/x.js`、`old_string:"a"`、`new_string:"b"`（不像真实用户数据）|
+| 逐字重复 | 201 条只落在 **4 个片段**上 |
+| 会话名 | **9 个 `auto-*`**（已 grep 在 `test/auto-continue*.test.mjs` 逐条对上）|
+| 节奏 | 同会话内间隔**工整 20s / 30s**（探针节奏）|
+| **真机会话** | **0 条** |
+
+⇒ **那是测试写进真实日志的合成样本**。照它改 = 为「真实模型从不这么吐」的形态增加
+解析宽容度 ⇒ 真实链路什么也没修好。**假读数比没有读数更贵。**
+
+**根因**：守卫只认 `NODE_TEST_CONTEXT`，而它**只在 `node --test` 下设置**；
+本机因 `spawnSync` EPERM 而**文档化要求逐文件跑** ⇒ 那种跑法**不设该变量**。
+**实测**：跑一次 `node test/auto-continue.test.mjs` ⇒ 真实日志 `session=auto-cont-1`
+条目 **34 → 36（+2）**；全量 **3644 条里 2065 条非真机**，真机（`session-<uuid>`）仅 **1579 条**。
+
+**修法**：三条拒写判据——① 原 env；② ★ **调用栈里出现本仓库 `test/`/`test-mock/` 的 .mjs**
+（**与跑法无关**）；③ 显式 `opts.dir` 照常放行。
+**验证**：同命令污染 delta **+2 → 0**；护栏新增两条；反向变异 ⇒ **7/9 → 9/9**。
+
+### 二、★ 第 ④ 项的真机读数（**只用 `session-<uuid>` 真机会话**，现算解析）
+
+⚠ 首版按 `auto-` 前缀排除，把 `fence-tail`/`headless-tail` 一类**漏成了真机**（表里出现假读数）。
+
+| 站点 | 正文 | 思维链 | 含痕 | PARSED | UNPARSED |
+| --- | --- | --- | --- | --- | --- |
+| **deepseek** | 818 | **649** | 782 | **755（96.5%）** | 27 |
+| **glm** | 65 | **45** | 49 | **43（87.8%）** | 6 |
+| kimi | 1 | 1 | 0 | 0 | 0 |
+| qwen/doubao/zai | **0** | — | — | — | — |
+
+**原生形态**：deepseek = 官方 `▁` token（711 条，占痕量 91%）；glm = ```json 代码块（24 条）
+⇒ **这两站的适配在工作，且与 `transportNoteFor` 的教学立场一致**（覆盖率 96.5% / 87.8%）。
+
+**剩余 8 站**：**不是「缺真机读数」，而是「取证通道里没有它们的记录」** ——
+`appendReplyLog` 的调用点**只在 `lib/index.js`**（产品适配器路径），
+而 `site-verify-multiturn` 走 **driver 直连** ⇒ 不经过那条路径
+（glm 最后真机条目停在 2026-09-28、kimi 09-27、zai 零条）。
+⇒ 已给取舍脚本加**可选**留档（`SV_CAPTURE_REPLIES=1`，**只写 `.tmp/`，绝不碰 `~/.dsh/logs/`**），
+并加源码级护栏钉住该边界（反向变异 ⇒ 8/9 红）。
+
+**deepseek/glm 的 UNPARSED 逐条归因**：模型自身漂移 / 断流截断（属既有 #25）/ 误报候选
+——**三类都不是「厂家适配缺失」**。
+
+### 三、台账纪律：补记真机额度（记账失误已追平）
+
+`GATE.md` 的「已用次数」此前**没跟着本轮真机跑更新**（glm/zai 仍写 `0`，实际已各用 **3/3**）。
+已按**本次会话日志**追平，并加 §3.2 额度小结。**纪律**：每次真机发送后必须立刻回写。
+
+### 四、诚实边界
+
+- **第 ④ 项仍未完成**：只有 deepseek / glm 两站读数；zai/qwen/doubao 仍零条（原因见 §二）；
+- **日志里 2065 条污染条目仍在**：本修只阻止新增，**不删旧数据**（属用户数据，须报备）；
+- **第 ① 项沿用上一轮读数**；#63 真机复验仍**未通过**；kimi #70 未修；
+- **本轮零真机发送**（glm/zai 额度已尽；kimi/doubao 剩下的额度留给用户点头的时机）。
+
+## 0.19.83（2026-10-16 第二轮，**版本号不变**）doubao 图片式验证不再伪装成「超时」+ 词表收成唯一真源
+
+### 一、★ 修 #63：`WEB_CAPTCHA_REQUIRED` 取代误导性的 `web turn timed out`
+
+真机（doubao，两轮独立复现，逐字一致）：
+`turn timeout scene {"captureAlive":true,"replyChars":0,"selectorHit":false}` ⇒
+`web turn timed out after 110000ms`。**报错方向是误导的**：用户会去查解码器/网络，
+而真实下一步是「**需要人去过验证**」。
+
+**根因三条**（第三条是上一轮漏掉的）：① doubao 未声明 `captchaSelector`；
+② `detectChallenge` 的 body 词表没有图片选择式（「请选择所有…图片 / 并拖拽到下方」）；
+③ ★ **`detectChallenge` 只在导航时跑**，而发送后那次采样**以站点声明为前提**
+⇒ 两条路都不通。**检查点选错了位置**——doubao 的验证在**发送之后**才弹出。
+
+**修法**：在**整轮超时点**加归因，两条独立判据任一命中即抛 `WEB_CAPTCHA_REQUIRED`：
+① 站点声明位命中**可见**节点；② **可见文案指纹**（**不依赖站点声明**，这是 doubao 的缺口）。
+⚠ 文案指纹**只归因、不代替站点声明** ⇒ **没有**顺手给 doubao 加 `captchaSelector`
+（未取得真实选择器读数，按纪律不猜）。
+
+### 二、★ 词表收成**唯一真源**：新增 `lib/challenge-heuristics.js`
+
+原词表**内联在 `page.evaluate` 字符串里**（测试读不到 ⇒ 护栏只能查字符串），
+且合并前**已有两份近似清单**——这正是 #63 的成因结构：同一事实两处各写一份。
+新模块把三类事实分开：「页面自己说了什么」（词表，**唯一真源**）／
+「哪个选择器属于哪个站点」（仍收口 `providers.js`）／「归因还是拦截」（驱动）。
+驱动以 `source` **传参**在页面侧重建，与 `attach-scope.js` 的 `ATTACH_PICK_SRC` 同一条纪律。
+
+⚠ 三条正则**不得带 `g`/`y`**：页面上下文里同一对象会被多次 `test()`，
+带 `g` 会因 `lastIndex` **递进而交替返回真假**（本仓库记过同型缺陷）——有护栏钉住。
+
+### 三、本轮被自己的护栏拦下四次（都是真缺陷，不是误报）
+
+1. `driver-scope` 的扫描器**不收集箭头函数形参** ⇒ `PAT.body` 被报成自由标识符。
+   修法是**改代码形状**（两个 source 用独立裸形参传入），**不是放宽扫描器**。
+2. 新护栏 ④b 首版**自相矛盾**（既禁又要求同一个字符串）⇒ 当场假红。
+3. ④/④b **两次把注释里的「证据引用」当违规**——驱动的注释逐字引用真机原文来解释为什么修。
+   修法：判据先剥 `//` 行与 `/* */` 块注释，**判代码不判注释**。
+4. #63 的 ④b 锚点**用错**：「超时前 6000 字符内找码」⇒ **删掉整块仍 PASS**
+   （窗口落到发送后闸门）。已改用只属于超时块的字符串。
+   **与 #68 同型：护栏若只匹配「名字出现过」，它判的是文本，不是实现。**
+
+### 四、#71：无地址形状站点的「同一会话」第二判据
+
+`sessionId` **或** 驱动 0.19.52 起的落地地址锚 `landedUrl` 任一逐字相同即成立；
+两者都拿不到**仍记 UNVERIFIED**。⚠ **不用「同一个 key 复用」当证据**（key 是 DSH 侧槽名）。
+
+### 五、★ 真机复验：**没有命中**（如实记，本轮最重要的负面读数）
+
+重跑 doubao（1 次发送，有头、串行）读数仍是：
+
+```
+[log] send confirmed (composer cleared / navigated) url=https://www.doubao.com/chat/local_…
+[warn] turn timeout scene: {"captureAlive":true,"replyChars":0,"selectorHit":false}
+FAIL  send — (no code): web turn timed out after 110000ms（捕获链在，页面无回复文本）
+```
+
+⇒ **不是** `WEB_CAPTCHA_REQUIRED`。**纪律：不许把「代码改了」写成「缺陷修好了」。**
+#63 的状态 = **离线护栏全绿 + 真机复验未通过**，不是一个干净的成功。
+
+**从负面读数得到两条新线索（都已落地，但同样尚无真机验证）**：
+
+1. ★ **`page.evaluate` 只跑主框架**，而风控/人机验证**普遍渲染在独立 iframe 里**
+   ⇒ 主框架 `body.innerText` 一个字都看不到，词表再全也抓不到。
+   已加固为**逐 frame 查**（`page.frames()`；跨域 frame 抛错则跳过并记入 probe），
+   护栏 + 反向变异：改成只查主框架 ⇒ `captcha-gate` **5/6** 红。
+2. **没命中时必须能说清「为什么没命中」**：只记「没命中」会把「本来没有验证码」与
+   「有验证码但我不认」印成同一件事。已加 `probe` 诊断（**只落关键词与长度，
+   不落整页正文**——这类页面可能含账号信息）。
+   ⇒ 下一个动作：读 `captcha probe at timeout (no hit)` 那一行的 `frames`。
+
+只读探针 `test-mock/doubao-frames-probe.mjs` 已建成（零发送）：静止态 **2 个 frame**
+（主框架 + `drive-iframe`）、**无**验证 ⇒「弹验证时」的 frame 结构**仍未取到**。
+
+### 六、验证与边界
+
+- 护栏：`challenge-heuristics` **7/7**、`captcha-gate` **6/6**、`driver-scope` **7/7**、
+  `regression` **54/54**、`site-verify-verdict` **22/22**。
+- **反向变异全部变红**：删超时归因块 ⇒ 4/6；删 doubao 词条 ⇒ 4/7；加 `g` ⇒ 4/7；
+  只查主框架 ⇒ 5/6；detectChallenge 改回内联（title 一条）⇒ 53/54。
+- **#63 真机复验未通过**（见 §五）⇒ **不许写成「doubao 已验证」**。
+- kimi #70 未修（长度相关仍是假设）；第 ①/④ 项未推进。
+- 本轮真机发送追加 1 次（doubao）；该站累计 2 次，**未超 ≤3 次额度**。
+
+## 0.19.82（2026-10-16 第一轮，**版本号不变**）修掉红线 1 的洞 + 修掉验收工具**自己**的两条缺陷
+
+**用户指令（逐字）**：「每站 1 发、间隔 60s，同一会话最低 3 次来回，回复间隔 30s」，
+以及上一轮那句仍未过期的「**！！不要每次就几个字还很短！！被风控了！！！**」。
+
+### 一、★ 红线 1「绝不静默降级模型」的洞（#67，**已修**）
+
+`lib/model-picker.js` 的 `readbackConfirms` 修前有**两个**会放行「比目标更短的回读」的入口
+（登记时只看见一个）：双向包含 `a.includes(base) || base.includes(a)`，以及
+「被点中项比目标短时拿它当基准」。⇒ 用户选 `zai:glm-5.3-flash`、切换没生效、
+页面仍停在 `GLM-5.3` 时，判据说「已确认」⇒ **界面完全看不出来**。
+
+**修法**：判据收成**单方向** `a.includes(w)`（回读必须覆盖目标名），并删掉第二个入口。
+单方向足够，因为装饰（`GLM-5.3-Flash ▾`）与营销后缀（`GLM-5.3-Flash NEW …`）
+**只会让回读更长**。⚠ 误判方向是刻意选的：判 false 只降级成 `strict:false` + warn
+（**切换本身仍发生**），判 true 则是静默降级——两者代价不对称，宁少放行。
+
+**验证**：`test/model-picker.test.mjs` **14/14**（`todo` 转正式断言，文件里不再有 todo）；
+反向变异（把 `|| w.includes(a)` 加回去）⇒ **13/14**，护栏当场红。
+
+### 二、★ 验收工具读的是**空目录**（#68，**已修**）
+
+`test-mock/site-verify.mjs` 手写的槽目录 `<root>/<siteId>` 与产品的
+`accounts.slotProfileDir()`（非 primary 站点 = `<root>/sites/<siteId>`）**分叉**，
+差集恰好是**全部非 deepseek 站点**（deepseek 是唯一 primary，恰好相同）
+⇒ 验收工具指向不存在的空目录，每个非 deepseek 站点只会得到 `BLOCKED 未登录`——
+**与「profile 真的没登录」完全不可区分**。
+
+**修法**：改用产品那一个真源，不再手写第二份公式。
+
+**验证**：护栏 ⑥ 断言「工具算出来的路径 == 产品算出来的路径」+ 钉住
+「`mountAtRelayRoot` 只允许 deepseek」；反向变异 ⇒ ⑥ 红（16/17）。
+⚠ 顺带抓到**护栏自身的假绿**：首版 ⑥ 只 `assert.match(src, /slotProfileDir\s*\(/)`，
+匹配到的是 import 行与注释 ⇒ 实现换回手写后仍 PASS（已改成剥注释 + 行首锚定）。
+
+### 三、★ 验收工具三轮发送**零间隔**（#69，**已修**）
+
+`.tmp/real-lane/PHASE2-RUNBOOK.md` §3 写着「本脚本内部三轮间隔由 `sendGapMs` 控制」，
+而修前的 `site-verify.mjs` **一处等待都没有**（可 grep 证伪）⇒ 三轮**背靠背连发**。
+`sendGapMs` 是产品里**唯一**一档发送节流 ⇒ 验收脚本用比产品严苛的节奏打站点
+⇒ **自造风控** ⇒ 四态记成 `BLOCKED`，**外部原因与工具自己的违规读数上无法区分**。
+
+**修法**：新增 `test-mock/site-verify-pacing.mjs`，**复用**产品两个真源
+（`accounts.sendGapForSlot` + `metrics.computeSendGap`），每轮发送前过闸门，
+并另设**独立于设置的 ≥20s 地板**（设置 0 时也不许零等待）。
+
+**验证**：`test/site-verify-pacing.test.mjs` **9/9**；反向变异（删三处闸门调用）⇒ ④ 红（8/9）。
+
+### 四、新增用户第 ③ 项的真机执行器（`site-verify-multiturn.mjs`）
+
+既有的 `site-verify.mjs` 第 3 轮是 `fresh:true`（**新开会话**）⇒ 证明不了「同一会话」。
+新脚本**全程同一个会话**跑 **≥3 轮来回**，间隔按用户节奏（回复间隔 30s，取较大者），
+且第 3 轮断言回复里出现一个**只存在于本机临时文件**的随机标记
+⇒ 这才分得开「真的读了工具结果」与「模型瞎编」。`--dry-run` 已跑通（零发送）。
+
+### 五、第 ③ 项真机执行：四站串行跑完（Lead 主裁判，60s 节奏）
+
+新增执行器 `test-mock/site-verify-multiturn.mjs`（**全程同一个会话**、**≥3 轮来回**、
+每轮前过间隔闸门、`fresh:true` 只用在第 1 轮）。**live profile、有头、串行**：
+
+| 站点 | 四态 | PASS/FAIL/BLOCKED/UNVERIFIED | 结论 |
+| --- | --- | --- | --- |
+| **glm** | UNVERIFIED | **13/0/0/1** | ★ **同一会话 3 轮 + 工具闭环成立**（三轮 `sessionId` 逐字相同；第 3 轮回复里出现本机临时文件的随机标记）|
+| **zai** | UNVERIFIED | **11/0/0/3** | ★ **修正 ② 真机生效**：三轮全程 `selectModel`，**零 `MODEL_UNAVAILABLE`**（上一轮同位置必现 `no-options`）|
+| **kimi** | **FAIL** | 2/1/0/1 | **新缺陷 #70**：`SEND_NOT_CONFIRMED`（长正文发不出去）|
+| **doubao** | **FAIL** | 2/1/0/1 | 与上一轮 **#63 同形**（图片式人机验证未被识别）|
+
+**共 12 次真实发送**（glm 3 + zai 3 + kimi 2 + doubao 1），失败处**停手不凑数**，
+每站第 2/3 轮实等 60s（日志 `[gap]` 行佐证）。
+⚠ 两个闭环成立站仍记 **UNVERIFIED 而非 PASS**（各有 `turn.settled` 等未验项）——
+**UNVERIFIED 不许写成通过**。
+
+### 六、kimi 的 `SEND_NOT_CONFIRMED`（#70）：三条只读取证赶走两个诱惑
+
+驱动日志逐字 `send path: sel=.send-button-container ready=true composerChars=1549`。
+两条「看起来很像结论」的假设都被**读数**否掉：
+
+- 「一定没登录」⇒ 截图昵称 `TYZ0712`、composer 可编辑 ⇒ **排除**（不是 #53 那种三态问题）；
+- 「发送键契约过期」⇒ `locator.click({trial:true})` **通过全部可点性检查**
+  （attached/visible/**stable**/receives-events/enabled 全绿，`pointer-events:auto`、无 `disabled` 类）
+  ⇒ **排除**（连「动画 SVG 让 stable 失败」这个最像的机制也不成立）；
+- 弹层吃点击 ⇒ 可见 dialog/modal/mask **为空** ⇒ 排除。
+
+⇒ 剩余方向是**长度相关**（既有成功读数那轮 65 字，本轮 **1549 字**），
+但**配对实验未做** ⇒ 只作假设，**不写成结论**。诊断器 `test-mock/kimi-send-diagnose.mjs`
+（**只读**：只有 `trial:true`、不写输入框、不按 Enter）复现了全部读数。
+
+### 七、诚实边界
+
+- 第 ③ 项 **2 站成立 / 2 站 FAIL**（kimi #70 未修、doubao #63 未修）；
+- `session.same` 的第二判据（#71，落地地址锚）**已修并离线验证**，但 zai 那两次
+  UNVERIFIED **保留原读数**（额度已尽，未用它重跑）⇒ 不改写成通过；
+- 第 ① 项图片真机验收、第 ④ 项站点级适配（#66）本轮**未推进**；
+- 全量测试：**2 条既有失败**（`webcode-preset` ②e、`aux-delta-compact`）
+  **在 pristine HEAD 上同样失败**（已 stash 核对）⇒ **本轮零回归**。
+
+## 0.19.76（2026-10-15 第四轮，**版本号不变**）设置页不再手写协议文本（红线 3）
+
+**用户指令（逐字）**：**「另外你的思维工具调用不同厂家模型适配没做啊！」**
+
+### 一、真缺陷：设置页教了**桥自己不教、也解析不了**的协议形状（已修）
+
+为回答「不同厂家适配没做」而做的审计：把 `transportNoteFor()`（**真源实际发送的教学**）
+与 `settings-page.js` 的手写卡片**逐字对照**，发现两处不一致：
+
+| 站点 | 设置页原先教的 | 真源实际发的 | 后果 |
+| --- | --- | --- | --- |
+| **Doubao** | `<seed:tool_call>{"name":…}</seed:tool_call>` | `<tool_call>{"mcp_action":"call",…}</tool_call>` | 教了**真源从不教**的壳，且缺 `mcp_action` |
+| **Kimi** | `<tool_call>{"name":…,"arguments":…}</tool_call>` | 同上（带 `mcp_action`） | 缺 `mcp_action` |
+| **Qwen** | `# Tools` + `<tool_call>{"name":…}` | 同上（带 `mcp_action`） | 缺 `mcp_action`、多教 `# Tools` |
+
+`agent-preset.js:2553` 的**唯一解析判据**是 `tagged || obj.mcp_action === 'call'`
+⇒ 设置页教的裸 JSON 形状（无 `mcp_action`）**解析不了**，用户照抄会得到「调用了但没执行」。
+
+**决定性读数**：`seed:tool_call` 在**解析器**里（`agent-preset.js:2712`，宽容外壳）、
+在**设置页**里（4 处，教用户）、而**教学侧零出现**（`transportNoteFor` 从不发它）。
+
+**修法**（落实红线 3「工具协议只有一处定义」）：`renderSettingsPage(models, teaching)`
+新增第二参数，由 `index.js` 在挂载路由时**运行时从真源取**
+（`transportNoteFor` / `trainNoteFor`）；旧手写段整段删除；缺省时**如实显示「未提供」**，
+**不回落**旧文本（回落＝把刚删的第二份请回来）。
+
+**护栏**：`test/settings-transport.test.mjs` ⑦（正向上屏 / 反向消失 / 缺省不回落三支）。
+**反向变异已验证**：换回手写 `seed:tool_call` ⇒ **10 → 9 pass / 1 fail**；还原 10/10。
+
+### 二、用户第 ④ 项的答案：变体粒度确实不足（登记 #66，**未修，缺读数**）
+
+现算读数：`prompt-variants` 只有 **3 条**变体（`official`←deepseek / `glm`←glm /
+**`default`←其余 8 站**），而厂家有 5+ 个 ⇒ 除 GLM/DeepSeek 外**8 站教学逐字相同**
+（已核对 `transportNoteFor` 对 kimi/doubao/zai/qwen/chatgpt 输出**逐字一致**）。
+
+GLM 的先例证明站点差异是真实的（网页内置执行器会抢走 `<tool_call>` 标签）。
+**已知但无读数**：doubao 网页原生标签是 `seed:tool_call`；gemini 走 `dom` 解码器。
+
+**为何未修**：按纪律「没有真机读数就不声明」—— 同一晚 Lead 在 GLM 发图上连猜三次全错
+（第二次把图传成用户头像），**给 8 站凭空加变体等于把同一个错误放大 8 倍**。
+
+### 三、判据
+
+```
+node test/settings-transport.test.mjs → 10/10 pass exit 0（新增 ⑦）
+node test/composer-write.test.mjs     → 25/25    node test/think-effort.test.mjs  → 27/27
+node test/model-picker.test.mjs       → 8/8      node test/prompt-variants.test.mjs → 15/15
+node test/provider-surface.test.mjs   → 7/7（对外面逐字不变）  node test/login-state.test.mjs → 6/6
+七个仓库闸门                          → 全 PASS
+```
+
+### 四、本轮**未做**
+
+- **未**给 doubao/kimi/qwen 新增专属变体（缺真机读数）。
+- **未**做用户第 ③ 项（4 站同一会话多轮 + 本地工具完整闭环）。
+- 设置页修复**未在浏览器里目视核对**（要等 DSH 重启后新代码生效）。
+
+## 0.19.76（2026-10-15 第三轮，**版本号不变**）图片能力验收 + GLM 附件确认选择器修复
+
+**用户指令**：① 图片能力真机验收 ② 修 zai 切模型 ③ 4 站完整闭环 ④ 各厂家「思维链+工具调用」适配。
+以及一条**方法论纠正**：**「你一直自己改改不好！」** —— 用户提出「你操作、我记录」的取证方式。
+
+### 一、GLM `attachPreview` 修复（真机轨迹取证）
+
+**缺陷**：GLM 上传成功后的预览节点是 **`img.limitSize`**，而声明的
+`[class*='file'], [class*='attachment'], [data-file]` **一个都不匹配它**；
+`[class*='file']` 还会命中那 **3 个隐藏 `<input type=file>`**（class 含 "file"）
+⇒ 计数非 0 但全不可见 ⇒ `ATTACH_NOT_CONFIRMED` ⇒ 按既有设计**静默降级纯文本**
+⇒ 模型回「我没有收到任何图片」。
+
+**修法**：`attachPreview: "img.limitSize, [class*='file'], …"`（只加不换）。
+⚠ **该修复尚未在真页面验证**（GLM 深链会触发阿里云滑块，见下）——如实记为待验。
+
+**同轮撤回一次错误修复**：我曾把 `attachSelector` 改成 `:not(.img-input)`，
+结果**把图传成了用户的账号头像**（用户截图抓到「修改头像」对话框）。
+真机记录证明通用回退本来就能选中正确的 `.img-input` ⇒ 已撤回。
+
+### 二、图片能力真机验收（判据 = 模型是否真的读出图中字符）
+
+| 站点 | 四态 | 依据 |
+| --- | --- | --- |
+| **zai** | **PASS** | 上传 `ok=true` + 模型读出 **`HELLO`**（13.5s）|
+| doubao | UNVERIFIED | 上传 `ok=true` 但 150s 超时无回复 |
+| kimi | BLOCKED | 站点限流 `resource_exhausted` |
+| glm | BLOCKED | 深链撞阿里云滑块（`TraceID 3ccdc160…`）|
+
+**只有 zai 拿到完整闭环证据**（上传 + 识别 + 回流）。**没有把「上传成功」当成「图片可用」。**
+
+### 三、zai 第二轮切模型 `no-options`：排除七条候选，**未修**
+
+已排除：` NEW` 徽章匹配失败 / 菜单打不开 / 菜单已开再点会关 / 生产函数自身缺陷 /
+「会话页」URL 形态 / 覆盖层遮挡 / actionability（**JS 直接 click 也开不了**）。
+已复现的确切条件：**只在「实发一条消息之后的活 SPA 状态」上出现**（两次独立复现）。
+⇒ 范围已缩小，**未修**（按纪律「改了没验 = 没做」，不写已修）。
+
+### 四、判据
+
+```
+node test/composer-write.test.mjs   → 25/25 pass exit 0
+node test/think-effort.test.mjs     → 27/27 pass exit 0
+node test/model-picker.test.mjs     → 8/8 pass exit 0
+node test/provider-surface.test.mjs → 7/7 pass exit 0（对外面逐字不变）
+node test/model-labels.test.mjs     → 12/12 pass exit 0
+七个仓库闸门                        → 全 PASS
+```
+
+### 五、本轮**未做**
+
+- 用户第 ③ 项（4 站同一会话多轮 + 本地工具完整闭环）：**未做**。
+- 用户第 ④ 项（各厂家「思维链 + 工具调用」站点级适配）：**未做**（用户已点名，如实留待下一轮）。
+- GLM 图片需用户过一次滑块后重测。
+
+## 0.19.76（2026-10-14 第二轮，**版本号不变**）Phase 2 真实对话验证：五站四态 + contenteditable 回读判据修复
+
+**本轮起因**：用户在点破 qwen 登录真因后**亲手过了「访问验证」+ 输入邮箱验证码**（登录成功），
+并要求把 Phase 2 跑完。据此在**五个站点**上跑完真实对话验证（有头、串行、每站一次 = 3 次发送
+= 每变体上限），四态如实归档。
+
+### 一、五站四态（**没有把 UNVERIFIED 写成通过**）
+
+| 站点 | 四态 | PASS | FAIL | BLOCKED | UNVERIFIED |
+| --- | --- | --- | --- | --- | --- |
+| **qwen** | UNVERIFIED | **9** | 0 | 0 | 2 |
+| **glm** | UNVERIFIED | **10** | 0 | 0 | 1 |
+| **zai** | FAIL | **9** | 1 | 0 | 1 |
+| **kimi** | FAIL | 2 | 1 | 0 | 8 |
+| **doubao** | FAIL | 2 | 1 | 0 | 8 |
+
+**最硬的正面读数**：glm 的 **`tool.resultRoundTrip` PASS** —— 第二轮收到 127 字且
+**会话 id 一致**（`6acf9978581cc707568d90bc`）⇒「调用 → 本地执行 → 回填**同一**网页会话
+→ 第二轮收束」这条链路**真实成立**。
+
+### 二、修复：contenteditable 回读判据（doubao / kimi **全线不可用**量级）
+
+**现象**：`PROMPT_TRUNCATED: 网页输入框只接收了 20/17 字符（判据=content-mismatch）`
+—— 回读（20）**比发送（17）还长**，自相矛盾。
+
+**真机读数**（doubao/tiptap，只写不发送）：
+
+| 写入 17 字 `[本地工具传输协议]\n请回复：收到` | 结果 |
+| --- | --- |
+| `innerText` | **18**（`\n` → `\n\n`） |
+| `textContent` | **16**（换行被吞） |
+| **块感知读取（本版新增）** | **17 ✓** |
+
+**根因**：tiptap/ProseMirror 把**每个换行渲染成一个块级 `<p>`**：
+
+| 写入 | DOM |
+| --- | --- |
+| `a\nb` | `<p>a</p><p>b</p>` |
+| `a\n\nb` | `<p>a</p><p class="is-empty"><br></p><p>b</p>` |
+
+⇒ `innerText` 在块间补 `\n\n`（换行数翻倍）、`textContent` 不补任何块间分隔（换行被吞）。
+**两个浏览器内建读数都不等于写入内容** ⇒ 恒判 `content-mismatch`
+⇒ **每一轮含换行的提示词都被拦住**——而 DSH 的真实轮次**必然含换行**。
+
+**修法：修读取，不放宽判据**。新增纯函数 `EDITOR_BLOCK_TEXT`（`lib/browser-driver.js`，**v4**）：
+
+1. 有块级子节点时**只按顶层子节点切分**，每段取行内文本，用**单个 `\n`** 连接；
+2. 行内 `<br>` 记一个 `\n`（用户的硬换行）；
+3. **只含换行的段视为空串**（空块里的 `<br>` 是 ProseMirror 的**占位断行**）；
+4. 去掉**首尾**空段、**保留中间空段**（那是真空行）。
+
+`readComposer` 对 contenteditable 改用它。**`composerEchoVerdict` 的白名单一个字都没动**
+⇒ 真正的截断**依然**不等、照旧被拦。
+
+**真机验证**：doubao **7/7**、kimi **7/7** 逐字精确（含空行、`\t`、17 字原案）。
+**效果**：doubao 的 `PROMPT_TRUNCATED` **消失**，失败下沉到下一层。
+
+**变异反向验证**：去掉「空块记空串」⇒ **25 → 23 pass / 2 fail**；
+`join('\n')` 改 `join('')` ⇒ **25 → 21 pass / 4 fail**；还原 25/25。
+新增 6 条护栏在 `test/composer-write.test.mjs`（最小 DOM 桩，不引 jsdom）。
+
+### 三、修复：qwen 登录判定的两个缺陷
+
+1. **水合竞态**：qwen 先渲染「游客壳」（登录/注册可见）、~4s 才水合成已登录；
+   而 `gotoFreshChat` 等的是 `SEL.input`，**游客壳自带 composer ⇒ 0.25s 就返回**
+   ⇒ `judgeLoggedIn` 撞上瞬时游客壳 ⇒ `probe-bad` **立即 return false**。
+   修法：`bad` 命中后给**有界 6s 窗口**（仅在有可见 composer 时），窗口内消失则继续走 ok 判定。
+   窗口取 6s 的依据是两轮真机采样（水合落在 3.8s～7.8s 之间）。
+2. **`loginProbe.ok` 选错**：真机头像是 `img.user-img`，声明的 `.user-avatar` 一族命中 **0**
+   ⇒ 已登录也只得 `probe-fallback`（与 doubao #59 同型）。已按真机读数**追加** `img.user-img`。
+
+**修后**：`loggedIn=true`、`loginBasis=probe-ok`、`loginVerified=true`。
+
+### 四、判据
+
+```
+node test/composer-write.test.mjs  → 25/25 pass exit 0
+node test/think-effort.test.mjs    → 27/27 pass exit 0
+node test/login-state.test.mjs     → 6/6 pass exit 0
+node test/provider-surface.test.mjs→ 7/7 pass exit 0（对外面逐字不变）
+node wiki/tools/gen-index.mjs --check → exit 0
+```
+
+### 五、本轮**未**做（诚实边界）
+
+- **kimi 的 8 项 UNVERIFIED 拿不到读数**：被站点侧限流挡住
+  （`resource_exhausted：和Kimi聊天的人太多了`）。
+- **doubao 的 8 项 UNVERIFIED 拿不到读数**：被站点**图片式人机验证**挡住，
+  而桥**没识别**出那是验证 ⇒ 报「超时」而非 `WEB_CAPTCHA_REQUIRED`（已登记 #63）。
+- **zai 的 `MODEL_UNAVAILABLE（no-options）`** 只定位到抛点，**未修**（已登记 #64）。
+- 全部 Phase 2 读数来自**拷贝的 profile**（线上桥进程持有各站账号锁）
+  ⇒「线上那个 profile 也验过了」**不成立**。
+
+## 0.19.76（2026-10-14 轮，**版本号不变**）思考档位下发：三个站点的真机缺陷与修复
+
+**本轮起因**：用户要求「除了 deepseek 之外的所有站点……每个网站模型适配提示词，模型适配思维链，
+工具调用方法……**然后才能让他进行真实操作**」。据此做**零发送**的真机审计，
+结果四个已登录站点里**三个**的「思维链适配」在真机上根本走不通——
+若先发真消息，这些缺陷会被误记成「站点风控」或「网页不稳定」。**本轮真机发送次数 = 0。**
+
+### 一、glm：档位下发整轮失败（三层根因）
+
+**现象**：`applyEffort(page, {siteId:'glm', target:'快速'})` 抛
+`THINK_EFFORT_UI_CHANGED: 站点 glm 的思考档位子菜单入口「思考强度」不可点`。
+⚠ `极致` 因走**幂等快路**恰好通过 ⇒ **该缺陷长期躲过真机复跑**（这正是它活到今天的原因）。
+
+**三层根因**（每层都由真机 trace 取出）：
+1. 入口「思考强度」在**尚未打开的**模型弹层里——弹层未开时 `getByText` 命中 0，
+   旧实现在此直接 `fail`。真机读数：先点一次 `.think-mode-trigger` 后，
+   同一 `getByText` 立刻 `count=1 / visible=true`。
+2. GLM 档位条目是**裸 `div.think-mode-item`**（无 `role`、无 `data-state`）⇒
+   不在 `CLICK_EFFORT_OPTION` 的 `CLICKABLE` 白名单里 ⇒ 候选池 `poolSize=0`。
+3. 补上 `optionSelector` 后**仍失败**：`.think-mode-item` 同时命中**左列模型行**
+   （`GLM-Flashnew5.3-Flash，回复速度快`）与**右列档位条目**（`快速`）
+   ⇒ `filter({hasText})` 匹配 2 个元素 ⇒ Playwright 严格模式 `isVisible()` **抛错**，
+   被 `catch` 吞成 `false` ⇒ 误报 `UNAVAILABLE`。
+   另：重试时只重开模型弹层、**没有重新展开子菜单** ⇒ 下一档必然失败。
+
+**修法**：① glm 段补 `optionSelector: '.think-mode-item'`；② `CLICK_EFFORT_OPTION` 支持
+`{want, selector}`，**限池后**才启用**前缀**判据（GLM 真实条目是 `深度处理复杂任务` 这类前缀形态，
+旧的 `endsWith` 恒 false）；③ `click-option` 改为 **locator 优先 + 页面侧兜底**
+（kimi 的 testid 走 locator，护栏钉住）；④ 重试时若声明 `itemLabel` 则**重新展开子菜单**。
+
+### 二、doubao：回读判据与真机不符（含一次**自己改法被证伪**）
+
+**现象**：`probe-think-effort-live.mjs doubao` → `FAIL（0/2）`，两档均 `no-readback`。
+**真机读数**：两条目 `aria-checked` / `data-state` **皆为 null**（全页 TRUE 计数 = 0）。
+
+⚠ **第一版修法（新增 `menuitem-svg` 口径：读带对勾 svg 的那条）经实测证伪**：
+豆包的 radix 菜单**点完条目后立刻关闭**，回读那一刻 `role="menuitem"` 条目**已不在 DOM**
+（trace：`afterClick_*` 各采样点 menuitem 数 = 0）。
+⇒「读弹层选中项」这一类口径对豆包**结构性不可用**：**不是判据不对，是读的时机窗口不存在。**
+
+**修法**：改走 `effort-text` —— 真机 trace 显示点完后触发钮文本
+**从 `豆包 快速` 变成 `豆包 专家`**；该段已声明 `triggerText:'豆包'`，
+`effortFromTriggerLabel` 剥掉锚点即得档位，**无需新增页面侧函数**（第一版新增的函数已整体撤掉，不留死代码）。
+
+### 三、kimi：选路判据判错（顺带修复）
+
+档位是**二级菜单**，但 `useSubmenu()` 判它「不需要」⇒ `THINK_EFFORT_UNAVAILABLE`。
+与 glm 同一条链，修复后真机复跑 **2/2 PASS**（`标准` / `进阶`）。
+
+### 四、判据与反向验证
+
+```
+node test/think-effort.test.mjs      → 27/27 pass exit 0
+node test/provider-surface.test.mjs  → 7/7 pass exit 0（对外面逐字不变）
+node test/model-labels.test.mjs      → 12/12 pass exit 0
+真机零发送回归：glm 1/3 → 3/3 PASS；doubao 0/2 → 2/2 PASS；kimi 2/2 PASS；zai 3/3 PASS（连跑三次稳定）
+```
+
+| 反向变异 | 读数 |
+| --- | --- |
+| doubao 回读口径退回旧 `aria-checked` | **27 → 26 pass / 1 fail（exit 1）** ✔ |
+| 删掉 glm 的 `optionSelector`（**真机复跑**） | **3/3 → 1/3**，错误与修复前逐字同形 ✔ |
+
+**⚠ 一次自己造成的次生事故（如实记）**：第一版反向验证用 `Set-Content` 写回**破坏了文件编码**
+（中文全丢、1087 行变 778 行）。已 `git checkout` 恢复，改用
+`[System.IO.File]::WriteAllText(path, text, UTF8Encoding($false))` 重做。
+> **教训**：变异测试前先备份；写回必须指定**无 BOM UTF-8**；否则「还原」本身变成一次事故。
+
+### 五、顺带发现（**未修**，已登记 `doc/long-term-issues.md`）
+
+- **doubao `loginProbe.ok` 与同文件 `accountProbe.avatar` 口径不一致**：真机头像 class 是
+  `rounded-full object-cover select-none mr-8 h-36 w-36`（**不含 "avatar"**）⇒
+  `loginProbe.ok` 命中 **0** ⇒ **已登录的 doubao 被判 `probe-fallback`（uncertain）**，
+  尽管头像与昵称 `aaa` 都在（用户当场指出，Lead 有头复核确认）。
+- **`#53` 的三态是死代码**：`browser-driver.js:1548` 算出的 `loginState`
+  被 `:1586` 的简写 `loginState,` 覆盖（后写者胜）⇒ **0.19.75 的三态从未到达面板**。
+  活体反证：10 行 `loginState` **恒为 `idle`**，而三态只可能返回那三个值之一。
+- **qwen 登录**：不是站点弹验证码，是**登录循环 300s 墙钟 + 从不检测验证码**
+  （`browser-driver.js:4655-4679`）= `long-term-issues` **#33** 现场；且今天那个浏览器是
+  `--headless` ⇒ 用户想登也没有可见窗口。
+
+### 本轮**未**做（诚实边界）
+
+**真实对话验证一次都没跑**：三个站点 cot 前置原先未绿（**现已修复，但修复后仍未做端到端真实发送**），
+qwen 未登录 ⇒ 按用户纪律**没有任何站点满足放行条件**。长运行稳定性、多轮工具循环收敛、
+会话重启恢复、视觉上传：全部【待验】。
+
 ## 0.19.76
 
 **补发 0.19.75 资产里缺的那半个 captcha 修复；并修掉三处「工具/闸门自身」的缺陷。**

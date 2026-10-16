@@ -4745,7 +4745,25 @@ function imageMarkdown(images) {
         handler: (req, res) => {
           // 这一页是「脱离宿主、单独打开」的设置页，没有 configManager 之外的账号入口，
           // 因此按**当前设置里的账号**现算（与 listModels 同一取法，不另立第二套）。
-          const html = renderSettingsPage(webModelsFor(configManager.get().accounts));
+          //
+          // 0.19.80：教学文本**运行时从真源取**，不再由设置页手写第二份。
+          // 背景（真机复核发现的真缺陷）：`settings-page.js` 原先手写的「首轮教学提示词」
+          // 与 `agent-preset.js` 实际发送的**不一致** —— 例如 doubao 那段教
+          // `<seed:tool_call>`（**桥自己从不教**）、kimi/qwen 那两段**缺 `mcp_action`**
+          // （而 `mcp_action` 是裸 JSON 路径的唯一解析凭据）⇒ 用户照抄会得到解析不了的调用。
+          // 这违反了本仓库红线 3「工具协议只有一处定义」，修法就是让展示层**调用**真源。
+          let teaching = null;
+          try {
+            const tools = [{ name: 'read', description: '读取本地文件文本内容。',
+              parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } }];
+            teaching = {
+              default: transportNoteFor('kimi', tools),      // 默认形状的代表站点（教学逐字相同）
+              glm: transportNoteFor('glm', tools),
+              trainDefault: trainNoteFor('kimi', '', tools),
+              trainGlm: trainNoteFor('glm', '', tools),
+            };
+          } catch (e) { warn('settings-page teaching text unavailable:', e?.message); }
+          const html = renderSettingsPage(webModelsFor(configManager.get().accounts), teaching);
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
           res.end(html);
         }
