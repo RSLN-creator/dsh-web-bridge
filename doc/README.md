@@ -134,6 +134,7 @@
 | `package/dsh-webcode-bridge/test-mock/prompt-bench.mjs` | [prompt-engineering-evidence-2026-09-14.md](research/prompt-engineering-evidence-2026-09-14.md)（变体的文献依据）+ [comment-style.md](comment-style.md) **§9**（实验与取证纪律、报告模板）+ `test/prompt-bench-harness.test.mjs` |
 | `package/dsh-webcode-bridge/test-mock/site-verify*.mjs` | [long-term-issues.md](long-term-issues.md) **#68/#69/#71**（验收工具自己制造假结论/自造风控/同一会话判据的三条真缺陷）+ `test/site-verify-verdict.test.mjs`、`test/site-verify-pacing.test.mjs` |
 | `package/dsh-webcode-bridge/test-mock/kimi-send-diagnose.mjs` | [long-term-issues.md](long-term-issues.md) **#70**（kimi `SEND_NOT_CONFIRMED`：只读诊断器，**只跑 `trial:true` 可点性检查**，零写入零发送）|
+| `package/dsh-webcode-bridge/test-mock/structure-audit.mjs` | [CODE-STRUCTURE.md](CODE-STRUCTURE.md) §三/§七（结构审计：静态 import 依赖图（扇入/扇出/环）+ 超长函数启发式 + 安全面模式扫描；**只读**，`exec` 会误报正则 `.exec()`，结论以人读为准）|
 | `package/dsh-webcode-bridge/lib/challenge-heuristics.js` | [long-term-issues.md](long-term-issues.md) **#63**（doubao 图片式验证伪装成「超时」：词表**唯一真源**，归因用词表、拦截用站点声明）+ `test/challenge-heuristics.test.mjs`、`test/captcha-gate.test.mjs` |
 | `package/dsh-webcode-bridge/test-mock/doubao-frames-probe.mjs` | [long-term-issues.md](long-term-issues.md) **#63**（**只读、零发送**：查 doubao 弹验证时到底有几个 frame —— 因为 `page.evaluate` 只跑主框架）|
 | `package/dsh-webcode-bridge/lib/bench.js` | [comment-style.md](comment-style.md) **§9.3**（判据先于实现）+ `test/bench.test.mjs` |

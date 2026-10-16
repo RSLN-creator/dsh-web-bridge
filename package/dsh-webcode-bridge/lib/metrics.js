@@ -429,10 +429,17 @@ export function estimateTokens(s) {
   let word = 0;
   let other = 0;
   for (const ch of str) {
+    // 快速路径：ASCII（码点 < 128）不可能匹配下面的 Unicode 脚本属性正则，
+    // 直接走整数比较。逐码点取一次 codePointAt：ascii 判定走整数比较，
+    // 比再跑一条正则快得多，而 estimateTokens 会被喂进十万级字符的整段提示词。
+    const cp = ch.codePointAt(0);
+    if (cp < 128) {
+      if (isAsciiWordChar(cp)) word += 1; else other += 1;
+      continue;
+    }
     if (CJK_RE.test(ch)) { cjk += 1; continue; }
-    // 逐码点取一次 codePointAt：ascii 判定走整数比较，比再跑一条正则快得多，
-    // 而 estimateTokens 会被喂进十万级字符的整段提示词。
-    if (isAsciiWordChar(ch.codePointAt(0))) word += 1; else other += 1;
+    // 非 ASCII 且非 CJK（emoji、带重音拉丁字母等）：原实现与其余 ASCII 符号同桶。
+    other += 1;
   }
   const base = cjk * TOKEN_DENSITY.cjk + word * TOKEN_DENSITY.word + other * TOKEN_DENSITY.other;
   return Math.max(1, Math.ceil(base + base * TOKEN_DENSITY.margin));

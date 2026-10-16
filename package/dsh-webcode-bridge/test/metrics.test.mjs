@@ -85,3 +85,13 @@ test('estimateTokens：中英混合按 CJK/ASCII 分别计价', () => {
   assert.ok(mixE >= estimateTokens('package.json'), '混合含 ASCII 不应低于纯 ASCII 部分');
   assert.ok(zhOnly > estimateTokens('abc'), '纯中文长文本估算应高于短英文');
 });
+
+test('estimateTokens：非 ASCII 非 CJK（emoji/带重音拉丁）仍按 other 计价，快速路径不改变归类', () => {
+  // 0.19.92 给 ASCII 加了码点快速路径；这条钉住「非 ASCII 非 CJK 字符仍落 other 桶」
+  // 这一语义等价性，防止将来有人把 else 分支写成 word 而悄悄改判计价。
+  const emoji = '🙂';         // 码点 > 128，非 CJK
+  const accented = 'é';       // 带重音拉丁
+  // 一个 emoji 与一个 ascii 符号同桶，估算应一致（margin 下至少同数量级、且相等）
+  assert.equal(estimateTokens(emoji), estimateTokens('!'));
+  assert.equal(estimateTokens(accented), estimateTokens('!'));
+});

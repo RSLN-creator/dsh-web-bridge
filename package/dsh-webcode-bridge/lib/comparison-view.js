@@ -321,7 +321,7 @@ function createColumn(index) {
   col.innerHTML = \`
     <div class="column-header">
       <select class="account-select" data-index="\${index}">
-        \${allAccounts.map(a => \`<option value="\${a.key}">\${a.label}</option>\`).join('')}
+        \${allAccounts.map(a => \`<option value="\${escapeHtml(a.key)}">\${escapeHtml(a.label)}</option>\`).join('')}
       </select>
       <button class="send-single" data-index="\${index}">发送</button>
     </div>

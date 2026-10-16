@@ -269,6 +269,23 @@ export async function downloadReleaseAsset({ url, name, timeoutMs = 120000, dir 
 }
 
 /**
+ * profile 名白名单：合法 profile 是 `web` / `headless` 这类短小写标识符。
+ *
+ * 它会被拼进 `dsh plugin --profile <profile> add …` 命令行（Windows 上 `shell:true`），
+ * 因此**必须在拼接前拒绝**一切 shell 元字符——`;`、`&`、空格、引号、`$()` 都不许出现。
+ * 此前这里直接 `String(profile)` 拼进去，是一个真实的命令注入面：本机进程经
+ * `POST /__webcode/update` 传入 `profile`（`web-control.js` 只做了 `trim`），
+ * 带分号的值会在这台机器上以当前用户身份执行任意命令（见 doc/security-review.md §6.3.1
+ * 「本机进程可直连 127.0.0.1」）。
+ *
+ * @param {string} p 待校验的 profile 名
+ * @returns {boolean}
+ */
+export function isSafeProfileName(p) {
+  return /^[a-z][a-z0-9_-]{0,31}$/.test(String(p || ''));
+}
+
+/**
  * 真的执行一次安装：`dsh plugin --profile <p> add <本地 tgz 绝对路径>`。
  *
  * 为什么用 `dsh` 而不是直接 `pnpm add`：profile 的依赖与 bundles 声明由 dsh 自己
@@ -290,7 +307,11 @@ export function installLocalTarball({ profile = 'web', file = '', timeoutMs = 30
   if (!spec || !fs.existsSync(spec)) {
     return Promise.resolve({ ok: false, error: '本地 tarball 不存在：' + spec, needsRestart: false, command: '' });
   }
-  const args = ['plugin', '--profile', String(profile), 'add', spec];
+  const profileName = String(profile || 'web');
+  if (!isSafeProfileName(profileName)) {
+    return Promise.resolve({ ok: false, error: 'profile 名不合法：' + profileName.slice(0, 40), needsRestart: false, command: '' });
+  }
+  const args = ['plugin', '--profile', profileName, 'add', spec];
   const command = 'dsh ' + args.join(' ');
   return new Promise((resolve) => {
     let settled = false;

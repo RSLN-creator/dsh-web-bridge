@@ -73,6 +73,8 @@
 | 70 | ★ **kimi `SEND_NOT_CONFIRMED`：长正文（1549 字）下发不出去**（2026-10-16 登记，**未修，待根因**）——真机 `site-verify-multiturn --site kimi` 第 1 轮回 `SEND_NOT_CONFIRMED`（「正文已写入输入框，但按站点契约发出后网页没有收下」）。驱动日志逐字：`send path: sel=.send-button-container ready=true composerChars=1549 url=https://www.kimi.com/`。**三条只读取证已排除低层原因**（零发送、零写入）：① **登录没问题**——只读截图左下昵称 `TYZ0712`、composer 可见可编辑（**不是**未登录）；② **发送键可点**——`locator.click({trial:true})` **通过全部可点性检查**（attached/visible/**stable**/receives-events/enabled 全绿）、`pointer-events:auto`、`opacity:1`、无 `disabled` 类、祖先链 6 层无遮挡、`elementFromPoint` 命中其内部 `svg>path`；③ **无弹层吃点击**——可见 `[role=dialog]`/modal/mask 列表为空。⇒ 剩余方向是**内容状态 / 长度相关**：仓库既有成功读数那次 `composerChars=65` 而本轮 **1549 字**失败，**「长度相关」是一个具体假设但本轮未证**（需配对实验：同一会话先短发一条、再长发一条）。**为什么记 FAIL 不记 BLOCKED**：这是真实页面复现的失败（产品结论侧），不是外部条件挡住。 | 高 | 否 | `test-mock/site-verify-multiturn.mjs`、`lib/browser-driver.js:3848-3952`、`.tmp/real-lane/out/kimi-debug-20261016-0158.log` |
 | 71 | **`site-verify-multiturn` 的 `session.same` 对无地址形状站点一度记 UNVERIFIED**（2026-10-16 登记，**已修**）——zai 真机三轮**全程同一会话**、工具闭环成立，但**三个 `sessionId` 全是 `null`**（`conversationIdFromUrl` 对 zai/doubao/qwen 无形状表）⇒ 只看 `sessionId` 就会把「明明停在同一个网页会话上」记成 UNVERIFIED（**上一轮 Phase 2 里 qwen 的 `tool.resultRoundTrip` 记 UNVERIFIED 正是同型成因**）。**已修**：判定抽成纯函数 `sameSessionVerdict`（`test-mock/site-verify-verdict.mjs`），**两个判据取其一成立即算成立**（① `sessionId` 逐字相同；② 驱动 0.19.52 起维护的**落地地址锚** `landedUrl` 逐字相同——`conversationStay` 认的就是它，换会话会判 `WEB_SESSION_LOST`）；**两者都拿不到时仍记 UNVERIFIED**（确实没有证据时不许猜成通过）。**反向护栏**：`test/site-verify-verdict.test.mjs` ⑦/⑦b/⑦c/⑦d/⑦e（含「把判成立写宽」的变异对照）。⚠ **不使用「同一个 key 复用」当证据**：key 是 DSH 侧的槽名，网页会话是否真停在那一个正是要验的东西。 | 中 | 否 | `test-mock/site-verify-verdict.mjs`、`test/site-verify-verdict.test.mjs`、`test-mock/site-verify-multiturn.mjs` |
 | 76 | ★★ **doubao 的「助手回复选择器」选不中 ⇒ `replyChars:0 / selectorHit:false` 是假读数**（2026-10-17 登记，**已修，0.19.89**）——驱动在 doubao 上**恒定**报 `turn timeout scene {"captureAlive":true,"replyChars":0,"selectorHit":false}`，而**只读**导航到同一会话页（零发送）证明**页面上确有一段完整模型回复**（截图 + DOM 双证据）。**根因【实证】**：驱动实际用的是 `answerSelectorFor('doubao')` 的**兜底串** `.markdown, [data-message-author-role="assistant"], .ds-markdown`（DeepSeek 形状兜底；doubao **没有**声明 `answerSelector`，而 0.19.19 的承诺是「未声明站点零位移」）⇒ 该串在 doubao 会话页命中 **0 个可见节点**；而真实助手容器类名含 **`receiveMessage`**（只读实测：`[class*="receiveMessage"]` 命中 **3 个可见**、最内层 **150 字**）。**⇒ 后果**：`replyChars:0` 与 `selectorHit:false` **与页面实际内容无关**，是**选择器形状错配**造成的恒假读数——而 `browser-driver.js:3637-3640` 的注释把 `selectorHit:false` 定义为「我们的选择器对这个站点是瞎的」，即**它本来就是设计用来暴露这种现场的**，只是没人看 doubao 的读数。⚠ 这同时解释了**第 ③ 项 doubao FAIL**：即使网页正常回复，桥也**读不到**，只能等到超时。**也改写了 #63 的结论**：所谓「doubao 图片式验证」在**本次真机复跑中根本没有出现**（标题是「**不文明用语提醒**」= 站点**内容审核**提示，正文含「安全」「图片」等词但**不是人机验证**）⇒ #63 的超时归因**未命中是正确的**（当时确实没有验证码），真正挡路的是本缺陷。**若要继续**：① 按只读读数给 doubao 声明 `answerSelector`（含 `[class*="receiveMessage"]`）；② 同法逐站取 zai/kimi/qwen 的**真实**助手容器（引擎是兜底串、都不该盲信）；③ 加护栏：`answerSelectorFor(site)` 对**每个真机跑过的站点**必须能命中该站会话页的助手节点。 | 高 | 否 | `lib/providers.js`（doubao 段）、`lib/browser-driver.js:315-318/:922`、`test-mock/doubao-answer-selector-candidates.mjs` |
+| 77 | ★ **`update.js` 的 `profile` 参数未经校验拼进 `shell:true` 命令 ⇒ 命令注入面**（2026-10-17 结构审查登记，**已修，0.19.92**）——`installLocalTarball` 在 Windows 上走 `spawn('dsh ' + args.slice(0,-1).join(' ') + ' "' + spec + '"', { shell:true })`，其中 `args` 含 `--profile <profile>`；`profile` 来自 `POST /__webcode/update` 的 body（`web-control.js:1570` 只 `String().trim()`，**未做任何白名单校验**）。而 `shell:true` 下 Node 不替参数加引号，含 `;`/`&`/`$(...)` 的 profile 值会**以当前用户身份执行任意命令**。⚠ 攻击者面 = 「本机进程可直连 127.0.0.1」（`doc/security-review.md` §6.3.1 已知边界）。**已修**：新增纯函数 `isSafeProfileName`（`/^[a-z][a-z0-9_-]{0,31}$/`，拒绝大写/空格/元字符/超长/`-` 开头），`installLocalTarball` 在拼命令前先拒。护栏 `test/update.test.mjs`（18 项，含合法/非法各 13 例）。 | 高 | 否 | `lib/update.js`（`installLocalTarball` / `isSafeProfileName`）、`lib/web-control.js:1570`、`test/update.test.mjs` |
+| 78 | ★ **`comparison-view.js` 把账号 label 裸拼进 `innerHTML` ⇒ 存储型 XSS 面**（2026-10-17 结构审查登记，**已修，0.19.92**）——`renderComparisonView` 产出的页内 `createColumn()` 把账号 `label`（用户可影响的站点昵称）与 `key` **直接**拼进 `<option>` 的 `innerHTML` 模板，未做 HTML 转义 ⇒ 含 `<img onerror>` 的昵称会被浏览器当标签解析。⚠ 该 HTML 经 `/__webcode/comparison` 原样返回，而昵称来源是账号缓存（`account-cache.js`），非本机用户输入，但仍属「外部数据进 DOM」的注入面。**已修**：模板里 `a.label`/`a.key` 均套 `escapeHtml(...)`。护栏 `test/comparison-view.test.mjs`（3 项，源码级：断言 `escapeHtml(a.key)`/`escapeHtml(a.label)` 在场 + 裸拼旧形态不在场）。⚠ 与 #75 同款边界：源码级护栏只证「转义在场」，不证「浏览器里真执行」——本仓库一贯承认，不冒充。 | 中 | 否 | `lib/comparison-view.js`（`createColumn`）、`test/comparison-view.test.mjs` |
 | 75 | ★★ **`page.evaluate` 传 4 个实参 ⇒ Playwright 同步抛 ⇒ 被 `.catch` 吞掉 ⇒ 那段判据「从来没跑过」**（2026-10-16 登记，**已修，0.19.87**）——**这是 0.19.83 #63 修复真机复验失败的真正原因**。契约（`playwright-core` 的 `evaluate(pageFunction, arg)`）：**pageFunction 之外只许再有一个 arg**，传多了它**同步抛** `Too many arguments. If you need to pass more than 1 argument to the function wrap them in an object.`（离线实证：仓库自带 chromium，原文见 `.tmp/audit-adaptation/verify-evaluate-argc.mjs`）。**危险在于它抛得早、又几乎总带 `.catch`**：`f.evaluate(fn, a, b, c).catch(() => null)` ⇒ 表达式**抛**，异常变成 `null`，调用方看到的是「没命中 / 没读到」，而真相是**那段判据从未执行**。**真机后果（#63/#75 串联）**：0.19.83 给 doubao 加的**超时点验证归因**写成 `f.evaluate((sel, patBody, patTitle) => …, sel, PAT.body, PAT.title)`（4 个顶层实参）⇒ 每次都在第一行之前抛 ⇒ 被 `.catch` 吞 ⇒ 复验读数**既没命中验证码、也没打出 probe 诊断行**。⚠ **最刺眼的一点**：当时**源码级护栏全绿**（`captcha-gate` ④b 只断言「源码里有 `page.frames?.()`」这个字符串）——**护栏只证明「字符串在场」，不证明「跑得起来」**。**全仓普查**：`lib/` + `test-mock/` 里 `X.evaluate(...)` 传 ≥3 顶层实参的调用 = **恰好 1 处，就是这一处**（⚠ 首版扫描器阈值写成「>1」，把 32 处**正确**的 `fn, arg` 全报成缺陷 ⇒ 一次**假读数**；阈值正确值是 **3**，因为 pageFunction 自己占第一个位置）。**已修**：参数收进**一个对象**（Playwright 契约内唯一的多值形态）。**护栏**：`test/evaluate-argc.test.mjs` **双判据**——① 源码级（`lib/`+`test-mock/` 里 `evaluate` 顶层实参不得 ≥3）；② **行为级**（真的起浏览器，钉住「传 3 个实参必抛」+「单对象正常」+「#63 的 doubao 真机原文在正确传参下必须命中」）。**另一个产物**：把逐 frame 扫描的**编排**抽成纯函数 `lib/captcha-gate-scan.js`（`scanFramesForChallenge`），并用**假 frame** 离线驱动（`test/captcha-gate-scan.test.mjs` **7/7**：命中即停 / probe 汇总 / frameError 如实记 / 跨域抛错不挡真命中 / 空列表不抛）。**反向变异**：① 静默吞 frameError ⇒ **5/7 红**；② 命中不即停 ⇒ **5/7 红**；③ 未命中不汇总 probe ⇒ **3/7 红**。 | 高 | 否 | `lib/browser-driver.js:3698`、`lib/captcha-gate-scan.js`、`test/evaluate-argc.test.mjs`、`test/captcha-gate-scan.test.mjs` |
 | 74 | ★ **兼容别名 `deepseek-web` 的目录条目漏了 `acceptsImages` ⇒ 同一个模型两条路径给出相反答案**（2026-10-16 登记，**已修，0.19.86**）——同一个模型有两条取数路径：**目录路径** `listAllModels()` 的条目被 `web-control.js` 的 `GET models`（`:968`）与 `GET context-windows`（`:999`）**原样返回**；**解析路径** `resolveWebModel(id)` 喂 `index.js:1270` 的 `inputModalities`。后者是**护栏**（`index.js:1263-1266` 注释逐字写明：宿主只在它不含 `'image'` 时把图片换成文字占位）。**冲突实例**：别名条目 `providers.js:963` **手写**、**漏了 `acceptsImages`**（显式为 undefined ⇒ 假），而 `resolveWebModel('deepseek-web')` 解析到**同一个** DeepSeek 模型是 `true`；⚠ `deepseek-web` 还是 **`DEFAULT_MODEL_ID`**（`providers.js:1024`）⇒ 那条护栏在**默认模型**上静默失效。**代价方向**：声明错方向时 **harness 截图在到达桥之前就被剥离**，症状是「网页端说没图」而**桥这边看不到任何异常**。**已修**：别名条目与真条目**同源取值**（照抄 `DEEPSEEK.models[0]` 的字段，不再手写第二份）⇒ 新增字段不会再漏。**实测**：修前 `listAllModels()` 17 条里 **1 条不一致**，修后 **0**。**护栏**：`test/provider-surface.test.mjs` 判据 8（逐条比对两条路径）；**反向变异**：把 `acceptsImages` 再删掉 ⇒ **7/8 红**。⚠ 本判据只查「两条路径同值」，**不查**「该值是否符合真机事实」——后者要真机读数（见第 ① 项四态）。 | 高 | 否 | `lib/providers.js:963`、`lib/index.js:1270`、`lib/web-control.js:968/:999`、`test/provider-surface.test.mjs` |
 | 73 | ★ **真实取证日志被测试合成回复污染**（`~/.dsh/logs/`）：守卫只认 `NODE_TEST_CONTEXT`，而本机**文档化要求逐文件跑**（`spawnSync` EPERM）⇒ 那种跑法**不设该变量**，守卫不生效（2026-10-16 登记，**已修**）——**实测读数**（逐条可复核）：① 跑一次 `node test/auto-continue.test.mjs` ⇒ 真实日志 `webcode-bridge-replies.deepseek.log` 里 `session=auto-cont-1` 条目 **34 → 36（+2）**；② 全量 **3644 条里 2065 条来自非真机会话**（`auto-*` / `fence-tail` / `headless-tail`…），**真机会话（`session-<uuid>`）只有 1579 条**。**它真的误导过一次**：本轮做第 ④ 项时，审计把一条**测试合成形状**（`D:/x.js` 占位值、9 个 `auto-*` 会话、201 条里只有 4 个逐字片段、30s 等间隔）当成「deepseek 真机反复失败形态」，差点照它改解析器 ⇒ **假读数比没有读数更贵**。**已修**：新判据三条任一命中即拒写 —— ① `NODE_TEST_CONTEXT`（原判据）；② **调用栈里出现本仓库 `test/` 或 `test-mock/` 的 .mjs**（**与跑法无关**，逐文件跑同样命中）；③ 显式传 `opts.dir` 的写入照常放行（测试自己的用例不受影响）。**验证**：修前 delta **+2** → 修后 **0**；护栏 `test/reply-log.test.mjs` 新增「逐文件跑也必须返回 null」；反向变异：禁用栈判据 ⇒ **7/8 红**。**已知边界**：栈判据依赖 `Error().stack` 里出现测试文件路径，若将来测试改从别的入口调用（不经 `test/` 文件）则回落为原行为 ⇒ 因此**显式 `opts.dir` 才是测试写入的正路**（文件头注已写明）。 | 高 | 否 | `lib/reply-log.js`、`test/reply-log.test.mjs` |
@@ -4486,6 +4488,66 @@ await page.evaluate((sel, PAT) => { … new RegExp(PAT.body) … })
 
 给扫描器补**箭头形参收集**（须同时保留 ⑤/⑥ 两条回归钉与 ⓪ 自检的既有断言），
 并在 ⓪ 里加一条「箭头形参不得被误报」的正例。**改之前先跑 ⓪**——那是判据自身的护栏。
+
+## 78. ★ **`comparison-view.js` 把账号 label 裸拼进 `innerHTML` ⇒ 存储型 XSS 面**（2026-10-17 登记，**已修，0.19.92**）
+
+### 缺陷现场
+
+`renderComparisonView({ allSlots })` 把账号槽投影成 `siteOptions`（`{key, label}`），
+`label` 是**账号昵称**（来源 `account-cache.js` 落盘缓存，非本机用户即时输入），
+经 `JSON.stringify(siteOptions)` 嵌入页内 JS，再由页内 `createColumn()` 拼 `<option>`：
+
+```js
+// 修前（危险）：label/key 裸拼进 innerHTML
+\${allAccounts.map(a => \`<option value="\${a.key}">\${a.label}</option>\`).join('')}
+```
+
+含 `<img src=x onerror=...>` 的昵称会被浏览器当标签解析 ⇒ 存储型 XSS。
+HTML 经 `/__webcode/comparison`（`index.js:4799`）原样返回，受 `csrfSafe` 三道闸保护，
+但「本机进程可直连 127.0.0.1」是已知边界（`security-review.md` §6.3.1），
+故仍是可被本机恶意进程触发的注入面。
+
+### 修复
+
+```js
+// 修后：label/key 均经 escapeHtml（页内函数，textContent 反读实现）
+\${allAccounts.map(a => \`<option value="\${escapeHtml(a.key)}">\${escapeHtml(a.label)}</option>\`).join('')}
+```
+
+### 护栏与边界
+
+`test/comparison-view.test.mjs` 3 项，**源码级**（与 `captcha-gate` ④b 同款）：
+断言模板里 `escapeHtml(a.key)`/`escapeHtml(a.label)` 在场、裸拼旧形态不在场。
+⚠ 与 #75 同一诚实边界：源码级护栏只证「转义在场」，不证「浏览器里真执行」——
+不在此冒充。
+
+## 77. ★ **`update.js` 的 `profile` 参数未经校验拼进 `shell:true` 命令 ⇒ 命令注入面**（2026-10-17 登记，**已修，0.19.92**）
+
+### 缺陷现场
+
+`installLocalTarball`（`update.js:288`）在 Windows 上：
+
+```js
+child = process.platform === 'win32'
+  ? spawn('dsh ' + args.slice(0, -1).join(' ') + ' "' + spec + '"', { shell: true, windowsHide: true })
+  : spawn('dsh', args, { windowsHide: true });
+```
+
+其中 `args = ['plugin', '--profile', <profile>, 'add', spec]`，`profile` 来自
+`POST /__webcode/update` 的 body（`web-control.js:1570` 只 `String().trim()`）。
+`shell:true` 下 Node **不替参数加引号**，含 `;`/`&`/`$(...)` 的 profile 值会
+以当前用户身份执行任意命令。攻击者面 = 「本机进程可直连 127.0.0.1」。
+
+### 修复
+
+新增纯函数 `isSafeProfileName`（`/^[a-z][a-z0-9_-]{0,31}$/`），
+`installLocalTarball` 在拼命令前先拒，非法值返回
+`{ ok:false, error:'profile 名不合法：…' }`。拒绝大写（profile 名事实全是小写）、
+空格、shell 元字符、超长、`-` 开头（防 `--xxx` 注入额外参数）。
+
+### 护栏
+
+`test/update.test.mjs` 新增用例（合法 4 例 + 非法 13 例），共 18 项。
 
 ## 76. ★★ **doubao 的「助手回复选择器」选不中 ⇒ `replyChars:0 / selectorHit:false` 是假读数**（2026-10-17 登记，**待修**）
 

@@ -11,9 +11,12 @@
 // installLocalTarball）有副作用，由接线层与人工验证覆盖。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   parseVersion, compareVersions, pickLatest, assetForVersion, updateDecision,
-  isSafeDownloadUrl, PACKAGE_NAME, GITHUB_REPO,
+  isSafeDownloadUrl, isSafeProfileName, installLocalTarball, PACKAGE_NAME, GITHUB_REPO,
 } from '../lib/update.js';
 
 /** 造一条 Releases API 形状的记录（只带本模块消费的字段）。 */
@@ -183,4 +186,34 @@ test('isSafeDownloadUrl：只放行 Releases 资产的真实下载域，http 与
 test('包名与发布仓库可核对（改了任何一个，更新就指向了别处）', () => {
   assert.equal(PACKAGE_NAME, 'dsh-webcode-bridge');
   assert.equal(GITHUB_REPO, 'RSLN-creator/dsh-web-bridge');
+});
+
+// ---- isSafeProfileName（0.19.92 新增的命令注入防护） -----------------------
+
+test('isSafeProfileName：合法 profile 放行，shell 元字符/空值/超长一律拒绝', () => {
+  for (const good of ['web', 'headless', 'desktop', 'my-profile_2']) {
+    assert.equal(isSafeProfileName(good), true, good);
+  }
+  for (const bad of [
+    '', ' ', null, undefined,            // 空值
+    'web; rm -rf /', 'web && calc', 'web|cat', 'web$(whoami)', 'web`id`',
+    'web /tmp', 'web\tx', 'web\nx',       // shell 元字符
+    'WEB', 'Web', 'web name',             // 大写 / 空格
+    'a'.repeat(33),                       // 超长
+    'web;dsh', '--profile', '-x',         // 以 - 开头 / 注入额外参数
+  ]) assert.equal(isSafeProfileName(bad), false, JSON.stringify(bad));
+});
+
+test('installLocalTarball：非法 profile 在 spawn 之前被拒，不进入命令拼接', async () => {
+  // 造一个存在的临时文件，确保它走到 profile 校验这一支（而不是「文件不存在」提前返回）。
+  const tmp = path.join(os.tmpdir(), 'webcode-update-guard-' + process.pid + '.tgz');
+  fs.writeFileSync(tmp, 'x');
+  try {
+    const r = await installLocalTarball({ profile: 'web; rm -rf /', file: tmp, timeoutMs: 1000 });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /profile 名不合法/);
+    assert.equal(r.needsRestart, false);
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
 });
