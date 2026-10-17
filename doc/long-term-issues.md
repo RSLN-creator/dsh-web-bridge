@@ -5251,4 +5251,22 @@ CI run 38532815623 **success**（CI + CodeQL）；全量单测 **126/127**
 （唯一失败 `webcode-preset.test.mjs` ②e 是**机器状态依赖**：它读本机安装的官方
 `standard.patch.yml`，在改动前的 2368b4a 上同样红，CI 干净跑器上不红）。
 
+### 2026-10-17 精确读数（0.19.92 发版轮补记）：那条「机器状态依赖」红的具体形状
+
+上面那句只说了「依赖本机状态」。本轮把它**测成了可修的形状**：
+
+- 本机全局 `@deepseek-ai/dsh` = **0.2.1-alpha.2**；其 `standard.patch.yml`
+  （`%APPDATA%\npm\node_modules\@deepseek-ai\dsh\node_modules\@deepseek-ai\dsh-web-app\presets\`，
+  mtime **2026-10-13T19:20:25Z**，7090 B）里**已不存在**这三项：
+  `tool-subagent-codex` ❌ / `tool-subagent-claude-code` ❌ / `tool-ralph` ❌；
+  而 `tool-plugin-manager` ✔ / `workflow-ptc` ✔ / `tool-subagent-fork` ✔ / `tool-workflow` ✔ 仍在。
+  官方该文件还**新增**了 `planning` / `compaction` / `delegation` 三个 id。
+- 断言原文（`test/webcode-preset.test.mjs:237`）：
+  `清单称 tool-subagent-codex「在 standard 里本就 disabled」，但官方 standard 里没有这一项`。
+- **决定性验证（本轮实做）**：`git stash` 把 0.19.92 的改动全部撤掉后重跑该文件 ——
+  **同样 11 pass / 1 fail**（mtime 与断言逐字相同）⇒ 与本轮改动无关；CI 上该路径不存在 ⇒ 该用例 **skip**，CI 不红。
+- **本轮为何不修**：修它 = 跟随官方 0.2.1-alpha.2 把三份清单改写一遍，是**独立的一刀**；
+  且它**不影响随包交付物**（`test/` 不在 `package.json` 的 `files` 白名单里，tarball 实测 64 项、零 `test/`）。
+  真要修时按上面读数走：删清单里那三个已消失的 id，并把官方新增的三个 id 交代进 ②c 的差集面。
+
 

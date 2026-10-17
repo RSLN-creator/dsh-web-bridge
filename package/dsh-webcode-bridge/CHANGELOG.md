@@ -5,6 +5,53 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.92（2026-10-17 发版轮）发布轮 + 本机 GitHub 传输层修复（**版本号一次从 0.19.76 跨到 0.19.92**）
+
+### 这次发版装的是什么
+
+0.19.77–0.19.91 这十五轮改动**一直没换版本号**（本文件里那些小节的标题自己写着「版本号不变」），
+`package.json` 停在 `0.19.76`。本版本把它们**一次性收口**到 `0.19.92`，tag `v0.19.92`
+与 `package.json` 的 version 逐字一致（`release.yml` 有硬校验）。
+
+覆盖面（明细见 [doc/progress.md](../../doc/progress.md) 各节）：
+
+| 轮次 | 主题 |
+| --- | --- |
+| 0.19.77 | 除 DeepSeek 外全部站点的「三项适配」真机审计 + 三条真缺陷修复 |
+| 0.19.78 | Phase 2 真实对话验证：五站四态 + 三条真缺陷修复 |
+| 0.19.79 | 图片能力真机验收 + 「人类操作记录」回路 + zai `no-options` 排查 |
+| 0.19.80 | 设置页不再手写第二份协议（红线 3）+ 站点级工具调用适配审计 |
+| 0.19.81 | zai 第二轮 `no-options` 真因（按钮被禁用）+ 挖出红线 1 的洞 |
+| 0.19.82 | 红线 1 的洞 + 验收工具**自己**的两条缺陷（#68 / #69） |
+| 0.19.83 | doubao 图片式验证不再伪装成「超时」（#63）+ 词表收成唯一真源 |
+| 0.19.84 | 取证日志被测试污染（#73） |
+| 0.19.85 | 第 ④ 项「解析覆盖」逐站闭环（含穷尽性证明） |
+| 0.19.86 | 默认模型 `deepseek-web` 的带图能力两条路径给相反答案（#74） |
+| 0.19.87 | #63 真机复验失败的**真因**：判据从未跑过（#75）——`page.evaluate` 只接受一个 arg |
+| 0.19.88–0.19.91 | doubao「读不到回复」真因（#76）+ 修复真正部署到 live 副本 + 逐站真机验证已声明的 `answerSelector` |
+
+### 本机 GitHub 传输层修复（**不改产品代码**）
+
+本机 `git` 的两条传输在受限环境里都是死的，而**报错都指向错误的方向**：
+
+| 现象 | 真因（实测） | 修法（全局 git 配置） |
+| --- | --- | --- |
+| 走 SSH：`ssh.exe: fatal error - NtCreateDirectoryObject(\BaseNamedObjects\msys-2.0S5-…): 0xC0000022` | Git 自带的是 **MSYS ssh**，它要建命名对象而被沙箱挡住；网络与密钥其实都好（`ssh -T git@github.com` 认证成功） | `core.sshCommand = C:/Windows/System32/OpenSSH/ssh.exe` |
+| 走 HTTPS：`schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030e)` | 默认 `schannel` 后端在受限凭据上下文里取不到凭证；**与证书、代理、网络都无关**（同一时刻系统 `curl.exe` 报的是**一模一样**的错） | `http.sslBackend = openssl` |
+| `github.com:443` 时通时不通（`Failed to connect … after 21085 ms` / `Connection was reset`） | git / curl 的多次直连超时或重置；而同一时刻对**同一个 IP** 的独立 HTTPS 探针又能连续成功 ⇒ 本机到 GitHub 的 443 通路是**间歇性**的，不是永久封锁。`api.github.com` 全程正常（`gh` CLI 可用） | 固定「一直可用」的那条腿：SSH；HTTPS 侧改用 openssl 后端 |
+
+修复后实测（**命令行无任何 `-c` 覆盖**）：`git ls-remote origin` ✔、
+`git ls-remote https://github.com/RSLN-creator/dsh-web-bridge.git` ✔、
+`git push --dry-run origin main` ✔（`6dcd816..917abaa  main -> main`）。
+
+### 边界（如实）
+
+- 本次只发 **GitHub Release**（tag 触发 `release.yml` 产出 tgz 资产）；registry 上的 `latest`
+  仍是 `0.19.76` —— 本项目的发布通道按设计**绝不 publish 到任何 registry**。
+- `github.com:443` 的偶发重置是**本机网络**层面的现象，本轮**没有**改 DNS / hosts / 代理设置；
+  上表最后一行只是把可用通道固定下来。
+- 全局配置已备份（`gitconfig.bak-*`），回退只需 `git config --global --unset` 那两行。
+
 ## 0.19.87（2026-10-16 第六轮，**版本号不变**）★★ 找到 #63 真机复验失败的**真因**：判据从未跑过（#75）
 
 ### ★★ `page.evaluate` 只接受**一个** arg，而 #63 的修复传了 4 个
