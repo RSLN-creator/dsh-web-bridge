@@ -869,11 +869,22 @@ export const GEMINI = withEffort({
 // 为什么不改 `ZAI.origin` 而是单列一条：两站域名/登录态/会话目录都不同
 //（profile: sites/zai vs sites/zai-cn），合并会让「登录了哪个站」变成隐式行为。
 // 拆开后模型选择器分别显示 `z.ai/…` 与 `zchat.z.ai/…`，各自登录、各自会话。
-// 复用海外站全部前端契约，只覆盖身份三元组（id/name/origin/shortKey）。
-// ⚠ 用户 2026-10-20：中国站暂时没法登录，先忽略——未登录只报 NEED_LOGIN，
-//   不影响海外站，也不阻塞其它站点。
+//
+// ⚠ 2026-10-20 CI 真缺陷（真机纪律）：最初用 `{...ZAI}` 整份继承，把**需要真机读数
+// 才能声明的站点知识**（answerSelector / efforts / effortControl）也带进了中国站——
+// 而中国站尚未登录、没有取到任何真机读数。仓库纪律是「没有读数的声明不许写」
+//（test/answer-selector 与 test/think-effort 的钉死名单就是这条纪律的护栏，CI 当场红）。
+// 因此这里**只复用不需要读数的通用字段**（completionPaths/decoder/input/sendButton/
+// staticOrigins 等），显式剔除上述三类声明位；等中国站能登录并取到读数后，再逐条补上
+// 并同步护栏名单（不是永不做，是没证据前不做）。
+const {
+  answerSelector: _cnAnswerSelector,
+  efforts: _cnEfforts,
+  effortControl: _cnEffortControl,
+  ...ZAI_CN_BASE
+} = ZAI;
 export const ZAI_CN = Object.freeze({
-  ...ZAI,
+  ...ZAI_CN_BASE,
   id: 'zai-cn',
   name: 'Z.ai 中国站',
   origin: 'https://zchat.z.ai',

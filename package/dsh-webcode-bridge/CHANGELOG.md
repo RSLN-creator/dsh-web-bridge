@@ -5,6 +5,21 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.21.2（2026-10-20 凌晨：修 CI 红 —— zai-cn 不继承「需要真机读数」的声明位；本机 web/headless 安装版；GitHub/npm 双发布）
+
+### 修复：CI 单测红（zai-cn 违反「没有真机读数不许声明站点知识」）
+
+- **现象**：GitHub CI 在 0.21.1 上失败两个文件——
+  · `test/answer-selector.test.mjs` 判据 6：`zai-cn` 声明了 `answerSelector` 却不在真机名单 → 违反「没有读数的声明不许写」；
+  · `test/think-effort.test.mjs` ①/①c/①d：`zai-cn` 继承了 `efforts/effortControl` 但 think-effort 没有它的声明（null）→ 等级集合/同源/载荷三条红。
+- **根因**：`ZAI_CN = {...ZAI}` 的「整份继承」把**需要真机证据**的三类声明位（`answerSelector` / `efforts` / `effortControl`）也带进了尚未登录、零真机读数的中国站。本地没跑这两个文件所以漏测（CI 抓到了——这正是 CI 的价值，如实入账）。
+- **修法**：从继承里显式剔除这三类，只复用不需要读数的通用字段（completionPaths/decoder/input/sendButton/staticOrigins 等）；注释写明「不是永不做，是没证据前不做」。中国站登录能取读数后再逐条补并同步护栏名单。
+- 复跑：answer-selector **8/0**、think-effort **28/0**、provider-surface 8/0、model-labels 12/0、captcha-gate 7/0、timeout-order 7/0、driver-scope 7/0、client-render 74/0、control-routes 19/0、settings-transport 20/0、login-state 16/0、lint PASS。
+
+### 边界
+
+- 本版本只装到本机 web/headless profile；未推 GitHub、未发 npm（发布动作在收尾流程里统一做）。
+
 ## 0.21.1（2026-10-20 凌晨：about:blank 真根因修复 + z.ai 海外站 origin 修回；本机 web/headless 安装版；未推 GitHub/npm）
 
 ### 修复：登录/展示窗口 about:blank 的**第二个**隐藏根因（用户 2026-10-20 报障）
