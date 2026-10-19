@@ -730,6 +730,82 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 会话界面上的「联网搜索」开关（0.19.97）。
+     *
+     * ## 为什么在会话里再加一个（用户 2026-10-20 原话）
+     *
+     * 「本插件没法做到完美兼容……就拿最少状态的 ds 举例——都缺少点击联网搜索的
+     * 按钮/功能呢，和网页版不完全适配」。
+     *
+     * 事实：搜索开关 0.19.94 就有（驱动会点网页控件并回读确认），但它只露在
+     * **设置页 → deepseek 分区**，会话界面里没有任何入口。用户天天在会话里看网页版，
+     * 网页版那颗「联网搜索」就在输入框旁边——桥这边看不到，自然是「缺功能」。
+     *
+     * ## 与设置页那份的关系（不是第二套真相）
+     *
+     * 两者读写**同一个** `searchModeBySite[siteId]`，判据与回落链都在服务端
+     * （`web-control.js` 的 `searchModeOf` + `POST composer-search`）。本组件只做三件事：
+     * 拉读数、发写入、如实显示服务端给的 reason/note。
+     *
+     * ## 「读不到就说读不到」
+     *
+     * 站点由服务端按「这个会话最近一次真实发送落在哪」给出（`sessionSiteOf`）。
+     * 没发过言 ⇒ `siteId: null` ⇒ 这里显示「本站点未知」并禁用，**不猜默认站点**；
+     * 站点未校准（当前只有 deepseek 有 `searchTogglePattern` 契约）⇒ 显示「未校准」
+     * 并禁用，不给出「点了会生效」的假承诺。
+     */
+    function SearchToggle(owner) {
+      const sessionId = useCurrentSessionId(owner);
+      const [state, setState] = React.useState(null);
+      const [notice, setNotice] = React.useState('');
+      const [pending, setPending] = React.useState(false);
+      // 拉读数：sessionId 变了才重拉。`alive` 防卸载后 setState。
+      React.useEffect(() => {
+        if (!sessionId) { setState(null); return () => {}; }
+        let alive = true;
+        apiSoft('composer-search', { sessionId }, 15000).then(r => {
+          if (!alive) return;
+          setState(r.ok ? r.data : { ok: false, error: r.error });
+        });
+        return () => { alive = false; };
+      }, [sessionId]);
+      if (!sessionId) return null;
+      const siteId = state && typeof state.siteId === 'string' ? state.siteId : null;
+      const calibrated = Boolean(state && state.calibrated);
+      const mode = state && (state.mode === 'on' || state.mode === 'off') ? state.mode : 'auto';
+      const label = { auto: '自动', on: '已开启', off: '已关闭' }[mode];
+      const disabled = pending || !state || !siteId || !calibrated;
+      const title = !state ? '正在读取…'
+        : !siteId ? '这个会话还没发过消息，无法确定落在哪个站点'
+          : !calibrated ? (siteName(siteId) + ' 尚未校准联网搜索开关（当前只有 DeepSeek 校准过）')
+            : '联网搜索：' + label + '（点击切换 自动 → 开启 → 关闭）\n实际点击发生在下一次发送前，由驱动回读网页开关确认';
+      /** 三态循环：auto → on → off → auto。服务端只认这三值。 */
+      const nextMode = mode === 'auto' ? 'on' : mode === 'on' ? 'off' : 'auto';
+      const onClick = () => {
+        if (disabled) return;
+        setPending(true);
+        setNotice('');
+        apiSoft('composer-search', { sessionId, mode: nextMode }, 15000).then(r => {
+          setPending(false);
+          if (!r.ok) { setNotice(r.error || '保存失败'); return; }
+          setState(r.data);
+          setNotice(r.data && r.data.note ? r.data.note : '');
+        });
+      };
+      return h('div', { className: 'hwb-searchwrap' },
+        h('button', {
+          type: 'button',
+          className: 'hwb-searchpill' + (mode === 'on' ? ' on' : mode === 'off' ? ' off' : ''),
+          disabled,
+          title,
+          'aria-label': '联网搜索：' + label,
+          'aria-pressed': mode === 'on',
+          onClick,
+        }, h('span', { className: 'hwb-searchpill-label' }, '联网搜索 · ' + label)),
+        notice ? h('span', { className: 'hwb-hint' }, notice) : null);
+    }
+
+    /**
      * 首轮提示词面板（0.14.0）。
      *
      * 用户原话：「设置界面提示词应该默认就显示，首轮提示词又不会变？有多的适配
@@ -6789,6 +6865,15 @@ window.__ModuleLoader__.load({
         ".hwb-waitpill:hover,.hwb-waitpill[aria-expanded=true]{background:var(--dsw-alias-interactive-bg-hover,#8882);color:var(--dsw-alias-label-secondary,inherit)}",
         ".hwb-waitpill:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#3b82f6);outline-offset:1px}",
         ".hwb-waitpill svg{flex:none;width:14px;height:14px}",
+        // 会话界面的「联网搜索」开关（0.19.97）：与官方药丸同排同高（dock 行的直接子项）。
+        // 尺寸/字号取官方 token，理由与 .hwb-waitpill 相同（写死 px 会在用户改字号时不缩放）。
+        ".hwb-searchwrap{display:inline-flex;align-items:center;gap:6px;min-width:0;max-width:100%;flex:0 1 auto;font-size:var(--dsh-content-font-size-secondary,13px)}",
+        ".hwb-searchpill{box-sizing:border-box;max-width:100%;display:inline-flex;align-items:center;gap:6px;padding:1px 8px;font:inherit;white-space:nowrap;color:var(--dsw-alias-label-tertiary,#8a8f98);background:0 0;border:.5px solid var(--dsw-alias-border-l3,#8885);border-radius:24px;cursor:pointer;transition:background .12s ease,color .12s ease,border-color .12s ease}",
+        ".hwb-searchpill:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,#8882);color:var(--dsw-alias-label-secondary,inherit)}",
+        ".hwb-searchpill:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#3b82f6);outline-offset:1px}",
+        ".hwb-searchpill:disabled{opacity:.55;cursor:not-allowed}",
+        ".hwb-searchpill.on{color:var(--dsw-alias-brand-primary,#3b82f6);border-color:var(--dsw-alias-brand-primary,#3b82f6);background:var(--dsw-alias-interactive-bg-hover,#8882)}",
+        ".hwb-searchpill-label{min-width:0;overflow:hidden;text-overflow:ellipsis}",
         ".hwb-waitpill-label{min-width:0;overflow:hidden;text-overflow:ellipsis}",
         // 点击面板：尺寸/圆角/阴影/网格逐项对齐官方 stat-dialog.module.css。
         // 向上展开（bottom:calc(100% + 8px)）而不是向下，因为药丸本身就在输入框
@@ -7357,6 +7442,17 @@ window.__ModuleLoader__.load({
             inject: (sessionId) => ({ sessionId }),
           }, WaitLine));
         } catch (e) { warn('composer.dock wait line', e); }
+      });
+      // ---- 输入框底下的「联网搜索」开关（0.19.97） ----
+      // 与等待药丸同一个座位、同一套尺寸 token；站点与是否可点全由服务端给
+      // （POST composer-search），本层不猜站点、不造默认值。
+      own(() => {
+        try {
+          return ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
+            name: 'conversation.composer.dock', id: 'webcode-search', order: 21,
+            inject: (sessionId) => ({ sessionId }),
+          }, SearchToggle));
+        } catch (e) { warn('composer.dock search toggle', e); }
       });
 
       // ---- 设置页（真实需求重构：登录管理前置、无历史导入） ------------

@@ -677,8 +677,15 @@ test('⑩ 联网搜索三态：真值表 + 设置面归一化 + sendPrompt→run
 
   // ③ 接线层（源码级：relay/executor 是 apply() 作用域内的真对象，单测拿不到句柄）。
   const indexSrc = fs.readFileSync(path.join(LIB, 'index.js'), 'utf8');
-  assert.match(indexSrc, /searchModeOf = \(settings, siteId\)/,
-    'index.js 必须有 searchModeOf 回落链解析（站点档 → 全局档 → auto），否则站点级覆盖无处生效');
+  // 0.19.97：回落链的**唯一实现**搬到 web-control.js 并导出（会话界面的
+  // POST composer-search 要用同一份）；index.js 必须 import 它、不得自己再写一份。
+  // 判据从「index 里有函数定义」改为「index 引用了导出、且 web-control 里确有此定义」
+  // ——旧判据在搬家后会假红，但直接删掉它会让「两处各写一份回落链」重新变得可能。
+  const wcSrc = fs.readFileSync(path.join(LIB, 'web-control.js'), 'utf8');
+  assert.match(wcSrc, /export function searchModeOf\(settings, siteId\)/,
+    'web-control.js 必须导出 searchModeOf（站点档 → 全局档 → auto）——它是唯一回落链真源');
+  assert.match(indexSrc, /import \{[^}]*searchModeOf[^}]*\} from '\.\/web-control\.js'/,
+    'index.js 必须从 web-control.js 导入 searchModeOf（自己再写一份就是第二份真相）');
   assert.match(indexSrc, /const searchMode = searchModeOf\(configManager\.get\(\), siteId\);/,
     'sendPrompt/executor 必须**现读** configManager 解析生效 searchMode（构造期快照会让设置页改了行为不变）');
   assert.match(indexSrc, /thinkMode,\r?\n\s+searchMode,/,
@@ -697,6 +704,54 @@ test('⑩ 联网搜索三态：真值表 + 设置面归一化 + sendPrompt→run
     + '——删掉回读等于「点一下就当开了」（说做了、其实没做）');
   assert.match(drvSrc, /for \(let i = 0; i < 10; i \+= 1\)/,
     '回读必须轮询等待（React 受控组件的 aria-pressed 在下一帧才更新；点一次立刻读会把成功误判成失败）');
+});
+
+// ── ⑪ 会话界面的联网搜索开关（0.19.97，用户报「缺少点击联网搜索的按钮」）────────
+//
+// 判据只钉三件，都是这次修法里**会错**的地方：
+//   ① 没发过言的会话：siteId 必须是 null（绝不回落 deepseek——那会往用户并不
+//      所在的站点档里写设置）；
+//   ② 发过言：站点由服务端登记表给（这里用 POST chat 走不到，故只验「未知」与
+//      「显式 siteId 兜底」两条可离线构造的路径）；
+//   ③ 写入只改站点档 `searchModeBySite[siteId]`，**不顺手改全局** `searchMode`
+//      ——会话界面上的开关不该悄悄影响别的站点。
+//
+// 真机取证（控件是否仍是 aria-pressed）见 .tmp/live-2026-10-19/search-toggle-report.md §5b/5c，
+// 本轮不重复点击网页。
+test('⑪ composer-search：未知站点不猜、写入只动站点档、未校准如实标注', async () => {
+  await withControlPlane({ driver: statusStub('attach') }, async ({ post }) => {
+    // ① 没有会话身份 / 没登记过 ⇒ siteId 必须为 null，且 calibrated=false。
+    const unknown = await post('composer-search', { sessionId: 'never-sent-session' });
+    assert.equal(unknown.status, 200, 'POST composer-search 必须可用：' + unknown.status);
+    assert.equal(unknown.json.siteId, null,
+      '没发过言的会话必须回 siteId=null（猜一个默认站点会写错站点档）：' + JSON.stringify(unknown.json));
+    assert.equal(unknown.json.calibrated, false, '站点未知时 calibrated 必须为 false');
+    assert.equal(unknown.json.reason, 'session-site-unknown', '必须给出可核对的 reason');
+
+    // ② 显式 siteId 兜底（排障/独立调用形态）：读回当前生效值。
+    const read = await post('composer-search', { siteId: 'deepseek' });
+    assert.equal(read.json.siteId, 'deepseek');
+    assert.equal(read.json.mode, 'auto', '未配置时生效值必须是 auto（零位移默认）');
+    assert.equal(read.json.calibrated, true, 'deepseek 是已校准站点（contract 有 searchTogglePattern）');
+
+    // ③ 写入：只改站点档，全局档一字不动。
+    const w = await post('composer-search', { siteId: 'deepseek', mode: 'on' });
+    assert.equal(w.json.mode, 'on');
+    const settings = await post('settings', {});
+    assert.equal(settings.json.searchModeBySite.deepseek, 'on',
+      '写入必须落在站点档 searchModeBySite.deepseek：' + JSON.stringify(settings.json.searchModeBySite));
+    assert.equal(settings.json.searchMode, 'auto',
+      '会话界面的开关不得顺手改全局 searchMode（会影响别的站点）：' + JSON.stringify(settings.json.searchMode));
+
+    // ④ 非法值归 auto（与 POST settings 同一口径）。
+    const bad = await post('composer-search', { siteId: 'deepseek', mode: 'ON' });
+    assert.equal(bad.json.mode, 'auto', '非法 mode 必须归 auto，不得产生第三种口径');
+
+    // ⑤ 未校准站点：写入照收，但 calibrated=false 且 note 如实说明不生效。
+    const glm = await post('composer-search', { siteId: 'glm', mode: 'on' });
+    assert.equal(glm.json.calibrated, false, 'glm 尚无 searchTogglePattern 契约，calibrated 必须为 false');
+    assert.match(String(glm.json.note || ''), /尚未校准|不会/, '未校准站点必须如实说明网页不会被点：' + JSON.stringify(glm.json.note));
+  });
 });
 
 // ── task-8 A：站点级 thinkMode 回落链（真值表）──────────────────────────────

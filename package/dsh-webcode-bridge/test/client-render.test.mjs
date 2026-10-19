@@ -35,7 +35,7 @@ const bridgeSrcFrom = (rel) => readFileSync(path.resolve(here, '../lib/', rel), 
 const SESSION_PROPS = { sessionId: 'session-render-test' };
 
 /** 在当前进程里加载 client.cjs 并跑若干渲染周期，返回每次渲染捕获的异常。 */
-async function renderPane({ payloads, which = 'pane', sites = [], roster = null, primitiveOmit = [], waitStats = null, openMenu = false, tabParams = undefined, noTabActions = false, settingsTab = '', sessionProps = SESSION_PROPS, iconNaming = 'legacy' } = {}) {
+async function renderPane({ payloads, which = 'pane', sites = [], roster = null, primitiveOmit = [], waitStats = null, openMenu = false, tabParams = undefined, noTabActions = false, settingsTab = '', sessionProps = SESSION_PROPS, iconNaming = 'legacy', composerSearch = null } = {}) {
   // 0.16.38：设置页按作用域切成「全局页 / 站点页」。站点的账户、模型、提示词三张卡
   // 只在站点页渲染，护栏必须能直接渲染站点页才谈得上验证它们——否则只能断言
   // 「全局页看不见」，那证明不了站点页是对的。`initialSettingsTab` 是给这个用的
@@ -67,6 +67,11 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
   // `conversation.composer.dock` 的组件，于是「药丸长什么样、点了会怎样」
   // 这整条路径在测试里是空白——护栏再密也拦不住它回归。
   let DockComponent = null;
+  // 0.19.97：dock 座位现在有**两枚**条目（等待药丸 order 20 / 联网搜索开关 order 21）。
+  // 旧桩只留「最后一个注册的」，新增一枚就会把药丸的用例全部变成「在测搜索开关」
+  // 而断言仍写着药丸文案——那不是产品缺陷，是桩建模失真（同 0.15.12 三个 kind 的教训）。
+  // 按 id 收全，`which: 'dock'` 仍指等待药丸（既有用例零位移），搜索开关单列一个 which。
+  const DockComponents = new Map();
   const MenuItems = [];
   // 0.19.51：收下每个 menu.item 注册的 id，用于断言「带 id 且互不相同」。
   const MenuItemIds = [];
@@ -304,6 +309,12 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
       }
       else if (u.includes('/__webcode/models')) body = { ok: true, models: [{ id: 'deepseek:deepseek', name: 'deepseek/deepseek', siteId: 'deepseek', thinking: true }] };
       else if (u.includes('/__webcode/connect')) body = { ok: true, loggedIn: true };
+      // 0.19.97：会话界面的「联网搜索」开关。默认给「已校准的 deepseek + auto」，
+      // 与真实服务端对已发过言的 deepseek 会话的输出同形；`composerSearch` 可整体替换
+      // （覆盖「没发过言 = 站点未知」与「未校准站点」两条降级路径）。
+      else if (u.includes('/__webcode/composer-search')) body = composerSearch || {
+        ok: true, siteId: 'deepseek', mode: 'auto', effective: 'auto', calibrated: true, reason: 'read',
+      };
       // 0.15.11：等待药丸的数据面。服务端已把文案与明细算好（label / detailRows），
       // 客户端只负责渲染——夹具照真实载荷形状给，含本会话与累计两类行。
       // 0.16.24：`waitStats` 可整体替换该载荷（在途等待用例要带 live/now/liveValue），
@@ -377,7 +388,7 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
           if (def?.name === 'sidebar.right.pane.tab') PaneComponents.set(def.key, Comp);
           if (def?.name === 'settings.section') SettingsComponent = Comp;
           if (def?.name === 'sidebar.right.tab.menu.item') { MenuItems.push(Comp); MenuItemIds.push(def.id); }
-          if (def?.name === 'conversation.composer.dock') DockComponent = Comp;
+          if (def?.name === 'conversation.composer.dock') { DockComponent = Comp; if (def.id) DockComponents.set(def.id, Comp); }
           // 0.15.12/0.16.0：左栏入口与中央列 main 座位。list 座位带 id（= main key）；
           // main 是 keyed 座位，按 key 派发。两者分别收下，用于断言成对且同名。
           if (def?.name === 'sidebar.panellist') PanelEntries.push({ id: def.id, order: def.order, label: def.label, Comp });
@@ -449,7 +460,9 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
     // 因此 `which: 'tasks'` 去 MainComponents 取，而不是 PaneComponents。
     const TASKS_PANEL_ID = 'webcode-tasks-panel';
     const Target = which === 'settings' ? SettingsComponent
-      : which === 'dock' ? DockComponent
+      // 0.19.97：两枚 dock 条目按 id 取；`dock` 保持「等待药丸」的旧语义（零位移）。
+      : which === 'dock' ? (DockComponents.get('webcode-wait') || DockComponent)
+        : which === 'dock-search' ? DockComponents.get('webcode-search')
         : which === 'tasks' ? MainComponents.get(TASKS_PANEL_ID)
           : PaneComponents.get(PANE_KEYS[which] || PANE_KEYS.pane);
     if (which === 'dock') assert.ok(DockComponent, 'conversation.composer.dock 从未注册');
@@ -1375,6 +1388,70 @@ test('★ 等待药丸：可点（onClick 存在），且 aria 契约完整', as
   // 官方那两枚药丸只给 aria-haspopup/aria-expanded，不挂 role="status"。
   assert.equal(pill.props.role, undefined, '按钮不得挂 role="status"');
   assert.match(String(pill.props['aria-label']), /等待发送/);
+});
+
+// ------------------------------------------------- 0.19.97 会话内「联网搜索」开关
+//
+// 用户原话：「本插件没法做到完美兼容……就拿最少状态的 ds 举例——都缺少点击联网
+// 搜索的按钮/功能呢，和网页版不完全适配」。
+//
+// 修法的判据分两半，缺一半就会出现「按钮有了、但点了不真生效」或反过来：
+//   ① 服务端：`POST composer-search` 按**真实发过的站点**读/写站点档，绝不猜站点
+//      （见 test/settings-transport.test.mjs 的 ⑪）；
+//   ② 客户端：dock 里真的多出一枚条目，且三条降级路径都如实显示、按钮不可点。
+// 本条钉 ②。
+
+/** 在渲染树里找指定 className 的节点（含嵌套函数组件）。 */
+function findByClass(el, cls, out = []) {
+  if (el === null || el === undefined || typeof el !== 'object') return out;
+  if (Array.isArray(el)) { for (const c of el) findByClass(c, cls, out); return out; }
+  if (typeof el.type === 'function') return findByClass(el.type(el.props), cls, out);
+  const cn = String((el.props && el.props.className) || '');
+  if (cn.split(/\s+/).includes(cls)) out.push(el);
+  for (const c of (el.children || [])) findByClass(c, cls, out);
+  return out;
+}
+
+test('★ 0.19.97 会话界面：联网搜索开关真的挂在 dock 上，并显示服务端给的生效值', async () => {
+  const { errors, tree } = await renderPane({ which: 'dock-search', payloads: [{}] });
+  assert.deepEqual(errors, [], '联网搜索开关渲染抛错：' + errors.map(e => e.message).join('; '));
+  const text = treeText(tree);
+  assert.match(text, /联网搜索/, 'dock 里必须真的出现「联网搜索」这一枚（用户的报障就是它不存在）');
+  assert.match(text, /自动/, '默认生效值 auto 必须可见（服务端 searchModeOf 的回落结果）');
+  const btns = findByClass(tree, 'hwb-searchpill');
+  assert.equal(btns.length, 1, '必须恰好一枚搜索开关按钮');
+  const btn = btns[0];
+  assert.equal(typeof btn.props.onClick, 'function', '按钮必须可点（否则还是「没有功能」）');
+  assert.equal(btn.props.disabled, false, '已校准 + 已知站点时必须可点');
+  assert.equal(btn.props['aria-pressed'], false, 'auto 不是「已开启」，aria-pressed 必须为 false');
+});
+
+test('★ 0.19.97 会话界面：没发过言（站点未知）时如实禁用，不猜 deepseek', async () => {
+  // 服务端对「这个会话还没发过任何消息」的会话回 siteId:null。客户端此时**不得**
+  // 回落成 deepseek 并允许点——那会写出一档用户并不存在于其中的站点设置。
+  const { errors, tree } = await renderPane({
+    which: 'dock-search', payloads: [{}],
+    composerSearch: { ok: true, siteId: null, mode: 'auto', effective: 'auto', calibrated: false, reason: 'session-site-unknown', note: '这个会话还没向任何站点发送过消息' },
+  });
+  assert.deepEqual(errors, [], '站点未知分支不得抛错');
+  const btn = findByClass(tree, 'hwb-searchpill')[0];
+  assert.ok(btn, '站点未知时按钮仍需存在（只是不可点），否则用户不知道有这个能力');
+  assert.equal(btn.props.disabled, true, '站点未知时必须禁用（点了会写到错的站点档）');
+  assert.match(String(btn.props.title), /还没发过消息/, '必须如实说明为什么不可用');
+});
+
+test('★ 0.19.97 会话界面：未校准站点显示「未校准」并禁用（不许假承诺）', async () => {
+  // 当前只有 deepseek 有 searchTogglePattern 契约；对别的站点写站点档不会报错，
+  // 但驱动**不会**去点网页控件。若不在这里禁用，用户会以为开了、其实没开——
+  // 正是本仓库「说做了、其实没做」那一族。
+  const { errors, tree } = await renderPane({
+    which: 'dock-search', payloads: [{}],
+    composerSearch: { ok: true, siteId: 'glm', mode: 'auto', effective: 'auto', calibrated: false, reason: 'read' },
+  });
+  assert.deepEqual(errors, []);
+  const btn = findByClass(tree, 'hwb-searchpill')[0];
+  assert.equal(btn.props.disabled, true, '未校准站点必须禁用');
+  assert.match(String(btn.props.title), /尚未校准/, '必须说明未校准，而不是静默可点');
 });
 
 test('★ 等待药丸：靠官方 dock 行自身的 flex 同栏，且不得有几何 hack', () => {

@@ -26,6 +26,9 @@ import { composerWaitLine, composerWaitPillLabel, waitStatDetailRows, waitStatRo
 // 注：`liveElapsedMs`（本地私有）已在 0.19.34 删除 —— 它的算法与 wait-stats 的
 // `liveWaitMs` 逐字相同，只是少加了账本累计，而面板标题现在要的正是带累计的那个数。
 import { isLoopbackHost, originMatchesHost } from './loopback.js';
+// 搜索开关的「是否已真机校准」判据只有一处：contract 的 `searchTogglePattern`。
+// 会话界面的按钮要用它决定「可点」还是「如实说不支持」（0.19.97）。
+import { getContract } from './contract.js';
 // 浏览器来源与安装（0.18.0）。与 browser-driver 读**同一份**解析逻辑，
 // 避免「驱动用一个、面板报另一个」。
 import { resolveBrowserExecutable, installBundledChromium } from './browser-runtime.js';
@@ -57,6 +60,28 @@ export function thinkModeOf(settings, siteId) {
   const siteVal = bySite && typeof bySite === 'object' ? bySite[siteId] : undefined;
   if (legal(siteVal)) return siteVal;
   return legal(settings?.thinkMode) ? settings.thinkMode : 'auto';
+}
+
+/**
+ * 站点级 `searchMode` 的**唯一回落链**（0.19.97 起由本文件导出，与 `thinkModeOf` 同形）：
+ * 站点档（`searchModeBySite[siteId]`，只认三值）→ 全局档（`searchMode`）→ `'auto'`。
+ *
+ * 为什么必须共用一份：消费方有三处——`index.js` 的 executor（真正透传给驱动）、
+ * 本文件的 `POST composer-search`（会话界面的开关）、以及测试。各写一份必然漂移，
+ * 而漂移的后果是「界面上写着『始终开启』、驱动那边却按 auto 一个字都不动」——
+ * 正是用户这次报的「缺少联网搜索按钮」那一族。宽松方向只能是更接近默认 `auto`：
+ * 非法值逐层跳过，绝不产生第三种没定义过的口径。
+ *
+ * @param {object|null|undefined} settings 设置快照
+ * @param {string} siteId 站点 id
+ * @returns {'on'|'off'|'auto'} 生效值
+ */
+export function searchModeOf(settings, siteId) {
+  const legal = (v) => v === 'on' || v === 'off' || v === 'auto';
+  const bySite = settings?.searchModeBySite;
+  const siteVal = bySite && typeof bySite === 'object' ? bySite[siteId] : undefined;
+  if (legal(siteVal)) return siteVal;
+  return legal(settings?.searchMode) ? settings.searchMode : 'auto';
 }
 
 /**
@@ -1017,6 +1042,68 @@ export function createWebControl(deps = {}) {
     // GET 永不抵达。多一条永不抵达的同名路由，只会让「哪个方法是对的」重新
     // 变成需要猜的事——那正是 0.15.3 那次 405 的同族病根。
     'POST wait-stats': async (body) => waitStatsPayload(body?.sessionId, body?.metrics || null),
+    /**
+     * 会话界面的「联网搜索」开关（0.19.97，用户 2026-10-20 报障的修法）。
+     *
+     * ## 为什么需要这条端点
+     *
+     * 用户原话：「本插件没法做到完美兼容……就拿最少状态的 ds 举例——都缺少点击联网
+     * 搜索的按钮/功能呢，和网页版不完全适配」。
+     *
+     * 事实核对（不是猜）：搜索开关**早就实现了**（0.19.94：`planSearchToggle` +
+     * 驱动里点开后回读 `aria-pressed`），但它只露在**设置页 → deepseek 分区**，且默认
+     * `auto` = 一个字都不动网页。会话界面里没有任何入口 ⇒ 用户感知就是「没有这个按钮」。
+     *
+     * 本端点把这个开关搬到会话界面（`conversation.composer.dock`）旁边：
+     *   · 不带 `mode` ⇒ **只读**当前生效值（站点档 → 全局档 → auto，与驱动同一个
+     *     `searchModeOf` 回落链，不在这里另造一份）；
+     *   · 带 `mode` ⇒ 写**站点档** `searchModeBySite[siteId]`（只动这一个会话所在站点，
+     *     不顺手改全局——会话界面上的开关不该悄悄影响别的站点）。
+     *
+     * ## 站点从哪来（绝不猜）
+     *
+     * `sessionSiteOf(sessionId)` 读的是「这个会话最近一次真实发送落在哪个站点」
+     *（lib/index.js 的 sessionSites，写入点是 `buildTurn` 里 siteId 定稿之后）。
+     * 没发过言 ⇒ null ⇒ 如实回 `siteId: null` + `calibrated: false`，让界面显示
+     * 「未知」，而不是编一个 `deepseek` 出来。
+     *
+     * ## calibrated 是什么
+     *
+     * 只有带 `searchTogglePattern` 契约的站点（当前仅 deepseek，见 contract.js:21/49）
+     * 才真的会被驱动去点网页控件。对未校准站点写站点档不会报错，但**也不会生效**——
+     * 所以这里把 `calibrated` 一起回给界面：它决定按钮是「可点」还是「如实显示不支持」。
+     */
+    'POST composer-search': async (body) => {
+      const sessionId = String(body?.sessionId || '') || null;
+      const hit = sessionId && typeof sessionSiteOf === 'function' ? sessionSiteOf(sessionId) : null;
+      // 显式 siteId 只作排障/独立调用时的兜底；会话界面永远靠登记表。
+      const siteId = (hit && hit.siteId) || (body?.siteId && getSite(String(body.siteId)) ? String(body.siteId) : null);
+      if (!siteId) {
+        return {
+          ok: true, siteId: null, mode: 'auto', effective: 'auto', calibrated: false,
+          reason: 'session-site-unknown',
+          note: '这个会话还没向任何站点发送过消息，无法确定它落在哪个站点；联网搜索开关暂不可用。',
+        };
+      }
+      const calibrated = Boolean(getContract(siteId)?.searchTogglePattern);
+      const current = settingsStore ? (settingsStore.get() || {}) : {};
+      const modeNow = searchModeOf(current, siteId);
+      const want = body && 'mode' in body ? String(body.mode ?? '') : null;
+      if (want === null || want === '') {
+        return { ok: true, siteId, mode: modeNow, effective: modeNow, calibrated, reason: 'read' };
+      }
+      // 写入只认三值（与 POST settings 同一口径）：非法值一律归 auto（零位移）。
+      const mode = want === 'on' || want === 'off' ? want : 'auto';
+      if (!settingsStore) return { ok: false, error: 'settings store unavailable', siteId };
+      const bySite = { ...(current.searchModeBySite && typeof current.searchModeBySite === 'object' ? current.searchModeBySite : {}), [siteId]: mode };
+      settingsStore.set({ ...current, searchModeBySite: bySite });
+      log(`composer-search: ${siteId} → ${mode}`);
+      return {
+        ok: true, siteId, mode, effective: searchModeOf(settingsStore.get() || {}, siteId), calibrated,
+        reason: 'written', settingsRevision: settingsRevisionNow(),
+        note: calibrated ? '已保存。下一次发送起生效。' : '已保存，但该站点尚未校准搜索开关，网页那边不会被点击。',
+      };
+    },
     // 窗口声明可见性（B-3）——「桥向 DSH 声明的上下文窗口」此前只存在于代码里，
     // 用户在 GUI 上看到的占用百分比是相对一个**看不见**的数，越界报错也说不清
     // 比的是哪个值。这里把每个站点的声明值 + 它的**来源**（实测 / 配置覆盖 /

@@ -25,7 +25,7 @@ import { zeroProgressDecision } from './zero-progress.js';
 import { findDegenerateRepeat } from './repeat-detect.js';
 import { idleWindowDecision } from './idle-window.js';
 import { createDeliveryTrace, compareStages } from './delivery-trace.js';
-import { createWebControl, buildSessionEvents, mainLineOf, thinkModeOf, siteModeOf } from './web-control.js';
+import { createWebControl, buildSessionEvents, mainLineOf, thinkModeOf, siteModeOf, searchModeOf } from './web-control.js';
 import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, stripProtocolRegions, proseSafeEnd, readCallAt, partialProtocolAt, unresolvedCallFenceAt, closingFenceAfter, headlessCallTailAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeOfficialToolCalls, normCallArgs, inferToolNameFromArgs, recoverUnparsedCalls, callsLostFromParse, officialToolCallSpecimen, officialCallExampleFor, buildPreset } from './agent-preset.js';
 // 只用 `teachFor`（1146 的续跑重申、3290 的首轮落盘）——那两处是**真调用**，
 // 即计划 Task 1.4 所说的「教学提示按 teachShape 选支」。
@@ -3522,6 +3522,40 @@ function imageMarkdown(images) {
     return live;
   }
 
+  // ---- 会话 → 站点（0.19.97）---------------------------------------------------
+  //
+  // 需求（用户 2026-10-20 原话）：「本插件没法做到完美兼容……就拿最少状态的 ds 举例——
+  // 都缺少点击联网搜索的按钮/功能呢，和网页版不完全适配」。
+  //
+  // 「按钮」要挂在会话界面（`conversation.composer.dock`），而那个槽只给 **sessionId**，
+  // 不给站点。要显示/写回站点级搜索开关，就必须知道「这个会话这一轮真正落在哪个站点」。
+  //
+  // 唯一可靠的来源是**真的发过一轮**：`buildTurn` 里 `siteId` 已经过模型解析、站点级
+  // 默认模型覆盖、子代理站点分流三层判定（见上方 4362-4401），此刻记下来的才是事实。
+  // 不去猜：不按会话标题猜、不按 URL 猜、不在没发过言时编一个 'deepseek'——
+  // 「读不到就说读不到」是本仓库对面板的一贯口径（见 client.cjs 文件头）。
+  //
+  // 键取主会话 id（`sessionKeyOf` 同一把键：`<sessionId>::<agentId>::<accountKey>` →
+  // 第一段），与等待账本同源——药丸与搜索开关都按会话 id 查，两边必须能对上。
+  const sessionSites = new Map();   // sessionId → { siteId, accountKey, at }
+  const SESSION_SITE_CAP = 512;
+
+  /** 记下「这一轮这个会话真的发到了哪个站点」。只在 buildTurn 里、siteId 定稿后调用。 */
+  function rememberSessionSite(meta, siteId, accountKey) {
+    const key = sessionKeyOf(meta);
+    if (!key || !siteId) return;
+    sessionSites.delete(key);   // 先删后插 = LRU
+    sessionSites.set(key, { siteId, accountKey: accountKey || siteId, at: Date.now() });
+    while (sessionSites.size > SESSION_SITE_CAP) sessionSites.delete(sessionSites.keys().next().value);
+  }
+
+  /** 控制面读取用：某会话最近一次真实发送落在哪个站点（没发过 = null，绝不猜）。 */
+  function sessionSiteOf(sessionId) {
+    const key = typeof sessionId === 'string' && sessionId ? sessionId.split('::')[0] : null;
+    if (!key) return null;
+    return sessionSites.get(key) || null;
+  }
+
   /** 控制面读取用：`{ total, session }`。sessionId 缺省时只回累计。 */
   function waitStatsSnapshot(sessionId) {
     const key = typeof sessionId === 'string' && sessionId ? sessionId.split('::')[0] : null;
@@ -3568,13 +3602,9 @@ function imageMarkdown(images) {
   // 跟随全局；手改配置里的非法值（非三态）逐层跳过，而不是变成第三种没定义过的口径。
   // 为什么解析放在这里而不是 buildTurn 的 meta：OpenAI 前端 / aux 轮没有 buildTurn 的
   // 完整 meta，而**所有轮次都会经过** executor；解析点只留一处（两处各算一份必漂移）。
-  const searchModeOf = (settings, siteId) => {
-    const legal = (v) => v === 'on' || v === 'off' || v === 'auto';
-    const bySite = settings?.searchModeBySite;
-    const siteVal = bySite && typeof bySite === 'object' ? bySite[siteId] : undefined;
-    if (legal(siteVal)) return siteVal;
-    return legal(settings?.searchMode) ? settings.searchMode : 'auto';
-  };
+  // 0.19.97：实现已搬到 web-control.js 的 `searchModeOf`（导出纯函数）——会话界面的
+  // `POST composer-search` 也要用同一份回落链，两处各写一份必然漂移。
+  // 判据不再有第二份：下面 executor 直接调上面导入的那一个。
   const SESSION_REBUILD_THROTTLE_MS = Math.max(0, Number(cfg.sessionRebuildThrottleMs ?? 60_000) || 0);
   const lastSessionRebuildAt = new Map();   // sessionKey → { at, chars }（真发生过的那次整段重放）
 
@@ -4243,6 +4273,9 @@ function imageMarkdown(images) {
     contextWindowOf: (m) => contextWindowFor(m),
     // 等待发送时长的累计账本（设置页「累计」+ 输入框底下的「本次会话」同源）。
     waitStatsOf: (sessionId) => waitStatsSnapshot(sessionId),
+    // 会话 → 站点（0.19.97）：会话界面的「联网搜索」开关按这个会话真正落在的站点
+    // 显示与写回。没发过言时回 null —— 控制面如实回「未知」，不编默认站点。
+    sessionSiteOf: (sessionId) => sessionSiteOf(sessionId),
     // 真实花名册（0.15.0）：子代理来自本会话的 subagentCatalog 持久化投影，
     // Team 成员来自官方 agentTeams 服务。两者各自独立降级，读不到时给空数组
     // 并把原因放进 *Error（面板据此区分「确实没有」与「读不到」）。
@@ -4410,6 +4443,11 @@ function imageMarkdown(images) {
     const keyPath = options.sessionId && cfg.contextMode === 'session' && !options.purpose
       ? [String(options.sessionId), keyAgentId ? String(keyAgentId) : '', accountKey].filter(Boolean).join('::')
       : null;
+    // 会话 → 站点登记（0.19.97）：站点此刻已定稿（模型解析 → 站点级默认模型 →
+    // 子代理站点分流全部走完），这是「这一轮真的发到了哪个站点」的唯一可靠时刻。
+    // 会话界面上的搜索开关按这张表决定显示什么、写哪一档（见 sessionSiteOf）。
+    // 只记真实会话轮（keyPath 非空）：aux/压缩轮不代表用户正在看的会话。
+    if (keyPath) rememberSessionSite({ sessionKey: keyPath }, siteId, accountKey);
     const recordPreset = (prompt) => {
       // Record every real agent turn (no aux purpose): this is the exact
       // first-turn text the bridge sends to the web page on first contact.

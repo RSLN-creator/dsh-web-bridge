@@ -5,6 +5,29 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.21.3（2026-10-20：会话界面补上「联网搜索」开关）
+
+### 修复：用户报「缺少点击联网搜索的按钮/功能」（以 DeepSeek 为例）
+
+- **先核事实**：搜索开关 0.19.94 就已实现（`planSearchToggle` + 点开后回读 `aria-pressed`），
+  但入口只在**设置页 → deepseek 分区**，且默认 `auto` = 不动网页；会话界面里没有入口，
+  而网页版那颗按钮就在输入框旁 ⇒ 用户感知为「缺功能」。契约本身未过期
+  （真机读数：`.tmp/live-2026-10-19/search-toggle-report.md` §5b/§5c）。
+- **新增 `POST composer-search`**：按「这个会话最近一次真实发送落在哪个站点」读写
+  `searchModeBySite[siteId]`；没发过言 ⇒ `siteId:null`（**不猜**默认站点）；
+  回 `calibrated` 标明该站点是否真有 `searchTogglePattern` 契约。写入只动站点档，
+  不顺手改全局 `searchMode`。
+- **新增 `searchModeOf` 导出**（web-control.js）：站点档 → 全局档 → auto，
+  index.js 与 composer-search 共用同一份回落链（不再各写一份）。
+- **会话输入框底下新增一枚「联网搜索 · 自动/已开启/已关闭」开关**（dock 条目
+  `webcode-search`，order 21）：三态循环；站点未知或未校准 ⇒ 禁用并如实说明原因，
+  不给「点了会生效」的假承诺。
+- **测试**：`client-render` 77/77（dock 桩改为按 id 收全两枚条目 + 3 条新用例）；
+  `settings-transport` 21/21（新增 ⑪：未知站点不猜 / 只写站点档 / 非法值归 auto /
+  未校准如实标注）；`provider-surface` 对外面逐字不变。
+- **边界**：其余九站仍未校准搜索控件，界面对它们如实显示「未校准」并禁用；
+  默认值仍是零位移的 `auto`。
+
 ## 0.21.2（2026-10-20 凌晨：修 CI 红 —— zai-cn 不继承「需要真机读数」的声明位；本机 web/headless 安装版；GitHub/npm 双发布）
 
 ### 修复：CI 单测红（zai-cn 违反「没有真机读数不许声明站点知识」）

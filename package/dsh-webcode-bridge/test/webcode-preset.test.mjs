@@ -54,11 +54,17 @@ const DROPPED_ROWS = [
  * `tool-plugin-manager` 与上面两条混在一起，断言文案是「0 次命中所以删」——
  * 那对后五项**不是真的**（它们从未被本机读数评估过）。分表是为了让断言说的
  * 与事实一致：一个判据如果理由写错，下次就会有人照着错理由删东西。
+ *
+ * 0.21.3：`tool-subagent-codex` 与 `tool-subagent-claude-code` 已从本清单**移除**——
+ * 上游把这两项从 standard 里删了。证据（本机装机目录 `…/dsh-web-app/presets/standard.patch.yml`
+ * 逐项实读）：`- id: tool-subagent-codex` / `- id: tool-subagent-claude-code` /
+ * `- id: tool-ralph` 均**零命中**，而 `- id: tool-plugin-manager` 仍在。清单继续声称
+ * 前两项「在 standard 里本就 disabled」就成了一句判不存在之物的声明，②e 因此变红。
+ * 这**不是**「按错理由删东西」：事实侧变了，声明必须跟着变。
+ * （注意：CI runner 上没有这份装机目录，②e 在那里整体 skip；本条只在开发者本机生效——
+ * 正因如此，靠它「在 CI 上变红」来提醒是不可能的，只有人跑全量才会看到。）
  */
 const DISABLED_IN_STANDARD_ROWS = [
-  'tool-subagent-codex',
-  'tool-subagent-claude-code',
-  'tool-ralph',
   'tool-plugin-manager',
 ];
 
