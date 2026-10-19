@@ -332,7 +332,7 @@ GitHub CI 在 0.21.1 上**红**（用户告知「run ci failed」）：`test/ans
 
 **修法**：`ZAI_CN` 继承时显式剔除 `answerSelector/efforts/effortControl`，只复用不需要读数的通用字段；注释写明「没证据前不做，取到读数后再补并同步护栏名单」。复跑全部相关测试绿（answer-selector 8/0、think-effort 28/0、provider-surface 8/0 等）。
 
-**收尾**：0.21.2 bump + 打包 + 本机 web/headless 安装 + GitHub main/tag/Release + npm 发布；CI 在 0.21.2 上应恢复绿（复跑结果见下一条）。
+**收尾（已完成并复跑验证）**：0.21.2 bump + 打包（verify-pack PASS）+ 本机 web/headless 安装 + GitHub main/tag/Release（Release 工作流 success）+ npm 发布（dist-tags.latest=0.21.2）。**CI 复跑绿**：run 39287835258（32a16ea）conclusion=success，4 个 job 全绿（ubuntu/windows × node 22/24）；v0.21.2 Release 工作流 completed/success。
 
 ---
 

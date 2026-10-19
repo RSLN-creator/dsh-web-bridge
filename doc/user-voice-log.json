@@ -1,5 +1,5 @@
 {
-  "generatedAt": 1792428002961,
+  "generatedAt": 1792428494518,
   "scope": "`dsh-webcode-bridge`",
   "command": "node scripts/user-voice-log.mjs",
   "rows": [
@@ -14825,6 +14825,18 @@
       "round": null,
       "text": "1.打包提交\n2.提交云端两个发布\n3.设置界面本插件的检查更新按钮--请你确保正在起作用\n4.快速收尾",
       "hash": "8ffef837",
+      "also": []
+    },
+    {
+      "sessionId": "session-a8d9a827-c350-4306-9932-f3562cc75f5d",
+      "workspace": "D:\\9_Code_Workspace\\dsh-webcode-bridge",
+      "at": 1792428065864,
+      "seq": 3990,
+      "origin": "user",
+      "goalId": null,
+      "round": null,
+      "text": "run ci failed",
+      "hash": "5757a67a",
       "also": []
     }
   ]
