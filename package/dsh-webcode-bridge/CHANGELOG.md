@@ -5,6 +5,25 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.20.0（2026-10-20 凌晨：验证码命中自动转有头窗口；z.ai 两站拆分改为下一版；本机 web/headless 安装版；未推 GitHub/npm）
+
+### 修复：验证码命中后自动把**同一现场**转成有头窗口（用户明令）
+
+- 用户原话（2026-10-20）：「就算你开了有头，你没有触发我也完全看不见！！！在这个窗口里无滑块」。
+- 根因：另开一个干净浏览器（或手动 `chrome --user-data-dir`）里**没有挑战现场**，所以永远看不到滑块；能过验证的只有「触发验证的那个 page」。
+- 修法：`browser-driver.js` 新增 `autoShowCaptchaWindow(reason)`——验证码抛出点（超时点 + 发送后点）在 reject/throw 前调度它：等 1.5s 让轮次收尾，若 `busy` 仍为真则让路（不硬抢窗口），否则 `openWindow({})` 把**命中验证的同一个浏览器**转成有头（openWindow 会 goto 当前 page URL = 挑战页），用户即可在窗口里拖滑块；验证过后同一浏览器继续服务后续轮次。
+- 测试：`captcha-gate.test.mjs` **7/0**（新增接线判据：两个抛点都调度 helper、helper 调 openWindow 且 busy 让路）；driver-scope 7/0、capture-stall-rescue 20/0、timeout-order 5/0、captcha-gate-scan 7/0；lint PASS。
+
+### 记录：z.ai 国内/海外两站拆分（用户 2026-10-20 明令；**本版未发布**）
+
+- 用户纠正：「国内国外网站是两个！你要区分！！」——正确模型是两个独立站点：`zai`（海外 chat.z.ai，profile sites/zai）+ **`zai-cn`（中国站 zchat.z.ai，独立 profile sites/zai-cn、独立登录态）**，各自出现在模型选择器（`z.ai/…` 与 `zchat.z.ai/…`）。
+- 0.19.99 曾把 `zai.origin` 改成 zchat，**不符合「两个站」的要求**，本版已还原为 chat.z.ai；两站拆分的代码骨架在本轮做过但未过完模型目录/快照回归（provider-surface/model-labels 的钉死清单要随新增站点更新），故**回滚、不发布**，下一版连同测试快照一起上。
+- 中国站登录态用户明确「暂时没法登录，先忽略」：`zai-cn` 未登录只会报 NEED_LOGIN，不影响海外站。
+
+### 边界
+
+- 本版本只装到本机 web/headless profile；未推 GitHub、未发 npm；宿主侧需重启 `dsh web` 生效。
+
 ## 0.19.99（2026-10-20 凌晨：z.ai 切到中国站 `zchat.z.ai`；本机 web/headless 安装版；未推 GitHub/npm）
 
 ### 修复：z.ai 的 origin 由 `chat.z.ai` 改为中国站 `zchat.z.ai`（用户明令）

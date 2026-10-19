@@ -142,3 +142,20 @@ test('⑤ 有头时必须把验证窗口带到前台（验证只能由人完成�
   const seg = DRIVER.slice(Math.max(0, at - 1200), at);
   assert.match(seg, /bringToFront/, '命中验证时必须把页面带到前台，否则有头窗口藏在后面用户点不到');
 });
+
+
+// ── 0.20.0：验证码命中 → 自动把**同一现场**转成有头窗口（用户 2026-10-20 明令）──
+//
+// 用户原话：「就算你开了有头，你没有触发我也完全看不见！！！在这个窗口里无滑块」。
+// 正确语义：另开干净窗口没有挑战现场；只有把**命中验证的那个 page** 转成有头
+// （browser-driver.openWindow 会 goto 当前 page URL）才能看到滑块并过掉。
+test('接线：两个 captcha 抛点都必须调度 autoShowCaptchaWindow，且 helper 走 openWindow（同一现场）', () => {
+  const src = DRIVER;
+  assert.ok(DRIVER.includes('function autoShowCaptchaWindow('), '缺少 autoShowCaptchaWindow helper');
+  assert.ok(DRIVER.includes("autoShowCaptchaWindow('timeout')"), '超时点 captcha 抛点必须调度自动转有头');
+  assert.ok(DRIVER.includes("autoShowCaptchaWindow('post-send')"), '发送后 captcha 抛点必须调度自动转有头');
+  const helperAt = DRIVER.indexOf('function autoShowCaptchaWindow(');
+  const helperBody = DRIVER.slice(helperAt, helperAt + 1200);
+  assert.ok(helperBody.includes('openWindow({})'), 'helper 必须调 openWindow({}) 转换同一现场');
+  assert.ok(helperBody.includes('if (busy) return'), '轮次仍在跑时必须让路（不硬抢窗口）');
+});

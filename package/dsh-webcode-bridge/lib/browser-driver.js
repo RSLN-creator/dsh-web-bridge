@@ -4145,6 +4145,9 @@ export function createBrowserDriver(options = {}) {
             + '处理：在弹出的浏览器窗口里手动完成验证后重试本轮。'
             + '（这不是解码器问题，也不是「网页没回传」——本轮零回复是验证闸门造成的）');
           withWebcodeCode(err, 'WEB_CAPTCHA_REQUIRED');
+          // 0.20.0：把触发验证的同一个浏览器转成有头窗口，用户才能在**同一现场**
+          // 看到滑块并过掉（另开干净窗口永远无滑块——用户 2026-10-20 已指出）。
+          autoShowCaptchaWindow('timeout');
           err.captcha = challengeAtTimeout;
           err.timeoutScene = lastTimeoutScene;
           warn('captcha gate hit at timeout: ' + JSON.stringify(challengeAtTimeout) + ' site=' + siteId);
@@ -4623,6 +4626,7 @@ export function createBrowserDriver(options = {}) {
             + '处理：在弹出的浏览器窗口里手动完成验证后重试本轮。'
             + '（这不是解码器问题，也不是「网页没回传」——wire 上零帧是验证闸门造成的）');
           withWebcodeCode(err, 'WEB_CAPTCHA_REQUIRED');
+          autoShowCaptchaWindow('post-send');
           err.captcha = gate;
           warn('captcha gate hit: ' + JSON.stringify(gate) + ' site=' + siteId);
           throw err;
@@ -5513,6 +5517,28 @@ export function createBrowserDriver(options = {}) {
   // 「独立窗口」与「右栏预览」共享同一登录会话，这是 iframe 方案做不到的
   // （DeepSeek 等站点 CSP 拒绝 iframe，参考 webcode 也用独立窗口承载）。
   // 生成期间可用：busy 锁只挡写操作（登录/导入），窗口打开不与轮次互斥。
+  /**
+   * 0.20.0：验证码命中后**自动把命中现场的那个浏览器转成有头窗口**。
+   *
+   * 用户 2026-10-20 原话：「就算你开了有头，你没有触发我也完全看不见！！！在这个
+   * 窗口里无滑块」——说得对：另开一个干净浏览器（或手动 chrome --user-data-dir）
+   * **没有挑战现场**，所以永远看不到滑块；能过验证的只有「触发验证的那个 page」。
+   * openWindow 的语义正是把**当前 page** 转成有头（并 goto 它当前的 URL），因此
+   * 唯一正确的做法是：验证码一命中就调它。
+   *
+   * 时序：等 1.5s 让 runTurn 的 reject/finally 收尾，避免和轮次清理并发；如果那时
+   * 仍 busy（别的轮次在跑）就放弃本次（不硬抢窗口，不打断在途轮次）。
+   *
+   * @param {string} reason 命中来源（timeout / post-send），只用于日志归因
+   */
+  function autoShowCaptchaWindow(reason) {
+    setTimeout(() => {
+      if (busy) return;
+      warn('captcha gate hit (' + reason + ') — converting this browser to a headed window so the user can see/pass the challenge');
+      openWindow({}).catch((e) => warn('captcha auto-window failed:', e?.message || e));
+    }, 1500);
+  }
+
   async function openWindow({ width, height, url, offset = 0 } = {}) {
     await ensure();
     throwIfTransitioning();
