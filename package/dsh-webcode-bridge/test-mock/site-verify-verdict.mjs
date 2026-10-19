@@ -169,3 +169,113 @@ export function streamDeliveryVerdict({ fullText, deltaText } = {}) {
   } else note = `全文与增量一致（${full.trim().length} 字）`;
   return { fullTextOk: fullOk, deltaOk, consistent, fullChars: full.trim().length, deltaChars: delta.trim().length, note };
 }
+
+// ── ⑧ 站点侧资源类错误必须归 BLOCKED，不得冒充产品 FAIL（#62）───────────────
+//
+// ## 缺陷形状（真机 + 代码两重证据）
+//
+// `site-verify.mjs` 旧实现用一条手写正则
+// `/(?:CAPTCHA|RATE_LIMIT|NEED_LOGIN)/` 判「外部条件」，只要资源类错误不落进
+// 这条正则，就会走 `FAIL` 分支。而**站点自有资源类错误**（kimi Connect-RPC 的
+// `resource_exhausted`；同族的 `rate_limit` / `overloaded` / `server_busy`）是
+// 「这一轮网页没接」——外部条件，**不是产品缺陷**。把它记成 FAIL 等于把站点
+// 的临时拥塞写成桥的 bug，验收汇总会被一条假红带偏。
+//
+// ## 为什么不能只看错误码
+//
+// kimi 的 `resource_exhausted` **不带机器码**：解码器把它解成人能读的一句话
+// （`lib/decoder.js` 的 kimiErrorText），驱动随后抛一个普通 Error，`err.code`
+// 为空、原话落在 `message` 里。因此判定必须同时看「码」与「服务端原话」。
+//
+// ## 边界（宽松方向只能朝 BLOCKED，不能朝 PASS）
+//
+// 本函数只回答「这一轮是否被外部条件挡住」；判断为 true 的调用点一律记
+// BLOCKED（**不是** PASS），所以误判的代价是「少报一条产品缺陷」，而不是假绿。
+// 反向仍要收窄：产品侧错误码（MODEL_UI_CHANGED / SEND_NOT_CONFIRMED /
+// ATTACH_* / EMPTY_RESPONSE 等）**绝不**得被吞成 BLOCKED——那些必须留在 FAIL。
+
+/** 机器码里的外部条件标记（大小写不敏感；按子串匹配以覆盖 WEB_ 前缀族）。 */
+const BLOCKED_CODE_MARKERS = Object.freeze([
+  'CAPTCHA',            // WEB_CAPTCHA_REQUIRED / CAPTCHA
+  'NEED_LOGIN',         // 未登录
+  'RATE_LIMIT',         // RATE_LIMITED（本插件）/ RATE_LIMIT（官方）
+  'RESOURCE_EXHAUSTED', // 站点侧资源耗尽（若上游把它映射成码时也接住）
+  'OVERLOADED',
+  'SERVER_BUSY',
+  // F18（2026-10-19 Wave2b zai 真机）：`WEB_UI_OVERLAY_BLOCKED` 是驱动侧抛的
+  // 「页面级 UI 遮罩盖住发送目标」——外部 UI 条件（导览/地区弹窗），**不是**产品缺陷。
+  // 此码在 F16 由 browser-driver 新增、error-codes.js 登记；工具侧此前没把它记进
+  // 外部条件表 ⇒ zai 的 send.text 被记成 FAIL（BLOCKED 才符合四态口径）。
+  // ⚠ 只收这一个码：产品侧码（SEND_NOT_CONFIRMED / MODEL_UI_CHANGED 等）必须留在 FAIL。
+  'UI_OVERLAY_BLOCKED', // WEB_UI_OVERLAY_BLOCKED
+]);
+
+/** 服务端原话里的外部条件标记（kimi 等站点不带机器码，只能读文本）。 */
+const BLOCKED_MESSAGE_PATTERNS = Object.freeze([
+  /resource[_ ]exhausted/i,
+  /rate[_ ]limit(?:ed|_exceeded)?/i,
+  /\boverloaded\b/i,
+  /server[_ ]busy/i,
+  /too many (?:requests|people)/i,
+  /请求过于频繁/,
+  /聊天的人太多了/,
+]);
+
+/**
+ * 机器错误码是否表示「外部条件挡住」（验证码 / 未登录 / 限流 / 资源耗尽）。
+ *
+ * @param {string|null|undefined} code 错误码（如 `WEB_CAPTCHA_REQUIRED`、`RATE_LIMITED`）
+ * @returns {boolean} true ⇒ 调用方应记 BLOCKED（**不是** PASS、也不是 FAIL）
+ */
+export function isBlockedErrorCode(code) {
+  const s = String(code ?? '').toUpperCase();
+  if (!s) return false;
+  return BLOCKED_CODE_MARKERS.some((m) => s.includes(m));
+}
+
+/**
+ * 错误原文是否来自**站点自有资源限制**（解码器把服务端错误帧解成人话后的文本）。
+ *
+ * 为什么不复用 {@link isBlockedErrorCode}：那是码表匹配（`NEED_LOGIN` 这类
+ * 本插件自定码），这里是服务端原话匹配；两者来源不同、放宽方向也不同，
+ * 合并成一个函数会让「码」与「文本」两个判据的边界不可解释。
+ *
+ * @param {string|null|undefined} message 错误原文
+ * @returns {boolean} true ⇒ 站点侧资源限制（外部条件）
+ */
+export function isBlockedErrorMessage(message) {
+  const s = String(message ?? '');
+  if (!s) return false;
+  return BLOCKED_MESSAGE_PATTERNS.some((re) => re.test(s));
+}
+
+/**
+ * 一次发送失败是否属于「外部条件挡住」——**码与原文两个判据取其一**。
+ *
+ * 这是 `site-verify.mjs` 三个分类点（send.text / tool.loop / tool.resultRoundTrip）
+ * 的**唯一**判据入口：三处若各自手写正则，迟早漂移成三份口径。
+ *
+ * @param {{code?:string, message?:string}|null|undefined} err 驱动抛出的错误
+ * @returns {boolean} true ⇒ BLOCKED；false ⇒ 保持原先的 FAIL 判定
+ */
+export function isBlockedSendError(err) {
+  if (!err) return false;
+  return isBlockedErrorCode(err.code) || isBlockedErrorMessage(err.message);
+}
+
+/**
+ * 这次失败是否明确指向「未登录」——只有它才能构成「登录判定与发送路径矛盾」。
+ *
+ * 为什么单独拆出来（#62 修法的安全边界）：旧实现把 CAPTCHA / RATE_LIMIT 也一并
+ * 记一条 `login.verdictConsistent=FAIL`，于是**任何外部拦截都会把整站判成 FAIL**
+ * （四态优先级 FAIL > BLOCKED）。验证码/限流与「登录判定说已登录」并不矛盾，
+ * 只有 NEED_LOGIN 才矛盾。判定时仍看码与原文两侧（站点可能不带码）。
+ *
+ * @param {{code?:string, message?:string}|null|undefined} err 驱动抛出的错误
+ * @returns {boolean} true ⇒ 可以判 `login.verdictConsistent=FAIL`
+ */
+export function isNeedLoginError(err) {
+  if (!err) return false;
+  const s = String(err.code ?? '') + ' ' + String(err.message ?? '');
+  return /NEED_LOGIN/i.test(s);
+}

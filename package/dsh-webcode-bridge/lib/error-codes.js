@@ -126,6 +126,7 @@ export const WEBCODE_CODES = Object.freeze({
   WEB_SESSION_LOST: { official: false, note: '网页会话已删/过期/被风控拦：前文确实没了，需整段重建。' },
   WEB_NO_PROGRESS: { official: false, note: '网页侧长时间无任何新内容（看门狗）。语义接近 `TIMEOUT`，但重试代价是一次完整投递，故不并入官方重试集。' },
   WEB_CAPTCHA_REQUIRED: { official: false, note: '站点风控闸门：验证通过前不发请求，需人工过滑块。' },
+  WEB_UI_OVERLAY_BLOCKED: { official: false, note: '页面级 UI 遮罩（产品导览 driver-overlay / 地区弹窗 _modal-overlay）盖住发送目标：点击不会命中，需人工关闭或折叠后重试。' },
   SEND_NOT_CONFIRMED: { official: false, note: '点了发送但网页未确认收到。' },
   PROMPT_TRUNCATED: { official: false, note: '网页输入框只接收了部分字符（回读校验）。本插件自己有一次性压缩重试。' },
   PROMPT_WRITE_STALLED: { official: false, note: '写入输入框后长度不再增长（分块写入卡死）。' },

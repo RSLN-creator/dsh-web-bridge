@@ -14,7 +14,7 @@
 // 下面每条负向用例都对应一个具体的偷懒写法，并且该写法在本文件里是可复现的。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { verdictOf, streamDeliveryVerdict, sameSessionVerdict, REQUIRED_CHECKS } from '../test-mock/site-verify-verdict.mjs';
+import { verdictOf, streamDeliveryVerdict, sameSessionVerdict, REQUIRED_CHECKS, isBlockedErrorCode, isBlockedErrorMessage, isBlockedSendError, isNeedLoginError } from '../test-mock/site-verify-verdict.mjs';
 
 /** 造一份「所有必要项都在、且都通过」的检查清单。 */
 function allPass(over = {}) {
@@ -261,4 +261,157 @@ test('⑦e 反向变异：把「判成立」写宽（任一侧非空即成立）
   assert.notEqual(loose({ kind: 'landedUrl', value: 'aaa' }, { kind: 'landedUrl', value: 'bbb' }, null, null),
     sameSessionVerdict({ kind: 'landedUrl', value: 'aaa' }, { kind: 'landedUrl', value: 'bbb' }, null, null).ok,
     '宽松版与真实判据在该场景下必须给出不同结果');
+});
+
+// ── ⑧ 站点侧资源类错误必须归 BLOCKED，不得冒充产品 FAIL（#62）───────────────
+//
+// 旧实现的手写正则 `/(?:CAPTCHA|RATE_LIMIT|NEED_LOGIN)/` 只认**机器码**，
+// 而 kimi 的 `resource_exhausted` 不带码（解码器把它解成服务端原话放 message 里）
+// ⇒ 站点临时拥塞被记为产品 FAIL，一条假红把整站四态带偏。
+//
+// 判据两块：① 码与原文两个来源都要认出「外部条件」；② **产品侧错误码绝不能被
+// 吞成 BLOCKED**（否则修完 #62 又把真缺陷藏起来——宽松方向只能朝 BLOCKED，
+// 但 BLOCKED/FAIL 的边界必须可解释）。
+test('⑧ 机器码：验证码/未登录/限流 ⇒ BLOCKED（正例）', () => {
+  for (const code of ['WEB_CAPTCHA_REQUIRED', 'CAPTCHA', 'NEED_LOGIN', 'RATE_LIMITED', 'RATE_LIMIT', 'OVERLOADED', 'SERVER_BUSY']) {
+    assert.equal(isBlockedErrorCode(code), true, `${code} 是外部条件，必须判 BLOCKED`);
+  }
+});
+
+test('⑧b 服务端原话：kimi resource_exhausted 等站点资源限制 ⇒ BLOCKED（正例）', () => {
+  // 真机原始形状：驱动抛普通 Error，message 含解码后的服务端原话。
+  const msg = 'web capture ended incomplete: resource_exhausted：和Kimi聊天的人太多了，请根据当前速率限制信息后重试。';
+  assert.equal(isBlockedErrorMessage(msg), true, 'resource_exhausted（不带码）必须被认成外部条件');
+  for (const s of ['rate_limit exceeded', 'rate_limited', 'server overloaded', 'server_busy', 'too many requests']) {
+    assert.equal(isBlockedErrorMessage(s), true, `${s} 必须判外部条件`);
+  }
+});
+
+test('⑧c 反例：产品侧错误码/普通失败绝不能被吞成 BLOCKED', () => {
+  for (const code of ['MODEL_UI_CHANGED', 'SEND_NOT_CONFIRMED', 'ATTACH_NOT_CONFIRMED', 'PROMPT_WRITE_STALLED', 'EMPTY_RESPONSE', 'WEB_NO_PROGRESS', '']) {
+    assert.equal(isBlockedErrorCode(code), false, `${code} 不是外部条件，必须留在 FAIL`);
+    assert.equal(isBlockedSendError({ code }), false, `${code} 不得被 isBlockedSendError 判成 BLOCKED`);
+  }
+  // 普通的「网页没说完」错误（无码、无资源类原话）同样是产品侧失败。
+  const plain = 'web capture ended incomplete: invalid_stream | 流首段: {"heartbeat":{}}';
+  assert.equal(isBlockedSendError({ message: plain }), false, '无资源类证据的失败必须留在 FAIL');
+});
+
+test('⑧d isBlockedSendError：码或原文任一命中即 BLOCKED（两个来源都接住）', () => {
+  assert.equal(isBlockedSendError({ code: 'RATE_LIMITED', message: 'x' }), true);
+  assert.equal(isBlockedSendError({ code: '', message: 'resource_exhausted：人太多了' }), true);
+  assert.equal(isBlockedSendError({ code: 'MODEL_UI_CHANGED', message: '模型不一致' }), false);
+  assert.equal(isBlockedSendError(null), false);
+  assert.equal(isBlockedSendError({}), false);
+});
+
+test('⑧e 只有 NEED_LOGIN 才构成「登录判定与发送路径矛盾」（#62 安全边界）', () => {
+  // 旧实现把 CAPTCHA/RATE_LIMIT 也记一条 login.verdictConsistent=FAIL ⇒
+  // 四态优先级 FAIL > BLOCKED ⇒ 任何外部拦截都会把整站判成 FAIL（#62 又回来）。
+  assert.equal(isNeedLoginError({ code: 'NEED_LOGIN' }), true);
+  assert.equal(isNeedLoginError({ code: 'RATE_LIMITED' }), false, '限流与登录判定不矛盾');
+  assert.equal(isNeedLoginError({ code: 'WEB_CAPTCHA_REQUIRED' }), false, '验证码与登录判定不矛盾');
+  assert.equal(isNeedLoginError({ message: 'resource_exhausted' }), false);
+});
+
+// ── ⑨ site-verify.mjs 的三个分类点必须走同一份纯函数（#62 接线）───────────────
+//
+// 纯函数测对了不等于接上了：旧实现三处各自手写正则，改一处忘两处就漂移。
+// 这里做源码级接线断言 + 反向（旧正则残留即红）。
+test('⑨ site-verify.mjs 必须用 isBlockedSendError 分类，不得保留手写正则（#62）', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { join, dirname } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const here = dirname(fileURLToPath(import.meta.url));
+  const src = readFileSync(join(here, '..', 'test-mock', 'site-verify.mjs'), 'utf8');
+  const code = src.split(/\r?\n/).filter((l) => !/^\s*\/\//.test(l)).join('\n');
+  assert.ok((code.match(/isBlockedSendError\(/g) || []).length >= 3,
+    'send.text / tool.loop / tool.resultRoundTrip 三处都必须走 isBlockedSendError（旧实现三处各写一条正则）');
+  assert.match(code, /import \{[^}]*isBlockedSendError[^}]*\} from '\.\/site-verify-verdict\.mjs'/, 
+    'isBlockedSendError 必须从纯函数模块导入');
+  assert.ok(!/CAPTCHA\|RATE_LIMIT/.test(code),
+    '不得再保留手写分类正则 /CAPTCHA|RATE_LIMIT/（它只认码，kimi 的 resource_exhausted 会漏成 FAIL）');
+});
+
+// ── ⑩ site-verify.mjs 的「同一会话」必须走 sameSessionVerdict（#71 同族）───────
+//
+// zai/doubao/qwen 的 sessionId 恒为 null ⇒ 旧判据 `firstSid && secondSid && firstSid === secondSid`
+// 会把**真的**工具往返记成 UNVERIFIED ⇒ 整站永远到不了 PASS。
+// 修法是复用纯函数（两个判据取其一），并在这里钉住「调用点没有退回裸 sessionId」。
+test('⑩ site-verify.mjs 的 tool.resultRoundTrip 必须调 sameSessionVerdict（#71 同族）', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { join, dirname } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const here = dirname(fileURLToPath(import.meta.url));
+  const src = readFileSync(join(here, '..', 'test-mock', 'site-verify.mjs'), 'utf8');
+  const code = src.split(/\r?\n/).filter((l) => !/^\s*\/\//.test(l)).join('\n');
+  assert.match(code, /sameSessionVerdict\(/,
+    '同一会话判定必须调用纯函数 sameSessionVerdict —— '
+    + '裸 sessionId 判据会让无地址形状站点（zai/doubao/qwen）的真往返被误记 UNVERIFIED');
+  assert.ok(!/firstSid && secondSid && firstSid === secondSid/.test(code),
+    '不得回退裸 `firstSid && secondSid && firstSid === secondSid` 的旧判据');
+  // 第二判据的**来源**必须是驱动 status().sessionSlot（落地地址锚），否则纯函数永远只有一判据。
+  assert.match(code, /sessionSlot/, 'site-verify 必须从 driver.status().sessionSlot 取落地地址锚');
+  assert.match(code, /readSlotAnchor\(/, '必须通过 readSlotAnchor(driver) 在轮次前后各取一次身份锚');
+});
+
+// ── ⑪ site-verify.mjs 的 turn.settled 必须在**发送后**重新取 status（F8）────────
+//
+// 真机 Wave1：deepseek 四态 UNVERIFIED，唯一缺项 turn.settled —— 因为
+//   `st = driver.status()` 是发送前取的（本轮还没收束），而 `diagnostics()` 旧返回体
+//   里又没有 lastEndReason ⇒ 两个来源都拿不到「本轮结束后的收束原因」。
+// 这是**验收工具自身的假 UNVERIFIED**（工具自己制造坏读数，与 #68/#69/#71 同族）。
+test('⑪ site-verify.mjs 的 turn.settled 必须引用发送后重取的 status（F8）', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { join, dirname } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const here = dirname(fileURLToPath(import.meta.url));
+  const src = readFileSync(join(here, '..', 'test-mock', 'site-verify.mjs'), 'utf8');
+  const code = src.split(/\r?\n/).filter((l) => !/^\s*\/\//.test(l)).join('\n');
+  assert.match(code, /const finalSt = driver\.status\?\.\(\) \|\| \{\};/,
+    'turn.settled 判定前必须**重新取一次** driver.status()（发送前的 st 拿不到本轮收束原因）');
+  assert.match(code, /finalSt\.lastEndReason/,
+    'turn.settled 必须读 finalSt.lastEndReason（旧实现取自发送前的 st ⇒ 恒 UNVERIFIED）');
+  assert.ok(!/const endReason = diag\?\.lastEndReason \?\? st\.lastEndReason/.test(code),
+    '不得回退「发送前 status() + diagnostics() 旧返回体」的取样顺序（F8 的缺陷形状）');
+});
+
+test('⑪b browser-driver 的 diagnostics() 必须返回 lastEndReason（F8 产品侧兼容）', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { join, dirname } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const here = dirname(fileURLToPath(import.meta.url));
+  const src = readFileSync(join(here, '..', 'lib', 'browser-driver.js'), 'utf8');
+  const start = src.indexOf('async function diagnostics()');
+  assert.ok(start > 0, 'browser-driver.js 必须有 diagnostics()');
+  const end = src.indexOf('async function resetConversation', start);
+  assert.ok(end > start, '必须能定位 diagnostics() 函数体');
+  const code = src.slice(start, end).split(/\r?\n/).filter((l) => !/^\s*\/\//.test(l)).join('\n');
+  assert.match(code, /lastEndReason/,
+    'diagnostics() 的返回体必须带 lastEndReason —— 诊断接口的语义就是「本轮现场」，'
+    + '缺了它所有诊断消费方都会重复踩 F8 这个坑');
+});
+
+// ── F18：WEB_UI_OVERLAY_BLOCKED 必须归 BLOCKED（zai Wave2b 真机暴露的工具自相矛盾）──
+//
+// ## 现场（2026-10-19 Wave2b zai 首轮真机读数，`.tmp/live-2026-10-19/wave2b/zai-*.log`）
+//
+// F16 让驱动在「页面级 UI 遮罩盖住发送目标」时抛 `WEB_UI_OVERLAY_BLOCKED`（可读、不再
+// 含糊成 SEND_NOT_CONFIRMED）。但 `site-verify.mjs` 的 send.text 把它记成了 **FAIL**——
+// 因为本文件的 `BLOCKED_CODE_MARKERS` 里没有这个码。按四态口径它属于**外部 UI 遮挡
+// = BLOCKED**（不是产品缺陷）⇒ 工具自相矛盾。修法只在码表加 `UI_OVERLAY_BLOCKED`
+// 一项；产品侧码（SEND_NOT_CONFIRMED / MODEL_UI_CHANGED）**必须仍判 false**（留在 FAIL）。
+test('F18 WEB_UI_OVERLAY_BLOCKED ⇒ BLOCKED（外部 UI 遮挡，不是产品缺陷）', () => {
+  assert.equal(isBlockedErrorCode('WEB_UI_OVERLAY_BLOCKED'), true,
+    'F16 新码是外部 UI 遮挡（导览/地区弹窗），必须归 BLOCKED —— 否则 zai 真机会被记成 FAIL');
+  assert.equal(isBlockedSendError({ code: 'WEB_UI_OVERLAY_BLOCKED ' }), true, 'isBlockedSendError 也必须接住（带空白）');
+  // 说明：本判据走**码表**（驱动一定会 `withWebcodeCode` 挂码）；服务端原话表刻意
+  // 不加 `ui_overlay_blocked` —— 那会把「码」与「文本」两个来源混成一团。
+});
+
+test('F18 反向：产品侧码仍必须留在 FAIL（不得因为加了 UI_OVERLAY 标记而放宽）', () => {
+  for (const code of ['SEND_NOT_CONFIRMED', 'MODEL_UI_CHANGED', 'WEB_SESSION_LOST', 'EMPTY_RESPONSE', 'ATTACH_NOT_CONFIRMED']) {
+    assert.equal(isBlockedErrorCode(code), false, `${code} 是产品侧失败，必须留在 FAIL`);
+    assert.equal(isBlockedSendError({ code }), false, `${code} 不得被 isBlockedSendError 吞成 BLOCKED`);
+  }
 });

@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import { DEEPSEEK, resolveWebModel, listAllModels, getSite, SITES, qualifyModelId, MODEL_ALIAS_IDS, MODEL_PROVIDER_COMPAT_ID, siteIdForProvider, providerGroupName, modelGroupEntryName, providerIdsForRegistration } from './providers.js';
 import {
   DEFAULT_SLOT, parseAccountKey, formatAccountKey, formatModelId, normalizeAccounts, slotsForSite,
-  slotProfileDir, accountLabel, sendGapForSlot, normalizeSlot,
+  slotProfileDir, accountLabel, sendGapForSlot, normalizeSlot, normalizeLoginState,
 } from './accounts.js';
 import { readIdentityCache, nameSlugForDisplay } from './account-cache.js';
 import { createHash } from 'node:crypto';
@@ -3979,7 +3979,10 @@ function imageMarkdown(images) {
           // 槽身份三个字段（slot / accountKey / profileDir）在**两条分支里都要有**：
           // 前端把 sites 当同一个列表渲染，缺字段的行会让「未初始化」的槽无法显示成
           // 「glm (账户2)」而退化成裸 siteId，两行看起来一模一样。
-         return { siteId: st.id, siteName: st.name, origin: st.origin, slot: acc.slot, accountKey: acc.key, displayName: accountLabel(st.name, acc.slot), profileDir: slotDir, initialized: false, running: false, busy: false, loggedIn: has ? cached.loggedIn : null, loggedInCached: has && cached.loggedIn === true, loginBasis: trusted ? cached.basis : (cached ? 'stale' : null), loginCheckedAt: cached ? cached.at : null, needLogin: has && cached.loggedIn === false, selectedModel: null, window: null, loginState: 'idle', lastLogin: null, sessionLostCount: 0, lastSessionLost: null,
+          // #60：未初始化槽没有 driver 状态 ⇒ 三态只能如实报「不确定」，**不得**写
+          // 'idle'——那不是三态的合法值（合法只有 verified-in / verified-out /
+          // uncertain）。'idle' 是登录**流程**阶段，已改名 loginPhase 单独转发。
+         return { siteId: st.id, siteName: st.name, origin: st.origin, slot: acc.slot, accountKey: acc.key, displayName: accountLabel(st.name, acc.slot), profileDir: slotDir, initialized: false, running: false, busy: false, loggedIn: has ? cached.loggedIn : null, loggedInCached: has && cached.loggedIn === true, loginBasis: trusted ? cached.basis : (cached ? 'stale' : null), loginCheckedAt: cached ? cached.at : null, needLogin: has && cached.loggedIn === false, selectedModel: null, window: null, loginState: 'uncertain', loginVerified: false, loginPhase: 'idle', lastLogin: null, sessionLostCount: 0, lastSessionLost: null,
           // 真实昵称/头像：驱动未懒创建时**从落盘缓存读**（0.19.46）。
           //
           // 旧实现这里写死 `accountName: null, avatarUrl: null` 并附一句「未初始化的
@@ -4005,7 +4008,13 @@ function imageMarkdown(images) {
         // 靠 loggedIn 猜，或者干脆写死一个假状态（那是用户明确不要的）。
         // 未初始化的槽给 0/null（不是 omit）：前端按键索引，缺字段会让该行
         // 退化成「undefined 次」，看起来像读数坏了。
-        return { siteId: st.id, siteName: st.name, origin: st.origin, slot: acc.slot, accountKey: acc.key, displayName: accountLabel(st.name, acc.slot), profileDir: s.profileDir ?? null, initialized: true, running: s.running === true, busy: s.busy === true, loggedIn: s.loggedIn ?? null, loggedInCached: s.loggedInCached === true, loginBasis: s.loginBasis ?? null, loginCheckedAt: s.loginCheckedAt ?? null, needLogin: s.needLogin === true, selectedModel: s.selectedModel ?? null, window: s.window ?? null, loginState: s.loginState ?? 'idle', lastLogin: s.lastLogin ?? null, sessionLostCount: s.sessionLostCount ?? 0, lastSessionLost: s.lastSessionLost ?? null,
+        // #60：`loginVerified` 必须在这里转发。`browser-driver.status()` 早就算出了
+        // 「登录结论是否已核验」这一格（与三态 loginState 自洽），但本行只转了
+        // `loginState` ⇒ 前端拿到的是「结论」却拿不到「这个结论可信吗」，面板
+        // 只能把 uncertain 也画成已登录/未登录的二选一。转发是纯增量，不改旧字段。
+        // `loginPhase` 同时转发：它是登录**流程**阶段（idle/launching/…），与三态
+        // `loginState` 是两个概念（#60 的根因就是两者曾共用同名变量而互相覆盖）。
+        return { siteId: st.id, siteName: st.name, origin: st.origin, slot: acc.slot, accountKey: acc.key, displayName: accountLabel(st.name, acc.slot), profileDir: s.profileDir ?? null, initialized: true, running: s.running === true, busy: s.busy === true, loggedIn: s.loggedIn ?? null, loggedInCached: s.loggedInCached === true, loginBasis: s.loginBasis ?? null, loginCheckedAt: s.loginCheckedAt ?? null, needLogin: s.needLogin === true, selectedModel: s.selectedModel ?? null, window: s.window ?? null, loginState: normalizeLoginState(s.loginState), loginVerified: s.loginVerified === true, loginPhase: s.loginPhase ?? 'idle', lastLogin: s.lastLogin ?? null, sessionLostCount: s.sessionLostCount ?? 0, lastSessionLost: s.lastSessionLost ?? null,
           // 真实昵称/头像（0.19.37）：**必须在这里转发**。
           //
           // 缺陷形状（与上面那两处注释警告过的是同一个）：`browser-driver.status()`

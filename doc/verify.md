@@ -4,6 +4,66 @@
 
 ---
 
+# 2026-10-19 夜：国模六站真机四态 + 风控合规实验（工作树 0.19.92，未发版）
+
+日期：2026-10-19（22:06–22:16 Wave2；22:2x 起 Wave2b）。环境：Windows、Node v24.18.0、DSH web 3080（运行中的进程仍加载旧代码，未重启/未装机）。
+执行协议与风控硬约束见 [`doc/research/2026-10-19-risk-control-and-real-machine-protocol.md`](research/2026-10-19-risk-control-and-real-machine-protocol.md) §5：
+唯一执行器 `test-mock/site-verify.mjs`（一次运行=3 次发送=单站单代码变体全部额度）、有头、串行、站间 ≥20s、零重试、命中验证码立即 BLOCKED/交人、逐次写 GATE 台账。
+证据根：`.tmp/live-2026-10-19/`（gitignore；`GATE-LEDGER.md`、`VERIFY-REPORT.md`、`wave1|wave2|wave2b/` 日志、`wave2/frozen-code-fingerprint.json`）。
+
+## 一、代码变体
+
+| 变体 | 内容 | 冻结证据 |
+| --- | --- | --- |
+| Wave1 基线 | 快照 `.tmp/live-pkg-20261019`（pkg 0.19.92，隔离后续修复） | 快照副本 |
+| 变体 1（Wave2） | 主工作树（fix-sites 第一轮 F1–F13 后冻结） | `wave2/frozen-code-fingerprint.json`（9 文件差异） |
+| 变体 2（Wave2b） | 仅补 F14（kimi ok 水合窗口）/F15（doubao segmented resume）/F16（zai 遮罩检测，新码 `WEB_UI_OVERLAY_BLOCKED`）；3 lib 文件 sha256 见 fix-report | `wave2b/frozen-code-fingerprint-v2.json`（执行者记录） |
+
+## 二、Wave1 + Wave2 四态（原始读数见 `.tmp/live-2026-10-19/VERIFY-REPORT.md`）
+
+| 波次 | 站 | 四态 | P/F/B/U | CAPTCHA | 发送（尝试/确认） | 备注 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Wave1 基线 | deepseek | **UNVERIFIED** | 13/0/0/1 | 无 | 3/3 | 唯一缺项 `turn.settled` 无收束读数（促成 F8） |
+| Wave2 | doubao | **FAIL** | 10/1/0/3 | 无 | 3/2 | `login.basis=probe-ok`（#59 ✅）；两轮 `dom-rescue-capture-stall`（#80 新登记）；第 3 轮 `MODEL_UNAVAILABLE 未能切换到 对话（no-options）`（#79 新登记） |
+| Wave2 | kimi | **BLOCKED** | 3/0/1/8 | 无 | 1/0 | 站点资源限制 `resource_exhausted`（#62 正确归 BLOCKED ✅）；`login.basis=UNVERIFIED(probe-fallback)`（#82/F14） |
+| Wave2 | zai | **FAIL** | 10/1/0/3 | 无 | 2/1 | 第 1 轮全 PASS；第 2 轮 `SEND_NOT_CONFIRMED`（#81/F16）；#64 未到场 |
+| Wave2 | qwen | **PASS** | 14/0/0/0 | 无 | 3/3 | 首次真机全绿；`resultRoundTrip` PASS `basis=slot-anchor`（F7 ✅）；`turn.settled=PASS`（F8 ✅） |
+| Wave2 | glm | **PASS** | 14/0/0/0 | 无 | 3/3 | 3 轮全 PASS；`turn.settled=PASS` |
+| Wave2 | deepseek | **PASS** | 14/0/0/0 | 无 | 3/3 | `turn.settled` 由 Wave1 UNVERIFIED → PASS(finished)（F8 真机生效 ✅） |
+
+## 三、Wave2b（变体 2，只补跑 kimi/doubao/zai）
+
+| 站 | 四态 | P/F/B/U | CAPTCHA | 发送（尝试/确认） | 判据与读数 |
+| --- | --- | --- | --- | --- | --- |
+| kimi | **BLOCKED** | 4/0/1/7 | 无 | 1/0 | **F14 ✅** `login.basis` UNVERIFIED→**PASS(probe-ok)**；发送仍 `resource_exhausted`（外部条件，零重试） |
+| doubao | **UNVERIFIED** | 12/0/0/2 | 无 | 3/3 | **F15 ✅** 第 3 轮不再 `MODEL_UNAVAILABLE`；`resultRoundTrip=PASS basis=slot-anchor`；仅 #80 流式增量 2 项 UNVERIFIED（三轮 `dom-rescue-capture-stall`，52/149/213 字全文可回读） |
+| zai | **BLOCKED**（工具当时记 FAIL） | 4/1/0/7 | 无 | 0 | **F16 ✅** 首轮被 `_modal-overlay` 地区/公告弹窗遮挡 → 可读 `WEB_UI_OVERLAY_BLOCKED`；未被映射为 BLOCKED 属工具口径缺口（F18 已补） |
+
+> 执行窗口 22:22:29–22:27:08，站间 21s/26s，全程无验证码、零重试、无残留。变体 2 只补跑 kimi/doubao/zai；qwen/glm/deepseek 的 PASS 来自变体 1。
+
+## 四、修复点真机终证（只列能证明的；不夸大）
+
+| 修复 | 真机证据 | 判定 |
+| --- | --- | --- |
+| #59 doubao `loginProbe.ok` 同源 | Wave2 doubao `login.basis=probe-ok` PASS | **已闭环** |
+| #62 site-verify 限流归 BLOCKED | Wave2 kimi `resource_exhausted` 记 BLOCKED 而非 FAIL | **已闭环** |
+| #71 同族 site-verify 会话判据 | Wave2 qwen `tool.resultRoundTrip=PASS basis=slot-anchor` | **已闭环** |
+| F8 收束读数 | deepseek Wave1 `turn.settled=UNVERIFIED` → Wave2 `PASS finished`；qwen/glm 旁证 | **已闭环** |
+| #60 loginState 三态 | 单测/渲染级全绿；真机链路无回归 | API+面板已修，**真机不构造该判据** |
+| #65 kimi ok 声明 + 水合时机 | Wave2 未验到（站点忙）；Wave2b 以 `login.basis=probe-ok` 为判据 | 见 §三 |
+| #64 zai 模型按钮禁用 | Wave2 被 `SEND_NOT_CONFIRMED` 抢先，`MODEL_UNAVAILABLE` 未到场 | **仍欠一次真机复跑，不写已修** |
+| #61 qwen 未登录前提 | Wave2 qwen `probe-ok` + 14/14 PASS（外部状态已变，非本方修改） | 前提解除 |
+
+## 五、诚实边界
+
+1. 变体 2 只补跑 kimi/doubao/zai；qwen/glm/deepseek 的 PASS 来自变体 1。两变体差异与冻结指纹在 `.tmp/` 存档，**不作「同一变体全站通过」表述**。
+2. 未发版、未装机、未重启：运行中 DSH 仍是旧代码；需用户自行「打包 → 装 web profile → 重启」。
+3. 新登记 #79–#84（doubao resume `no-options`→F15 已修并真机验证 / doubao 流式增量缺失（#80，根因未定位、未修）/ zai `SEND_NOT_CONFIRMED` 与导览遮罩（#81，F16 保守处置）/ kimi 登录水合时机（#82，F14 已修并真机验证）/ z.ai 国内站与地区弹窗（#83）/ kimi 站点忙弹窗可关闭但无受控恢复（#84，登记待取证））见 `long-term-issues.md`；#64 仍欠真机复跑。
+4. z.ai 国内站：用户两次澄清——「zchat.z.ai，国内网站是这个z.ai」「chat.z.ai，国内z.ai要求用这个前面的网站而不是z.ai」。只读核对：主工作树 `providers.js` 的 ZAI `origin` **本来就是 `https://chat.z.ai`**，`site-verify` 也按 `site.origin` 导航 ⇒ **本轮 zai 读数本来就在 chat.z.ai 上**，不是跑错国际站；变体 2 的 `_modal-overlay`（地区/公告）是 chat.z.ai 自身行为。待确认的只剩**显示名/shortKey 仍为 `z.ai`** 是否要一并改（产品显示口径，本轮不改）。真机读数：headed 下 `chat.z.ai` 会自动跳 `zchat.z.ai`，headless root 新会话页有「请切换至中国站点」弹窗（+2~12s 持久），既有 `/c/…` 页不跳。本轮**不改 origin/路由**，登记下轮取证。
+5. 全程有头、串行、零重试、站间 20–28s，**未出现验证码/滑块**；未做任何绕过、未处理验证码。z.ai 地区/导览遮罩与 kimi 站点忙弹窗均**未由桥自动关闭**（F16 只在 z.ai 导览类遮罩上做 Escape 重试；地区弹窗直接抛可读码交人）。
+
+---
+
 # 0.19.0 补记 —— 第三轮对抗审查抓到的 2 条真缺陷（887 条单测当时全绿也看不见）
 
 日期：2026-09-22（同日追加）。工作树仍为 **0.19.0**。

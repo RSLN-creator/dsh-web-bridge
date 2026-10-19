@@ -2950,3 +2950,62 @@ test('★ 0.19.0 站点标签：站点不得被「有独立窗口就切过去」
   assert.match(src, /if \(controlledSite && SITE_NAMES\[controlledSite\]\) setSiteId\(controlledSite\);/,
     '受控站点同步必须保留——修掉自动采纳 ≠ 不再认标签自己的站点');
 });
+
+/**
+ * ★ #60（2026-10-19 本轮，工作树未发版）：登录状态**三态**必须真的被面板消费。
+ *
+ * ## 缺陷形状
+ *
+ * 后端（browser-driver.status → index.js 站点状态行 → GET login-sites）早就透出了
+ * `loginState` 三态（verified-in / verified-out / uncertain）和 `loginVerified`，
+ * 但面板的 `statusLabel` 只看 `loggedIn` 二态 ⇒ `probe-fallback`（声明了登录特征
+ * 却一个都没命中 = 猜测）被画成「未登录」。用户看到的正是「明明登录了却显示未登录」
+ * ——#60 修到 API 层就断了，这是最后一跳。
+ *
+ * ## 判据（把真实函数体取出来**原样求值**，而不是另写一份判据）
+ *
+ *   · uncertain          → 「待确认」（**不得**是「未登录」）；
+ *   · verified-in        → 「已登录」；
+ *   · verified-out       → 「未登录」；
+ *   · 无 loginState 的旧行 → 保持旧二态行为（零回归）。
+ */
+test('★ #60 登录三态：uncertain 必须渲染「待确认」而不是「未登录」', () => {
+  const src = bridgeSrcFrom('client.cjs');
+  /** 从 client.cjs 源码里取出一个 `const <name> = row => { ... };` 的函数体原样求值。 */
+  function extractRowFn(name) {
+    const start = src.indexOf(`const ${name} = row => {`);
+    assert.ok(start > 0, `client.cjs 里必须有 ${name}（登录态渲染的三个入口之一）`);
+    const end = src.indexOf('\n      };', start);
+    assert.ok(end > start, `${name} 的函数体必须能定位到结尾`);
+    const body = src.slice(src.indexOf('{', start), end + '\n      };'.length - 1);
+    // eslint-disable-next-line no-new-func
+    return new Function('row', body);
+  }
+  const statusLabel = extractRowFn('statusLabel');
+  const statusClass = extractRowFn('statusClass');
+  const statusTitle = extractRowFn('statusTitle');
+
+  // ① 三态核心：probe-fallback（uncertain）**不得**被画成「未登录」。
+  assert.equal(statusLabel({ loggedIn: false, loginState: 'uncertain', loginBasis: 'probe-fallback' }), '待确认',
+    'uncertain 必须显示「待确认」——它既不等于已登录、也不等于未登录（#60）');
+  assert.equal(statusClass({ loggedIn: false, loginState: 'uncertain' }), 'idle',
+    'uncertain 的样式必须是灰色 idle，不能是红色 bad（「不知道」不该被画成「未登录」）');
+  assert.match(statusTitle({ loginState: 'uncertain' }), /无法确认/,
+    'uncertain 的 title 必须解释「无法确认（≠未登录）」并提示可点检测重新核验');
+  assert.match(statusTitle({ loginState: 'uncertain' }), /检测/, 'title 必须给出下一步动作');
+  // ② verified-in / verified-out 与旧行为逐字一致。
+  assert.equal(statusLabel({ loggedIn: true, loginState: 'verified-in' }), '已登录');
+  assert.equal(statusLabel({ loggedIn: true, loginState: 'verified-in', loggedInCached: true }), '已登录(缓存)');
+  assert.equal(statusLabel({ loggedIn: false, loginState: 'verified-out', loginBasis: 'probe-bad' }), '未登录');
+  assert.equal(statusClass({ loggedIn: true, loginState: 'verified-in' }), 'ok');
+  assert.equal(statusClass({ loggedIn: false, loginState: 'verified-out' }), 'bad');
+  // ③ 旧行（无 loginState 字段）行为零位移。
+  assert.equal(statusLabel({ loggedIn: true }), '已登录');
+  assert.equal(statusLabel({ loggedIn: false }), '未登录');
+  assert.equal(statusLabel({ loggedIn: null }), '待检查');
+  assert.equal(statusClass({ loggedIn: true }), 'ok');
+  assert.equal(statusClass({ loggedIn: false }), 'bad');
+  // ④ 三态必须以 loginState 为**优先**判据（不能被 loggedIn 二态抢先）。
+  assert.equal(statusLabel({ loggedIn: true, loginState: 'uncertain' }), '待确认',
+    'uncertain 优先于 loggedIn：猜测出来的 true 也必须标「待确认」');
+});

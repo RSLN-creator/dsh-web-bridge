@@ -1,5 +1,5 @@
 {
-  "generatedAt": 1792253444932,
+  "generatedAt": 1792420479555,
   "scope": "`dsh-webcode-bridge`",
   "command": "node scripts/user-voice-log.mjs",
   "rows": [
@@ -14567,6 +14567,54 @@
       "round": null,
       "text": "打包 0.19.92版本并发布+解决github的连接问题：参考真实情况",
       "hash": "58c20007",
+      "also": []
+    },
+    {
+      "sessionId": "session-fb390deb-8b67-4655-ac0b-78bf04787ccb",
+      "workspace": "D:\\9_Code_Workspace\\dsh-webcode-bridge",
+      "at": 1792254002909,
+      "seq": 746,
+      "origin": "user",
+      "goalId": null,
+      "round": null,
+      "text": "？PowerShell 7.6.6\n加载个人和系统配置文件耗时 8704 毫秒。\nPS C:\\Users\\rsyhn> dsh plugin --profile web add .\\package\\dsh-webcode-bridge\\dsh-webcode-bridge-0.19.92.tgz\n✓ Lockfile passes supply-chain policies (verified 3d ago)\n[ENOENT] ENOENT: no such file or directory, open 'C:\\Users\\rsyhn\\package\\dsh-webcode-bridge\\dsh-webcode-bridge-0.19.92.tgz'\n\nThis error happened while installing a direct dependency of C:\\Users\\rsyhn\\.dsh\\profiles\\web\n\n[WARN] GET https://registry.npmjs.org/dsh-drop-caret error (UND_ERR_DESTROYED). Will retry in 10 seconds. 2 retries left.\n[WARN] GET https://registry.npmjs.org/dshmarket error (UND_ERR_DESTROYED). Will retry in 10 seconds. 2 retries left.\nProgress: resolved 4, reused 0, downloaded 1, added 0\ndsh: plugin command failed; diagnostics: C:\\Users\\rsyhn\\.dsh\\profiles\\web\\.plugin-manager\\logs\\operation-5VfKzW\\pnpm.log\nPS C:\\Users\\rsyhn>\n\n怎么回事",
+      "hash": "c4e61380",
+      "also": []
+    },
+    {
+      "sessionId": "session-fb390deb-8b67-4655-ac0b-78bf04787ccb",
+      "workspace": "D:\\9_Code_Workspace\\dsh-webcode-bridge",
+      "at": 1792254142904,
+      "seq": 761,
+      "origin": "user",
+      "goalId": null,
+      "round": null,
+      "text": "[WARN] GET https://registry.npmjs.org/dsh-drop-caret error (UND_ERR_DESTROYED). Will retry in 10 seconds. 2 retries left.\n[WARN] GET https://registry.npmjs.org/dshmarket error (UND_ERR_DESTROYED). Will retry in 10 seconds. 2 retries left.\nProgress: resolved 4, reused 0, downloaded 1, added 0\ndsh: plugin command failed; diagnostics: C:\\Users\\rsyhn\\.dsh\\profiles\\web\\.plugin-manager\\logs\\operation-5VfKzW\\pnpm.log\nPS C:\\Users\\rsyhn> cd D:\\9_Code_Workspace\\dsh-webcode-bridge\nPS D:\\9_Code_Workspace\\dsh-webcode-bridge> dsh plugin --profile web add .\\package\\dsh-webcode-bridge\\dsh-webcode-bridge-0.19.92.tgz\n✓ Lockfile passes supply-chain policies (verified 3d ago)\n\n   ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\n   │                                                                                                            │\n   │                                    Update available! 11.25.0 → 12.14.0.                                    │\n   │                                    Changelog: https://pnpm.io/v/12.14.0                                    │\n   │   To update, run: Invoke-WebRequest https://get.pnpm.io/install.ps1 -UseBasicParsing | Invoke-Expression   │\n   │                                                                                                            │\n   ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\n\n[WARN] Request took 19485ms: https://registry.npmjs.org/playwright-core\n[WARN] Request took 25530ms: https://registry.npmjs.org/playwright-core\n[WARN] Issues with peer dependencies found. Run \"pnpm peers check\" to list them.\nPackages: +1\n+\nProgress: resolved 18, reused 1, downloaded 2, added 1, done\nDone in 49.1s using pnpm v11.25.0\nPS D:\\9_Code_Workspace\\dsh-webcode-bridge>",
+      "hash": "8ce477c0",
+      "also": []
+    },
+    {
+      "sessionId": "session-a8d9a827-c350-4306-9932-f3562cc75f5d",
+      "workspace": "D:\\9_Code_Workspace\\dsh-webcode-bridge",
+      "at": 1792417550678,
+      "seq": 21,
+      "origin": "user",
+      "goalId": null,
+      "round": null,
+      "text": "真机实验，主要注意风控规则：自行先调研同类型/同作用插件/模型怎么规避风控，先写出这个\n然后你就作为主队话替我确认，多team，子代理进行任务：完成插件的后续所有国模网站完美适配和验证--限时你自己看，必须0点前完成：而且是完美解决所有已知长期问题+完美验证真机跑！",
+      "hash": "83bdd1b7",
+      "also": []
+    },
+    {
+      "sessionId": "session-a8d9a827-c350-4306-9932-f3562cc75f5d",
+      "workspace": "D:\\9_Code_Workspace\\dsh-webcode-bridge",
+      "at": 1792419503396,
+      "seq": 1160,
+      "origin": "user",
+      "goalId": null,
+      "round": null,
+      "text": "zchat.z.ai，国内网站是这个z.ai",
+      "hash": "cd34f9f9",
       "also": []
     }
   ]

@@ -106,6 +106,7 @@
 - `2026-09-23-longrun-rounds-3-4.md` — **长上下文第三、四轮思考**（纯文档）：第三轮从「压力读数量的是谁」落到**两个上下文账本从未对账**（分子分母都是桥的自述；`index.js:844` 注释承诺 128k、代码给出 1M）；第四轮从「auto_continue 是不是免费的」落到**每次救活都在给下一次加长**（完整提醒 = 26,264 字符常驻），给出两条可检验的解决方向（对账探针 / 恢复预算 + 重建而不是加长）与 10 条文献引证
 - `2026-09-23-token-density-calibration.md` — **token 密度标定（官方真实数据）**：官方文档给的是平均密度（中文 0.6 / 英文 0.3），本文用本机凭据对**官方端点实测**六类样本，先修掉「上下文缓存让同一段文本两次差 1.86 倍」的测量陷阱，再拟合出「每类都不低于实测」的三类单价（CJK 0.75 / 散文 ASCII 0.30 / 其余 ASCII 0.70）——**旧口径 0.7/0.25 在源码上低估 33%、数字符号低估 63%**，正是编码 agent 的日常流量
 - `2026-10-05-dsh-multi-session-and-client-hot-swap.md` — **官方「多会话」的真实实现 + 客户端插件热换契约（0.2.0-rc.2 实读 + 真机）**：① `main` 是 keyed 槽一次一个 key、面板与单个会话互斥、任何官方导航都 `selectPanel(null)` ⇒ **官方没有多会话同屏**；官方支持的等价构造 = 面板声明 session 子槽 + `sessions.retain` + `SessionProvider` + `renderFactorySlot('conversation.content',{variant:'embedded'})`（`ui-subagent` / `ui-sidebar-right` 在产范例）；② 「面板全空」的两类形状（抛错空盒 vs 塌高）与各自读数；③ `dsh-client-hmr` 热换契约（产物路径 = `exports["./client"]`、内存快照 + `&rev=` 破缓存、`/plugins*` 免 token、宿主半边必须重启）与**正确姿势：原地覆盖**（`Move-Item` 替换会 404，实测）；④ 真页面验证通道——`dsh web` 启动横幅就打印带 token 的 URL，「token 只在内存里 ⇒ 开不了真页面」这个旧判断只对了一半；⑤ 本轮两个真根因（`layout` 未进 inject / `warn` 声明在 `apply()` 里）与「正则判据看不见作用域」这一课
+- `2026-10-19-risk-control-and-real-machine-protocol.md` — **真机实验风控调研 + 本轮协议**：站点风控五维、同类「网页转 API」项目与反检测框架的做法对照、本项目「学真实浏览器/持久登录、不学指纹伪造/打码/代理池」的取舍判定、已做对的机制清单、真机发送硬约束（串行/限额/间隔/有头/一票停手）与四态判读
 - `real-probe-*.json`、`sse-samples/` — 真机探针输出与 SSE 样本
 
 ## 操作手册（doc/runbooks/）

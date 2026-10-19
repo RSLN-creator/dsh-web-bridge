@@ -153,3 +153,45 @@ test('判据 6：真机确认过「页面会有助手回复」的站点必须声
     '有站点声明了 answerSelector 却不在真机名单里 —— '
     + '要么补上它的真机读数并登记，要么撤掉声明（没有读数的声明违反本仓库纪律）');
 });
+
+// ── 判据 7（#57）：**契约字段必须有消费者** —— strictModelType ─────────────────
+//
+// ## 本条防的是什么
+//
+// `lib/contract.js` 声明了 `strictModelType`（deepseek=true、其余站点=false），
+// 但全仓**零消费**：驱动里真正决定「核验本轮请求元数据」的是一句硬编码
+// `siteId === 'deepseek'`。两份知识（契约 vs 驱动）从此可以各自漂移：
+// 给某个站点打开严格核验要改代码，而不是改契约——契约字段成了摆设。
+//
+// ## 判据
+//
+//   ① 契约值本身：只有 deepseek 为 true，其余站点一律 false（语义与旧硬编码等价）；
+//   ② 消费者：`lib/browser-driver.js` 里必须出现对 `contract.strictModelType`
+//      的**读取**，且不得再退回 `siteId === 'deepseek' && model` 的硬编码。
+//
+// ① 是「值没被改坏」的正反断言，② 是「字段真的被读了」的源码级接线证据
+// （驱动需要真浏览器才能实例化，这里只能钉接线）。
+test('判据 7：strictModelType 只有 deepseek 为真（与旧硬编码语义等价）', () => {
+  for (const s of SITES) {
+    const c = getContract(s.id);
+    assert.equal(typeof c.strictModelType, 'boolean', `${s.id} 的契约必须有布尔 strictModelType`);
+    assert.equal(c.strictModelType, s.id === 'deepseek',
+      `${s.id} 的 strictModelType 必须等于「是否 deepseek」——`
+      + '这是旧硬编码 `siteId === \'deepseek\'` 的语义，改成契约字段后不允许语义漂移');
+  }
+});
+
+test('判据 8：驱动必须读取契约字段，不得回退站点 id 硬编码（#57）', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { join, dirname } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const here = dirname(fileURLToPath(import.meta.url));
+  const driverSrc = readFileSync(join(here, '..', 'lib', 'browser-driver.js'), 'utf8');
+  // 剥掉整行注释（否则「注释里提到 contract.strictModelType」也能骗过本判据）。
+  const code = driverSrc.split(/\r?\n/).filter((l) => !/^\s*\/\//.test(l)).join('\n');
+  assert.match(code, /contract\.strictModelType/,
+    'browser-driver.js 必须**读取**契约的 strictModelType 字段 —— '
+    + '否则 contract.js 里的声明又变成没人消费的摆设（#57）');
+  assert.ok(!/siteId === 'deepseek' && model/.test(code),
+    '不得回退 `siteId === \'deepseek\' && model` 的硬编码判断（#57 的原始缺陷形状）');
+});

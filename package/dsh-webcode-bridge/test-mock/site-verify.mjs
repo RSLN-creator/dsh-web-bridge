@@ -69,7 +69,7 @@ import { getSite, SITES } from '../lib/providers.js';
 // 会与产品真实的 `sites/<siteId>` 布局分叉，登录态读不到）。
 import { slotProfileDir, DEFAULT_SLOT } from '../lib/accounts.js';
 import { serializeFirstTurn, parseAgentReply } from '../lib/agent-preset.js';
-import { verdictOf, streamDeliveryVerdict } from './site-verify-verdict.mjs';
+import { verdictOf, streamDeliveryVerdict, sameSessionVerdict, isBlockedSendError, isNeedLoginError } from './site-verify-verdict.mjs';
 import { planSendGap, sleepMs, MIN_SEND_GAP_MS } from './site-verify-pacing.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -157,6 +157,31 @@ function pickModel(site) {
   const m = Array.isArray(site.models) ? site.models[0] : null;
   if (!m?.id) return null;
   return `${site.id}:${m.id}`;
+}
+
+/**
+ * 取驱动当前的**会话身份锚**（给 `sameSessionVerdict` 用；#71 同族在 site-verify 的接线）。
+ *
+ * 为什么需要它：zai / doubao / qwen 等站点**没有地址形状**（`conversationIdFromUrl`
+ * 对它们没有形状表），`sendTurn` 返回的 `sessionId` 恒为 `null`。若「同一会话」只认
+ * `sessionId`，这些站点的工具结果往返**即使真的成立**也会被记 UNVERIFIED ⇒ 整站
+ * 永远到不了 PASS。驱动 0.19.52 起为这类站点维护**落地地址锚**（`status().sessionSlot`
+ * 的 `landedUrl`），换会话会被判 `WEB_SESSION_LOST` ⇒ 它是可信的第二身份。
+ *
+ * 取法与 `site-verify-multiturn.mjs` 同源（本脚本不另写判定，只取身份后交给纯函数）。
+ *
+ * @param {object} driver 浏览器驱动
+ * @returns {{kind:'webSessionId'|'landedUrl'|'none', value:string|null, source:string|null}}
+ */
+function readSlotAnchor(driver) {
+  try {
+    const slot = driver.status?.()?.sessionSlot || {};
+    if (slot.webSessionId) return { kind: 'webSessionId', value: String(slot.webSessionId), source: slot.source || null };
+    if (slot.landedUrl) return { kind: 'landedUrl', value: String(slot.landedUrl), source: slot.source || null };
+    return { kind: 'none', value: null, source: slot.source || null };
+  } catch {
+    return { kind: 'none', value: null, source: null };
+  }
 }
 
 /** 单站验收。返回 { siteId, status, checks[] }。 */
@@ -290,15 +315,25 @@ async function verifySite(siteId) {
       );
     } catch (err) {
       const code = err?.code || '';
-      // 验证码/风控是**外部条件**，不是产品缺陷——单独标 BLOCKED 并保留现场。
-      if (/CAPTCHA|RATE_LIMIT|NEED_LOGIN/.test(code)) {
-        add('send.text', 'BLOCKED', `${code}: ${String(err?.message || err).slice(0, 140)}`);
+      // 验证码/风控/未登录/**站点自有资源限制**都是外部条件，不是产品缺陷
+      // ——单独标 BLOCKED 并保留现场。判定收在纯函数 `isBlockedSendError()`
+      // （#62）：旧实现手写 `/CAPTCHA|RATE_LIMIT|NEED_LOGIN/` **只看码**，而
+      // kimi 的 `resource_exhausted` 不带机器码（解码器把它解成服务端原话放
+      // message 里）⇒ 站点临时拥塞被记成产品 FAIL。码与原文两个判据缺一不可。
+      if (isBlockedSendError(err)) {
+        add('send.text', 'BLOCKED',
+          `${code || '(站点侧资源限制) ' + String(err?.message || err).slice(0, 60)}: ${String(err?.message || err).slice(0, 120)}`);
         // 登录判定说「已登录」，而真实发送路径说「要登录」——**两者必有一错**。
         // 这不是 BLOCKED 能盖过去的：它是一条真实缺陷（面板会对没登录的站点
         // 显示「已登录」），所以单独记一条 FAIL。
-        add('login.verdictConsistent', 'FAIL',
-          `登录判定回 loggedIn=true（basis=${st.loginBasis ?? '?'}），但真实发送路径回 ${code}`
-          + '——面板会把未登录站点显示成「已登录」，登录判定的兜底判据需要收紧');
+        // ⚠ 只有 NEED_LOGIN 才构成这个矛盾（#62 的边界）：CAPTCHA / 限流 /
+        // 资源耗尽都是外部拦截，旧实现把它们也记 FAIL ⇒ 整站被这条 FAIL 带成
+        // FAIL（四态优先级 FAIL > BLOCKED），#62 就又回来了。
+        if (isNeedLoginError(err)) {
+          add('login.verdictConsistent', 'FAIL',
+            `登录判定回 loggedIn=true（basis=${st.loginBasis ?? '?'}），但真实发送路径回 ${code || 'NEED_LOGIN'}`
+            + '——面板会把未登录站点显示成「已登录」，登录判定的兜底判据需要收紧');
+        }
         return finalize();
       }
       add('send.text', 'FAIL', `${code || '(no code)'}: ${String(err?.message || err).slice(0, 160)}`);
@@ -342,10 +377,14 @@ async function verifySite(siteId) {
       );
     } catch (err) {
       const code = err?.code || '';
-      add('tool.loop', /CAPTCHA|RATE_LIMIT/.test(code) ? 'BLOCKED' : 'FAIL',
+      // 外部条件（验证码/未登录/限流/站点资源耗尽）记 BLOCKED，不进 FAIL（#62）。
+      add('tool.loop', isBlockedSendError(err) ? 'BLOCKED' : 'FAIL',
         `${code || '(no code)'}: ${String(err?.message || err).slice(0, 140)}`);
       return finalize();
     }
+    // 首轮落地后的会话身份锚（#71 同族在 site-verify 的接线）：与 sessionId 一起，
+    // 供 `sameSessionVerdict()` 判「回填轮是不是还在同一个网页会话」。
+    const anchor1 = readSlotAnchor(driver);
     const authoritative = String(loopResult?.text || loopText || '');
     mark('end');   // 第二轮收束：下一次调用的 end-to-start 锚点
     const parsed = parseAgentReply(authoritative, { tools: toolSchema });
@@ -385,24 +424,34 @@ async function verifySite(siteId) {
         );
       } catch (err) {
         const code = err?.code || '';
-        add('tool.resultRoundTrip', /CAPTCHA|RATE_LIMIT/.test(code) ? 'BLOCKED' : 'FAIL',
+        // 外部条件记 BLOCKED，不把站点侧的临时失败写成产品缺陷（#62）。
+        add('tool.resultRoundTrip', isBlockedSendError(err) ? 'BLOCKED' : 'FAIL',
           `第二轮（回填结果）失败：${code || '(no code)'}: ${String(err?.message || err).slice(0, 120)}`);
         return finalize();
       }
       const secondBody = String(secondResult?.text || secondText || '');
+      const anchor2 = readSlotAnchor(driver);
       // 判据分两层，缺一不可：
       //   ① 第二轮**真的收到回复**（往返闭环成立）；
-      //   ② **同一个会话**（驱动回话里带 sessionId，且与首轮一致）——否则「回填」
-      //      可能进了一个新会话，那不是往返而是两次独立提问。
+      //   ② **同一个会话**——否则「回填」可能进了一个新会话，那不是往返而是两次
+      //      独立提问。
+      //
+      // ⚠ 第 ② 层**不能只认 `sessionId`**（#71 同族，2026-10-19 本轮修（工作树，未发版））：zai /
+      //   doubao / qwen 等无地址形状站点的 `sessionId` 恒为 null ⇒ 即使往返真的
+      //   成立也会被记 UNVERIFIED ⇒ 整站永远到不了 PASS。判定交给纯函数
+      //   `sameSessionVerdict()`：sessionId 逐字相同 **或** 驱动 `sessionSlot`
+      //   的落地地址锚逐字相同，两个判据取其一；两者都拿不到时**仍记 UNVERIFIED**
+      //   （没有证据时不许猜，也**不**拿「key 相同」当证据——key 是 DSH 侧槽名，
+      //   网页会话是否真停在那一个是正要验的东西）。
       const firstSid = loopResult?.sessionId ?? null;
       const secondSid = secondResult?.sessionId ?? null;
-      const sameSession = Boolean(firstSid && secondSid && firstSid === secondSid);
+      const same = sameSessionVerdict(anchor1, anchor2, firstSid, secondSid);
       const gotReply = secondBody.trim().length > 0;
-      add('tool.resultRoundTrip', (gotReply && sameSession) ? 'PASS' : 'UNVERIFIED',
+      add('tool.resultRoundTrip', (gotReply && same.ok) ? 'PASS' : 'UNVERIFIED',
         gotReply
-          ? (sameSession
-            ? `第二轮收到 ${secondBody.trim().length} 字，会话一致（${String(secondSid).slice(0, 24)}）`
-            : `第二轮收到回复但**会话 id 不一致**（首轮 ${firstSid ?? 'null'} / 次轮 ${secondSid ?? 'null'}）`
+          ? (same.ok
+            ? `第二轮收到 ${secondBody.trim().length} 字，同一会话成立（basis=${same.basis}）`
+            : `第二轮收到回复但**会话身份未通过**：${same.detail}`
               + '——这更像两次独立提问，不算往返闭环')
           : '第二轮没有任何回复——工具结果可能没被网页受理');
     } else {
@@ -410,9 +459,23 @@ async function verifySite(siteId) {
     }
 
     // ---- ④ 会话连续性/收束：驱动报告了收束原因才谈得上「收得住」----
+    //
+    // F8（真机 Wave1 暴露的**工具自身假 UNVERIFIED**）：旧代码是
+    //   `const endReason = diag?.lastEndReason ?? st.lastEndReason ?? null`
+    // 而 `st = driver.status()` 是**发送前**取的（本轮还没收束，天然是旧值/null），
+    // `diagnostics()` 旧返回体里又没有 lastEndReason 字段 ⇒ 两个来源都取不到
+    // 「本轮结束后的收束原因」，于是一轮**成功收束**（noteEndReason('finished')
+    // 已写）也被记成 UNVERIFIED ⇒ 整站因缺必要项永远到不了 PASS。
+    // 修法：收束之后**重新取一次** status()；再兼容 diagnostics()（它现在也带
+    // lastEndReason/lastEndReasonAt，见 browser-driver.js 的注释）。
+    const finalSt = driver.status?.() || {};
     const diag = await driver.diagnostics?.().catch(() => null);
-    const endReason = diag?.lastEndReason ?? st.lastEndReason ?? null;
-    add('turn.settled', endReason ? 'PASS' : 'UNVERIFIED', endReason ? `收束原因=${endReason}` : '没有收束读数');
+    const endReason = finalSt.lastEndReason ?? st.lastEndReason ?? diag?.lastEndReason ?? null;
+    const endReasonAt = finalSt.lastEndReasonAt ?? diag?.lastEndReasonAt ?? null;
+    add('turn.settled', endReason ? 'PASS' : 'UNVERIFIED',
+      endReason
+        ? `收束原因=${endReason}` + (endReasonAt ? `（收束于 ${new Date(endReasonAt).toISOString()}）` : '')
+        : '没有收束读数');
 
     // 最终状态**完全交给纯函数判定**（四态优先级 + 缺必要项也算不确定）。
     return finalize();

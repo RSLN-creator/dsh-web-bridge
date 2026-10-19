@@ -17,7 +17,7 @@
 //   • Responses never echo tokens; errors are fixed-text; bodies are bounded.
 
 import { listAllModels, resolveWebModel, SITES, getSite } from './providers.js';
-import { DEFAULT_SLOT, normalizeSlot, formatAccountKey, parseAccountKey, normalizeAccounts, slotProfileDir, parseModelId } from './accounts.js';
+import { DEFAULT_SLOT, normalizeSlot, formatAccountKey, parseAccountKey, normalizeAccounts, slotProfileDir, parseModelId, normalizeLoginState } from './accounts.js';
 import { buildPromptVariants, buildSitePromptRows } from './prompt-variants.js';
 // 站点提示词文件的**唯一路径来源**（0.16.38）：设置页要「指向本地提示词文件」，
 // 路径就必须与真正落盘/读回用的是同一个函数——前端自己拼路径，迟早与落盘分叉。
@@ -1618,7 +1618,12 @@ export function createWebControl(deps = {}) {
           avatarUrl: s?.avatarUrl ?? null,
           initialized: s?.initialized === true,
           loggedIn: s?.loggedIn ?? null,
-          loginState: s?.loginState || 'idle',
+          // #60：三态 loginState（verified-in/out/uncertain）与「是否已核验」
+          // loginVerified 必须一起转发；loginPhase 是登录**流程**阶段（旧 loginState
+          // 的语义，改名后单独一格）。三者都取自 index.js 的站点状态行，本层不另算。
+          loginState: normalizeLoginState(s?.loginState),
+          loginVerified: s?.loginVerified === true,
+          loginPhase: s?.loginPhase || 'idle',
           lastLogin: s?.lastLogin || null,
           profileDir: s?.profileDir ?? null,
         });
@@ -1637,7 +1642,10 @@ export function createWebControl(deps = {}) {
           avatarUrl: s.avatarUrl ?? null,
           initialized: s.initialized === true,
           loggedIn: s.loggedIn ?? null,
-          loginState: s.loginState || 'idle',
+          // 同上一分支：三态结论 + 可信度 + 流程阶段（#60）。
+          loginState: normalizeLoginState(s.loginState),
+          loginVerified: s.loginVerified === true,
+          loginPhase: s.loginPhase || 'idle',
           lastLogin: s.lastLogin || null,
           profileDir: s.profileDir ?? null,
         });

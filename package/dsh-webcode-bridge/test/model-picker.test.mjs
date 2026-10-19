@@ -223,3 +223,109 @@ test('★ 对照 #67：修法是**收窄**不是变严——装饰与「回读�
   assert.equal(currentModelIsTarget('GLM-5.3', 'GLM-5.3-Flash'), false);
   assert.equal(currentModelIsTarget('GLM-5.3-Flash', 'GLM-5.3-Flash'), true);
 });
+
+// ── F15：分段控件只在**新会话页**存在，续聊轮不得报 no-options（doubao 真机）─────
+//
+// ## 缺陷现场（2026-10-19 Wave2，零发送真机读数）
+//
+// 证据：`.tmp/live-2026-10-19/raw/wave2probe-b-2026-10-19T14-15-02.json`（doubaoConfirm，
+// 两次 load 一致）：既有会话页 `https://www.doubao.com/chat/38447511625363202` 上
+// `div.bg-dbx-fill-trans-20.rounded-full > button` 与 `button.w-160` **count=0 visible=0**，
+// 文本「对话/工作」命中 0；而**新会话页有**（历史真机 dump 与 round1/2 成功）。
+// 驱动每轮都调 selectModel（含 resume）⇒ round3 resume 必报 `no-options`。
+// 修法语义：模式是**会话属性**，只在新会话创建时生效；resume 轮控件不在页 ⇒ 保留会话模式，
+// 但**必须出声**（返回结构化 absent，驱动侧 warn，不是静默成功）。
+//
+// ## 假 page（只实现 selectWebModel 用到的最小接口）
+//
+// evaluate 收到的 payload 是判据：`READ_SELECTED_BY_CLASS` 带 selectedStateClass；
+// `OPEN_AND_READ` 带 segmented/option。借此可以断言「续聊轮到底有没有去开/点控件」。
+function fakePickerPage({ controlPresent = false, selectedText = null, options = [] } = {}) {
+  const calls = { evaluate: [], press: [], waitForTimeout: [], opened: false, clicked: false };
+  const page = {
+    evaluate: async (fn, arg) => {
+      calls.evaluate.push(arg);
+      if (arg && Object.prototype.hasOwnProperty.call(arg, 'selectedStateClass')) {
+        // READ_SELECTED_BY_CLASS：控件在页才回读到选中项，否则 null（不在页）。
+        return controlPresent ? selectedText : null;
+      }
+      if (arg && Object.prototype.hasOwnProperty.call(arg, 'segmented')) {
+        // OPEN_AND_READ：枚举选项（fresh 轮/非分段路径会走到这里）。
+        calls.opened = true;
+        return options.length
+          ? { ok: true, triggerText: null, options }
+          : { ok: false, reason: 'no-options', options: [] };
+      }
+      if (arg && Object.prototype.hasOwnProperty.call(arg, 'wantName')) {
+        calls.clicked = true;
+        return { ok: true, clicked: arg.wantName };
+      }
+      return null;
+    },
+    keyboard: { press: async (k) => { calls.press.push(k); } },
+    waitForTimeout: async (ms) => { calls.waitForTimeout.push(ms); },
+  };
+  return { page, calls };
+}
+
+test('F15 ① segmented + resume + 控件不在页 ⇒ 保留会话模式（absent），不打开/不点击', async () => {
+  const { selectWebModel } = await import('../lib/model-picker.js');
+  const doubao = getSite('doubao');
+  const model = doubao.models[0];   // 对话
+  const { page, calls } = fakePickerPage({ controlPresent: false });
+  const r = await selectWebModel(page, model, doubao.modelPicker, { resume: true });
+  assert.equal(r.ok, true, '续聊轮没有分段控件不是失败——模式是会话属性');
+  assert.equal(r.reason, 'segmented-control-absent-on-resume');
+  assert.equal(r.applied, null, '读不到当前模式 ⇒ applied 必须 null（不假装知道）');
+  assert.equal(r.confirmed, false, 'absent 不得 confirmed（不能静默成功）');
+  assert.equal(calls.opened, false, '不得去 OPEN_AND_READ 枚举 0 选项（这正是旧报错来源）');
+  assert.equal(calls.clicked, false, '不得点任何选项');
+  assert.equal(calls.press.length, 0, '不得按 Escape（根本没有打开弹层）');
+});
+
+test('F15 ② segmented + fresh + 控件不在页 ⇒ 仍报 no-options（真缺陷不掩盖）', async () => {
+  const { selectWebModel } = await import('../lib/model-picker.js');
+  const doubao = getSite('doubao');
+  const { page, calls } = fakePickerPage({ controlPresent: false });
+  const r = await selectWebModel(page, doubao.models[0], doubao.modelPicker, { resume: false });
+  assert.equal(r.ok, false, '新会话页必须能选模式；控件缺失是真缺陷，不得放行');
+  assert.equal(r.reason, 'no-options');
+  assert.equal(calls.opened, true, 'fresh 轮必须真的去读控件');
+});
+
+test('F15 ③ segmented + resume + 控件在页且已是目标 ⇒ already-current（幂等，不动 UI）', async () => {
+  const { selectWebModel } = await import('../lib/model-picker.js');
+  const doubao = getSite('doubao');
+  const { page, calls } = fakePickerPage({ controlPresent: true, selectedText: '对话' });
+  const r = await selectWebModel(page, doubao.models[0], doubao.modelPicker, { resume: true });
+  assert.equal(r.ok, true);
+  assert.equal(r.reason, 'already-current');
+  assert.equal(r.applied, '对话');
+  assert.equal(calls.opened, false, '已是目标模型 ⇒ 不做任何 UI 动作');
+});
+
+test('F15 ④ segmented + resume + 控件在页但不是目标 ⇒ 照常去点（不得静默保留错误模式）', async () => {
+  const { selectWebModel } = await import('../lib/model-picker.js');
+  const doubao = getSite('doubao');
+  // 页面选中「工作」，请求「对话」⇒ 必须走原路径切换，而不是静默保留「工作」。
+  const { page, calls } = fakePickerPage({
+    controlPresent: true, selectedText: '工作',
+    options: [{ name: '对话' }, { name: '工作' }],
+  });
+  const r = await selectWebModel(page, doubao.models[0], doubao.modelPicker, { resume: true });
+  assert.equal(r.ok, true);
+  assert.equal(r.requested, '对话');
+  assert.equal(calls.opened, true, '控件在页且不是目标 ⇒ 必须走原路径切换（红线 1）');
+  assert.equal(calls.clicked, true, '必须真的点目标选项');
+});
+
+test('F15 ⑤ 非分段站点 + resume ⇒ 原路径零位移（不能误吃 resume 分支）', async () => {
+  const { selectWebModel } = await import('../lib/model-picker.js');
+  const zai = getSite('zai');
+  const model = resolveWebModel('zai:glm-5.3');
+  const { page, calls } = fakePickerPage({ options: [{ name: 'GLM-5.3' }] });
+  const r = await selectWebModel(page, model, zai.modelPicker, { resume: true });
+  assert.equal(r.ok, true);
+  assert.equal(calls.opened, true, '非分段站点不受 resume 影响：照常打开弹层选模型');
+  assert.equal(r.requested, 'GLM-5.3');
+});

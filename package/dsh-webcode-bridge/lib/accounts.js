@@ -227,3 +227,26 @@ export function sendGapForSlot(settings, accountKey, siteId) {
   const global = settings && typeof settings === 'object' ? settings.sendGapMs : undefined;
   return global;
 }
+
+/**
+ * 登录状态三态的**白名单归一**（#60 的唯一合法值集合）。
+ *
+ * 合法值只有三个：
+ *   · `verified-in`  —— 已验证登录（正向特征命中）
+ *   · `verified-out` —— 已验证未登录（负向特征命中）
+ *   · `uncertain`    —— 无法确认（声明了特征却一个都没命中 / 尚未核验）
+ *
+ * 为什么必须归一而不是原样透传：`loginState` 历史上曾是登录**流程**阶段
+ * （idle/launching/…，见 browser-driver 的 loginPhase），旧消费方/测试替身
+ * 里仍可能带着 `idle` / `ready` 这类值。面板若把非法值当三态渲染，会重新掉回
+ * 「把不确定画成未登录」的老坑。宽松方向只能是「更不确定」——未知值一律
+ * 落到 `uncertain`，绝不允许落进 verified-in（那才是真正危险的谎报）。
+ *
+ * @param {unknown} value 可能来自驱动 status / 站点状态行 / 测试替身的值
+ * @returns {'verified-in'|'verified-out'|'uncertain'} 合法三态之一
+ */
+export function normalizeLoginState(value) {
+  const v = String(value ?? '');
+  if (v === 'verified-in' || v === 'verified-out') return v;
+  return 'uncertain';
+}

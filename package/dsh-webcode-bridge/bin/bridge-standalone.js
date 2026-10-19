@@ -14,6 +14,7 @@ import { createBrowserDriver } from '../lib/browser-driver.js';
 import { createWebControl } from '../lib/web-control.js';
 import { createMirror } from '../lib/mirror.js';
 import { getSite, SITES, qualifyModelId } from '../lib/providers.js';
+import { normalizeLoginState } from '../lib/accounts.js';
 
 const port = Number(process.argv[2] || process.env.WEBCODE_PORT || 8931);
 const cfg = {
@@ -66,9 +67,9 @@ function driverStatus() {
   const base = driver.status();
   const sites = SITES.map((st) => {
     const d = st.id === 'deepseek' ? driver : drivers.get(st.id);
-    if (!d) return { siteId: st.id, siteName: st.name, origin: st.origin, initialized: false, running: false, busy: false, loggedIn: null, needLogin: false, selectedModel: null, window: null, loginState: 'idle', lastLogin: null };
+    if (!d) return { siteId: st.id, siteName: st.name, origin: st.origin, initialized: false, running: false, busy: false, loggedIn: null, needLogin: false, selectedModel: null, window: null, loginState: 'uncertain', loginVerified: false, loginPhase: 'idle', lastLogin: null };
     const s = d.status();
-    return { siteId: st.id, siteName: st.name, origin: st.origin, initialized: true, running: s.running, busy: s.busy, loggedIn: s.loggedIn, loggedInCached: s.loggedInCached === true, loginBasis: s.loginBasis ?? null, needLogin: s.needLogin, selectedModel: s.selectedModel, window: s.window ?? null, loginState: s.loginState ?? 'idle', lastLogin: s.lastLogin ?? null };
+    return { siteId: st.id, siteName: st.name, origin: st.origin, initialized: true, running: s.running, busy: s.busy, loggedIn: s.loggedIn, loggedInCached: s.loggedInCached === true, loginBasis: s.loginBasis ?? null, needLogin: s.needLogin, selectedModel: s.selectedModel, window: s.window ?? null, loginState: normalizeLoginState(s.loginState), loginVerified: s.loginVerified === true, loginPhase: s.loginPhase ?? 'idle', lastLogin: s.lastLogin ?? null };
   });
   return { ...base, sites };
 }

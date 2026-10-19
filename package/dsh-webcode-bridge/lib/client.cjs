@@ -6125,18 +6125,39 @@ window.__ModuleLoader__.load({
       const siteStatus = (accountSlot
         ? accountRows.find(r => r && r.siteId === siteId && (r.slot || '') === accountSlot)
         : null) || siteStatuses[siteId] || null;
+      // #60（2026-10-19 本轮，工作树未发版）：登录状态**三态**到面板的最后一步。
+      //
+      // 后端早已算出 `loginState`（verified-in / verified-out / uncertain），但这里
+      // 旧实现只看 `loggedIn` 二态 ⇒ `probe-fallback`（声明了登录特征却一个都没
+      // 命中 = 猜测）被画成「未登录」，用户看到的正是「明明登录了却显示未登录」。
+      // 现在 `uncertain` 单独显示「待确认」：它**既不**说已登录、也**不**说未登录，
+      // 并提示可点「检测」重新核验。verified-in / verified-out 与旧行为逐字一致
+      // （零回归）；没有三态字段的旧接口/测试替身仍走二态分支（行为零位移）。
       const statusLabel = row => {
         if (!row || row.loggedIn == null) return '待检查';
+        if (row.loginState === 'uncertain') return '待确认';
+        if (row.loginState === 'verified-out') return '未登录';
+        if (row.loginState === 'verified-in') {
+          return row.loginVerified === false ? '已登录(未核验)' : (row.loggedInCached ? '已登录(缓存)' : '已登录');
+        }
         if (row.loggedIn === true) return row.loggedInCached ? '已登录(缓存)' : '已登录';
         return '未登录';
       };
-      const statusClass = row => row?.loggedIn === true ? 'ok' : row?.loggedIn === false ? 'bad' : 'idle';
+      const statusClass = row => {
+        // 三态优先：uncertain 用灰色 idle（不是红 bad）——「不知道」不应被画成「未登录」。
+        if (row?.loginState === 'uncertain') return 'idle';
+        if (row?.loginState === 'verified-out') return 'bad';
+        return row?.loggedIn === true ? 'ok' : row?.loggedIn === false ? 'bad' : 'idle';
+      };
       // 判定依据存疑时给一句解释（0.12.9 起 status 带 loginBasis）：
       //   'input-fallback' → 站点没声明 loginProbe，只能按「有没有输入框」判，
       //                      游客页自带输入框的站点会有误报；
       //   'stale'          → 落盘值来自旧版本判定，已不再作为结论。
+      // #60：三态 uncertain 优先给「无法确认（≠未登录）」的解释——它是第三种
+      // 结论，不能被读成二态里的某一态。
       const statusTitle = row => {
         if (!row) return '';
+        if (row.loginState === 'uncertain') return '登录特征未命中、无法确认（≠未登录）；可点「检测」按站点特征重新核验';
         if (row.loginBasis === 'input-fallback') return '该站点未声明未登录特征，按输入框存在与否判定——游客页自带输入框时可能误报，请以「检测」为准';
         if (row.loginBasis === 'stale') return '此结论来自旧版本判定，已被忽略；点「检测」按站点特征重新核验';
         return '';

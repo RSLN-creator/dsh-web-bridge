@@ -62,3 +62,64 @@ test('★ 0.19.8 发送确认不得引入永久等待：轮询是有限次', () 
     assert.ok(n > 0 && n <= 20, 'settle 轮数 ' + n + ' 不在合理范围（1..20 × 250ms）');
   }
 });
+
+// ── F16：页面级 UI 遮罩必须被识别（真机 z.ai 产品导览拦截发送点击）────────────
+//
+// ## 缺陷现场（2026-10-19 Wave2，只读 live-probe，`.tmp/live-2026-10-19/probe-report-2.md` §4）
+//
+// 既有会话页 `body.className="driver-active driver-fade"`、`.driver-overlay` svg、
+// `.driver-popover` 文案「将任务结果保存到文件夹 … 1/2 下一页」；`elementFromPoint`
+// 在发送键中心 (1209,849) 与输入框中心 (852,799) 命中的都是 `.driver-overlay` 内的
+// `<path>`（pointer-events:auto），`hitInsideSelf=false`（headed/headless 双证）。
+// 机制与症状吻合：正文进框（不需要点击）→ 点发送键被遮罩拦 → 改 Enter（zai 不响应）
+// → 再点仍被拦 → `SEND_NOT_CONFIRMED`。
+//
+// 修法：发送点击前用 elementFromPoint 检测遮罩；产品导览先 Escape 一次再重测，
+// 仍被盖住则抛可读的 `WEB_UI_OVERLAY_BLOCKED`；地区弹窗不自动处理（直接抛错）。
+test('F16 ① 遮罩判定纯函数：driver-overlay / driver-popover / _modal-overlay 命中 ⇒ blocked', async () => {
+  const { overlayBlocksPoint } = await import('../lib/browser-driver.js');
+  // 真机形状：命中的是 `.driver-overlay` 内的 <path>，祖先链带 driver-overlay。
+  assert.deepEqual(overlayBlocksPoint({
+    className: '', ancestorClasses: ['driver-overlay', ''],
+    bodyClasses: 'driver-active driver-fade', point: { x: 1209, y: 849 },
+  }), { blocked: true, kind: 'driver-tour' }, '导览遮罩盖住目标点 ⇒ 必须 blocked');
+  assert.equal(overlayBlocksPoint({ className: 'driver-popover', ancestorClasses: [] }).blocked, true);
+  assert.equal(overlayBlocksPoint({ className: '_modal-overlay' }).blocked, true, '地区弹窗也必须被识别');
+  assert.equal(overlayBlocksPoint({ className: '_modal-overlay' }).kind, 'modal-overlay');
+});
+
+test('F16 ② 遮罩判定纯函数：无遮罩/普通元素 ⇒ 不 blocked（不得误伤正常发送）', async () => {
+  const { overlayBlocksPoint } = await import('../lib/browser-driver.js');
+  // 正常页面：命中发送按钮本身，body 只有普通 class。
+  assert.deepEqual(overlayBlocksPoint({
+    className: 'send-button', ancestorClasses: ['composer', 'chat-page'],
+    bodyClasses: 'theme-light', point: { x: 1, y: 2 },
+  }), { blocked: false, kind: null }, '普通元素不得判成遮罩（否则每轮都会误 Escape/误报）');
+  // 只有 body 的 driver-active、但命中点不在 overlay 里 ⇒ 不算盖住目标点。
+  assert.equal(overlayBlocksPoint({ className: 'chat-input', ancestorClasses: [], bodyClasses: 'driver-active' }).blocked, false,
+    '导览「激活」但没盖住目标点 ⇒ 不得 block（判据是 elementFromPoint 确实命中遮罩）');
+  assert.equal(overlayBlocksPoint(null).blocked, false);
+  assert.equal(overlayBlocksPoint(undefined).blocked, false);
+  assert.equal(overlayBlocksPoint({}).blocked, false);
+});
+
+test('F16 ③ 接线：发送点击前必须检测遮罩，且新错误码已登记', async () => {
+  const { WEBCODE_CODES } = await import('../lib/error-codes.js');
+  // (a) 错误码必须在真源登记表里（未登记会被 error-codes.test.mjs ⑥ 抓出来）。
+  assert.ok('WEB_UI_OVERLAY_BLOCKED' in WEBCODE_CODES,
+    'WEB_UI_OVERLAY_BLOCKED 必须在 lib/error-codes.js 的 WEBCODE_CODES 登记');
+  const block = sendBlock();
+  // (b) 检测必须真的**被调用**，且发生在发送点击之前（发送确认段内、路 ① 之前）。
+  //     只断言 `overlayBlocksPoint(` 出现在段里是不够的——那可能是函数定义本身
+  //     （`detectOverlay` 的 body）；断言检测调用与点击调用的先后，且必须是
+  //     **首次检测**（`let overlay = await detectOverlay();`）——只留 Escape 重试
+  //     里那一次不算（那时已经点过发送键了）。
+  const detectAt = block.indexOf('let overlay = await detectOverlay();');
+  const clickAt = block.indexOf('clickSendButton(SEL.sendButton');
+  assert.ok(detectAt > 0, '发送段里必须有首次遮罩检测调用 `let overlay = await detectOverlay();`');
+  assert.ok(clickAt > detectAt, '遮罩检测必须在发送点击之前——点完再检测就晚了');
+  // (c) 命中时要出声：Escape 关导览 + 可读错误码（不是继续走到含糊的 SEND_NOT_CONFIRMED）。
+  assert.match(block, /page\.keyboard\.press\('Escape'\)/,
+    '产品导览遮罩必须先尝试 Escape 关闭（可逆 UI 操作）');
+  assert.match(block, /WEB_UI_OVERLAY_BLOCKED/, '仍被盖住时必须抛可读错误码，不得落到含糊的 SEND_NOT_CONFIRMED');
+});

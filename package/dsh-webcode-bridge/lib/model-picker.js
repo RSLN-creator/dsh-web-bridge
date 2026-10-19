@@ -350,13 +350,18 @@ const CLICK_OPTION = (payload) => {
  *      点击即切换。`segmented: true` 时直接枚举并点击，不需要也不应该先点触发
  *      ——（分段控件的"触发"就是选项本身，点它会先把模式切走）。
  *
+ * @param {object} page Playwright 页面
+ * @param {object} model 已解析的网页模型（labels[0] 是网页上的名字）
+ * @param {object} contractPicker 站点声明的 `providers.modelPicker` 契约
+ * @param {{resume?: boolean}} [opts] `resume=true` ⇒ 本轮是**续聊**（导航回既有会话），
+ *   不是新建会话。分段控件的模式是**会话属性**，只在新会话创建时生效——见下方 F15 注释。
  * @returns {{
  *   ok: boolean, reason?: string, ui?: string,
  *   requested?: string, applied?: string|null, options?: string[],
  *   confirmed?: boolean
  * }}
  */
-export async function selectWebModel(page, model, contractPicker) {
+export async function selectWebModel(page, model, contractPicker, { resume = false } = {}) {
   const picker = contractPicker;
   if (!pickerUsable(picker)) {
     return { ok: false, reason: 'no-picker-contract' };
@@ -406,6 +411,52 @@ export async function selectWebModel(page, model, contractPicker) {
     if (currentModelIsTarget(current, wanted)) {
       return { ok: true, reason: 'already-current', requested: wanted, applied: current, confirmed: true, ui: 'noop' };
     }
+  }
+
+  // ── F15：分段控件的**续聊轮**（真机 doubao，2026-10-19 Wave2）───────────────
+  //
+  // ## 缺陷现场
+  //
+  // 豆包的「对话 / 工作」是**新会话的模式选择器**：既有会话页
+  // `https://www.doubao.com/chat/<id>` 上它**根本不渲染**。真机零发送读数
+  // （`.tmp/live-2026-10-19/raw/wave2probe-b-2026-10-19T14-15-02.json` 的 doubaoConfirm，
+  // 两次 load 一致）：
+  //   · `div.bg-dbx-fill-trans-20.rounded-full > button` count=0 visible=0；
+  //   · `button.w-160` count=0 visible=0；文本「对话/工作」命中 0；
+  //   · 而**新会话页有**（历史真机 dump 与 round1/2 成功）。
+  // 驱动**每轮**都调 selectModel（含 resume）⇒ round3 resume 必然读到 0 选项
+  // ⇒ `MODEL_UNAVAILABLE …（no-options）`——那是**语义错误**，不是真缺陷：
+  // 模式是**会话属性**，续聊不会改变它，也不需要在这个页面上重新选。
+  //
+  // ## 判据（不是绕过判据）
+  //
+  //   · resume 轮：先按 `selectedStateClass` 回读当前选中项；读到且已是目标
+  //     → `already-current`（幂等快路）；**读不到**（控件不在页）→ 返回
+  //     `segmented-control-absent-on-resume`，由驱动侧 `warn` **出声**后保留会话模式
+  //     ——不是静默成功（`confirmed:false/applied:null`，调用方据此如实告知用户）；
+  //   · fresh 轮（新会话创建）：行为**逐字不变**——控件必须在；读到 0 选项仍报
+  //     `no-options`（真缺陷不掩盖）；
+  //   · 非分段站点：不进本分支，零位移。
+  if (cfg.segmented && resume === true) {
+    let current = null;
+    if (picker.selectedStateClass) {
+      current = await page.evaluate(READ_SELECTED_BY_CLASS, {
+        cfg,
+        selectedStateClass: picker.selectedStateClass,
+        unselectedStateClass: picker.unselectedStateClass || null,
+      }).catch(() => null);
+    }
+    if (currentModelIsTarget(current, wanted)) {
+      return { ok: true, reason: 'already-current', requested: wanted, applied: current, confirmed: true, ui: 'noop' };
+    }
+    if (!current) {
+      // 读不到当前选中项 = 控件不在这个页面上（既有会话页）。
+      return {
+        ok: true, reason: 'segmented-control-absent-on-resume',
+        requested: wanted, applied: null, confirmed: false, ui: 'noop',
+      };
+    }
+    // 控件在页、读到了但**不是**目标：照常走原有路径去点（与修复前同语义）。
   }
 
   const opened = await page.evaluate(OPEN_AND_READ, cfg).catch((e) => ({ ok: false, reason: 'evaluate-failed: ' + (e?.message || e) }));

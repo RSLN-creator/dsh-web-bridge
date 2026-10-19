@@ -20,8 +20,8 @@
 | 项 | 值 |
 | --- | --- |
 | 工作区过滤 | `dsh-webcode-bridge` |
-| 条目数 | 878（去重合并后） |
-| 时间跨度 | 2026-09-06 00:10 → 2026-10-17 16:44 |
+| 条目数 | 882（去重合并后） |
+| 时间跨度 | 2026-09-06 00:10 → 2026-10-19 22:18 |
 
 ---
 
@@ -11559,4 +11559,74 @@ dsh cli打不开？
 `会话 `fb390deb`` · `seq `9``
 
 打包 0.19.92版本并发布+解决github的连接问题：参考真实情况
+
+
+### 879 · 2026-10-18 00:20
+
+`会话 `fb390deb`` · `seq `746``
+
+？PowerShell 7.6.6
+加载个人和系统配置文件耗时 8704 毫秒。
+PS C:\Users\rsyhn> dsh plugin --profile web add .\package\dsh-webcode-bridge\dsh-webcode-bridge-0.19.92.tgz
+✓ Lockfile passes supply-chain policies (verified 3d ago)
+[ENOENT] ENOENT: no such file or directory, open 'C:\Users\rsyhn\package\dsh-webcode-bridge\dsh-webcode-bridge-0.19.92.tgz'
+
+This error happened while installing a direct dependency of C:\Users\rsyhn\.dsh\profiles\web
+
+[WARN] GET https://registry.npmjs.org/dsh-drop-caret error (UND_ERR_DESTROYED). Will retry in 10 seconds. 2 retries left.
+[WARN] GET https://registry.npmjs.org/dshmarket error (UND_ERR_DESTROYED). Will retry in 10 seconds. 2 retries left.
+Progress: resolved 4, reused 0, downloaded 1, added 0
+dsh: plugin command failed; diagnostics: C:\Users\rsyhn\.dsh\profiles\web\.plugin-manager\logs\operation-5VfKzW\pnpm.log
+PS C:\Users\rsyhn>
+
+怎么回事
+
+
+### 880 · 2026-10-18 00:22
+
+`会话 `fb390deb`` · `seq `761``
+
+[WARN] GET https://registry.npmjs.org/dsh-drop-caret error (UND_ERR_DESTROYED). Will retry in 10 seconds. 2 retries left.
+[WARN] GET https://registry.npmjs.org/dshmarket error (UND_ERR_DESTROYED). Will retry in 10 seconds. 2 retries left.
+Progress: resolved 4, reused 0, downloaded 1, added 0
+dsh: plugin command failed; diagnostics: C:\Users\rsyhn\.dsh\profiles\web\.plugin-manager\logs\operation-5VfKzW\pnpm.log
+PS C:\Users\rsyhn> cd D:\9_Code_Workspace\dsh-webcode-bridge
+PS D:\9_Code_Workspace\dsh-webcode-bridge> dsh plugin --profile web add .\package\dsh-webcode-bridge\dsh-webcode-bridge-0.19.92.tgz
+✓ Lockfile passes supply-chain policies (verified 3d ago)
+
+   ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+   │                                                                                                            │
+   │                                    Update available! 11.25.0 → 12.14.0.                                    │
+   │                                    Changelog: https://pnpm.io/v/12.14.0                                    │
+   │   To update, run: Invoke-WebRequest https://get.pnpm.io/install.ps1 -UseBasicParsing | Invoke-Expression   │
+   │                                                                                                            │
+   ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+[WARN] Request took 19485ms: https://registry.npmjs.org/playwright-core
+[WARN] Request took 25530ms: https://registry.npmjs.org/playwright-core
+[WARN] Issues with peer dependencies found. Run "pnpm peers check" to list them.
+Packages: +1
++
+Progress: resolved 18, reused 1, downloaded 2, added 1, done
+Done in 49.1s using pnpm v11.25.0
+PS D:\9_Code_Workspace\dsh-webcode-bridge>
+
+
+---
+
+## 周次 2026-W43
+
+### 881 · 2026-10-19 21:45
+
+`会话 `a8d9a827`` · `seq `21``
+
+真机实验，主要注意风控规则：自行先调研同类型/同作用插件/模型怎么规避风控，先写出这个
+然后你就作为主队话替我确认，多team，子代理进行任务：完成插件的后续所有国模网站完美适配和验证--限时你自己看，必须0点前完成：而且是完美解决所有已知长期问题+完美验证真机跑！
+
+
+### 882 · 2026-10-19 22:18
+
+`会话 `a8d9a827`` · `seq `1160``
+
+zchat.z.ai，国内网站是这个z.ai
 

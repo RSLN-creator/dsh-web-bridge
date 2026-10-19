@@ -885,6 +885,55 @@ export function markDynamicAttachBlock(siteId, total) {
  * curLen 为 null 表示回读失败（元素被替换、页面转场）：既不计入停滞、也不重置
  * 计数，也**不**据此判死——那是另一类故障，由调用方的超时与错误码负责。
  */
+/**
+ * 判定「点击目标是否被页面级 UI 遮罩挡住」（F16，真机 z.ai 2026-10-19 Wave2）。
+ *
+ * ## 缺陷现场（只读 live-probe，`.tmp/live-2026-10-19/probe-report-2.md` §4）
+ *
+ * z.ai 既有会话页带**产品导览**：`body.className="driver-active driver-fade"`、
+ * `.driver-overlay` svg 1 个、`.driver-popover` 文案「将任务结果保存到文件夹 … 1/2 下一页」。
+ * `elementFromPoint` 在发送键中心 (1209,849) 与输入框中心 (852,799) 命中的都是
+ * `.driver-overlay` 内的 `<path>`（pointer-events:auto），`hitInsideSelf=false`
+ * （headed/headless 双证）。机制与症状吻合：写入输入框不需要点击（正文进框）→
+ * 点发送键被遮罩拦 → catch 改 Enter（zai 对程序化 Enter 不响应）→ 再点仍被拦
+ * → `SEND_NOT_CONFIRMED`。
+ *
+ * ## 为什么抽成纯函数
+ *
+ * 「遮罩是否盖住目标」的判据必须可离线反向验证（本仓库对 idle-window 等判据同一条纪律）。
+ * 输入是 `elementFromPoint` 命中的元素信息——命中点本身就在目标 rect 中心，
+ * 所以「目标 rect」已经体现在这次命中里；这里只需要判断命中链是否属于遮罩。
+ *
+ * @param {null|{className?:string, ancestorClasses?:string[], bodyClasses?:string, point?:{x:number,y:number}}} hit
+ *   `elementFromPoint(targetCenter)` 命中的元素：自身 class/id、祖先链 class/id、body class。
+ * @returns {{blocked:boolean, kind:'driver-tour'|'modal-overlay'|null}}
+ *   blocked=true 时 kind 指明遮罩类型（产品导览可尝试 Escape 关闭；地区弹窗必须人工处理）。
+ */
+export function overlayBlocksPoint(hit) {
+  if (!hit || typeof hit !== 'object') return { blocked: false, kind: null };
+  const chain = [hit.className, ...(Array.isArray(hit.ancestorClasses) ? hit.ancestorClasses : []), hit.bodyClasses]
+    .filter((s) => typeof s === 'string' && s.trim())
+    .join(' ');
+  if (!chain) return { blocked: false, kind: null };
+  const classes = chain.split(/\s+/).filter(Boolean);
+  const hasToken = (needle) => classes.some((c) => c.indexOf(needle) !== -1);
+  // 产品导览（driver.js）：overlay 盖住目标点 ⇒ 点击必然打空。
+  if (hasToken('driver-overlay') || hasToken('driver-popover')) return { blocked: true, kind: 'driver-tour' };
+  // 地区/公告弹窗：语义上需要用户确认地区，**不自动处理**，只报可读错误。
+  if (hasToken('_modal-overlay')) return { blocked: true, kind: 'modal-overlay' };
+  return { blocked: false, kind: null };
+}
+/**
+ * 富文本输入框「停滞」判据：连续两次回读长度没有增长才判死。
+ *
+ * 为什么是两次而不是一次：富文本站点（GLM 等）一次回读偶发拿到中间态，
+ * 单次不涨就判死会误杀正常写入；单块不涨不算死、连续两块不涨才死。
+ *
+ * @param {number|null} prevLen 上一次回读长度（首块为 -1）
+ * @param {number|null} curLen 本次回读长度（null = 读不到，不计数）
+ * @param {number} stalled 当前累计停滞次数
+ * @returns {{stalled:number, prevLen:number, died:boolean}}
+ */
 export function stallStep(prevLen, curLen, stalled) {
   const prev = typeof prevLen === 'number' ? prevLen : -1;
   const count = Math.max(0, Number(stalled) || 0);
@@ -997,7 +1046,13 @@ export function createBrowserDriver(options = {}) {
   let lastFinished = null;
   // 登录流程的可观测状态：控制面 POST login 现在会等它结束并把结果带回去，
   // 设置页因此能显示「登录中… / 已登录 / 失败原因」，而不是永远显示「登录」。
-  let loginState = 'idle';   // idle | launching | waiting-for-login | already-logged-in | ready | error
+  //
+  // ⚠ 变量名必须是 `loginPhase` 而**不是** `loginState`（#60）：`status()` 里
+  // 还有一个同名概念 `loginState` —— 那是 0.19.75 引入的**三态登录结论**
+  // （verified-in / verified-out / uncertain）。两件事曾共用一个变量名，
+  // 于是 status() 返回对象里 `loginState,` 这句简写（进度值 idle/…）把先写的
+  // 三态 IIFE 整个覆盖掉 ⇒ 三态从未到达面板。名字分开后，两句各归各的。
+  let loginPhase = 'idle';   // idle | launching | waiting-for-login | already-logged-in | ready | error
   let lastLogin = null;      // { ok, at, ms, error, message }
   // 「部分流」自愈次数：网页没送 FINISHED 但正文已经解出来的轮次。UI 用它区分
   // 「网页掉流但内容保住了」和「真的失败了」。
@@ -1287,7 +1342,40 @@ export function createBrowserDriver(options = {}) {
       } catch { /* bad 特征坏了不阻塞判定 */ }
     }
     if (probe?.ok) {
-      try { if (await p.locator(probe.ok).first().count()) { lastLoginBasis = 'probe-ok'; return true; } } catch { /* 同上 */ }
+      try {
+        // 快速路径（零等待，生产常见路径不变）：ok 特征已在页面里 ⇒ 直接判已登录。
+        if (await p.locator(probe.ok).first().count()) { lastLoginBasis = 'probe-ok'; return true; }
+        // ── F14：ok 特征的**水合窗口**（kimi 真机，2026-10-19 Wave2）────────────
+        //
+        // ## 缺陷现场（零发送真机读数，lead-probe）
+        //
+        // 证据：`.tmp/live-2026-10-19/raw/wave2probe-2026-10-19T14-12-39.json`。
+        // kimi 落地页从 domcontentloaded 起，target 300/800/1500ms 采样（+1.16s /
+        // +1.58s / +1.61s）：`span.user-name` 与 `img.user-avatar` **count=0 visible=0**，
+        // 而 composer 已可见；到 **+4.2s** 才 `span.user-name` count1/visible1
+        // text=TYZ0712、`img.user-avatar` 1/1。
+        // ⇒ 旧实现只查一次 ok；水合前必然落到 `probe-fallback`（#53 三态 = uncertain）
+        //   —— Wave2 kimi 的 `login.basis=UNVERIFIED(probe-fallback)` 正是此现场，
+        //   **不是**声明错（#59 doubao 已 probe-ok，证明声明-同源没白做）。
+        //
+        // ## 判据（与上面 bad 分支的水合重探对称）
+        //
+        //   ① 快速路径已在上方返回，已登录常见路径零等待；
+        //   ② 仅当 ok 一次都没命中 + **有可见 composer**（SPA 壳已渲染、只是头部账号区
+        //      未水合）时，做一次**有界**等待；命中 ⇒ probe-ok；
+        //   ③ 窗口耗尽 ⇒ 维持原逻辑继续往下走 fallback（**不得**写成 probe-bad：
+        //      那会把「没等到」谎报成「确认未登录」）。
+        //
+        // 窗口 5_000ms 的依据：真机观测水合落在 1.6s～4.2s，取 5s 覆盖观测下界并留余量；
+        // 只有「声明了 ok + ok 未命中 + composer 可见」的判定才会付这笔等待，
+        // 已正确命中的站点/无 composer 的页面零等待。
+        if (await visibleComposerCount(p) > 0) {
+          const appeared = await p.locator(probe.ok).first()
+            .waitFor({ state: 'visible', timeout: 5_000 })
+            .then(() => true, () => false);
+          if (appeared) { lastLoginBasis = 'probe-ok'; return true; }
+        }
+      } catch { /* 同上：ok 特征坏了不阻塞判定 */ }
     }
     // SPA 水合重探（kimi 真机 2026-09-21）：domcontentloaded 一瞬，头部「登录」按钮
     // 尚未水合，bad/ok 双缺 → 直接回退会把「没登录」记成「有输入框=已登录」。
@@ -1702,7 +1790,11 @@ export function createBrowserDriver(options = {}) {
       browserSource: cfg.executablePath
         ? (isBundledChromiumPath(cfg.executablePath) ? 'bundled' : 'system')
         : null,
-      loginState,
+      // 登录**流程**的阶段（#60）：与上面 `loginState` 的三态**不是同一件事**。
+      // 改名后两者互不覆盖：三态回答「结论是否已核验」，本字段回答「这一轮登录
+      // 进行到哪一步」。旧实现用同名的 `loginState,` 简写把三态覆盖成 idle，
+      // 面板因此永远看不到 verified-in/out/uncertain。
+      loginPhase,
       lastLogin,
       recoveredTurns,
       lastRecovered,
@@ -3521,7 +3613,7 @@ export function createBrowserDriver(options = {}) {
       // thinkMode: 'auto'(按模型默认) | 'on'(强制开) | 'off'(强制关)——设置页手动覆盖。
       // DeepSeek 的「深度思考」pill 是独立开关,auto 时按模型 thinking 属性双向同步。
       const thinkOverride = thinkMode === 'on' ? true : thinkMode === 'off' ? false : null;
-      const selection = model ? await selectModel(model, { hasImages: Array.isArray(images) && images.length > 0, thinkOverride }) : null;
+      const selection = model ? await selectModel(model, { hasImages: Array.isArray(images) && images.length > 0, thinkOverride, resume: navigate !== 'fresh' }) : null;
       // 思考等级（0.19.48）：**在模型选择之后**下发——真机读数里 kimi 的档位控件就长在
       // 模型菜单里、glm 的档位子菜单长在模型弹层里，先选模型再落档位是唯一不会互相
       // 覆盖的顺序。`reasoningEffort` 为 null（用户没选 / 停在 Default）时它**立即返回**，
@@ -4043,6 +4135,90 @@ export function createBrowserDriver(options = {}) {
         warn('send button still disabled after 12s (site=' + siteId + ', sel=' + SEL.sendButton
           + ') — trying Enter anyway');
       }
+      // ── F16：发送前的**页面级 UI 遮罩检测**（真机 z.ai 产品导览，2026-10-19 Wave2）──
+      //
+      // ## 缺陷现场（只读 live-probe，`.tmp/live-2026-10-19/probe-report-2.md` §4）
+      //
+      // z.ai 既有会话页带产品导览：`body.className="driver-active driver-fade"`、
+      // `.driver-overlay` svg、`.driver-popover`（「将任务结果保存到文件夹 … 1/2 下一页」）。
+      // `elementFromPoint` 在发送键中心与输入框中心命中的都是 `.driver-overlay` 里的
+      // `<path>`（pointer-events:auto）⇒ 点击打空；catch 改 Enter（zai 对程序化 Enter
+      // 不响应）⇒ 再点仍打空 ⇒ 含糊的 `SEND_NOT_CONFIRMED`。
+      //
+      // ## 判据与边界（保守、最小、不绕过风控）
+      //
+      //   · 只在 elementFromPoint **确实盖住发送键/输入框中心**时才动作（无遮罩零行为变化）；
+      //   · 产品导览（driver-overlay/popover）先 Escape 一次（可逆 UI），等 400ms 重测；
+      //   · 地区/公告弹窗（._modal-overlay）**不自动处理**，检测到就直接抛可读错误；
+      //   · 仍被盖住 ⇒ 抛 `WEB_UI_OVERLAY_BLOCKED`（已在 error-codes.js 登记），
+      //     不再让用户看到含糊的「发送未确认」。
+      const overlayHitAtTarget = async () => {
+        try {
+          return await page.evaluate((targetSel) => {
+            const out = [];
+            for (const t of [targetSel, 'composer']) {
+              let el = null;
+              try {
+                if (t === 'composer') {
+                  el = [...document.querySelectorAll('textarea, [contenteditable="true"]')].find((e) => {
+                    const r = e.getBoundingClientRect();
+                    return r.width > 40 && r.height > 0;
+                  });
+                } else if (t) el = document.querySelector(t);
+              } catch { el = null; }
+              if (!el) { out.push(null); continue; }
+              const r = el.getBoundingClientRect();
+              if (r.width <= 0 || r.height <= 0) { out.push(null); continue; }
+              const x = Math.round(r.x + r.width / 2);
+              const y = Math.round(r.y + r.height / 2);
+              const hit = document.elementFromPoint(x, y);
+              if (!hit) { out.push(null); continue; }
+              const ancestorClasses = [];
+              for (let n = hit; n && n !== document.body && ancestorClasses.length < 8; n = n.parentElement) {
+                ancestorClasses.push(String(n.className || n.id || ''));
+              }
+              out.push({
+                className: String(hit.className || hit.id || ''),
+                ancestorClasses,
+                bodyClasses: String(document.body.className || ''),
+                point: { x, y },
+              });
+            }
+            return out;
+          }, SEL.sendButton || null);
+        } catch { return null; }
+      };
+      const detectOverlay = async () => {
+        const hits = await overlayHitAtTarget();
+        if (!Array.isArray(hits)) return { blocked: false, kind: null };
+        for (const hit of hits) {
+          const v = overlayBlocksPoint(hit);
+          if (v.blocked) return v;
+        }
+        return { blocked: false, kind: null };
+      };
+      let overlay = await detectOverlay();
+      if (overlay.blocked) {
+        if (overlay.kind === 'driver-tour') {
+          // 产品导览是**可逆 UI**：Escape 关掉再重测；不是绕过验证码/风控。
+          warn('[ui-overlay] product tour overlay blocks send target; pressing Escape once (site=' + siteId + ')');
+          await page.keyboard.press('Escape').catch(() => {});
+          await page.waitForTimeout(400);
+          overlay = await detectOverlay();
+        }
+        if (overlay.blocked) {
+          const label = overlay.kind === 'modal-overlay'
+            ? '地区/公告弹窗（_modal-overlay）'
+            : '产品导览遮罩（driver-overlay）';
+          const err = new Error('WEB_UI_OVERLAY_BLOCKED: 网页上有' + label
+            + '盖住了发送目标（发送键/输入框中心），点击不会命中 ⇒ 消息未被发送。'
+            + '处理：在弹出的浏览器窗口里人工关闭/折叠该遮罩后重试本轮。'
+            + '（这不是发送按钮故障，也不是解码器问题——点击被页面级遮罩拦截）');
+          withWebcodeCode(err, 'WEB_UI_OVERLAY_BLOCKED');
+          err.overlay = overlay;
+          throw err;
+        }
+      }
       // 路 ①：契约既有行为（声明了 sendButton 就点它，否则回车）。
       //
       // 顺序在 0.19.41 调整过：旧实现先判 `btn.isEnabled()`，而 kimi 的控件是
@@ -4166,11 +4342,17 @@ export function createBrowserDriver(options = {}) {
       } else {
         result = await done;
       }
-      if (siteId === 'deepseek' && model && selection?.strict !== false) {
-        // 「绝不静默降级模型」：核验本轮真实请求元数据。新版统一 UI 的模式差异在
-        // thinking_enabled（model_type 恒为 default），旧三 pill UI 的差异在
-        // model_type。取不到请求体本身即失败——旧实现只比对非空 model_type，
-        // 请求体一旦改形（如 model_type 消失）就会静默放行。
+      // 「绝不静默降级模型」：核验本轮真实请求元数据。
+      //
+      // 是否严格由**契约字段**决定，不在这里硬编码站点 id（#57）：旧实现写死
+      // `siteId === 'deepseek'`，而 `contract.js` 的 `strictModelType` 全仓零消费
+      // ——契约声明了一个不会被读取的字段，等于把「哪些站点严格核验」这件事藏在
+      // 驱动的第二份知识里。现在只认 `contract.strictModelType`（deepseek=true、
+      // 其余站点=false，语义与旧实现逐字等价：其它站不新增行为）。
+      if (contract.strictModelType === true && model && selection?.strict !== false) {
+        // 新版统一 UI 的模式差异在 thinking_enabled（model_type 恒为 default），
+        // 旧三 pill UI 的差异在 model_type。取不到请求体本身即失败——旧实现只
+        // 比对非空 model_type，请求体一旦改形（如 model_type 消失）就会静默放行。
         if (!requestMetadata) {
           const err = new Error('MODEL_UI_CHANGED: 未捕获到本轮 /chat/completion 请求体，无法核验网页实际模式');
           withWebcodeCode(err, 'MODEL_UI_CHANGED');
@@ -4497,7 +4679,7 @@ export function createBrowserDriver(options = {}) {
     });
   }
 
-  async function selectModel(value, { hasImages = false, thinkOverride = null } = {}) {
+  async function selectModel(value, { hasImages = false, thinkOverride = null, resume = false } = {}) {
     const model = resolveWebModel(value);
     if (model.siteId !== siteId) throw new Error(`MODEL_SITE_MISMATCH: 模型 ${model.id} 属于站点${model.siteId}，当前驱动为 ${siteId}`);
     if (model.vision && !hasImages) {
@@ -4514,7 +4696,7 @@ export function createBrowserDriver(options = {}) {
     // 手动覆盖 > 模型默认;auto 时不干预 pill 之外的既有逻辑
     const label = new RegExp('^(?:' + model.labels.join('|') + ')$', 'i');
     if (siteId === 'deepseek') return selectModelDeepSeek(model, { hasImages, label, thinkOverride });
-    return selectModelGeneric(model, { label });
+    return selectModelGeneric(model, { label, resume });
   }
 
   /**
@@ -4529,7 +4711,7 @@ export function createBrowserDriver(options = {}) {
    * 由 lib/model-picker.js 执行**精确名匹配 + 点击后回读确认**；没有契约就
    * 如实报告 unverified，绝不假装切换成功。
    */
-  async function selectModelGeneric(model, { label }) {
+  async function selectModelGeneric(model, { label, resume = false }) {
     const picker = site.modelPicker;
     if (!pickerUsable(picker)) {
       // 旧行为保留一层：站点若有原生 <select> 或多形态标签，仍可尝试，
@@ -4548,7 +4730,7 @@ export function createBrowserDriver(options = {}) {
       return { strict: false, fallback: 'unverified', note: `站点 ${siteId} 的模型切换尚未真机校准，本轮沿用网页当前模型` };
     }
 
-    const result = await selectWebModel(page, model, picker);
+    const result = await selectWebModel(page, model, picker, { resume });
     if (!result.ok) {
       selectedModel = null;
       const detail = result.options?.length ? ' — 弹层可选：' + result.options.join('、') : '';
@@ -4564,6 +4746,19 @@ export function createBrowserDriver(options = {}) {
       withWebcodeCode(err, 'MODEL_UNAVAILABLE');
       err.reason = result.reason;
       throw err;
+    }
+    // F15（真机 doubao，2026-10-19 Wave2）：分段控件只在新会话页渲染。续聊轮控件
+    // 不在页 ⇒ 模式是会话属性、保留即可，但**必须出声**（不能静默成功）：
+    // 这条 warn 就是「本轮没有重新选择模型」的可核对痕迹；`strict:false` 让上层
+    // 按既有路径把 note 提示给用户（绝不假装已切换，红线 1）。
+    if (result.reason === 'segmented-control-absent-on-resume') {
+      selectedModel = null;
+      warn('[model] segmented control absent on resume; keeping conversation mode');
+      return {
+        strict: false, ui: 'noop', applied: null,
+        fallback: 'segmented-absent-on-resume',
+        note: `续聊会话页没有模型分段控件（站点只在新建会话时渲染它）：保留该会话已选的「${model.name}」模式，本轮不切换`,
+      };
     }
     selectedModel = model.id;
     if (result.ui === 'noop') {
@@ -4765,7 +4960,21 @@ export function createBrowserDriver(options = {}) {
   }
 
   async function diagnostics() {
-    if (!page) return { controls: [], urlPath: null, transport: 'playwright-edge', preview: false, siteId };
+    // F8（真机 Wave1 暴露的取样缺陷）：收束读数 `lastEndReason` / `lastEndReasonAt`
+    // 必须出现在**诊断**返回体里，不能只在 `status()` 上。
+    //
+    // 缺陷现场：`site-verify.mjs` 的 `turn.settled` 取
+    // `diag?.lastEndReason ?? st?.lastEndReason`，但
+    //   ① `st` 是**发送前**取的（那时本轮还没收束，天然是旧值/null）；
+    //   ② `diagnostics()` 返回体里**根本没有** lastEndReason 字段。
+    // 两处都取不到 ⇒ 一轮**成功收束**（`noteEndReason('finished')` 已写，
+    // 见 runTurn 收尾）也会被记成 `turn.settled=UNVERIFIED`。
+    //
+    // 放在这里而不是只在调用点重取 status()：诊断接口的语义就是「本轮/最近一轮
+    // 的现场」，收束原因是其中最关键的一格；缺了它，任何诊断消费方都会重复踩
+    // 同一个坑。调用点同时改成收束后重取（两边都修，读数才可靠）。
+    const settle = { lastEndReason, lastEndReasonAt };
+    if (!page) return { controls: [], urlPath: null, transport: 'playwright-edge', preview: false, siteId, ...settle };
     // composer 分析:输入框附近(输入框向上 3 层祖先容器内)的全部可点元素,
     // 用于真机核对模型 pill/深度思考开关的真实形态。只读,不点击。
     const composer = await page.evaluate(() => {
@@ -4825,6 +5034,9 @@ export function createBrowserDriver(options = {}) {
     }).catch(() => null);
     return {
       urlPath: new URL(page.url()).pathname,
+      // 本轮/最近一轮的收束现场（F8）：诊断消费方（test-mock/site-verify.mjs 的
+      // turn.settled）必须能从这里读到，否则「成功收束」会被记成「没有收束读数」。
+      ...settle,
       attachEntry,
       ui: await detectDeepSeekUi(),
       selectedModel,
@@ -4873,7 +5085,7 @@ export function createBrowserDriver(options = {}) {
     if (busy || transitioning) throw new Error('driver busy with a web turn — login refused');
     transitioning = true;
     const t0 = Date.now();
-    const report = (s) => { loginState = s; try { onState?.(s); } catch {} };
+    const report = (s) => { loginPhase = s; try { onState?.(s); } catch {} };
     report('idle');
     try {
       // 已经登录过的 profile：无需再走「打开窗口 + 人工登录」，直接核验一次。

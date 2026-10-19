@@ -268,6 +268,13 @@ export const GLM = withEffort({
     // 变为用户名文本（如 `<p class="sidebar-user-name">RSYHN</p>`），且已登录页
     // 常驻 `.userInfoBar`（用户名 + 积分）。bad 优先命中「登录」文本，ok 命中
     // 「已有用户名」——两向都不再依赖输入框兜底。
+    //
+    // ⚠ 2026-10-19 曾怀疑第二条裸 `p:has-text("登录")` 过宽（会把含「登录」的
+    //   广告 <p> 误判成未登录），一度收窄；随后 **live profile 直读否证**：
+    //   已登录页 `bad` 命中 **count=1 / visible=0**（只命中不可见的「退出登录」
+    //   p.action-text），judgeLoggedIn 的 bad 分支要求 isVisible ⇒ 不会误判。
+    //   那份「4 个可见误命中」来自残缺 profile 副本（拿到的其实是游客页），
+    //   证据作废 ⇒ **撤回收窄，保持原值**（仓库纪律：无真机证据不改选择器）。
     bad: 'p.sidebar-user-name:has-text("登录"), p:has-text("登录"), button:has-text("登录"), a:has-text("登录"), button:has-text("Sign in"), a:has-text("Sign in")',
     ok: '.userInfoBar, p.sidebar-user-name',
   },
@@ -341,6 +348,35 @@ export const CHATGPT = withEffort({
   ],
 });
 
+// kimi 的账号身份选择器（**单一真源**，#65）：`loginProbe.ok` 与 `accountProbe`
+// 读同一份**证据**，但登录判定只能取其中的**精确子集**。
+//
+// ## 缺陷现场
+//
+// `loginProbe` 原先只有 `bad`、没有 `ok` ⇒ 已登录的 kimi 只能落到
+// `probe-fallback`（按 #53 三态 = uncertain），面板显示不出「已登录」。
+// 同文件 `accountProbe` 早有真机证据：昵称 `span.user-name` = "TYZ0712"、
+// 头像 `img.user-avatar`（src 落在 `avatar.moonshot.cn`）。
+//
+// ## 为什么两处**不**逐字共用同一组（2026-10-19 live 真机读数）
+//
+//   · `span.user-name`       —— 登录判定 ok 用（live c1v1 命中）；
+//   · `img.user-avatar`      —— 登录判定 ok 用（live c1v1 命中）；
+//   · `img[src*="avatar.moonshot.cn"]` —— **不得**进 loginProbe.ok：live 读数
+//     c3v3，会命中侧栏的插件图标 ⇒ 用它判登录会误报。它只用于**身份打分**
+//     （accountProbe.avatar，读不到昵称时靠它找头像）。
+//
+// 因此常量分层：精确子集（登录判定）与宽集合（身份打分）各一份，宽集合显式
+// 引用精确子集，杜绝同一字面量写两遍。
+const KIMI_ACCOUNT_NAME_SELECTORS = Object.freeze(['span.user-name']);
+// 登录判定用的精确头像选择器（live 真机 c1v1）。
+const KIMI_LOGIN_AVATAR_SELECTORS = Object.freeze(['img.user-avatar']);
+// 身份打分用的宽集合：精确子集 +头像 CDN 的 src 包含匹配（live c3v3，含插件图标）。
+const KIMI_ACCOUNT_AVATAR_SELECTORS = Object.freeze([
+  ...KIMI_LOGIN_AVATAR_SELECTORS,
+  'img[src*="avatar.moonshot.cn"]',
+]);
+
 export const KIMI = withEffort({
   // 2026-09-11 实测：kimi.moonshot.cn 已只剩 302 → https://www.kimi.com/，
   // 镜像按旧域名取页会拿到空跳转壳，右侧栏打不开。改用真实站点。
@@ -383,6 +419,11 @@ export const KIMI = withEffort({
   // 已登录页的其它节点一旦出现「登录」二字就会误判。
   loginProbe: {
     bad: 'button:has-text("登录"), a:has-text("登录"), button:has-text("Sign in"), a:has-text("Sign in")',
+    // ok（#65）：取 `accountProbe` 证据里的**精确子集**——昵称 `span.user-name`
+    // 与头像 `img.user-avatar`（live 真机两者均 c1v1 命中）。**不含**
+    // `img[src*="avatar.moonshot.cn"]`：该宽串 live c3v3，会命中侧栏插件图标
+    // ⇒ 放进登录判定会误报已登录（宽集合只用于身份打分，见上方常量注释）。
+    ok: [...KIMI_ACCOUNT_NAME_SELECTORS, ...KIMI_LOGIN_AVATAR_SELECTORS].join(', '),
   },
   // 真实昵称/头像（2026-10-03 真机取证，证据
   // `test-mock/out/account-identity-live-kimi-2026-10-03T17-17-55.json`）：
@@ -390,8 +431,8 @@ export const KIMI = withEffort({
   //     现在**显式声明**，不再依赖「类名里恰好含 user-name」这个巧合）；
   //   · 头像 `img.user-avatar`，src 落在 `avatar.moonshot.cn`（score 18，全页最高）。
   accountProbe: {
-    name: ['span.user-name'],
-    avatar: ['img.user-avatar', 'img[src*="avatar.moonshot.cn"]'],
+    name: KIMI_ACCOUNT_NAME_SELECTORS,
+    avatar: KIMI_ACCOUNT_AVATAR_SELECTORS,
   },
   // 模型选择契约 —— 真机 dump（2026-09-13，test-mock/out/model-dropdown-kimi-*.json）：
   //   触发  <div class="model-name"><span class="current-effort">进阶</span></div>
@@ -472,6 +513,21 @@ export const QWEN = withEffort({
   ],
 });
 
+// 豆包的账号头像选择器（**单一真源**，#59）：`loginProbe.ok` 与
+// `accountProbe.avatar` 必须读同一组字符串。
+//
+// 缺陷现场（0.19.92 真机读数）：旧 `loginProbe.ok` 是
+// `[class*="avatar"], .user-avatar, img[class*="avatar"]` —— **真机命中 0**
+// （豆包真实头像的 class 是 `rounded-full object-cover select-none …`，不含
+// "avatar" 语义），于是已登录的豆包只能落到 `probe-fallback`（= uncertain）。
+// 同文件 `accountProbe.avatar` 早已有真机证据：头像 `<img src="…passport.byteacctimg.com/img/user-avatar/…">`
+// 命中 1（36x36 @17,850）。以它为唯一真源，两个字段引用同一个数组，杜绝
+// 「两处手写、迟早漂移」。
+const DOUBAO_AVATAR_SELECTORS = Object.freeze([
+  'img[src*="passport.byteacctimg.com/img/user-avatar"]',
+  'img.rounded-full.object-cover.select-none',
+]);
+
 export const DOUBAO = withEffort({
   id: 'doubao', name: 'Doubao', origin: 'https://www.doubao.com',
   completionPaths: ['/samantha/chat/completion'],
@@ -513,7 +569,9 @@ export const DOUBAO = withEffort({
   // 未登录特征：游客页有可见的「登录」按钮；登录后该按钮消失。
   loginProbe: {
     bad: 'button:has-text("登录"), a:has-text("登录"), button:has-text("Sign in"), a:has-text("Sign in")',
-    ok: '[class*="avatar"], .user-avatar, img[class*="avatar"]',
+    // ok（#59）：与 `accountProbe.avatar` **同源**（见上方 DOUBAO_AVATAR_SELECTORS）。
+    // 旧值三条在真机上全部命中 0 ⇒ 已登录豆包恒为 probe-fallback（不确定）。
+    ok: DOUBAO_AVATAR_SELECTORS.join(', '),
   },
   // 真实昵称/头像（2026-10-03 真机取证，证据
   // `test-mock/out/account-identity-live-doubao-2026-10-03T17-17-55.json`）。
@@ -533,7 +591,7 @@ export const DOUBAO = withEffort({
   // 取新读数再改，**不要凭印象换一个**（本项目纪律：选择器必须来自真机读数）。
   accountProbe: {
     name: ['span.min-w-0.overflow-hidden.text-left'],
-    avatar: ['img[src*="passport.byteacctimg.com/img/user-avatar"]', 'img.rounded-full.object-cover.select-none'],
+    avatar: DOUBAO_AVATAR_SELECTORS,
   },
   // 模式选择契约 —— 真机 dump（2026-09-13，test-mock/out/doubao-mode-*.json）：
   //   豆包的「对话 / 工作」是常驻在输入框附近的**分段控件**（不是弹层）：
