@@ -683,7 +683,10 @@ export const CLAUDE = withEffort({
 // 浏览器端为 OpenAI 兼容 SSE（/api/chat/completions），故复用 'openai-sse'
 // 解码器；选择器用「特征选择器」而不是站点版本 class（改版频繁，特征更稳）。
 export const ZAI = withEffort({
-  id: 'zai', name: 'Z.ai', origin: 'https://zchat.z.ai',
+  // 0.21.1 修：海外站 origin 必须是 chat.z.ai。0.19.99 曾把它改成 zchat，虽然
+  // 0.21.0 已把中国站拆成独立站点 ZAI_CN，但这里漏改回来 ⇒ 两站指向同一域名，
+  // 违反用户 2026-10-20「国内国外是两个站点」的明令（已由 login-sites 实测抓到）。
+  id: 'zai', name: 'Z.ai', origin: 'https://chat.z.ai',
   // 选择器里显示的站点键。默认等于 id，只有这里不同：站点的真实身份就是
   // 「z.ai」这个域名（用户要的正是「一眼看出是哪个网站」），而 `zai` 只是
   // 我们内部的路由 id。二者不同不影响解析——解析只认 id（见 resolveWebModel）。

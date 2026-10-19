@@ -5,6 +5,26 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.21.1（2026-10-20 凌晨：about:blank 真根因修复 + z.ai 海外站 origin 修回；本机 web/headless 安装版；未推 GitHub/npm）
+
+### 修复：登录/展示窗口 about:blank 的**第二个**隐藏根因（用户 2026-10-20 报障）
+
+- 0.21.0 已让 goto 失败可诊断（navError），但真机验证发现**白页时 navError 仍为 null**：因为 `launch()` 只开新页**不导航**，fresh 驱动打开窗口时 page 就是`about:blank`；旧代码把它当「remembered 会话地址」⇒ `target = about:blank` ⇒ goto 成功、永远白页、且没有任何错误。
+- 修法：`openWindow` 里把 `about:blank` / `chrome://newtab/` / 空串一律当「没有 remembered」，回落 `cfg.site`。
+- **真机验证（worktree 0.21.1）**：fresh 驱动对 qwen `openWindow` → `url: https://chat.qwen.ai/`、`navError: null`（PASS）；对不可达站点 grok → `navError: page.goto: net::ERR_CONNECTION_TIMED_OUT at https://grok.com/`（说明失败现在**可归因**，不再白屏无读数）。
+- 护栏：`timeout-order.test.mjs` 新增「about:blank 不可当 remembered」接线判据（6→7 条）。
+
+### 修复：z.ai **海外站 origin 仍是 zchat**（0.19.99 漏改回来）
+
+- 0.21.0 拆出 `zai-cn` 中国站后，运行中 `login-sites` 实测 `zai` 的 origin 仍是 `https://zchat.z.ai` ⇒ 两站指向同一域名，违反用户「国内国外是两个站点」。
+- 修法：`ZAI.origin = 'https://chat.z.ai'`（海外站）；`ZAI_CN.origin = 'https://zchat.z.ai'`（中国站）保持不变。重启后 `login-sites` 应显示两条不同 origin。
+- 测试：provider-surface / model-labels / captcha-gate / timeout-order / driver-scope / client-render 等全部复跑绿。
+
+### 边界
+
+- 本版本只装到本机 web/headless profile；未推 GitHub、未发 npm；宿主侧需重启 `dsh web` 生效。
+- 中国站登录仍未建立（用户指示忽略）；GLM 在 0.20.0 实测真实一轮能拿到回复（无验证码）。
+
 ## 0.21.0（2026-10-20 凌晨：z.ai 国内/海外两站拆分 + 登录/展示窗口 about:blank 修复；本机 web/headless 安装版；未推 GitHub/npm）
 
 ### 新增：z.ai **国内站 / 海外站拆成两个独立站点**（用户 2026-10-20 明令）

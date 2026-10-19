@@ -141,3 +141,13 @@ test('接线：展示/登录窗口导航必须可诊断（navigateForDisplay + n
   const calls = src.match(/navigateForDisplay\(/g) || [];
   assert.ok(calls.length >= 4, 'openLogin ×3 + openWindow ×1 至少 4 处调用；实际 ' + calls.length);
 });
+
+// 0.21.1：about:blank 不是会话现场——openWindow 不得把它当 remembered 目标。
+// 旧 bug：launch() 只开新页不导航，page 就是 about:blank；旧代码把 about:blank
+// 当 remembered ⇒ target=about:blank ⇒ goto 成功但永远白页且 navError=null。
+test('接线：about:blank 不可当 remembered（否则打开窗口永远白页）', () => {
+  const src = driverSrc;
+  assert.ok(src.includes("remembered === 'about:blank'"), '必须过滤 about:blank 的 remembered');
+  assert.ok(src.includes('remembered = null'), '过滤后必须回落 cfg.site');
+});
+

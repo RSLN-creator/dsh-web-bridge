@@ -5616,6 +5616,12 @@ export function createBrowserDriver(options = {}) {
     // 一轮的地址读数（lastTurn.url；标签被关掉时页面已不在）→ 站点根（全新浏览器）。
     let remembered = null;
     if (page && !page.isClosed?.()) remembered = safeUrl(page.url());
+    // 0.21.1（用户 2026-10-20：「打开窗口/登录一直是 about:blank 没加载」）：
+    // launch() 只开新页**不导航**，于是「刚 ensure 出来的驱动」page 就是 about:blank；
+    // 旧代码把它当成 remembered 目标 ⇒ target = about:blank ⇒ goto 成功但仍在白页，
+    // 且 navError 为 null（这就是「静默白页」的另一半根因）。白页不是会话现场，
+    // 必须当「没有 remembered」处理，让 target 回落到 cfg.site。
+    if (remembered === 'about:blank' || remembered === 'chrome://newtab/' || remembered === '') remembered = null;
     remembered ||= lastTurn?.url || null;
     if (ctx && !headed) {
       // 无头上下文 → 有头窗口：持久 profile 只能开一个实例，必须先关再开。
