@@ -1,5 +1,5 @@
 {
-  "generatedAt": 1792424427246,
+  "generatedAt": 1792424939237,
   "scope": "`dsh-webcode-bridge`",
   "command": "node scripts/user-voice-log.mjs",
   "rows": [
@@ -68,6 +68,11 @@
       "text": "继续",
       "hash": "1fc1afc5",
       "also": [
+        {
+          "sessionId": "session-eab8f639-b701-4c67-ac71-b2f1b2422527",
+          "at": 1791689076552,
+          "origin": "user"
+        },
         {
           "sessionId": "session-eab8f639-b701-4c67-ac71-b2f1b2422527",
           "at": 1791689092976,
@@ -14708,6 +14713,11 @@
         {
           "sessionId": "session-a8d9a827-c350-4306-9932-f3562cc75f5d",
           "at": 1792423735088,
+          "origin": "goal"
+        },
+        {
+          "sessionId": "session-a8d9a827-c350-4306-9932-f3562cc75f5d",
+          "at": 1792424510145,
           "origin": "goal"
         }
       ]
