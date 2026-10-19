@@ -1,5 +1,5 @@
 {
-  "generatedAt": 1792420479555,
+  "generatedAt": 1792424427246,
   "scope": "`dsh-webcode-bridge`",
   "command": "node scripts/user-voice-log.mjs",
   "rows": [
@@ -14616,6 +14616,101 @@
       "text": "zchat.z.ai，国内网站是这个z.ai",
       "hash": "cd34f9f9",
       "also": []
+    },
+    {
+      "sessionId": "session-a8d9a827-c350-4306-9932-f3562cc75f5d",
+      "workspace": "D:\\9_Code_Workspace\\dsh-webcode-bridge",
+      "at": 1792420725388,
+      "seq": 1623,
+      "origin": "user",
+      "goalId": null,
+      "round": null,
+      "text": "2",
+      "hash": "da4b9237",
+      "also": []
+    },
+    {
+      "sessionId": "session-a8d9a827-c350-4306-9932-f3562cc75f5d",
+      "workspace": "D:\\9_Code_Workspace\\dsh-webcode-bridge",
+      "at": 1792421268891,
+      "seq": 1759,
+      "origin": "user",
+      "goalId": null,
+      "round": null,
+      "text": "now?continue",
+      "hash": "78636c7d",
+      "also": []
+    },
+    {
+      "sessionId": "session-a8d9a827-c350-4306-9932-f3562cc75f5d",
+      "workspace": "D:\\9_Code_Workspace\\dsh-webcode-bridge",
+      "at": 1792421294455,
+      "seq": 1780,
+      "origin": "user",
+      "goalId": null,
+      "round": null,
+      "text": "doubao每次我都看到回复了的",
+      "hash": "24f205d0",
+      "also": []
+    },
+    {
+      "sessionId": "session-a8d9a827-c350-4306-9932-f3562cc75f5d",
+      "workspace": "D:\\9_Code_Workspace\\dsh-webcode-bridge",
+      "at": 1792421872251,
+      "seq": 1872,
+      "origin": "user",
+      "goalId": null,
+      "round": null,
+      "text": "右栏网页/有头窗口里看到回复 ！你继续！完成啊！你的长期运行（半小时）没有验证啊！还有调用工具能力！以及你的dsh模型选择器适配好了不同网站不同模式吗？还有一些任务模式/网页搜索/智能模式呢？有些都没开！你确保能搞定吗？我要完整可以用的！还有这个间隔时间怎样才能减少？增加一次性调用工具数量？反正现在太慢了一点不能适配真实工作！至少增加了4倍时间‘",
+      "hash": "1fb8b4e8",
+      "also": []
+    },
+    {
+      "sessionId": "session-a8d9a827-c350-4306-9932-f3562cc75f5d",
+      "workspace": "D:\\9_Code_Workspace\\dsh-webcode-bridge",
+      "at": 1792422560334,
+      "seq": 2073,
+      "origin": "user",
+      "goalId": null,
+      "round": null,
+      "text": "这个时间够了！不要半小时太久了你没时间了",
+      "hash": "a8509bd2",
+      "also": []
+    },
+    {
+      "sessionId": "session-a8d9a827-c350-4306-9932-f3562cc75f5d",
+      "workspace": "D:\\9_Code_Workspace\\dsh-webcode-bridge",
+      "at": 1792422643325,
+      "seq": 2104,
+      "origin": "user",
+      "goalId": null,
+      "round": null,
+      "text": "（不同网站不同模式）搜索开关 → 任务模式 → 多调用并行 → zai 等级",
+      "hash": "95b1b46b",
+      "also": []
+    },
+    {
+      "sessionId": "session-a8d9a827-c350-4306-9932-f3562cc75f5d",
+      "workspace": "D:\\9_Code_Workspace\\dsh-webcode-bridge",
+      "at": 1792423207134,
+      "seq": 2307,
+      "origin": "goal",
+      "goalId": "goal-2bb77cec-38ca-468b-81d7-c95ec5e4d29a",
+      "round": 1,
+      "text": "完全完成下一轮建议顺序：任务模式（glm 任务/研究报告 + deepseek 深度思考已取证）→ kimi/qwen/zai 模式补采 → zai 等级 → 全站多调用基线。你确认后我就按这个继续。",
+      "hash": "4d399ab9",
+      "also": [
+        {
+          "sessionId": "session-a8d9a827-c350-4306-9932-f3562cc75f5d",
+          "at": 1792423662435,
+          "origin": "goal"
+        },
+        {
+          "sessionId": "session-a8d9a827-c350-4306-9932-f3562cc75f5d",
+          "at": 1792423735088,
+          "origin": "goal"
+        }
+      ]
     }
   ]
 }
