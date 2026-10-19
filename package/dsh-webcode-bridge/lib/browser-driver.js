@@ -3973,6 +3973,44 @@ export function createBrowserDriver(options = {}) {
         // 黑盒超时只能瞎猜（2026-09-12 断流事故：页面早有全文、捕获从未建立）。
         const scene = await page?.evaluate?.((sel) => {
           const last = [...document.querySelectorAll(sel)].pop();
+          const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+          const textOf = (el) => (el && el.textContent ? el.textContent : '').trim().replace(/\s+/g, ' ');
+          // 0.19.97：超时现场**加采 DOM 诊断**（纯读数、不改行为）。真机（2026-10-19 GLM
+          // 任务模式 E2E）出现 `{captureAlive:true, replyChars:3, selectorHit:true}` 却在
+          // 180s 才超时：页面已有回复但「流结束」判据没成立。只凭这三个数分不清是
+          // 「agent 模式回复容器不同」「停止按钮/结束标记不同」还是「探测链没建立」——
+          // 所以下次再遇到这类轮次，必须能事后读到当时的 DOM 形状（按钮文本/类名、
+          // 停止/生成中候选、正文节点 class 链）。全部包在 try/catch 里：诊断失败
+          // 绝不许改变原来的超时路径与错误码。
+          let dom = null;
+          try {
+            const buttons = [...document.querySelectorAll('button')]
+              .filter(vis).slice(0, 12)
+              .map((b) => ({ text: textOf(b).slice(0, 40), aria: b.getAttribute('aria-label'), cls: String(b.className || '').slice(0, 120), disabled: b.disabled === true }));
+            const probe = (s) => { try { return [...document.querySelectorAll(s)].filter(vis).length; } catch { return null; } };
+            let answerNode = null;
+            if (last) {
+              answerNode = {
+                tag: last.tagName,
+                cls: String(last.className || '').slice(0, 160),
+                parentCls: String(last.parentElement?.className || '').slice(0, 160),
+                gpCls: String(last.parentElement?.parentElement?.className || '').slice(0, 160),
+                textHead: String(last.innerText || '').slice(0, 200),
+              };
+            }
+            dom = {
+              bodyTextTail: String(document.body ? document.body.innerText : '').slice(-600),
+              visibleButtons: buttons,
+              answerNode,
+              visibleCounts: {
+                think: probe('[class*=think]'),
+                stop: probe('[class*=stop]'),
+                loading: probe('[class*=loading]'),
+                generating: probe('[class*=generat]'),
+                agent: probe('[class*=agent]'),
+              },
+            };
+          } catch { dom = null; }
           return {
             captureAlive: typeof window.__webcodeChunk === 'function' && window.__webcodeCaptureInstalled === true,
             replyChars: last ? (last.innerText || '').length : 0,
@@ -3980,6 +4018,7 @@ export function createBrowserDriver(options = {}) {
             // 与「我们的选择器对这个站点是瞎的」分成两种现场——两者的下一步完全不同，
             // 而 replyChars:0 会把它们印成同一句话。
             selectorHit: Boolean(last),
+            dom,
           };
         }, answerSelector).catch(() => null);
         const detail = !scene ? '页面不可用'

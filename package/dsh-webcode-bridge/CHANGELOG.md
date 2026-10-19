@@ -5,6 +5,25 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.97（2026-10-19 夜第五轮：超时现场 DOM 诊断 + GLM 任务模式 E2E 复核分析；本机 web/headless 安装版；未推 GitHub/npm）
+
+### 新增：turn 超时现场加采 DOM 诊断（只读读数，不改行为）
+
+- 背景：2026-10-19 GLM 任务模式 E2E 出现 `{captureAlive:true, replyChars:3, selectorHit:true}` 却在超时点才失败——页面已有回复但「流结束」判据没成立；仅凭这三个数分不清「agent 模式回复容器不同」「停止/结束标记不同」「探测链没建立」。
+- 修法：`browser-driver.js` 的超时现场页内采样在原有三字段外新增 `dom`：`bodyTextTail`（末 600 字）、`visibleButtons`（文本/aria/class/disabled）、`answerNode`（tag/class 链/textHead）、`visibleCounts`（think/stop/loading/generat/agent 可见数）。**全部包在 try/catch**：诊断失败不改变原超时路径与错误码；仍写 `lastTimeoutScene` 供 `GET diagnostics` 事后取。
+- 护栏：`driver-scope` 7/0（新增页内代码无自由标识符）；`tool-loop` 12/0；lint-comments 0 error/0 warn。
+
+### 复核分析：GLM 任务模式 E2E 超时的两种可能（尚未定论，不假装修好）
+
+- 我方 E2E 脚本把 `requestTimeoutMs` 设成 `180_000`，与驱动的 `answerTimeoutMs`（默认 180s，思考-only 硬上限）**同值** ⇒ 总超时与「稳态/硬上限收束」在同一时刻赛跑，谁先到由事件循环决定；真机日志正是「180s 超时、页面已有 3 字」。
+- 产品路径的 relay 请求超时是 `requestTimeoutMs×2`（240s×2=480s），**比硬上限宽**；因此不能据本次 E2E 断言「任务模式回复捕获坏了」——需要把 E2E 的 requestTimeout 调到 480s 后复跑（待用户过完 GLM 滑块验证后执行）。
+- 该条仍按「未定论」处理：等复跑读数决定是「agent 模式流结束信号不同」（真问题 #85）还是「探测超时配置太紧」（探针缺陷）。
+
+### 边界
+
+- 本轮**无真机发送**（GLM 处于访问验证状态，按纪律停手；zai 地区弹窗未解）。
+- 本版本只装到本机 web/headless profile；未推 GitHub、未发 npm；宿主侧需重启 `dsh web` 生效。
+
 ## 0.19.96（2026-10-19 夜第四轮：任务模式设置页 UI + GLM 模式真机校准 + zai #34 disabled 态修复；本机 web/headless 安装版；未推 GitHub/npm）
 
 ### 新增：任务模式设置页 UI（用户第①项的「最后一跳」）
