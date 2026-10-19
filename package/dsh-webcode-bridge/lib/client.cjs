@@ -317,7 +317,7 @@ window.__ModuleLoader__.load({
     //
     // 这是**展示层**的表：它只决定标签页标题、工具条、目录卡片与设置页 tab 的
     // 文字。站点 id（`doubao`）、模型 id（`doubao:chat`）、分组名（`z.ai`）一律不动。
-    const SITE_NAMES = { deepseek: 'DeepSeek', glm: 'GLM', chatgpt: 'ChatGPT', kimi: 'Kimi', qwen: 'Qwen', doubao: 'Doubao', grok: 'Grok', claude: 'Claude', gemini: 'Gemini', zai: 'Z.ai' };
+    const SITE_NAMES = { deepseek: 'DeepSeek', glm: 'GLM', chatgpt: 'ChatGPT', kimi: 'Kimi', qwen: 'Qwen', doubao: 'Doubao', grok: 'Grok', claude: 'Claude', gemini: 'Gemini', zai: 'Z.ai', 'zai-cn': 'Z.ai 中国站' };
     const siteName = sid => SITE_NAMES[sid] || sid;
     /**
      * 毫秒时间戳 → `<input type="datetime-local">` 要的**本地时间**字符串。

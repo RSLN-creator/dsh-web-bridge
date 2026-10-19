@@ -152,6 +152,8 @@ const EXPECTED_GROUP_NAMES = Object.freeze({
   grok: 'grok',
   claude: 'claude',
   zai: 'z.ai',     // 短键即真实域名
+  // 0.21.0 有意新增：z.ai 国内站（用户明令「国内国外是两个站点」）
+  'zai-cn': 'zchat.z.ai',
   gemini: 'gemini',
 });
 

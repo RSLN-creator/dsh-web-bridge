@@ -131,3 +131,13 @@ test('⑤ 驱动内建默认 240s 保持（它只在宿主没传时生效，改�
   assert.match(driverSrc, /requestTimeoutMs:\s*options\.requestTimeoutMs\s*\?\?\s*240_000/,
     'browser-driver 的内建默认值变了：这是「宿主没传」时的兜底，改动必须是有意识的');
 });
+
+// 0.21.0：展示/登录窗口导航必须可诊断（用户 2026-10-20 报 about:blank 一直不加载）。
+test('接线：展示/登录窗口导航必须可诊断（navigateForDisplay + navError 回带）', () => {
+  const src = driverSrc;
+  assert.ok(src.includes('async function navigateForDisplay('), '缺 navigateForDisplay');
+  assert.ok(src.includes('lastWindowNavError'), '缺 lastWindowNavError 读数');
+  assert.ok(src.includes('navError: lastWindowNavError'), 'windowState 必须回带 navError');
+  const calls = src.match(/navigateForDisplay\(/g) || [];
+  assert.ok(calls.length >= 4, 'openLogin ×3 + openWindow ×1 至少 4 处调用；实际 ' + calls.length);
+});

@@ -5,6 +5,29 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.21.0（2026-10-20 凌晨：z.ai 国内/海外两站拆分 + 登录/展示窗口 about:blank 修复；本机 web/headless 安装版；未推 GitHub/npm）
+
+### 新增：z.ai **国内站 / 海外站拆成两个独立站点**（用户 2026-10-20 明令）
+
+- 用户原话：「国内国外网站是两个！你要区分！！」——0.19.99 把 `ZAI.origin` 改成 zchat 是错的，本版起：
+  - `zai` = **海外站** `https://chat.z.ai`，profile `sites/zai`；
+  - **`zai-cn` = 中国站** `https://zchat.z.ai`，独立 profile `sites/zai-cn`、独立登录态；复用海外站前端契约（同一应用的中国镜像），只覆盖身份三元组 id/name/origin/shortKey。
+- 模型选择器/目录现在同时出现 `z.ai/glm-5.3` 与 `zchat.z.ai/glm-5.3` 等条目（目录 17→20 行，`provider-surface` 的钉死清单/组名/显示名**有意**同步更新并在测试注释注明理由）；`client.cjs` 的 SITE_NAMES 同步加 `zai-cn: 'Z.ai 中国站'`，并修正 provider-surface 里只认无引号键的解析器（带连字符站点键必须支持）。
+- 别名：`zai-cn` / `zchat.z.ai` → `zai-cn:glm-5.3`。**中国站登录按用户指示忽略**（未登录只报 NEED_LOGIN，不影响海外站）。
+- 测试：provider-surface **8/0**、model-labels 12/0、client-render 74/0、control-routes 19/0、settings-transport 20/0、model-picker 19/0、login-state 16/0、client-server-contract 2/0 全绿。
+
+### 修复：登录/展示窗口 `about:blank` 一直不加载（用户 2026-10-20 报障）
+
+- 用户原话：「about:blank，这个什么你每次登录这个就是这个网址一直没有加载」。
+- 根因：`openLogin` / `openWindow` 里两处 `page.goto` 都带**空 catch**（失败=静默），任何一次导航失败窗口就永远停在 about:blank，且没有任何读数可归因。
+- 修法：新增 `navigateForDisplay(target)` 三档降级——`waitUntil:'commit'`（快速提交）→ `'domcontentloaded'`（容忍慢站）→ `page.evaluate(location.href=target)`（SPA/跳转兜底）；每档失败 `warn` 并把最后错误记入 `lastWindowNavError`，`windowState()` 新增 `navError` 字段（`GET/POST /window` 会回带）；openLogin 的 3 处 goto 与 openWindow 的 goto 全部改走它。
+- 测试：timeout-order **6/0**（新增接线判据：navigateForDisplay 存在、≥4 处调用、windowState 回带 navError）；driver-scope 7/0、captcha-gate 7/0、capture-stall-rescue 20/0、lint PASS。
+
+### 边界
+
+- 本版本只装到本机 web/headless profile；未推 GitHub、未发 npm；宿主侧需重启 `dsh web` 生效。
+- 中国站登录仍未建立（用户指示忽略）；GLM 真实一轮已能拿到回复（0.20.0 实测，无验证码）。
+
 ## 0.20.0（2026-10-20 凌晨：验证码命中自动转有头窗口；z.ai 两站拆分改为下一版；本机 web/headless 安装版；未推 GitHub/npm）
 
 ### 修复：验证码命中后自动把**同一现场**转成有头窗口（用户明令）

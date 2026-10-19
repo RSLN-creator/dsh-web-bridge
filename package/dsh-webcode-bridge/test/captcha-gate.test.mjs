@@ -46,7 +46,7 @@ test('① z.ai 必须声明人机验证选择器（真机 bundle 证据：featur
   assert.match(ZAI.captchaSelector, /aliyunCaptcha/, '必须包含真机实测的阿里云弹窗节点');
   // 站点表里只有 z.ai 声明它（其余站点没有这条读数，不许顺手加上）。
   const declared = SITES.filter((s) => s.captchaSelector).map((s) => s.id);
-  assert.deepEqual(declared, ['zai'],
+  assert.deepEqual(declared, ['zai', 'zai-cn'],
     'captchaSelector 只允许写在**有真机读数**的站点上；实际 ' + JSON.stringify(declared));
 });
 

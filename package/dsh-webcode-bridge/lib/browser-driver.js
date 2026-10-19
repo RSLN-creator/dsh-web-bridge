@@ -1657,6 +1657,10 @@ export function createBrowserDriver(options = {}) {
   // 复位，下一次 ensure 回无头形态——旧实现漏了这刀，手 X 之后 headed 悬空成
   // true，下一次 openWindow 在无头浏览器上跑「有头」分支，窗口永远不出现。
   let windowMinimized = false;
+  // 0.21.0：展示/登录窗口**最近一次导航失败**的原始错误（用户 2026-10-20 报
+  // 「about:blank 一直没加载」）。旧实现 goto 失败被空 catch 吞掉、无任何读数，
+  // 现在由 navigateForDisplay 写入、windowState().navError 回带给面板/诊断。
+  let lastWindowNavError = null;
   const storePath = () => path.join(cfg.profileDir, 'webcode-sessions-' + siteId + '.json');
 
   function loadStore() {
@@ -5407,6 +5411,51 @@ export function createBrowserDriver(options = {}) {
    *
    * @param {{onState?: (s: string) => void}} [opts]
    */
+  /**
+   * 0.21.0：展示/登录窗口的导航必须**可诊断**。
+   *
+   * 用户 2026-10-20 原话：「about:blank，这个什么你每次登录这个就是这个网址一直
+   * 没有加载」——旧实现 openLogin/openWindow 里两处 \`page.goto\` 都带**空 catch**
+   *（失败=静默），任何一次导航失败都会让窗口永远停在 about:blank，用户只看到一个
+   * 白页，且没有任何读数可归因。
+   *
+   * 现在三档降级：commit（最快，导航一提交就返回）→ domcontentloaded（容忍慢站）
+   * → page.evaluate(location.href=target)（对 SPA/跳转链的兜底）。每档失败都 warn
+   * 并把**最后一条错误**记进 lastWindowNavError（windowState/navError 会回带给面板
+   * 与诊断），成功不清空目的，只在最后按实际 URL 判定。
+   *
+   * @param {string|null} target 目标地址（通常 cfg.site 或当前会话 URL）
+   * @returns {Promise<string|null>} 导航后的实际 URL（仍失败则返回 about:blank/null）
+   */
+  async function navigateForDisplay(target) {
+    lastWindowNavError = null;
+    if (!target) return null;
+    const attempts = [
+      { waitUntil: 'commit', timeout: 30_000 },
+      { waitUntil: 'domcontentloaded', timeout: 45_000 },
+    ];
+    for (const opt of attempts) {
+      try { await page.goto(target, opt); break; } catch (e) {
+        lastWindowNavError = String(e?.message || e).slice(0, 200);
+        warn('display window goto failed (' + opt.waitUntil + '):', lastWindowNavError);
+      }
+    }
+    if (!page.url() || page.url() === 'about:blank') {
+      try {
+        await page.evaluate((u) => { window.location.href = u; }, target);
+        await new Promise((r) => setTimeout(r, 1500));
+      } catch (e) {
+        lastWindowNavError = String(e?.message || e).slice(0, 200);
+        warn('display window location fallback failed:', lastWindowNavError);
+      }
+    }
+    const finalUrl = page && !page.isClosed?.() ? safeUrl(page.url()) : null;
+    if (!finalUrl || finalUrl === 'about:blank') {
+      warn('display window still blank after navigation attempts; target=' + target);
+    }
+    return finalUrl;
+  }
+
   async function openLogin({ onState } = {}) {
     if (busy || transitioning) throw new Error('driver busy with a web turn — login refused');
     transitioning = true;
@@ -5435,7 +5484,7 @@ export function createBrowserDriver(options = {}) {
         report('launching');
         try {
           await launch({ headless: true });
-          try { await page.goto(cfg.site, { waitUntil: 'domcontentloaded', timeout: 45_000 }); } catch {}
+          try { await navigateForDisplay(cfg.site); } catch {}
           if (await judgeLoggedIn(page)) {
             loggedIn = true;
             persistLoginState({ loggedIn: true, at: Date.now(), message: '无头快速核验：登录态有效' });
@@ -5462,7 +5511,7 @@ export function createBrowserDriver(options = {}) {
         ctx = null; page = null;
         await launch({ headless: false });
       });
-      try { await page.goto(cfg.site, { waitUntil: 'domcontentloaded', timeout: 45_000 }); } catch {}
+      try { await navigateForDisplay(cfg.site); } catch {}
       report('waiting-for-login');
       const t1 = Date.now();
       let healed = 0;
@@ -5478,7 +5527,7 @@ export function createBrowserDriver(options = {}) {
           warn('login window lost mid-flow — reopening');
           try {
             await ensure();
-            await page.goto(cfg.site, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+            await navigateForDisplay(cfg.site);
             report('waiting-for-login');
             continue;
           } catch (e) { throw new Error('登录窗口已关闭，登录未完成（' + String(e?.message || e).slice(0, 80) + '）'); }
@@ -5604,7 +5653,7 @@ export function createBrowserDriver(options = {}) {
       }
     } catch (err) { warn('window dock failed (window stays at default position):', err?.message); }
     const target = url || remembered || cfg.site;
-    try { await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => {}); } catch { /* already there */ }
+    try { await navigateForDisplay(target); } catch { /* navigateForDisplay 内部已 warn */ }
     // 与登录同一套判定（z.ai 游客页有输入框，旧「URL 不含 login 即已登录」
     // 会把未登录记成已登录）；先等输入框渲染完再判，避免瞬时误判未登录。
     await page.waitForSelector(SEL.input, { timeout: 15_000 }).catch(() => {});
@@ -5689,6 +5738,9 @@ export function createBrowserDriver(options = {}) {
       headed,
       minimized: windowMinimized,
       url: page && !page.isClosed?.() ? safeUrl(page.url()) : null,
+      // 0.21.0：展示/登录窗口最近一次导航失败的原始错误（用户报的「about:blank
+      // 一直没加载」必须能从 /window API 读到归因，而不是只能看宿主控制台）。
+      navError: lastWindowNavError,
     };
   }
 

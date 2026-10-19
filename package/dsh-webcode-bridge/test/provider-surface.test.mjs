@@ -36,6 +36,8 @@ import {
 /** 站点 id 与顺序（顺序即 OpenAI /models 的列表顺序）。 */
 const EXPECTED_SITE_IDS = [
   'deepseek', 'glm', 'chatgpt', 'kimi', 'qwen', 'doubao', 'grok', 'claude', 'gemini', 'zai',
+  // 0.21.0 有意新增：z.ai 国内站（zchat.z.ai）与海外站是两个站点（用户 2026-10-20 明令区分）
+  'zai-cn',
 ];
 
 /**
@@ -72,6 +74,7 @@ const EXPECTED_GROUP_NAMES = {
   deepseek: 'deepseek', glm: 'chatglm', chatgpt: 'chatgpt',
   kimi: 'kimi', qwen: 'qwen', doubao: 'doubao',
   grok: 'grok', claude: 'claude', gemini: 'gemini', zai: 'z.ai',
+  'zai-cn': 'zchat.z.ai',
 };
 
 /**
@@ -88,6 +91,7 @@ const EXPECTED_SITE_NAMES = {
   deepseek: 'DeepSeek', glm: 'GLM', chatgpt: 'ChatGPT',
   kimi: 'Kimi', qwen: 'Qwen', doubao: 'Doubao',
   grok: 'Grok', claude: 'Claude', gemini: 'Gemini', zai: 'Z.ai',
+  'zai-cn': 'Z.ai 中国站',
 };
 
 test('判据 1：站点 id 与顺序逐字不变', () => {
@@ -138,10 +142,10 @@ test('判据 5：模型目录非空，且每行都带得出站点与 id', () => 
 
 test('判据 6：模型目录的形状快照（防「少了一行」这类静默缩水）', () => {
   const models = listAllModels();
-  // 17 行是 0.19.50 迁移前的实测读数（10 站点各 1 + glm/zai 的多模型 + 1 条兼容别名）。
+  // 17 行是 0.19.50 迁移前的实测读数；0.21.0 有意 +3（新站点 zai-cn 的三个模型）。
   // 这是**对外面**的一部分：少一行意味着某个模型从选择器里消失。
-  assert.equal(models.length, 17,
-    '模型目录共 17 行（迁移前实测）。实际：' + models.length + ' 行 —— 若这是有意的变更，请同时更新本期望值并说明理由');
+  assert.equal(models.length, 20,
+    '模型目录共 20 行（17 + 0.21.0 zai-cn 的 3 个模型）。实际：' + models.length + ' 行 —— 若这是有意的变更，请同时更新本期望值并说明理由');
   // 兼容别名必须仍在（历史会话与 OpenAI 前端的 `model: 'deepseek-web'` 依赖它）。
   assert.ok(models.some((m) => m.id === 'deepseek-web'),
     '兼容别名 `deepseek-web` 必须仍在目录里——历史设置值与 OpenAI 前端依赖它解析');
@@ -160,7 +164,8 @@ function clientSiteNames() {
   const m = src.match(/const SITE_NAMES = \{([\s\S]*?)\};/);
   assert.ok(m, 'client.cjs 里找不到 `const SITE_NAMES = {…};` 字面量——先修本测试的解析');
   const out = {};
-  for (const kv of m[1].matchAll(/([a-z][a-z0-9.]*)\s*:\s*'([^']*)'/g)) out[kv[1]] = kv[2];
+  // 0.21.0：站点键可能带连字符（如 'zai-cn'），必须允许引号键，否则解析器会静默漏行。
+  for (const kv of m[1].matchAll(/(?:'([a-z][a-z0-9.-]*)'|([a-z][a-z0-9.]*))\s*:\s*'([^']*)'/g)) out[kv[1] || kv[2]] = kv[3];
   return out;
 }
 

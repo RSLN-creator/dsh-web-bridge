@@ -861,7 +861,23 @@ export const GEMINI = withEffort({
 });
 
 /** 全部内容服务（顺序即 OpenAI /models 列表顺序）。 */
-export const SITES = Object.freeze([DEEPSEEK, GLM, CHATGPT, KIMI, QWEN, DOUBAO, GROK, CLAUDE, GEMINI, ZAI]);
+// z.ai **中国站**（zchat.z.ai）：与海外站是两个站点（用户 2026-10-20 明令区分）。
+//
+// 为什么不改 `ZAI.origin` 而是单列一条：两站域名/登录态/会话目录都不同
+//（profile: sites/zai vs sites/zai-cn），合并会让「登录了哪个站」变成隐式行为。
+// 拆开后模型选择器分别显示 `z.ai/…` 与 `zchat.z.ai/…`，各自登录、各自会话。
+// 复用海外站全部前端契约，只覆盖身份三元组（id/name/origin/shortKey）。
+// ⚠ 用户 2026-10-20：中国站暂时没法登录，先忽略——未登录只报 NEED_LOGIN，
+//   不影响海外站，也不阻塞其它站点。
+export const ZAI_CN = Object.freeze({
+  ...ZAI,
+  id: 'zai-cn',
+  name: 'Z.ai 中国站',
+  origin: 'https://zchat.z.ai',
+  shortKey: 'zchat.z.ai',
+});
+
+export const SITES = Object.freeze([DEEPSEEK, GLM, CHATGPT, KIMI, QWEN, DOUBAO, GROK, CLAUDE, GEMINI, ZAI, ZAI_CN]);
 
 /**
  * 选择器里显示的模型名 = `站点短键/模型 id`（0.14.0）。
@@ -1147,6 +1163,7 @@ const ALIASES = Object.freeze({
   grok: 'grok:auto', claude: 'claude:auto', gemini: 'gemini:auto',
   zai: 'zai:glm-5.3', 'zai:auto': 'zai:glm-5.3',
   'z-ai': 'zai:glm-5.3', 'chat.z.ai': 'zai:glm-5.3', 'glm-zai': 'zai:glm-5.3',
+  'zai-cn': 'zai-cn:glm-5.3', 'zchat.z.ai': 'zai-cn:glm-5.3',
 });
 
 export const DEFAULT_MODEL_ID = 'deepseek-web';
