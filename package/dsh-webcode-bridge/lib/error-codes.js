@@ -129,7 +129,8 @@ export const WEBCODE_CODES = Object.freeze({
   WEB_UI_OVERLAY_BLOCKED: { official: false, note: '页面级 UI 遮罩（产品导览 driver-overlay / 地区弹窗 _modal-overlay）盖住发送目标：点击不会命中，需人工关闭或折叠后重试。' },
   SEND_NOT_CONFIRMED: { official: false, note: '点了发送但网页未确认收到。' },
   SEARCH_TOGGLE_UNCONFIRMED: { official: false, note: '已点击联网搜索开关但回读 aria-pressed 未确认（不重试：重试=再点一次网页控件）；用户选了 on、网页却没开，必须让他知道，不许静默当成功。' },
-  PROMPT_TRUNCATED: { official: false, note: '网页输入框只接收了部分字符（回读校验）。本插件自己有一次性压缩重试。' },
+
+  SITE_MODE_UNAVAILABLE: { official: false, note: '任务模式（GLM 工具选择器）点击/回读未确认：网页可能改版或条目不可用。不重试（重试=再点一次网页控件）；本轮不假装模式已生效。' },  PROMPT_TRUNCATED: { official: false, note: '网页输入框只接收了部分字符（回读校验）。本插件自己有一次性压缩重试。' },
   PROMPT_WRITE_STALLED: { official: false, note: '写入输入框后长度不再增长（分块写入卡死）。' },
   DRIVER_BUSY: { official: false, note: '同一驱动正在跑另一轮。' },
   BRIDGE_ACCOUNT_BUSY: { official: false, note: '同一账号的跨进程单实例锁被占。' },

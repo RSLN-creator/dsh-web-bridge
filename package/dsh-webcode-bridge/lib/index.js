@@ -25,7 +25,7 @@ import { zeroProgressDecision } from './zero-progress.js';
 import { findDegenerateRepeat } from './repeat-detect.js';
 import { idleWindowDecision } from './idle-window.js';
 import { createDeliveryTrace, compareStages } from './delivery-trace.js';
-import { createWebControl, buildSessionEvents, mainLineOf } from './web-control.js';
+import { createWebControl, buildSessionEvents, mainLineOf, thinkModeOf, siteModeOf } from './web-control.js';
 import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, stripProtocolRegions, proseSafeEnd, readCallAt, partialProtocolAt, unresolvedCallFenceAt, closingFenceAfter, headlessCallTailAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeOfficialToolCalls, normCallArgs, inferToolNameFromArgs, recoverUnparsedCalls, callsLostFromParse, officialToolCallSpecimen, officialCallExampleFor, buildPreset } from './agent-preset.js';
 // 只用 `teachFor`（1146 的续跑重申、3290 的首轮落盘）——那两处是**真调用**，
 // 即计划 Task 1.4 所说的「教学提示按 teachShape 选支」。
@@ -938,7 +938,10 @@ export function apply(ctx, config = {}) {
   // 联网搜索开关（0.19.94）：'auto'（默认：不动网页，零位移）/ 'on'（强制开 + 回读确认）/
   // 'off'（强制关，旧行为）。站点级 searchModeBySite 只保留在编站点 id，回落链见 searchModeOf。
   // 默认 auto：不配的用户行为只有一处变化——不再像旧实现那样把用户手动开的搜索静默关掉。
-  const defaultConfig = { extraPrompt: '', extraPromptBySite: {}, defaultModel: 'deepseek', defaultModelBySite: {}, previewRefreshRate: 5000, thinkMode: 'on', subAgentMode: 'own', subAgentSite: 'follow', sendGapMs: 0, sendGapBasis: 'send-to-send', accounts: [], sendGapMsBySlot: {}, promptTransport: 'attach', promptTransportBySite: {}, maxConcurrentLanes: 2, searchMode: 'auto', searchModeBySite: {} };
+  // thinkModeBySite / siteModeBySite（task-8）：站点级覆盖字典。全局 thinkMode 保持
+  // 旧默认 'on'；回落链唯一真源是 web-control.js 的 thinkModeOf（站点→全局→auto）。
+  // siteModeBySite 默认空 = 不动网页（GLM 任务模式，零位移）。
+  const defaultConfig = { extraPrompt: '', extraPromptBySite: {}, defaultModel: 'deepseek', defaultModelBySite: {}, previewRefreshRate: 5000, thinkMode: 'on', thinkModeBySite: {}, subAgentMode: 'own', subAgentSite: 'follow', sendGapMs: 0, sendGapBasis: 'send-to-send', accounts: [], sendGapMsBySlot: {}, promptTransport: 'attach', promptTransportBySite: {}, maxConcurrentLanes: 2, searchMode: 'auto', searchModeBySite: {}, siteModeBySite: {} };
   // 设置**修订号**（0.19.33）：单调递增的进程内计数器，每次 set() 自增。
   //
   // 为什么必须有它：设置面有多处读数（提示词模板 / 再教学 / 投递形态生效值）是从
@@ -3606,17 +3609,22 @@ function imageMarkdown(images) {
       // 归一化模型限定 id：meta 可能只带裸 id（OpenAI 前端），补上站点前缀，
       // 保证 driver 的 selectModel 一定解析到正确站点，不会因跨站点重名串模型。
       const qualified = qualifyModelId(m?.model, m?.siteId);
-      // thinkMode: 'auto' | 'on' | 'off' — 设置页手动覆盖网页「深度思考」开关
-      const thinkMode = ['on', 'off', 'auto'].includes(m?.thinkMode) ? m.thinkMode : 'auto';
+      // thinkMode: 'auto' | 'on' | 'off' — 设置页手动覆盖网页「深度思考」开关。
+      // ⚠ task-8 起不再从 meta 取：改为**站点档 → 全局档 → 'auto'** 的回落链
+      //（唯一真源 web-control.js 的 thinkModeOf，与 searchModeOf 同形）。解析必须在
+      // `siteId` 之后（TDZ，0.19.94 教训）。
+      const siteId = m?.siteId || 'deepseek';
+      const thinkMode = thinkModeOf(configManager.get(), siteId);
+      // 任务模式（task-8，设置层，先只服务 GLM）：站点→模式名；默认 '' = 不动网页。
+      // 与 searchMode 同层透传，是否真的点由 driver 按 `fresh` 与 modePicker 契约判定。
+      const siteMode = siteModeOf(configManager.get(), siteId);
       // 联网搜索开关（0.19.94）：与 thinkMode 同一层收一次合法性；未知值归 auto（零位移）。
       // 这条 executor 是 sendPrompt 形参 → driver.sendTurn 的**唯一透传点**：会话轮走
       // turnOpts、无会话轮（OpenAI 前端）走 driver.sendPrompt，两条路都必须带同一个键，
       // 否则「同一次发送的两条通道」会给出两种搜索开关行为（第二份真相）。
-      // ⚠ 必须先算出 `siteId`（下面一行）再解析 searchMode：本文件 0.19.94 首版把这两行
-      //   写反了，`searchModeOf(..., siteId)` 撞 TDZ（ReferenceError: Cannot access
-      //   'siteId' before initialization）——prompt-compact / tool-loop 两条端到端测试当场
-      //   红；真机上则是每次发送都抛。顺序即判据，别再调换。
-      const siteId = m?.siteId || 'deepseek';
+      // ⚠ `siteId` 已在上方（thinkMode 之前）解析——顺序即判据：0.19.94 首版把
+      //   siteId 写在 searchModeOf 之后，撞 TDZ 当场红。thinkMode/siteMode/searchMode
+      //   三者都必须在 siteId 之后解析。
       const searchMode = searchModeOf(configManager.get(), siteId);
       // 账户槽（0.14.7）：meta 显式带 accountKey；只有裸 id 的调用方
       // （OpenAI 前端、aux 轮）则从限定模型 id 里解出来（`glm@2:glm-5.3`）。
@@ -3644,6 +3652,7 @@ function imageMarkdown(images) {
             images: m.images,
             thinkMode,
             searchMode,
+            siteMode,
             // 思考等级（0.19.48）：由 buildTurn 的 meta 带来（源头是请求的
             // `GenerateOptions.reasoningEffort`），驱动在选完模型之后落到网页控件上。
             // null 表示「用户没选」——驱动据此**不动**网页当前档位。
@@ -3753,7 +3762,7 @@ function imageMarkdown(images) {
             throw err;
           });
         }
-        return driverFor(accountKey).sendPrompt(prompt, { signal: opts.signal, meta: m, onDelta: opts.onDelta, onThink: opts.onThink, onImage: opts.onImage, model: qualified, thinkMode, searchMode });
+        return driverFor(accountKey).sendPrompt(prompt, { signal: opts.signal, meta: m, onDelta: opts.onDelta, onThink: opts.onThink, onImage: opts.onImage, model: qualified, thinkMode, searchMode, siteMode });
       };
       // 投放前等待（0.19.44）：本 executor **开始跑**的那一刻。适配器的看门狗
       // 在 `relay.submit()` 之后立刻开跑，而 submit 只是入队——executor 由

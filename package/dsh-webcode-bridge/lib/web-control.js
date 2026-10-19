@@ -38,6 +38,42 @@ import {
 // 并列多会话的列身份 → 提示词（0.19.21，用户 Q5 的沙箱适配）。
 import { withColumnGuidance, normalizeColumnContext } from './column-context.js';
 import { writeColumnArtifact, fencedBlocks, ColumnFsDenied } from './column-fs.js';
+
+/**
+ * 站点级 `thinkMode` 的**唯一回落链**（与 `searchModeOf` 同一形状）：
+ * 站点档（`thinkModeBySite[siteId]`，只认三值）→ 全局档（`thinkMode`）→ `'auto'`。
+ *
+ * 为什么单独抽成导出纯函数：三处消费（index.js executor、web-control GET/POST、
+ * 测试）必须共用**同一份**回落判据；各写一份必然漂移。宽松方向只能是「更接近
+ * 默认 auto」——非法值逐层跳过，绝不产生第三种没定义过的口径。
+ *
+ * @param {object|null|undefined} settings 设置快照
+ * @param {string} siteId 站点 id
+ * @returns {'on'|'off'|'auto'} 生效值
+ */
+export function thinkModeOf(settings, siteId) {
+  const legal = (v) => v === 'on' || v === 'off' || v === 'auto';
+  const bySite = settings?.thinkModeBySite;
+  const siteVal = bySite && typeof bySite === 'object' ? bySite[siteId] : undefined;
+  if (legal(siteVal)) return siteVal;
+  return legal(settings?.thinkMode) ? settings.thinkMode : 'auto';
+}
+
+/**
+ * 站点级**任务模式名**（GLM 的「任务 / 研究报告 / PPT制作 / 数据分析 / 更多」等）。
+ *
+ * 回落链比 thinkMode 更短：只有站点档，**没有全局档**（任务模式是站点专属语义，
+ * 不能跨站套用）。默认 `''` = **不动网页**（零位移：不点、不回读、不抛错）。
+ *
+ * @param {object|null|undefined} settings 设置快照
+ * @param {string} siteId 站点 id
+ * @returns {string} 模式名（trim 后）；未配置/非法/空串一律返回 ''
+ */
+export function siteModeOf(settings, siteId) {
+  const bySite = settings?.siteModeBySite;
+  const val = bySite && typeof bySite === 'object' ? bySite[siteId] : undefined;
+  return typeof val === 'string' ? val.trim() : '';
+}
 // 并发组的「专属 git worktree」导入（0.19.68）**已删除**（0.19.68（10-08 轮））：
 // 用户明令「文件夹内一个会话一行！！不是每个会话一个文件夹！」⇒ 并发列不再自建目录，
 // 就在当前工作区里普通新建会话（官方「新会话」同路径）。`lib/concurrent-workspace.js`
@@ -1087,6 +1123,12 @@ export function createWebControl(deps = {}) {
         // 会让设置页三态下拉一个都不选中。站点级字典同理回空对象（未配置 = 跟随全局）。
         searchMode: config.searchMode === 'on' || config.searchMode === 'off' ? config.searchMode : 'auto',
         searchModeBySite: config.searchModeBySite && typeof config.searchModeBySite === 'object' ? config.searchModeBySite : {},
+        // 深度思考三态（task-8）：与 searchMode 同一口径——必须带默认值回给前端；
+        // 站点级字典回空对象（未配置 = 跟随全局，回落链见 thinkModeOf）。
+        thinkMode: config.thinkMode === 'on' || config.thinkMode === 'off' ? config.thinkMode : 'auto',
+        thinkModeBySite: config.thinkModeBySite && typeof config.thinkModeBySite === 'object' ? config.thinkModeBySite : {},
+        // 任务模式（task-8，设置层）：站点→模式名；默认空对象 = 每个站点都不动网页。
+        siteModeBySite: config.siteModeBySite && typeof config.siteModeBySite === 'object' ? config.siteModeBySite : {},
         maxConcurrentLanes: laneCap,
       };
     },
@@ -1209,6 +1251,32 @@ export function createWebControl(deps = {}) {
           if (val === 'on' || val === 'off' || val === 'auto') out[sid] = val;
         }
         updated.searchModeBySite = out;
+      }
+      // 深度思考三态（task-8）：与 searchMode 同一套归一化，只认 'on'|'off'|'auto'；
+      // 站点级只保留「在编站点 + 合法值」，未知站点的键永远查不到，留着只会弄脏设置文件。
+      if ('thinkMode' in updated) {
+        updated.thinkMode = ['on', 'off', 'auto'].includes(updated.thinkMode) ? updated.thinkMode : 'auto';
+      }
+      if ('thinkModeBySite' in updated) {
+        const src = updated.thinkModeBySite && typeof updated.thinkModeBySite === 'object' ? updated.thinkModeBySite : {};
+        const out = {};
+        for (const [sid, val] of Object.entries(src)) {
+          if (!getSite(sid)) continue;
+          if (val === 'on' || val === 'off' || val === 'auto') out[sid] = val;
+        }
+        updated.thinkModeBySite = out;
+      }
+      // 任务模式（task-8，设置层，先只服务 GLM）：站点→模式名，只保留在编站点 + 非空
+      // 字符串（trim，限长 40）；空值 = 移除该站点（默认空 = 不动网页，零位移）。
+      if ('siteModeBySite' in updated) {
+        const src = updated.siteModeBySite && typeof updated.siteModeBySite === 'object' ? updated.siteModeBySite : {};
+        const out = {};
+        for (const [sid, val] of Object.entries(src)) {
+          if (!getSite(sid)) continue;
+          const mode = typeof val === 'string' ? val.trim().slice(0, 40) : '';
+          if (mode) out[sid] = mode;
+        }
+        updated.siteModeBySite = out;
       }
       const result = settingsStore.set(updated);
       // 落盘成功后把**新的**修订号一起回（0.19.33）：客户端不必等下一次轮询才知道

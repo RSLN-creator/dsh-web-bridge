@@ -310,6 +310,16 @@ export const GLM = withEffort({
     // 判定按「包含」即可（见 verify-model-switch 的比较口径）。
     selected: ['.think-label'],
   },
+  // 任务模式选择契约（task-8，**真机只读读数**见 `.tmp/live-2026-10-19/mode-inventory.md` §1）：
+  //   · 容器 `.model-select-container` 命中 2 个（第 1 个空容器；第 2 个是工具选择器）；
+  //   · 可见条目 `.model-select-container .model-select-item` count=5 / visible=5，
+  //     文本逐字 `任务 / 研究报告 / PPT制作 / 数据分析 / 更多`（class 均含 model-select-item）。
+  // 选择器**逐字来自该真机读数**（不凭印象写）；没有读数的条目（「更多」浮层内部）不点。
+  // 默认空设置 = 不动网页（零位移）；只有 fresh 轮才应用，见 browser-driver 的 planSiteMode。
+  modePicker: {
+    trigger: '.model-select-container',
+    option: '.model-select-container .model-select-item',
+  },
   // 未真机校准的站点只给「网页当前模型」入口:桥不宣称具体版本号(网页
   // 模型更新极快,硬编码清单必然过时——2026-09-08 用户实测 GLM 网页已到
   // 5.x,旧目录还在 4.5/4.6)。在右侧网页里手动选模型,桥按当前网页状态对话。

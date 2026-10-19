@@ -991,6 +991,31 @@ export function planSearchToggle({ pressed = null, mode = 'auto' } = {}) {
 }
 
 /**
+ * 任务模式（站点→模式名，先只服务 GLM）的**纯判定**：这一轮到底要不要动网页控件。
+ *
+ * ## 为什么要能离线测（task-8）
+ *
+ * 三条安全线都是「判据」而不是「实现细节」，改坏了必须变红：
+ *   ① **默认空 = 零位移**：`siteModeBySite` 没配（或空串/非字符串）⇒ 不点、不回读、不抛错。
+ *      这是「不配置的用户行为逐字不变」的可核对形式。
+ *   ② **只在 fresh 轮应用**：模式是与会话绑定的网页状态，resume（续聊既有会话）时重新点
+ *      可能把「上一轮已选好的模式」改掉/切走，且既有会话页可能根本不渲染该控件
+ *      （doubao 分段控件的同型教训，见 plan/record）。resume 一律不动。
+ *   ③ 显式配置了但驱动层找不到控件/回读失败 ⇒ **抛可读错误**（SITE_MODE_UNAVAILABLE），
+ *      不静默降级（与 planSearchToggle 的 on+fail 同一条纪律）。
+ *
+ * @param {{siteMode?: string|null, fresh?: boolean}} [input]
+ *   siteMode = 设置层解析出的模式名（默认 ''）；fresh = 本轮是否新建会话。
+ * @returns {{apply: boolean, mode: string|null, reason: string}}
+ */
+export function planSiteMode({ siteMode = '', fresh = false } = {}) {
+  const mode = typeof siteMode === 'string' ? siteMode.trim() : '';
+  if (!mode) return { apply: false, mode: null, reason: 'mode-unset' };
+  if (!fresh) return { apply: false, mode, reason: 'resume-keeps-mode' };
+  return { apply: true, mode, reason: 'fresh-apply' };
+}
+
+/**
  * 建一个站点驱动实例：用真实 Edge 打开站点、登录、发消息、收流、回读会话 id。
  *
  * 一个实例 = **一个「站点 × 账户槽」**（0.14.7 起）。同站点两个账户是两个实例、
@@ -3449,7 +3474,7 @@ export function createBrowserDriver(options = {}) {
     return result;
   }
 
-  async function runTurn(message, { navigate, key = null, signal, onDelta, onThink, onImage, model, images, thinkMode, searchMode = 'auto', reasoningEffort = null } = {}) {
+  async function runTurn(message, { navigate, key = null, signal, onDelta, onThink, onImage, model, images, thinkMode, searchMode = 'auto', siteMode = null, reasoningEffort = null } = {}) {
     if (busy || transitioning) throw new Error('driver busy');
     busy = true;
     let timer = null;
@@ -3754,7 +3779,63 @@ export function createBrowserDriver(options = {}) {
         // 站点没有搜索控件契约：如实提示「无法确认」，但**不杀轮**（理由见上）。
         onThink?.(`⚠ 本轮联网搜索设为 on，但 ${siteId} 站点尚未校准搜索开关，无法确认已开启`);
       }
-      throwIfAborted();
+      // ── 任务模式（task-8，设置层，先只服务 GLM）：fresh 轮才应用 ────────────────
+      // 判定收在纯函数 planSiteMode（默认空=零位移；resume 不动）；失败抛可读的
+      // SITE_MODE_UNAVAILABLE，绝不静默降级。控件选择器只来自真机读数
+      // （.tmp/live-2026-10-19/mode-inventory.md：.model-select-container 可见条目
+      // 任务/研究报告/PPT制作/数据分析/更多），不在没有读数时猜测。
+      const siteModePlan = planSiteMode({ siteMode, fresh: navigate === 'fresh' });
+      if (siteModePlan.apply) {
+        const modePicker = site.modePicker;
+        if (!modePicker || !modePicker.option) {
+          throw withWebcodeCode(new Error('SITE_MODE_UNAVAILABLE: 站点 ' + siteId + ' 未声明 modePicker 契约，无法切换到任务模式「' + siteModePlan.mode + '」'), 'SITE_MODE_UNAVAILABLE');
+        }
+        const modeHit = await page.evaluate(({ sel, want }) => {
+          const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+          const textOf = (el) => (el && el.textContent ? el.textContent : '').trim().replace(/\s+/g, ' ');
+          const items = [...document.querySelectorAll(sel)].filter(vis);
+          const target = items.find((el) => textOf(el) === want) || null;
+          return { found: Boolean(target), list: items.map(textOf).slice(0, 20) };
+        }, { sel: modePicker.option, want: siteModePlan.mode }).catch((e) => ({ error: String(e && e.message ? e.message : e) }));
+        if (modeHit.error) {
+          throw withWebcodeCode(new Error('SITE_MODE_UNAVAILABLE: 读取任务模式条目失败（' + modeHit.error + '）'), 'SITE_MODE_UNAVAILABLE');
+        }
+        if (!modeHit.found) {
+          throw withWebcodeCode(new Error('SITE_MODE_UNAVAILABLE: 页面上没有任务模式条目「' + siteModePlan.mode + '」' + (modeHit.list.length ? '（可见：' + modeHit.list.join('、') + '）' : '（一个条目都没读到）') ), 'SITE_MODE_UNAVAILABLE');
+        }
+        await page.evaluate(({ sel, want }) => {
+          const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+          const textOf = (el) => (el && el.textContent ? el.textContent : '').trim().replace(/\s+/g, ' ');
+          const el = [...document.querySelectorAll(sel)].filter(vis).find((e) => textOf(e) === want);
+          if (el) el.click();
+        }, { sel: modePicker.option, want: siteModePlan.mode }).catch(() => {});
+        let modeConfirmed = false;
+        let modeReadback = null;
+        for (let i = 0; i < 10 && !modeConfirmed; i += 1) {
+          modeReadback = await page.evaluate(({ sel, want }) => {
+            const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+            const textOf = (el) => (el && el.textContent ? el.textContent : '').trim().replace(/\s+/g, ' ');
+            for (const el of [...document.querySelectorAll(sel)].filter(vis)) {
+              if (textOf(el) !== want) continue;
+              const cls = String(el.className || '');
+              const toks = cls.split(/\s+/).filter(Boolean);
+              const selected = el.getAttribute('aria-selected') === 'true'
+                || el.getAttribute('aria-checked') === 'true'
+                || toks.indexOf('selected') !== -1
+                || toks.indexOf('active') !== -1
+                || toks.indexOf('checked') !== -1;
+              return { selected, cls: cls.slice(0, 120) };
+            }
+            return { selected: false, cls: null };
+          }, { sel: modePicker.option, want: siteModePlan.mode }).catch(() => null);
+          if (modeReadback && modeReadback.selected) { modeConfirmed = true; break; }
+          await delay(150);
+        }
+        if (!modeConfirmed) {
+          throw withWebcodeCode(new Error('SITE_MODE_UNAVAILABLE: 已点击任务模式「' + siteModePlan.mode + '」但回读未确认选中态（读回：' + JSON.stringify(modeReadback) + '）'), 'SITE_MODE_UNAVAILABLE');
+        }
+        log('site mode applied and confirmed: ' + siteModePlan.mode + ' (site=' + siteId + ')');
+      }      throwIfAborted();
       if (Array.isArray(images) && images.length) {
         // 上传后**确认**附件真的进了网页才继续（见 uploadImages 的注释）：
         // 拿不到可见证据就抛 ATTACH_NOT_CONFIRMED。
@@ -4602,7 +4683,7 @@ export function createBrowserDriver(options = {}) {
     }
   }
 
-  async function sendTurn(key, message, { fresh = false, signal, onDelta, onThink, onImage, model, images, thinkMode, searchMode = 'auto', reasoningEffort = null } = {}) {
+  async function sendTurn(key, message, { fresh = false, signal, onDelta, onThink, onImage, model, images, thinkMode, searchMode = 'auto', siteMode = null, reasoningEffort = null } = {}) {
     // 这个 key 就是「当前」会话槽（`status().sessionSlot` 报它）。
     lastSessionKey = String(key || 'main');
     let existing = conversationFor(key);
@@ -4734,7 +4815,7 @@ export function createBrowserDriver(options = {}) {
     try {
       // key 一并交给 runTurn：「落地即落盘」的写点在里面（见 runTurn 的
       // noteLanded）——身份必须在导航落地那一刻就记下，而不是等这里成功返回。
-      result = await runTurn(message, { key, navigate, signal, onDelta, onThink, onImage, model, images, thinkMode, searchMode, reasoningEffort });
+      result = await runTurn(message, { key, navigate, signal, onDelta, onThink, onImage, model, images, thinkMode, searchMode, siteMode, reasoningEffort });
     } catch (err) {
       // 会话槽里存的是一个已经死掉的网页会话：立刻丢掉，别让下一轮再撞一次。
       // 上层收到 WEB_SESSION_LOST 后作废游标并以整段首轮提示词重开。
@@ -4776,9 +4857,9 @@ export function createBrowserDriver(options = {}) {
     return result;
   }
 
-  async function sendPrompt(prompt, { signal, onDelta, onThink, onImage, meta, model, thinkMode, searchMode } = {}) {
+  async function sendPrompt(prompt, { signal, onDelta, onThink, onImage, meta, model, thinkMode, searchMode, siteMode = null } = {}) {
     return runTurn(prompt, {
-      navigate: 'fresh', signal, onDelta, onThink, onImage, thinkMode,
+      navigate: 'fresh', signal, onDelta, onThink, onImage, thinkMode, siteMode,
       // 联网搜索（0.19.94）：与 have-session 的 sendTurn 同一形参名、同一条 meta 来源，
       // 否则「无会话轮」与「会话轮」会给出两种搜索开关行为——第二份真相。
       searchMode,

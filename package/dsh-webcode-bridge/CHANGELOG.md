@@ -5,6 +5,38 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.95（2026-10-19 夜第三轮：全站多调用并行 + 任务模式设置层 + 三站模式补采；本机 web/headless 安装版；未推 GitHub/npm）
+
+### 新增：全站「多调用并行」教学（0.19.94 只对 deepseek，本轮提升为公共段）
+
+- `lib/agent-preset.js`：强约束句（「无依赖、相互独立的多个工具调用，必须合并在同一条回复里一起发起；只有存在依赖才分多轮」）从 deepseek 条件展开**提升为公共教学段**，全站生效且 lib 中只出现一次；使用准则旧句「能用一次调用覆盖就不用多次」全站替换为不冲突措辞（保留反重复原意）。
+- 基线：`test/prompt-variants.test.mjs` 的 ZERO_DRIFT_BASELINE **刻意更新**（测试头与段落注明理由，只有本次教学相关两行变化，其余逐字保留 0.14.7 原文）；`test/deepseek-prompt-slim.test.mjs` ④/④b 改为全站生效断言+去重计数。
+- 读数：deepseek-prompt-slim 10/0、prompt-variants 15/0、prompt-compact 5/0、tool-loop 12/0、fence-nested-call 19/0、fence-prose 12/0、present-preset 4/0、glm-session-replay 24/0、parse 22/0。反向变异：把公共新句换成占位符 ⇒ prompt-variants 14/1、deepseek-prompt-slim 8/2 红；还原全绿。
+
+### 新增：任务模式设置层（per-site 深度思考 + glm 任务/研究报告模式）
+
+- **per-site 深度思考**：`thinkModeBySite` 站点级覆盖（回落链：站点→全局→auto，唯一解析点 `web-control.js` 的 `thinkModeOf`；index.js 先 siteId 后解析，守住 TDZ 教训）；GET/POST settings 归一化；无会话轮与 turnOpts 两通道透传。
+- **glm 模式**：`providers.js` GLM 段新增 `modePicker`（`.model-select-container` / `.model-select-item`，选择器逐字来自 2026-10-19 live 直读盘点：可见条目 任务/研究报告/PPT制作/数据分析/更多）；驱动新增纯判定 `planSiteMode({siteMode,fresh})`（**默认空=零位移；resume 不动网页；只在 fresh 轮 apply**），发送前按文本精确匹配点击并轮询回读选中态；找不到/回读未确认 ⇒ 抛 `SITE_MODE_UNAVAILABLE`（已登记 error-codes）。
+- 读数：settings-transport **17/0**（原 11 + 新增 6）、error-codes 10/0、think-effort 27/0；反向变异：回落链写坏 16/1、默认空当强制点 16/1、删回读确认 16/1，均还原 17/0。
+- **未完成（如实）**：① 设置页 UI 未接（数据层 GET/POST 已通，可用 `POST /__webcode/settings` 传 `thinkModeBySite` / `siteModeBySite`）；② GLM 模式点击后的「选中态」回读口径**无真机读数支撑**，首次真机应用可能抛可读 `SITE_MODE_UNAVAILABLE`，需下轮校准；③ GLM「更多」浮层内模式未做（无读数不猜）。
+
+### 新增：kimi / qwen / zai 模式入口补采（零发送只读，取证非功能）
+
+- kimi：侧栏 6 项（我的 Kimi/插件/定时任务/灵感库/PPT/更多）+ composer 2 按钮 + 快捷能力行 6 项（PPT/深度研究/文档/构建应用/表格/设计），均可见 enabled；无 aria-pressed 开关。
+- qwen：`.qwen-thinking-selector` 文本「自动」（think-effort 声明选择器命中成立）、`div.mode-select-open`（选择模式）、`div.wms-trigger`（Select Model，Qwen3.7-Plus）；联网/搜索开关与思考三档菜单未展开 ⇒ UNVERIFIED。
+- zai：`modelSelectorButton` 文本 GLM-5.3-Flash，root enabled / 会话页 disabled；「深度思考」pill **只在会话页**存在（root 无 pill）。证据：`.tmp/live-2026-10-19/mode-inventory.md` §5。
+
+### zai 推理等级（#34）：本轮**未修**，取证 UNVERIFIED
+
+- 两条零发送只读通路（桥 CDP 新标签页 / sites/zai 落盘 profile 临时副本）读到的**都是未登录落地页**（有「登录」按钮、无档位控件、`[class*=think]`=0）；落地页本就不渲染该控件 ⇒ **(a) 当前状态无该档 vs (b) 契约过期无法区分**。
+- 反证：`sites/zai/webcode-login-state.json` 1 小时前仍 loggedIn/probe-ok；契约依据来自 2026-09-27 **登录态对话页**（`深度思考/最高`）。
+- 处置：**不改任何选择器**（无依据改了会点错控件/每轮误报），#34 保持 open；下一步建议先用 `POST window {accountKey:'zai', action:'open'}` 恢复/确认登录态，再取登录态对话页只读 DOM 后修契约。
+
+### 边界
+
+- 本版本只装到本机 web/headless profile；未推 GitHub、未发 npm；宿主侧需重启 `dsh web` 生效。
+- 任务模式设置页 UI、GLM 模式真机回读校准、zai 等级、非 deepseek 站点的搜索开关都仍是下一轮。
+
 ## 0.19.94（2026-10-19 夜第二轮：搜索开关 + 多调用并行教学；本机 web/headless 安装版；未推 GitHub/npm）
 
 ### 新增：per-site「搜索开关」`searchMode`（auto | on | off）

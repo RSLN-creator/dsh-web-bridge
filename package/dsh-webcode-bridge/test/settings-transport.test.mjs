@@ -43,7 +43,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { listen } from './fixtures/listen.js';
-import { promptTransportPlan, planSearchToggle } from '../lib/browser-driver.js';
+import { promptTransportPlan, planSearchToggle, planSiteMode } from '../lib/browser-driver.js';
+import { thinkModeOf, siteModeOf } from '../lib/web-control.js';
 
 const pkg = path.dirname(import.meta.dirname);
 const LIB = path.join(pkg, 'lib');
@@ -682,8 +683,9 @@ test('⑩ 联网搜索三态：真值表 + 设置面归一化 + sendPrompt→run
     'sendPrompt/executor 必须**现读** configManager 解析生效 searchMode（构造期快照会让设置页改了行为不变）');
   assert.match(indexSrc, /thinkMode,\r?\n\s+searchMode,/,
     'turnOpts 必须把 searchMode 透传给 driver.sendTurn（漏传 ⇒ 会话轮永远走默认 auto）');
-  assert.match(indexSrc, /thinkMode, searchMode \}\)/,
-    '无会话轮（driver.sendPrompt）也必须带 searchMode——两条通道两种行为就是第二份真相');
+  assert.match(indexSrc, /thinkMode, searchMode \}\)|thinkMode, searchMode, siteMode \}\)/,
+    '无会话轮（driver.sendPrompt）也必须带 searchMode——两条通道两种行为就是第二份真相'
+    + '（task-8 起同一调用了多传 siteMode，判据同时接受新旧形状）');
 
   const drvSrc = fs.readFileSync(path.join(LIB, 'browser-driver.js'), 'utf8');
   assert.match(drvSrc, /searchMode = 'auto'/,
@@ -695,5 +697,80 @@ test('⑩ 联网搜索三态：真值表 + 设置面归一化 + sendPrompt→run
     + '——删掉回读等于「点一下就当开了」（说做了、其实没做）');
   assert.match(drvSrc, /for \(let i = 0; i < 10; i \+= 1\)/,
     '回读必须轮询等待（React 受控组件的 aria-pressed 在下一帧才更新；点一次立刻读会把成功误判成失败）');
+});
+
+// ── task-8 A：站点级 thinkMode 回落链（真值表）──────────────────────────────
+// 回落链：站点档（只认三值）→ 全局档 → 'auto'；非法值逐层跳过，绝不产生第三种口径。
+test('task-8 A thinkModeOf 回落链真值表（站点 → 全局 → auto）', () => {
+  // 站点档优先
+  assert.equal(thinkModeOf({ thinkMode: 'on', thinkModeBySite: { glm: 'off' } }, 'glm'), 'off');
+  // 站点档缺失/非法 ⇒ 跟随全局
+  assert.equal(thinkModeOf({ thinkMode: 'off', thinkModeBySite: {} }, 'glm'), 'off');
+  assert.equal(thinkModeOf({ thinkMode: 'on', thinkModeBySite: { glm: 'bogus' } }, 'glm'), 'on');
+  assert.equal(thinkModeOf({ thinkMode: 'on', thinkModeBySite: { glm: 1 } }, 'glm'), 'on');
+  // 站点档只对**自己的站点**生效（别的站点键不得串用）
+  assert.equal(thinkModeOf({ thinkMode: 'auto', thinkModeBySite: { glm: 'off' } }, 'kimi'), 'auto');
+  // 全局档缺失/非法 ⇒ auto
+  assert.equal(thinkModeOf({}, 'glm'), 'auto');
+  assert.equal(thinkModeOf({ thinkMode: 'bogus' }, 'glm'), 'auto');
+  assert.equal(thinkModeOf(null, 'glm'), 'auto');
+  // 边界：auto 是显式合法值（不是「缺失」）
+  assert.equal(thinkModeOf({ thinkMode: 'on', thinkModeBySite: { glm: 'auto' } }, 'glm'), 'auto');
+});
+
+test('task-8 A siteModeOf：只有站点档、默认空串（不配置 = 不动网页）', () => {
+  assert.equal(siteModeOf({ siteModeBySite: { glm: '任务' } }, 'glm'), '任务');
+  assert.equal(siteModeOf({ siteModeBySite: { glm: '  研究报告  ' } }, 'glm'), '研究报告', 'trim');
+  assert.equal(siteModeOf({ siteModeBySite: {} }, 'glm'), '');
+  assert.equal(siteModeOf({ siteModeBySite: { glm: '' } }, 'glm'), '');
+  assert.equal(siteModeOf({ siteModeBySite: { glm: 123 } }, 'glm'), '');
+  assert.equal(siteModeOf({ siteModeBySite: { kimi: '研究报告' } }, 'glm'), '', '站点键不得串用');
+  assert.equal(siteModeOf(null, 'glm'), '');
+});
+
+// ── task-8 B：任务模式判定（默认空/仅 fresh/显式值才 apply）──────────────────
+test('task-8 B planSiteMode：默认空 = 零位移（不点、不回读、不抛错）', () => {
+  assert.deepEqual(planSiteMode({ siteMode: '', fresh: true }), { apply: false, mode: null, reason: 'mode-unset' });
+  assert.deepEqual(planSiteMode({ siteMode: '   ', fresh: true }), { apply: false, mode: null, reason: 'mode-unset' });
+  assert.deepEqual(planSiteMode({}), { apply: false, mode: null, reason: 'mode-unset' });
+});
+
+test('task-8 B planSiteMode：resume 轮不应用（模式是会话属性，续聊不动）', () => {
+  assert.deepEqual(planSiteMode({ siteMode: '任务', fresh: false }), { apply: false, mode: '任务', reason: 'resume-keeps-mode' });
+});
+
+test('task-8 B planSiteMode：fresh + 显式模式 ⇒ apply（回读确认在驱动里，失败抛 SITE_MODE_UNAVAILABLE）', () => {
+  assert.deepEqual(planSiteMode({ siteMode: '任务', fresh: true }), { apply: true, mode: '任务', reason: 'fresh-apply' });
+  assert.equal(planSiteMode({ siteMode: '  研究报告 ', fresh: true }).mode, '研究报告');
+});
+
+test('task-8 接线（源码级）：executor 用 thinkModeOf 且 siteId 先于解析；驱动 fresh-only + 回读 + 契约来自真机读数', () => {
+  const indexSrc = fs.readFileSync(path.join(LIB, 'index.js'), 'utf8');
+  const drvSrc = fs.readFileSync(path.join(LIB, 'browser-driver.js'), 'utf8');
+  const provSrc = fs.readFileSync(path.join(LIB, 'providers.js'), 'utf8');
+  const wcSrc = fs.readFileSync(path.join(LIB, 'web-control.js'), 'utf8');
+  // A：唯一解析点 + TDZ 顺序（siteId 声明必须在 thinkModeOf 调用之前）
+  assert.match(indexSrc, /const thinkMode = thinkModeOf\(configManager\.get\(\), siteId\)/,
+    'executor 必须用 thinkModeOf 回落链，不得再只认 meta 里的全局 thinkMode');
+  const siteIdAt = indexSrc.indexOf("const siteId = m?.siteId || 'deepseek';");
+  const thinkAt = indexSrc.indexOf('const thinkMode = thinkModeOf(');
+  assert.ok(siteIdAt > 0 && thinkAt > siteIdAt, 'TDZ：siteId 必须先解析，再算 thinkMode（0.19.94 教训）');
+  assert.ok(!/const thinkMode = \['on', 'off', 'auto'\]\.includes\(m\?\.thinkMode\)/.test(indexSrc),
+    '不得回退「只认 meta.thinkMode」的旧解析（站点级覆盖会失效）');
+  // A：GET/POST 归一化两处都在
+  assert.match(wcSrc, /thinkModeBySite: config\.thinkModeBySite/, 'GET settings 必须回带 thinkModeBySite');
+  assert.match(wcSrc, /siteModeBySite: config\.siteModeBySite/, 'GET settings 必须回带 siteModeBySite');
+  assert.match(wcSrc, /if \('thinkModeBySite' in updated\)/, 'POST settings 必须归一化 thinkModeBySite');
+  assert.match(wcSrc, /if \('siteModeBySite' in updated\)/, 'POST settings 必须归一化 siteModeBySite');
+  // B：契约来自真机读数（mode-inventory.md §1 的逐字选择器）
+  assert.match(provSrc, /modePicker: \{[\s\S]{0,220}trigger: '\.model-select-container'/, 'GLM modePicker.trigger 必须来自真机读数');
+  assert.match(provSrc, /modePicker: \{[\s\S]{0,260}option: '\.model-select-container \.model-select-item'/, 'GLM modePicker.option 必须来自真机读数');
+  // B：驱动侧 fresh-only + 回读 + 可读错误码
+  assert.match(drvSrc, /planSiteMode\(\{ siteMode, fresh: navigate === 'fresh' \}\)/, '驱动必须用 planSiteMode 判 fresh-only');
+  assert.match(drvSrc, /SITE_MODE_UNAVAILABLE/, '失败必须抛可读的 SITE_MODE_UNAVAILABLE');
+  // 回读确认必须真的被消费：命中置 modeConfirmed=true，未命中抛可读错误（删掉即红）。
+  assert.match(drvSrc, /modeConfirmed = true/, '回读命中必须把确认标志置真');
+  assert.match(drvSrc, /if \(!modeConfirmed\)[\s\S]{0,260}SITE_MODE_UNAVAILABLE/,
+    '点击后回读未确认必须抛 SITE_MODE_UNAVAILABLE——删掉回读确认等于「点一下就当生效」');
 });
 

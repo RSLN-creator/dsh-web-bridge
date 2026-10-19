@@ -11,10 +11,13 @@
 //    （doc/research/prompt-engineering-evidence-2026-09-14.md §2.2）。
 // ② 骨架必须留着：它是 serializeFirstTurn 注入的最后一段，且自动续跑轮
 //    （teachFor → transportNoteFor）单独复用它——那时没有 preset 在场。
-// ③ 默认路径逐字不动：改的只有 deepseek 分支。
-// ④ 多调用并行教学（2026-10-19）：deepseek 分支必须说「无依赖/相互独立的多个调用 ⇒
-//    合并在同一条回复里一起发起；有依赖才分轮」，且不得保留会被读成「尽量少调用」的
-//    「能用一次调用覆盖就不用多次」原句（反重复原意换成不冲突的措辞）；其它站点零位移。
+// ③ 「工具调用（非代码块）」的措辞纠错只改 deepseek 分支：0.19.95 把「多调用并行」教学
+//    提升为公共段（见 ④，并同步更新了 test/prompt-variants.test.mjs 的基线），但**这条**
+//    措辞句仍只对 deepseek 换词，其余站点保持 0.14.7 的「工具调用代码块」逐字不动。
+// ④ 多调用并行教学（2026-10-19，**0.19.95 起全站生效**）：公共教学段必须有「无依赖/相互
+//    独立的多个调用 ⇒ 合并在同一条回复里一起发起；有依赖才分轮」的强约束句；全站不得
+//    保留会被读成「尽量少调用」的「能用一次调用覆盖就不用多次」原句（反重复原意保留）；
+//    且每个站点文本里只出现一次（公共化后不得在 deepseek 分支再教一遍）。
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -98,32 +101,42 @@ test('③d 端到端：serializeFirstTurn 的 deepseek 首轮里，「代码块�
 });
 
 // ---------------------------------------------------------------------------
-// ④ 多调用并行教学（2026-10-19）
+// ④ 多调用并行教学（2026-10-19；0.19.95 起全站生效）
 // ---------------------------------------------------------------------------
 
-test('④ deepseek 分支带「多调用并行」强约束：同一条回复 + 一起发起 + 依赖才分轮', () => {
+test('④ 公共教学段带「多调用并行」强约束：同一条回复 + 一起发起 + 依赖才分轮（deepseek 读数）', () => {
   const ds = dsPreset();
   // 「同一条回复」与「一起发起」两个语义必须出现：只教「可以包含多个」不够——
   // 真机症状是每条回复只发一个调用，彼此独立的调用被拆成多轮、每轮白等一次往返。
-  assert.ok(ds.includes('同一条回复'), 'deepseek 分支必须教「同一条回复」');
-  assert.ok(ds.includes('一起发起'), 'deepseek 分支必须教「一起发起」（并行语义）');
+  assert.ok(ds.includes('同一条回复'), '公共教学段必须教「同一条回复」');
+  assert.ok(ds.includes('一起发起'), '公共教学段必须教「一起发起」（并行语义）');
   assert.match(ds, /无依赖、相互独立的多个工具调用[，,]?\s*必须合并在同一条回复里一起发起/,
     '强约束句式必须把「无依赖/相互独立 ⇒ 合并到同一条回复」说成「必须」');
   assert.match(ds, /只有[^。]*依赖[^。]*才分多轮等待结果/, '必须给出「有依赖才分轮」的判据');
-  // 反向：会抑制并行的那句原话不得留在 deepseek 分支（反重复原意换成了不冲突的措辞）。
+  // 去重：0.19.95 公共化后，deepseek 分支不得再重复一遍同一句。
+  assert.equal(ds.split('多调用并行（强约束）').length - 1, 1,
+    '并行教学在 deepseek 文本里只应出现一次（不得因公共段 + 分支各一份而教两遍）');
+  // 反向：会抑制并行的那句原话不得再出现（反重复原意换成了不冲突的措辞）。
   assert.ok(!ds.includes('能用一次调用覆盖就不用多次'),
-    'deepseek 分支不得保留可能被读成「尽量少调用」的原句');
+    'deepseek 文本不得保留可能被读成「尽量少调用」的原句');
   assert.ok(ds.includes('同一信息不要用多个调用重复获取'),
     '反重复的原意必须保留（不许为了并行而鼓励重复取同一信息）');
 });
 
-test('④b 并行教学不波及其它站点：默认/glm 等站点准则句与文本逐字不动', () => {
+test('④b 并行教学全站生效：default/glm 等全部站点收到新句、不含旧抑制句；「代码块」措辞仍只在非 deepseek', () => {
   for (const siteId of [undefined, 'glm', 'chatgpt', 'kimi', 'qwen', 'doubao', 'zai']) {
     const text = buildPreset({ tools: TOOLS, ...(siteId ? { siteId } : {}) });
-    assert.ok(text.includes('能用一次调用覆盖就不用多次'),
-      `${siteId || 'default'} 的准则句必须逐字不动（零位移）`);
-    assert.ok(!text.includes('多调用并行（强约束）'),
-      `${siteId || 'default'} 不得被 deepseek 的并行教学波及`);
+    const tag = siteId || 'default';
+    assert.ok(text.includes('多调用并行（强约束）'), `${tag} 必须收到公共并行教学（0.19.95 全站生效）`);
+    assert.ok(text.includes('同一条回复') && text.includes('一起发起'), `${tag} 必须带「同一条回复/一起发起」并行语义`);
+    assert.ok(!text.includes('能用一次调用覆盖就不用多次'), `${tag} 不得保留旧抑制句`);
+    assert.ok(text.includes('同一信息不要用多个调用重复获取'), `${tag} 反重复原意必须保留`);
+    assert.equal(text.split('多调用并行（强约束）').length - 1, 1, `${tag} 的并行教学只应出现一次`);
+  }
+  // 0.19.95 只动两条公共教学文本：「工具调用代码块」这句的 deepseek 措辞纠错边界不变。
+  for (const siteId of [undefined, 'glm', 'chatgpt']) {
+    const text = buildPreset({ tools: TOOLS, ...(siteId ? { siteId } : {}) });
+    assert.ok(text.includes('多个工具调用代码块'), `${siteId || 'default'} 的「代码块」措辞仍逐字不动`);
   }
 });
 
