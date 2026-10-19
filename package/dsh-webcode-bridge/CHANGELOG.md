@@ -5,6 +5,24 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.98（2026-10-20 凌晨：超时点 DOM 兜底 —— 页面已有回复不再被当成超时丢掉；本机 web/headless 安装版；未推 GitHub/npm）
+
+### 新增：超时点 DOM 兜底（partial 交付，不再整轮丢内容）
+
+- 背景：2026-10-19 GLM 任务模式 / chat_agent 真机 E2E 到总超时那一刻，页面**已有 3 字回复**（`selectorHit:true`），但没有任何收束判据成立 ⇒ 旧实现按 `web turn timed out` 失败、内容整轮丢掉。
+- 判据：新增纯函数 `metrics.shouldRescueTimeoutScene(scene)` —— **仅当** `selectorHit===true && replyChars>0` 才允许救（选择器没命中=可能读到上一轮回复；无回复文本=可能还在 prefill/验证闸门，均不救）。
+- 接线：`browser-driver.js` 超时回调在 captcha 归因之后、`lastEndReason='timeout'` 之前，按该判据读 `answerSelector` 最后一节点 innerText → `cleanAnswerDomText` → 非空则 resolve `{text, partial:true, complete:false, reason:'dom-rescue-timeout'}`，走 `noteEndReason` 同一条 partial 落账路径（不新增第二条收尾通路）。
+- 读数：`capture-stall-rescue.test.mjs` **20/0**（新增判据真值表 + 接线顺序/落账源码判据）；`metrics.test` 13/0、`driver-scope` 7/0、`tool-loop`、`send-confirmed 5/0`。反向变异：把判据改成恒 false ⇒ **19/1 红**（判据用例命中），还原 20/0 绿。
+
+### 工具：E2E 探针超时对齐产品口径
+
+- `.tmp/live-2026-10-19/e2e-mode-effort.mjs` 的 `requestTimeoutMs` 由 180s 改为 **480s**（= 产品 relay 240×2），避免与驱动 `answerTimeoutMs`(180s) 同值赛跑造成「假超时」；GLM 任务模式定性复跑用此脚本（待用户过滑块）。
+
+### 边界
+
+- 本轮**无真机发送**（GLM 处于访问验证状态、zai 地区弹窗未解，按纪律停手）。
+- 本版本只装到本机 web/headless profile；未推 GitHub、未发 npm；宿主侧需重启 `dsh web` 生效。
+
 ## 0.19.97（2026-10-19 夜第五轮：超时现场 DOM 诊断 + GLM 任务模式 E2E 复核分析；本机 web/headless 安装版；未推 GitHub/npm）
 
 ### 新增：turn 超时现场加采 DOM 诊断（只读读数，不改行为）

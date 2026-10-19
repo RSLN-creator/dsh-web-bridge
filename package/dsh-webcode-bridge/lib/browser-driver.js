@@ -22,7 +22,7 @@ import { toPlaywrightCookie } from './cookies.js';
 import { getSite, getContract, resolveWebModel, conversationNav, conversationIdFromUrl, conversationStay } from './contract.js';
 import { DEFAULT_SLOT, normalizeSlot } from './accounts.js';
 import { selectWebModel, pickerUsable } from './model-picker.js';
-import { deriveLastRate, shouldSettleWip, shouldSettleStalledThinking, answerDomLength, cleanAnswerDomText, shouldRescueStalledCapture } from './metrics.js';
+import { deriveLastRate, shouldSettleWip, shouldSettleStalledThinking, answerDomLength, cleanAnswerDomText, shouldRescueStalledCapture, shouldRescueTimeoutScene } from './metrics.js';
 import { createDeliveryTrace, compareStages } from './delivery-trace.js';
 import { emptyWebResponseError } from './zero-progress.js';
 import { readIdentityCache, writeIdentityCache } from './account-cache.js';
@@ -4152,6 +4152,39 @@ export function createBrowserDriver(options = {}) {
           lastEndReasonAt = Date.now();
           if (a) a.reject(err); else warn(err.message);
           return;
+        }
+        // 0.19.98：超时点 DOM 兜底——页面已有回复文本却走到总超时，拒绝把内容说成
+        // 「超时失败」。真机现场（2026-10-19 GLM 任务模式 / chat_agent）：
+        // `{captureAlive:true, replyChars:3, selectorHit:true}` 却没有任何收束判据成立。
+        // 判据收在 metrics.shouldRescueTimeoutScene（宁可漏救不可误救：必须
+        // selectorHit===true && replyChars>0 才救）；只救一次，结果走与
+        // dom-rescue-capture-stall 同形的 partial 落账路径（reason/noteEndReason/resolve），
+        // 绝不新增第二条收尾通路。
+        if (a && shouldRescueTimeoutScene(scene)) {
+          let rescued = '';
+          try {
+            rescued = await page?.evaluate?.((sel) => {
+              const last = [...document.querySelectorAll(sel)].pop();
+              return last ? (last.innerText || '') : '';
+            }, answerSelector).catch(() => '');
+            rescued = cleanAnswerDomText(String(rescued || '')).trim();
+          } catch { rescued = ''; }
+          if (rescued) {
+            warn('turn timed out but page had reply text — rescuing partial from page DOM '
+              + rescued.length + ' chars (reason=dom-rescue-timeout)');
+            const result = {
+              text: rescued,
+              thinking: String(a.thinking || ''),
+              images: Array.isArray(a.images) ? a.images : [],
+              complete: false,
+              partial: true,
+              reason: 'dom-rescue-timeout',
+            };
+            a.settled_by = 'dom-rescue-timeout';
+            noteEndReason('dom-rescue-timeout');
+            a.resolve(result);
+            return;
+          }
         }
         lastEndReason = 'timeout';
         lastEndReasonAt = Date.now();

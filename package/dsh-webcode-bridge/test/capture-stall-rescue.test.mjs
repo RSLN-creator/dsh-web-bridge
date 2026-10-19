@@ -33,7 +33,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { shouldRescueStalledCapture, answerDomLength, cleanAnswerDomText } from '../lib/metrics.js';
+import { shouldRescueStalledCapture, answerDomLength, cleanAnswerDomText, shouldRescueTimeoutScene } from '../lib/metrics.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -180,4 +180,33 @@ test('接线：captureStallRescueMs 配置必须从 cfg 读入 driver（默认 4
   // 两处 createBrowserDriver 都要显式传入（默认槽 + 非默认槽行为必须一致）。
   const passes = indexSrc.match(/captureStallRescueMs: cfg\.captureStallRescueMs/g) || [];
   assert.ok(passes.length >= 2, `两处驱动创建都要传入（实测 ${passes.length} 处）`);
+});
+
+
+// ── 0.19.98：超时点 DOM 兜底（与上面的 WIP 兜底同族，触发点不同）──────────────
+//
+// 真机现场（2026-10-19 GLM 任务模式 / chat_agent）：超时那一刻页面已有 3 字回复
+// （selectorHit:true），却没有任何收束判据成立 ⇒ 整轮按超时失败把内容丢掉。
+// 反向安全线：选择器没命中（可能读到上一轮回复）或页面确实没有回复文本（prefill /
+// 验证闸门后面）都**不许**救——宁可漏救，不可误救。
+test('超时点兜底判据：只有 selectorHit && replyChars>0 才允许救（宁可漏救不可误救）', () => {
+  assert.equal(shouldRescueTimeoutScene({ selectorHit: true, replyChars: 3, captureAlive: true }), true);
+  assert.equal(shouldRescueTimeoutScene({ selectorHit: true, replyChars: '3' }), true);
+  assert.equal(shouldRescueTimeoutScene({ selectorHit: true, replyChars: 0 }), false);
+  assert.equal(shouldRescueTimeoutScene({ selectorHit: false, replyChars: 3 }), false);
+  assert.equal(shouldRescueTimeoutScene({ replyChars: 3 }), false);
+  assert.equal(shouldRescueTimeoutScene(null), false);
+  assert.equal(shouldRescueTimeoutScene(), false);
+});
+
+test('接线：超时分支必须用该判据、带可读 reason 与 partial 落账，且在 timeout 归因之前', () => {
+  const driverSrc2 = readFileSync(join(here, '..', 'lib', 'browser-driver.js'), 'utf8');
+  const hitAt = driverSrc2.indexOf('shouldRescueTimeoutScene(scene)');
+  assert.ok(hitAt > 0, '超时分支必须调用 shouldRescueTimeoutScene(scene)');
+  const timeoutAt = driverSrc2.indexOf("lastEndReason = 'timeout';", hitAt);
+  assert.ok(timeoutAt > hitAt, '兜底必须在 timeout 归因之前（否则内容已经丢了）');
+  const block = driverSrc2.slice(hitAt, timeoutAt);
+  assert.ok(block.includes("reason: 'dom-rescue-timeout'"), '结果必须带可读 reason');
+  assert.ok(block.includes("noteEndReason('dom-rescue-timeout')"), '收束原因必须落账（status 可核对）');
+  assert.ok(block.includes('a.resolve(result)'), '必须 resolve partial 结果（复用 runTurn 落账路径）');
 });

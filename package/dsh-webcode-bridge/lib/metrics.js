@@ -327,6 +327,30 @@ export function shouldRescueStalledCapture(v = {}) {
 }
 
 /**
+ * 超时点 DOM 兜底判据（0.19.98）。
+ *
+ * 与 {@link shouldRescueStalledCapture} 的分工：那条防的是「WIP 巡检还活着、捕获链先死」；
+ * 本条防的是「到**总超时**那一刻才发现页面早有回复、捕获链一个事件都没交」。真机现场
+ *（2026-10-19，GLM 任务模式 / chat_agent）：`{captureAlive:true, replyChars:3,
+ * selectorHit:true}`——页面已有 3 字回复，却没有任何收束判据成立，整轮被当成超时失败
+ * 把内容丢掉。超时点离现场最近，是唯一还能把内容救回来的位置。
+ *
+ * 反向安全线（宁可漏救，不可误救）：
+ *   · `selectorHit !== true` → 不救：选择器对本站点是瞎的，读到的可能是**上一轮**回复；
+ *   · `replyChars <= 0` → 不救：页面确实没有回复文本（可能还在 prefill/验证闸门后面）；
+ *   · 其它一律不命中。判据只收现场读数，不猜站点、不看正文。
+ *
+ * @param {{selectorHit?:boolean, replyChars?:number, captureAlive?:boolean}|null} [scene]
+ *   超时点从页面采到的现场（browser-driver 的 `lastTimeoutScene` 同形）
+ * @returns {boolean} 是否允许用页面 DOM 文本兜底 settle 本轮
+ */
+export function shouldRescueTimeoutScene(scene = {}) {
+  if (!scene || typeof scene !== 'object') return false;
+  if (scene.selectorHit !== true) return false;
+  return Number(scene.replyChars) > 0;
+}
+
+/**
  * 发送前预算闸 —— 「整段提示词超过声明的上下文窗口」必须在**发出之前**拦下来
  *（0.14.1，B-2；0.16.22 改按真实文本构成折算）。
  *
