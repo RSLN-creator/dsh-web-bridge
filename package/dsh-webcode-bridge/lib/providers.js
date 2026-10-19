@@ -673,11 +673,17 @@ export const CLAUDE = withEffort({
   ],
 });
 
-// z.ai（智谱 GLM 的海外站点）：与 chatglm.cn 同源模型、不同域与不同前端。
+// z.ai（智谱 GLM 的**国内站 zchat.z.ai**）：与 chatglm.cn 同源模型、不同前端。
+//
+// ⚠ 2026-10-19 用户明令 + 真机证据：国内访问 chat.z.ai 会被地区弹窗拦截
+//（「请切换至中国站点 zchat.z.ai」，0.19.96 E2E 逐字读数），且该弹窗在 effort
+// 控件之前就把页面挡住——继续拿 chat.z.ai 当 origin 等于让 z.ai 永远不可用。
+// 因此 origin 改为 **https://zchat.z.ai**（中国站，用户要求用这个）；`id` 仍是
+// `zai`（模型 id / 会话 / 账户槽 / profile 全部不变，登录态沿用同一份 profile）。
 // 浏览器端为 OpenAI 兼容 SSE（/api/chat/completions），故复用 'openai-sse'
 // 解码器；选择器用「特征选择器」而不是站点版本 class（改版频繁，特征更稳）。
 export const ZAI = withEffort({
-  id: 'zai', name: 'Z.ai', origin: 'https://chat.z.ai',
+  id: 'zai', name: 'Z.ai', origin: 'https://zchat.z.ai',
   // 选择器里显示的站点键。默认等于 id，只有这里不同：站点的真实身份就是
   // 「z.ai」这个域名（用户要的正是「一眼看出是哪个网站」），而 `zai` 只是
   // 我们内部的路由 id。二者不同不影响解析——解析只认 id（见 resolveWebModel）。

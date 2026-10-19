@@ -326,6 +326,18 @@
 - 不入库：全部真机产物（`.tmp/live-2026-10-19/`，gitignore），只作为报告里的证据路径引用。
 - 提交信息按 `CONTRIBUTING.md` §9 形状；提交前逐项跑闸门（见 §七）。
 
+### 十八、0.19.99：z.ai 切到中国站 zchat.z.ai（用户明令）+ 为用户打开有头验证窗口
+
+用户 2026-10-19 原话：「我每次完全不能看到验证滑块没法验证」「你自行增加站点：中国站啊！！！」
+
+**做了什么**
+1. **z.ai origin 改为 https://zchat.z.ai**（中国站；id 仍 zai，profile/登录态沿用）。依据：0.19.96 E2E 真机读数——chat.z.ai 被「请切换至中国站点 zchat.z.ai」地区弹窗拦截，且弹窗在 effort 控件前挡住页面，等于 z.ai 不可用。测试 9 个相关文件全绿（provider-surface/model-labels/session-stay/mirror/site-verify-verdict/zai-answer-selector/glm-conversation/settings-transport/model-picker），lint PASS。**未做真机复验**（等用户登录后跑）。
+2. **为用户打开两个有头浏览器窗口**（bridge 的 window API 打开的是 about:blank，用户看不到验证页）：直接用自带 Chromium + live profile 启动——GLM（sites/glm）打开 chatglm.cn 供过访问验证滑块；ZAI（sites/zai）打开 https://zchat.z.ai 供登录中国站。用户操作完关窗即可，cookie 留在 profile 里。
+
+**下一步（等用户）**：GLM 过滑块后跑 480s 超时 E2E 复跑定性任务模式捕获；zai 登录后重启到 0.19.99 再跑 zai 真机轮（effort + 会话）。
+
+---
+
 ### 十七、0.19.98：超时点 DOM 兜底 —— 页面已有回复不再被当成超时丢掉
 
 **问题**：0.19.97 的超时现场读数已证明「GLM 任务模式 E2E 到总超时时页面已有 3 字回复（selectorHit:true）」，但旧实现仍按 `web turn timed out` 失败——**内容明明在页面里，却被整轮丢掉**。这是「捕获链没认结束」与「总超时到点」之间的最后一道缺口，与具体站点无关。
@@ -6278,7 +6290,7 @@ MUTATED ok — 缺陷写法已写回（断言替换确实生效，而不是空�
 
 | 项 | 值 |
 | --- | --- |
-| 工作树版本 | **0.19.98（2026-10-20 凌晨：超时点 DOM 兜底 partial 交付；已打包并装入本机 web/headless profile；未推 GitHub/npm）**：本轮为「真机风控实验 + 国模六站四态验证 + 长期问题收口」，代码改动见本文件顶部「2026-10-19 夜」一节（F1–F16，`#57/#59/#60/#62/#65/#71同族/F8` + 新增登记 #79–#83），测试/闸门读数同节 §七。运行中的 3080 进程仍加载旧代码（未装机未重启）。 |
+| 工作树版本 | **0.19.99（2026-10-20 凌晨：z.ai 切中国站 zchat.z.ai；已打包并装入本机 web/headless profile；未推 GitHub/npm）**：本轮为「真机风控实验 + 国模六站四态验证 + 长期问题收口」，代码改动见本文件顶部「2026-10-19 夜」一节（F1–F16，`#57/#59/#60/#62/#65/#71同族/F8` + 新增登记 #79–#83），测试/闸门读数同节 §七。运行中的 3080 进程仍加载旧代码（未装机未重启）。 |
 | 工作树版本 | **0.19.92（2026-10-17 发版轮：打包发布 0.19.92 + 本机 GitHub 连通性全局修复）**：完整记录见本文件顶部「0.19.92」一节与 `CHANGELOG.md`。**本轮零产品代码改动**——0.19.77–0.19.91 十五轮改动早就在 `1c6a1c6`/`917abaa` 两个提交里（当时工作树干净），本轮把它们**一次收口**成版本号 `0.19.92`（`0.19.76` → `0.19.92`），补 `CHANGELOG.md` 的 0.19.92 节，并发 **GitHub Release**（tag 触发 `release.yml` 出 tgz 资产）。**连通性修复（全机、可回退）**：实测本机 git 两条传输各有一个**确定性**故障——① 走 SSH 报 `msys-2.0S5: NtCreateDirectoryObject … 0xC0000022`（Git 自带的 **MSYS ssh** 要建命名对象被沙箱挡，网络与密钥其实都好，`ssh -T` 认证通过）⇒ 全局 `core.sshCommand = C:/Windows/System32/OpenSSH/ssh.exe`；② 走 HTTPS 报 `schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030e)`（与证书/代理/网络**无关**，同一时刻系统 `curl.exe` 报一模一样的错）⇒ 全局 `http.sslBackend = openssl`。改前备份 `~/.gitconfig` → `.tmp/gitconfig.bak-20261017-170308`。**修复后无任何 `-c` 覆盖实测**：`git ls-remote origin` ✔、`git ls-remote https://github.com/…` ✔、`git push --dry-run origin main` ✔（`6dcd816..917abaa`）。**边界**：`github.com:443` 的偶发重置是本机网络现象（本轮**未**改 DNS/hosts/代理）；Clash Verge 服务在跑但数据面未生效（助手不代启）；npm **未发布**（用户选只发 GitHub Release，registry `latest` 仍是 0.19.76）；装机与重启按用户选择都由用户自己做。 |
 | 工作树版本 | **0.19.76（2026-10-14：补发 0.19.75 资产里缺的那半个 captcha 修复 + 三处工具/闸门缺陷）**：完整记录见本文件顶部「2026-10-14 第三轮」一节与 `CHANGELOG.md`。**为什么必须换号重发（如实）**：0.19.75 的 npm 与 Release 资产**不含 captcha 可见性修复**——逐字节核实下载回来的包：`window.getComputedStyle` 判据**不在**、旧的 `offsetWidth \|\| offsetHeight \|\| getClientRects` 判据**在** ⇒ 装 0.19.75 的人会碰到「正常轮次被误报需要人机验证」（零尺寸空壳节点被当可见）。npm 不允许覆盖同版本 ⇒ 只能换号。 |
 | 工作树版本 | **0.19.75（2026-10-11：先让验收工具不能假绿，再给交付链装逐层取证）**：完整记录见本文件顶部「0.19.75」一节与 `CHANGELOG.md`。**① 验收工具三个假绿缺陷（复审点名，已逐条核实）**：（a）最终状态把 `UNVERIFIED` 汇总成 `PASS`（旧收尾只判「有没有 FAIL」⇒ **零工具调用的站点也被盖章通过**）⇒ 抽出纯函数 `verdictOf()`，优先级 `FAIL > BLOCKED > UNVERIFIED > PASS`，**缺必要项也算不确定**；（b）从未真正做工具结果往返（注释却写「工具结果回填后能收束」）⇒ 真执行 `read` + 结果 `mcp_action:"result"` 回填**同一**网页会话 + 解析第二轮 + **校验两轮 sessionId 一致**；（c）全文回读掩盖流式交付失败（`String(text \|\| sent?.text \|\| '')` ⇒ 零增量时全文非空即判通过，**恰好掩盖 Issue #1 症状**）⇒ 拆成 `stream.fullText`/`stream.deltaReceived`/`stream.consistency`。另：`--profile` 语义歧义改为 `--profile-root`（收根目录）；`login.basis=probe-fallback` 不再记 PASS。**② 交付链逐层取证（新增 `lib/delivery-trace.js`）**：复审的核心判断——`lastEventAt` 只在适配器收到流事件时推进，读 `domReplyChars` **不会**把 DOM 正文送回流里，故「不再误杀」≠「内容完整交付」。五层 `capture→decoder→driver→relay→adapter` 各记事件数/字符数/首末时刻/内容哈希（**默认不留原文**），`compareStages()` 给出**首个分叉层**并区分「某层零事件（丢在上游→本层）」与「某层有事件但更短（丢在本层）」；`capture` 是原始帧，只判「有没有解出正文」而不比长度（否则每轮正常生成都报分叉）。**③ #53 三态（窄口径）**：`probe-ok`/`probe-bad`=已验证、`input-fallback`=按 loggedIn 照旧（**DeepSeek 路径，不得降级**）、`probe-fallback`/`stale`/未知=**uncertain**；不确定时**不改写** `loggedIn`（改了会把站点改版导致的已登录用户判成未登录）。**④ 判据**：新增 4 个测试文件（16+12+5+6 项）；**变异 V1–V5 全部被抓且各被对应护栏抓住**；全量 **126/126 文件 exit 0**。**未做**：Issue #1 的原始内容缺失**仍未闭环**（本轮只交付取证工具，未真机复现并定位）；站点验收工具**尚未跑过任何真实站点**；真机长轮次、非 Windows、多站点覆盖均未做。 |

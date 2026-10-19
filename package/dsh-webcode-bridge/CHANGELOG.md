@@ -5,6 +5,20 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.99（2026-10-20 凌晨：z.ai 切到中国站 `zchat.z.ai`；本机 web/headless 安装版；未推 GitHub/npm）
+
+### 修复：z.ai 的 origin 由 `chat.z.ai` 改为中国站 `zchat.z.ai`（用户明令）
+
+- 真机证据（0.19.96 E2E）：国内访问 `chat.z.ai` 会被地区弹窗「请切换至中国站点 zchat.z.ai」拦截，且弹窗在 effort 控件之前就把页面挡住 ⇒ 继续用 `chat.z.ai` 等于让 z.ai 永远不可用。
+- 改动：`providers.js` 的 `ZAI.origin = 'https://zchat.z.ai'`；**`id` 仍为 `zai`**，模型 id / 会话槽 / 账户槽 / 已登录 profile 全部沿用，不新增也不需要二次登录（有头窗口里已在 zchat 站登录/验证）。
+- 用户名/站点键不变（选择器里仍显示 `z.ai`）；若 zchat 的登录 cookie 与 chat.z.ai 不同域，首次可能需要在右侧面板的 z.ai 行打开窗口登录一次（本轮已为用户打开有头窗口）。
+- 测试：provider-surface 8/0、model-labels 12/0、session-stay 6/0、mirror 8/0、site-verify-verdict 33/0、zai-answer-selector 7/0、glm-conversation 18/0、settings-transport 20/0、model-picker 19/0；lint PASS。
+- **未做真机复验**（用户需先在 zchat 窗口完成登录/验证；之后跑 zai 真机轮）。
+
+### 边界
+
+- 本版本只装到本机 web/headless profile；未推 GitHub、未发 npm；宿主侧需重启 `dsh web` 生效。
+
 ## 0.19.98（2026-10-20 凌晨：超时点 DOM 兜底 —— 页面已有回复不再被当成超时丢掉；本机 web/headless 安装版；未推 GitHub/npm）
 
 ### 新增：超时点 DOM 兜底（partial 交付，不再整轮丢内容）
