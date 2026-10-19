@@ -5,6 +5,52 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.93（2026-10-19 真机轮，本机 web profile 安装版；未推 GitHub / npm）
+
+本轮顺序：**先写风控调研，再做真机验证与修复**。调研见
+[ doc/research/2026-10-19-risk-control-and-real-machine-protocol.md ]（本仓库文档，含同类插件/反检测框架对照与
+「学真实浏览器/持久登录、不学指纹伪造/打码/代理池」的取舍 + 本轮真机硬约束）。
+
+### 修复（全部带护栏 + 反向变异）
+
+- **#59** doubao `loginProbe.ok` 与 `accountProbe.avatar` 同源（真机 doubao `login.basis=probe-ok` 验证）。
+- **#65 + #82** kimi `loginProbe.ok` 精确子集 + `judgeLoggedIn` 的 **ok 特征水合窗口**（真机 kimi `login.basis` 由 UNVERIFIED→**PASS(probe-ok)**）。
+- **#60** `loginState` 三态被登录进度同名变量覆盖：进度变量改名 `loginPhase`，三态贯通 **index / web-control / bin / client.cjs**（uncertain→「待确认」），新增 `normalizeLoginState` 白名单归一。
+- **#62** `site-verify` 把站点侧限流/资源类错误归 **BLOCKED**（真机 kimi `resource_exhausted` 实证）。
+- **#57** `strictModelType` 接消费者（**部分**：全量「契约字段必须有消费者」闸门留后续）。
+- **#71 同族** `site-verify` 的会话判据接入 `sameSessionVerdict`（槽锚第二判据；qwen 真机 PASS `basis=slot-anchor`）。
+- **F8** `turn.settled` 假 UNVERIFIED：`diagnostics()` 补收束读数 + 工具侧收束后重取（deepseek 真机 UNVERIFIED→**PASS(finished)**）。
+- **新 #79** doubao 既有会话页不渲染「对话/工作」分段控件 ⇒ resume 轮 `no-options`（F15：`segmented-control-absent-on-resume` 出声跳过；真机第 3 轮不再报错）。
+- **新 #81** zai 导览/地区遮罩拦截发送（F16：发送前遮罩检测、导览 Escape 重试、新码 `WEB_UI_OVERLAY_BLOCKED`；真机可读归因）。
+- **F18** `site-verify` 把新码 `WEB_UI_OVERLAY_BLOCKED` 归 BLOCKED。
+- **撤回 F9**：GLM `bad` 收窄假设被 live 真机复核否定（原读数是残缺 profile 副本的游客页），代码保持原值。
+
+### 真机四态（`test-mock/site-verify.mjs`，每站每代码变体一次 = 3 次发送、零重试）
+
+| 站 | 结果 | 说明 |
+| --- | --- | --- |
+| qwen | **PASS 14/0/0/0** | 首次真机全绿（已登录；回填往返 slot-anchor；收束 PASS） |
+| glm | **PASS 14/0/0/0** | 3 轮投递/流一致/工具往返全 PASS |
+| deepseek | **PASS 14/0/0/0** | F8 真机判据：turn.settled 由 UNVERIFIED→PASS |
+| doubao | **UNVERIFIED** | F15 修复后不再 FAIL；仅 **#80 流式增量缺失**（`dom-rescue-capture-stall`）2 项 UNVERIFIED |
+| kimi | **BLOCKED** | 站点忙（`resource_exhausted`，外部条件）；F14 登录判定已真机验证 |
+| zai | **BLOCKED** | 地区弹窗遮挡（外部 UI 条件，F16 可读归因，0 发送）；#64 仍欠复跑 |
+
+变体 1 = 修复后冻结代码；变体 2 = 仅 F14/F15/F16 定向修复，补跑 kimi/doubao/zai。两变体边界见
+`doc/progress.md` 2026-10-19 节与 `doc/verify.md`。全程有头、串行、站间 ≥20s、零重试、**无验证码/滑块**。
+
+### 新增登记
+
+`doc/long-term-issues.md` **#79–#84**：doubao resume 分段 no-options（已修）/ doubao 流式增量捕获（未修，根因未定位）/
+zai `SEND_NOT_CONFIRMED` 与导览遮罩（F16 保守处置）/ kimi 登录水合时机（已修）/ z.ai 国内站与地区弹窗（未改 origin）/
+kimi 站点忙弹窗可关闭但桥无受控恢复（未实现，用户现场情报）。
+
+### 边界
+
+- **本版本只装到本机 web profile**；未推 GitHub、未发 npm；tag 仍停在 `v0.19.92`。
+- 全量单测：133 文件 **132 exit 0**（唯一红 `webcode-preset` ②e 为既有 #56 官方 standard 漂移，非本轮引入）。
+- kimi/zai/doubao 的非 PASS 结果均为**站点侧**或**未修缺陷**，未写成通过；详见台账。
+
 ## 0.19.92（2026-10-17 发版轮）发布轮 + 本机 GitHub 传输层修复（**版本号一次从 0.19.76 跨到 0.19.92**）
 
 ### 这次发版装的是什么

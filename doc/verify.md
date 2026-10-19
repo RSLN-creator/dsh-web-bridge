@@ -4,7 +4,7 @@
 
 ---
 
-# 2026-10-19 夜：国模六站真机四态 + 风控合规实验（工作树 0.19.92，未发版）
+# 2026-10-19 夜：国模六站真机四态 + 风控合规实验（0.19.93 本机安装版；未推 GitHub/npm）
 
 日期：2026-10-19（22:06–22:16 Wave2；22:2x 起 Wave2b）。环境：Windows、Node v24.18.0、DSH web 3080（运行中的进程仍加载旧代码，未重启/未装机）。
 执行协议与风控硬约束见 [`doc/research/2026-10-19-risk-control-and-real-machine-protocol.md`](research/2026-10-19-risk-control-and-real-machine-protocol.md) §5：
@@ -57,7 +57,7 @@
 ## 五、诚实边界
 
 1. 变体 2 只补跑 kimi/doubao/zai；qwen/glm/deepseek 的 PASS 来自变体 1。两变体差异与冻结指纹在 `.tmp/` 存档，**不作「同一变体全站通过」表述**。
-2. 未发版、未装机、未重启：运行中 DSH 仍是旧代码；需用户自行「打包 → 装 web profile → 重启」。
+2. 安装状态（含一次真实教训）：**0.19.93 已打包并装入本机 web profile，需重启后生效**。此前 22:37 那次「装机+重启」加载的仍是旧 0.19.92（第一次安装命令未先重打包工作树 ⇒ `install-profiles` 装的是 10-17 的旧 tarball，属 no-op；详见 `doc/progress.md` 2026-10-19 §十）。
 3. 新登记 #79–#84（doubao resume `no-options`→F15 已修并真机验证 / doubao 流式增量缺失（#80，根因未定位、未修）/ zai `SEND_NOT_CONFIRMED` 与导览遮罩（#81，F16 保守处置）/ kimi 登录水合时机（#82，F14 已修并真机验证）/ z.ai 国内站与地区弹窗（#83）/ kimi 站点忙弹窗可关闭但无受控恢复（#84，登记待取证））见 `long-term-issues.md`；#64 仍欠真机复跑。
 4. z.ai 国内站：用户两次澄清——「zchat.z.ai，国内网站是这个z.ai」「chat.z.ai，国内z.ai要求用这个前面的网站而不是z.ai」。只读核对：主工作树 `providers.js` 的 ZAI `origin` **本来就是 `https://chat.z.ai`**，`site-verify` 也按 `site.origin` 导航 ⇒ **本轮 zai 读数本来就在 chat.z.ai 上**，不是跑错国际站；变体 2 的 `_modal-overlay`（地区/公告）是 chat.z.ai 自身行为。待确认的只剩**显示名/shortKey 仍为 `z.ai`** 是否要一并改（产品显示口径，本轮不改）。真机读数：headed 下 `chat.z.ai` 会自动跳 `zchat.z.ai`，headless root 新会话页有「请切换至中国站点」弹窗（+2~12s 持久），既有 `/c/…` 页不跳。本轮**不改 origin/路由**，登记下轮取证。
 5. 全程有头、串行、零重试、站间 20–28s，**未出现验证码/滑块**；未做任何绕过、未处理验证码。z.ai 地区/导览遮罩与 kimi 站点忙弹窗均**未由桥自动关闭**（F16 只在 z.ai 导览类遮罩上做 Escape 重试；地区弹窗直接抛可读码交人）。
