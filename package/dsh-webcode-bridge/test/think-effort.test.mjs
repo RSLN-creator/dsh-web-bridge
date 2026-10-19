@@ -30,7 +30,7 @@ import path from 'node:path';
 import {
   THINK_EFFORT, thinkEffortFor, reasoningEffortsFor, effortById,
   normalizeLabel, confirmEffort, planEffort, applyEffort, effortFromTriggerLabel,
-  FIND_EFFORT_CONTROL, READ_CHECKED_EFFORT, READ_SELECTOR_TEXT,
+  FIND_EFFORT_CONTROL, FIND_DISABLED_EFFORT_CONTROL, READ_CHECKED_EFFORT, READ_SELECTOR_TEXT,
 } from '../lib/think-effort.js';
 import { SITES, resolveWebModel } from '../lib/providers.js';
 
@@ -88,6 +88,9 @@ function domMatches(e, sel) {
     return e.__kind === 'input' || e.getAttribute('contenteditable') === 'true';
   }
   if (s === 'button') return e.__kind === 'button';
+  // 裸标签选择器（0.19.96 补）：zai 的深度思考 pill 是**裸 `div`**（无 role/data-state），
+  // 「禁用态取证」函数按 `div, span` 扫候选池。桩若不认裸标签，这条真机形态在单测里恒不可见。
+  if (s === 'div' || s === 'span') return e.__kind !== 'input' && e.__kind !== 'button';
   // 类选择器（0.19.49 补）：`readbackSelector` 用的是 `.current-effort` /
   // `.qwen-thinking-selector` 这类类名。桩必须认它，否则「回读节点选择器」这条判据
   // 在单测里恒找不到节点、只能靠别的断言间接覆盖（那就是没覆盖）。
@@ -698,6 +701,40 @@ test('④j 页面函数：**常驻**的 checked 控件不算「菜单已开」�
   const snap = FIND_EFFORT_CONTROL({ tokens: ['快速', '进阶'], known: ['标准', '进阶'] });
   assert.equal(snap.menuOpen, false, '常驻控件不算菜单已开（否则触发永远点不开）');
   assert.equal(snap.found.text, '快速 进阶');
+});
+
+// ④k 控件存在但**禁用**（0.19.96，zai 真机 #34）
+//
+// 真机读数（2026-10-19 23:23，零发送 live-probe；见 think-effort.js 的 FIND_DISABLED_EFFORT_CONTROL）：
+//   div#bits-c802[aria-label="当前场景无法取消"]
+//     └ div.flex…opacity-50.cursor-not-allowed   ← 可点容器（**裸 div**，无 role/data-state）
+//         ├ span 深度思考
+//         └ span 最高
+// 旧实现：该 pill 不进 CLICKABLE 候选池 ⇒ 报「找不到思考等级控件」（THINK_EFFORT_UI_CHANGED，
+// **致命**），而 zai 声明了默认档「最高」⇒ 每一轮都抛、整站不可用。修法把它判成
+// 「此刻不能改档」：非致命 applied:false / reason:'control-disabled' / note 带禁用依据。
+test('④k applyEffort：控件存在但禁用 ⇒ 非致命 control-disabled（不抛、不点、不假装成功）', async () => {
+  const t1 = el({ text: '深度思考' });
+  const t2 = el({ text: '最高' });
+  const clickable = el({
+    text: '深度思考 最高', x: 1063, y: 835, w: 126, h: 28,
+    // 真机逐字 class 片段（opacity-50 / cursor-not-allowed 是 disabled 的**唯一**证据：
+    // 既没有 native disabled，也没有 aria-disabled）
+    cls: 'flex gap-1.5 items-center h-7 pl-3 pr-2 py-1 rounded-lg whitespace-nowrap transition-colors opacity-50 cursor-not-allowed',
+    kids: [t1, t2],
+  });
+  const wrap = el({ text: '深度思考 最高', cls: 'flex', attrs: { 'aria-label': '当前场景无法取消' }, kids: [clickable] });
+  const page = fakePage({ domGroups: { div: [wrap, clickable] } });
+  const out = await applyEffort(page, { siteId: 'zai', target: '高' });
+  assert.equal(out.applied, false, '禁用的控件不许被当作「已生效」');
+  assert.equal(out.reason, 'control-disabled', '必须返回 control-disabled，而不是抛 THINK_EFFORT_UI_CHANGED');
+  assert.equal(out.state, 'control-disabled');
+  assert.match(String(out.note), /不可操作|禁用/, 'note 必须说明为什么没生效（驱动/排障能读到）');
+  assert.match(String(out.note), /高/, 'note 要带上目标档（否则不知道是哪个目标没生效）');
+  assert.match(String(out.readback), /深度思考/, '回读要带页面当前读数（真机是「深度思考 最高」）');
+  assert.deepEqual(page.calls.mouse, [], '禁用控件不许按坐标点击（点了也开不了菜单）');
+  assert.equal(clickable.clicks, 0, '禁用容器一次都不许被点');
+  assert.equal(t1.clicks + t2.clicks, 0, '内层 span 也不许被点');
 });
 
 // ---------------------------------------------------------------------------

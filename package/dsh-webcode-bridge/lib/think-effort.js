@@ -444,14 +444,60 @@ export const FIND_EFFORT_CONTROL = (cfg) => {
   const CLICKABLE = 'button, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="option"], [role="radio"], [data-state], [aria-haspopup]';
   const all = [...document.querySelectorAll(CLICKABLE)].filter(vis);
 
+  /**
+   * 「控件存在但**禁用/不可操作**」的判据（0.19.96，zai 真机 #34）。
+   *
+   * 真机读数（2026-10-19 23:23，零发送 live-probe）——新 z.ai UI 的深度思考 pill：
+   *   · 可点容器 `<div class="flex gap-1.5 items-center h-7 … opacity-50 cursor-not-allowed">`
+   *     内是 `<span>深度思考</span><span>最高</span>`；
+   *   · 父节点 `div#bits-c802` 的 `aria-label` = **「当前场景无法取消」**；
+   *   · **没有** native `disabled`、也没有 `aria-disabled`、没有 `data-state`（旧契约里那句
+   *     `<div data-state="closed">` 已不成立）。
+   * ⇒ 只认「disabled 属性」的实现对这条真机现场是瞎的；必须把 class / 计算样式 / 祖先
+   *    aria 三种信号一起认。返回的是**依据数组**而不是布尔：报告与日志要能回答「凭什么
+   *    判它禁用」。
+   *
+   * 只读、不点击；判定放在**候选定位之后**（否则「禁用」会吞掉「控件根本不存在」这条
+   * 更该报的错——两者的下一步不同）。
+   */
+  const disabledBasis = (el) => {
+    const basis = [];
+    const clsOf = (n) => { try { return String((n.className && n.className.baseVal !== undefined) ? n.className.baseVal : (n.className || '')); } catch { return ''; } };
+    const cls = clsOf(el);
+    if (/cursor-not-allowed|pointer-events-none/.test(cls)) basis.push('class:' + (cls.match(/cursor-not-allowed|pointer-events-none/) || [''])[0]);
+    if (/opacity-50/.test(cls)) basis.push('class:opacity-50');
+    try { if (el.getAttribute?.('aria-disabled') === 'true') basis.push('aria-disabled=true'); } catch {}
+    try { if (typeof el.hasAttribute === 'function' && el.hasAttribute('disabled')) basis.push('disabled'); } catch {}
+    try {
+      const cs = getComputedStyle(el);
+      if (cs?.cursor === 'not-allowed') basis.push('style:cursor=not-allowed');
+      if (cs?.pointerEvents === 'none') basis.push('style:pointer-events=none');
+      if (cs && Number(cs.opacity || '1') <= 0.6) basis.push('style:opacity=' + cs.opacity);
+    } catch { /* 读不到样式就只靠 class/aria */ }
+    // 祖先最多 2 层：zai 的「当前场景无法取消」写在父层 aria-label 上，disabled 样式也可能挂在包裹容器。
+    let p = el.parentElement;
+    for (let i = 0; i < 2 && p; i += 1) {
+      const pcls = clsOf(p);
+      const pm = pcls.match(/cursor-not-allowed|opacity-50|pointer-events-none/);
+      if (pm) basis.push('ancestor-class:' + pm[0]);
+      try {
+        const al = String(p.getAttribute?.('aria-label') || '');
+        if (/无法取消|不可取消|无法切换|当前场景/.test(al)) basis.push('ancestor-aria:' + al);
+      } catch { /* ignore */ }
+      p = p.parentElement;
+    }
+    return basis;
+  };
+
   // ① 显式选择器（有 testid 的站点走这条）
   if (cfg.selector) {
     try {
       const hit = [...document.querySelectorAll(cfg.selector)].filter(vis);
       if (hit.length) {
         const r = hit[0].getBoundingClientRect();
+        const basis = disabledBasis(hit[0]);
         return {
-          found: { text: txt(hit[0]), x: r.x, y: r.y, w: r.width, h: r.height, how: 'selector' },
+          found: { text: txt(hit[0]), x: r.x, y: r.y, w: r.width, h: r.height, how: 'selector', disabled: basis.length > 0, disabledBasis: basis.join('|') || null },
           candidates: all.map(txt).filter(Boolean).slice(0, 12),
           menuOpen: false,
         };
@@ -507,8 +553,9 @@ export const FIND_EFFORT_CONTROL = (cfg) => {
     if (hits.length) {
       const el = hits[0];
       const r = el.getBoundingClientRect();
+      const basis = disabledBasis(el);
       return {
-        found: { text: txt(el), x: r.x, y: r.y, w: r.width, h: r.height, how: 'text' },
+        found: { text: txt(el), x: r.x, y: r.y, w: r.width, h: r.height, how: 'text', disabled: basis.length > 0, disabledBasis: basis.join('|') || null },
         candidates: hits.slice(0, 6).map(txt),
         menuOpen: false,
       };
@@ -527,6 +574,100 @@ export const FIND_EFFORT_CONTROL = (cfg) => {
     return known.some((k) => t.includes(k));
   });
   return { found: null, candidates: all.map(txt).filter(Boolean).slice(0, 12), menuOpen: Boolean(openItem) };
+};
+
+/**
+ * 页面侧：找「**存在但被禁用/不可操作**」的思考档位控件（0.19.96，zai #34 真机修出）。
+ *
+ * ## 为什么 FIND_EFFORT_CONTROL 不够
+ *
+ * 那份候选池是 `CLICKABLE`（button / role / data-state / aria-haspopup…）。新 z.ai UI 的
+ * 深度思考 pill 退化成一枚**裸 `div`**（真机 2026-10-19 23:23 读数：
+ * `<div class="… opacity-50 cursor-not-allowed">深度思考 最高</div>`，无 role、无 data-state），
+ * 它因此根本不进候选池 ⇒ 旧代码只能报「找不到控件」（THINK_EFFORT_UI_CHANGED，**致命**：
+ * zai 声明了默认档最高 ⇒ 每一轮都抛，整站不可用）。但它其实**在页面上、且显示着当前档**，
+ * 只是当前场景不允许操作（父层 aria-label「当前场景无法取消」）。
+ *
+ * ## 判据（全部来自上面那次真机读数，不猜）
+ *
+ *   ① 文本含触发 token（zai = 「深度思考」）且 ≤ 40 字（排除整块 composer 容器）；
+ *   ② 文本里**含有本站点某个已知档位**（说明它真的是一枚档位控件，而不是别的「深度思考」文案）；
+ *   ③ 命中 `disabledBasis` 至少一条：class `opacity-50`/`cursor-not-allowed`/`pointer-events-none`、
+ *      `aria-disabled=true`、native disabled、计算样式 cursor/opacity/pointer-events，或父层
+ *      aria-label 含「无法取消/不可取消/无法切换/当前场景」。
+ *
+ * 不点击、不写状态；返回值形状与 FIND_EFFORT_CONTROL 的 `found` 对齐，便于调用方只加一支。
+ *
+ * @param {object} cfg `{ text, tokens, known }`（与 FIND_EFFORT_CONTROL 同一份 cfg）
+ * @returns {{found:{text:string,x:number,y:number,w:number,h:number,how:string,disabled:boolean,disabledBasis:string|null}|null}}
+ */
+export const FIND_DISABLED_EFFORT_CONTROL = (cfg) => {
+  const vis = (el) => {
+    try {
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) return false;
+      const cs = getComputedStyle(el);
+      return cs.visibility !== 'hidden' && cs.display !== 'none' && Number(cs.opacity || '1') > 0.02;
+    } catch { return false; }
+  };
+  const txt = (el) => (el?.textContent || '').trim().replace(/\s+/g, ' ');
+  const want = cfg.tokens?.length ? cfg.tokens : (cfg.text ? [cfg.text] : []);
+  const known = cfg.known || [];
+  if (!want.length || !known.length) return { found: null };
+  const input = [...document.querySelectorAll('textarea, [contenteditable="true"]')]
+    .filter((e) => vis(e) && e.getBoundingClientRect().width > 40)
+    .pop() || null;
+  const ir = input?.getBoundingClientRect() || null;
+  const near = (el) => {
+    if (!ir) return true;
+    const r = el.getBoundingClientRect();
+    const dx = Math.max(0, Math.max(ir.left - r.right, r.left - ir.right));
+    const dy = Math.max(0, Math.max(ir.top - r.bottom, r.top - ir.bottom));
+    return Math.hypot(dx, dy) <= 300;
+  };
+  // 页面函数必须自包含（见 FIND_EFFORT_CONTROL 头注）：disabledBasis 在这里再写一份内联副本。
+  const disabledBasis = (el) => {
+    const basis = [];
+    const clsOf = (n) => { try { return String((n.className && n.className.baseVal !== undefined) ? n.className.baseVal : (n.className || '')); } catch { return ''; } };
+    const cls = clsOf(el);
+    if (/cursor-not-allowed|pointer-events-none/.test(cls)) basis.push('class:' + (cls.match(/cursor-not-allowed|pointer-events-none/) || [''])[0]);
+    if (/opacity-50/.test(cls)) basis.push('class:opacity-50');
+    try { if (el.getAttribute?.('aria-disabled') === 'true') basis.push('aria-disabled=true'); } catch {}
+    try { if (typeof el.hasAttribute === 'function' && el.hasAttribute('disabled')) basis.push('disabled'); } catch {}
+    try {
+      const cs = getComputedStyle(el);
+      if (cs?.cursor === 'not-allowed') basis.push('style:cursor=not-allowed');
+      if (cs?.pointerEvents === 'none') basis.push('style:pointer-events=none');
+      if (cs && Number(cs.opacity || '1') <= 0.6) basis.push('style:opacity=' + cs.opacity);
+    } catch { /* 读不到样式就只靠 class/aria */ }
+    let p = el.parentElement;
+    for (let i = 0; i < 2 && p; i += 1) {
+      const pcls = clsOf(p);
+      const pm = pcls.match(/cursor-not-allowed|opacity-50|pointer-events-none/);
+      if (pm) basis.push('ancestor-class:' + pm[0]);
+      try {
+        const al = String(p.getAttribute?.('aria-label') || '');
+        if (/无法取消|不可取消|无法切换|当前场景/.test(al)) basis.push('ancestor-aria:' + al);
+      } catch { /* ignore */ }
+      p = p.parentElement;
+    }
+    return basis;
+  };
+  const pool = [...document.querySelectorAll('button, [role="button"], div, span')].filter(vis);
+  for (const el of pool) {
+    const t = txt(el);
+    if (!t || t.length > 40) continue;
+    if (!want.every((w) => t.includes(w))) continue;
+    if (!known.some((k) => t.includes(k))) continue;
+    // 排除「自身就是外层容器」：真机里 pill 的最内层文本恰好是「深度思考 最高」，
+    // 而包裹容器会带上整块 composer 文案（长度 > 40 已被上面滤掉，这里再加一道 token 数判据）。
+    if (!near(el)) continue;
+    const basis = disabledBasis(el);
+    if (!basis.length) continue;
+    const r = el.getBoundingClientRect();
+    return { found: { text: t, x: r.x, y: r.y, w: r.width, h: r.height, how: 'text-disabled', disabled: true, disabledBasis: basis.join('|') } };
+  }
+  return { found: null };
 };
 
 /**
@@ -807,6 +948,38 @@ export async function applyEffort(page, { siteId, target } = {}) {
       const pre = confirmEffort({ target, label: baselineLabel, triggerText: ctl.triggerText ?? null, knownIds: plan.knownIds });
       if (pre.state === 'match') {
         return { applied: true, target, readback: pre.seen, reason: 'already:' + pre.reason, state: pre.state };
+      }
+      // ── 0.19.96（zai 真机 #34）：控件**存在但当前场景不可操作** ──────────────
+      //
+      // 真机读数（2026-10-19 23:23，零发送 live-probe）：
+      //   · 会话页 / composer 里确有「深度思考 最高」pill，当前档位可读；
+      //   · 但它被渲染成 `opacity-50 cursor-not-allowed`，父层 aria-label 是
+      //     「当前场景无法取消」——**当前场景不允许改档**；
+      //   · 该 pill 是裸 div（无 role/data-state）⇒ 不进 FIND_EFFORT_CONTROL 的 CLICKABLE 池，
+      //     旧实现走到这里只会 `fail(THINK_EFFORT_UI_CHANGED)`，而 zai 声明了默认档「最高」
+      //     ⇒ **每一轮都抛**，整站不可用。
+      //
+      // 处置：这不是「网页改版」（选择器过期），也不是「用户选了个假档位」，而是
+      // 「此刻不能改」——抛死整轮既救不了任何东西、还会把站点搞成不可用。因此**非致命**返回
+      // `{applied:false, reason:'control-disabled', note}`：不点、不假装成功（applied=false），
+      // 把「为什么没生效」如实写进 note（驱动/排障读得到），本轮按网页当前档位继续发送。
+      //
+      // 顺序：必须放在「幂等快路（已等于目标档）」之后——目标档已经成立时，applied:true 是
+      // 正确读数（禁不禁用不影响「现状=目标」这个事实）；只有**需要改档**时才受此分支影响。
+      // 也必须放在「找不到控件」的 fail 之前——否则真机现场会被误报成「网页没有控件」。
+      const disabledNow = snap?.found?.disabled
+        ? { text: snap.found.text, basis: snap.found.disabledBasis || null }
+        : (await page.evaluate(FIND_DISABLED_EFFORT_CONTROL, findCfg).catch(() => null))?.found || null;
+      if (disabledNow) {
+        return {
+          applied: false,
+          target,
+          readback: disabledNow.text ?? baselineLabel ?? null,
+          reason: 'control-disabled',
+          state: 'control-disabled',
+          note: `站点 ${siteId} 的思考档位控件当前不可操作（禁用依据：${disabledNow.basis || 'disabled'}；`
+            + `页面显示「${disabledNow.text || '-'}」）— 本轮不改档位，按网页当前档位继续（目标「${target}」未假装已生效）`,
+        };
       }
       if (!snap?.found && !snap?.menuOpen && plan.openIfClosed) {
         // 触发控件按 token 匹配不到（豆包：按钮文本拼了模型名）⇒ 用站点声明过的选择器直接

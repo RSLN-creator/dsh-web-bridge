@@ -43,7 +43,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { listen } from './fixtures/listen.js';
-import { promptTransportPlan, planSearchToggle, planSiteMode } from '../lib/browser-driver.js';
+import { promptTransportPlan, planSearchToggle, planSiteMode, siteModeVerdict } from '../lib/browser-driver.js';
 import { thinkModeOf, siteModeOf } from '../lib/web-control.js';
 
 const pkg = path.dirname(import.meta.dirname);
@@ -762,15 +762,48 @@ test('task-8 接线（源码级）：executor 用 thinkModeOf 且 siteId 先于�
   assert.match(wcSrc, /siteModeBySite: config\.siteModeBySite/, 'GET settings 必须回带 siteModeBySite');
   assert.match(wcSrc, /if \('thinkModeBySite' in updated\)/, 'POST settings 必须归一化 thinkModeBySite');
   assert.match(wcSrc, /if \('siteModeBySite' in updated\)/, 'POST settings 必须归一化 siteModeBySite');
-  // B：契约来自真机读数（mode-inventory.md §1 的逐字选择器）
-  assert.match(provSrc, /modePicker: \{[\s\S]{0,220}trigger: '\.model-select-container'/, 'GLM modePicker.trigger 必须来自真机读数');
-  assert.match(provSrc, /modePicker: \{[\s\S]{0,260}option: '\.model-select-container \.model-select-item'/, 'GLM modePicker.option 必须来自真机读数');
+  // B：契约来自**真机校准**读数（glm-mode-calibration.md：chip 才是展开 trigger）
+  assert.match(provSrc, /modePicker: \{[\s\S]{0,260}trigger: '\.selected-model-info'/,
+    'GLM modePicker.trigger 必须是真机读到的 chip `.selected-model-info`（点它展开工具行）');
+  assert.match(provSrc, /modePicker: \{[\s\S]{0,320}selectedInfo: '\.selected-model-info'/,
+    'GLM modePicker 必须声明 selectedInfo（回读证据②=可见 chip 文本）');
+  assert.match(provSrc, /modePicker: \{[\s\S]{0,420}option: '\.model-select-item'/,
+    'GLM modePicker.option 必须是 `.model-select-item`（真机 class 逐字）');
   // B：驱动侧 fresh-only + 回读 + 可读错误码
   assert.match(drvSrc, /planSiteMode\(\{ siteMode, fresh: navigate === 'fresh' \}\)/, '驱动必须用 planSiteMode 判 fresh-only');
   assert.match(drvSrc, /SITE_MODE_UNAVAILABLE/, '失败必须抛可读的 SITE_MODE_UNAVAILABLE');
-  // 回读确认必须真的被消费：命中置 modeConfirmed=true，未命中抛可读错误（删掉即红）。
-  assert.match(drvSrc, /modeConfirmed = true/, '回读命中必须把确认标志置真');
-  assert.match(drvSrc, /if \(!modeConfirmed\)[\s\S]{0,260}SITE_MODE_UNAVAILABLE/,
-    '点击后回读未确认必须抛 SITE_MODE_UNAVAILABLE——删掉回读确认等于「点一下就当生效」');
+  // B：回读必须走 siteModeVerdict（真机：selected item 不可见仍算命中；chip 文本也算）
+  assert.match(drvSrc, /siteModeVerdict\(\{ selectedItemTexts/, '回读必须收在纯函数 siteModeVerdict');
+  assert.match(drvSrc, /querySelectorAll\(itemSel \+ '\.selected'\)/, 
+    '回读必须读 `.selected` 子集（真机选中条目在淡出后不可见，不能再按可见性过滤）');
+  assert.ok(!/querySelectorAll\(itemSel \+ '\.selected'\)[\s\S]{0,120}?\.filter\(vis\)/.test(drvSrc),
+    '不得给 `.selected` 回读加可见性过滤——真机的选中 item 恰恰是隐藏的（旧判据恒失败的原因）');
+});
+
+// ── task-15：GLM 任务模式回读判据必须与真机校准一致 ──────────────────────────
+//
+// 真机证据：`.tmp/live-2026-10-19/glm-mode-calibration.md` + raw3：
+//   点中模式后工具行立刻淡出隐藏，`div.model-select-item.selected` 文本=模式名但 visible=false；
+//   条目**全程无 aria-selected/aria-checked**；可见的选中证据在 `div.selected-model-info` chip。
+// 旧判据（只看可见 item 的 aria/class）恒为 false ⇒ fresh 轮必抛 SITE_MODE_UNAVAILABLE。
+test('task-15 siteModeVerdict：selected item 文本命中即成功（**不过滤可见性**，真机形状）', () => {
+  const r = siteModeVerdict({ selectedItemTexts: ['研究报告'], selectedInfoText: null, mode: '研究报告' });
+  assert.equal(r.confirmed, true, 'selected item 文本=目标即确认——真机上它是隐藏的（淡出），可见性不能作判据');
+  assert.equal(r.basis, 'selected-item');
+});
+
+test('task-15 siteModeVerdict：可见 chip（selected-model-info）文本命中即成功', () => {
+  const r = siteModeVerdict({ selectedItemTexts: [], selectedInfoText: 'PPT制作', mode: 'PPT制作' });
+  assert.equal(r.confirmed, true, 'chip 文本=目标必须算成功（真机可见的选中证据）');
+  assert.equal(r.basis, 'selected-info');
+});
+
+test('task-15 siteModeVerdict：两条证据都对不上 ⇒ 失败（不得恒真）', () => {
+  assert.equal(siteModeVerdict({ selectedItemTexts: ['任务'], selectedInfoText: '任务', mode: '研究报告' }).confirmed, false);
+  assert.equal(siteModeVerdict({ selectedItemTexts: [], selectedInfoText: null, mode: '数据分析' }).confirmed, false);
+  assert.equal(siteModeVerdict({ selectedItemTexts: ['数据分析'], selectedInfoText: null, mode: '' }).confirmed, false,
+    '目标为空不得判成功');
+  // 空白归一：chip 文本带首尾空白仍算同一模式。
+  assert.equal(siteModeVerdict({ selectedItemTexts: [], selectedInfoText: '  研究报告 ', mode: '研究报告' }).confirmed, true);
 });
 

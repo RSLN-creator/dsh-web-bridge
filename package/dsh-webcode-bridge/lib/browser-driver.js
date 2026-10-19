@@ -1016,6 +1016,34 @@ export function planSiteMode({ siteMode = '', fresh = false } = {}) {
 }
 
 /**
+ * 任务模式「是否已生效」的**真机判据**（GLM，2026-10-19 真机校准）。
+ *
+ * ## 真机事实（`.tmp/live-2026-10-19/glm-mode-calibration.md` + raw3）
+ *
+ * 点中任一模式后工具行**立刻淡出隐藏**（容器 `model-select-fade-leave-active`）：
+ * DOM 里 `div.model-select-item.selected` 的文本=模式名，但 `visible=false`；
+ * 条目**全程没有 aria-selected / aria-checked**。因此旧判据（只看可见 item 的
+ * aria/class）**恒为 false** ⇒ 每次 fresh 轮都必抛 SITE_MODE_UNAVAILABLE。
+ * 真正可读的选中证据有两个：
+ *   ① `div.model-select-item.selected` 的 textContent（**不过滤可见**）；
+ *   ② 可见的 `div.selected-model-info`（chip）的 textContent。
+ *
+ * 本函数把这两条收成纯函数，便于离线反向验证（判据必须可测，不能只活在驱动闭包里）。
+ *
+ * @param {{selectedItemTexts?: string[], selectedInfoText?: string|null, mode?: string}} [input]
+ * @returns {{confirmed: boolean, basis: 'selected-item'|'selected-info'|null}}
+ */
+export function siteModeVerdict({ selectedItemTexts = [], selectedInfoText = null, mode = '' } = {}) {
+  const want = typeof mode === 'string' ? mode.trim().replace(/\s+/g, ' ') : '';
+  const norm = (s) => String(s == null ? '' : s).trim().replace(/\s+/g, ' ');
+  if (!want) return { confirmed: false, basis: null };
+  const hitItem = Array.isArray(selectedItemTexts) && selectedItemTexts.some((t) => norm(t) === want);
+  if (hitItem) return { confirmed: true, basis: 'selected-item' };
+  if (norm(selectedInfoText) === want) return { confirmed: true, basis: 'selected-info' };
+  return { confirmed: false, basis: null };
+}
+
+/**
  * 建一个站点驱动实例：用真实 Edge 打开站点、登录、发消息、收流、回读会话 id。
  *
  * 一个实例 = **一个「站点 × 账户槽」**（0.14.7 起）。同站点两个账户是两个实例、
@@ -3781,61 +3809,91 @@ export function createBrowserDriver(options = {}) {
       }
       // ── 任务模式（task-8，设置层，先只服务 GLM）：fresh 轮才应用 ────────────────
       // 判定收在纯函数 planSiteMode（默认空=零位移；resume 不动）；失败抛可读的
-      // SITE_MODE_UNAVAILABLE，绝不静默降级。控件选择器只来自真机读数
-      // （.tmp/live-2026-10-19/mode-inventory.md：.model-select-container 可见条目
-      // 任务/研究报告/PPT制作/数据分析/更多），不在没有读数时猜测。
+      // SITE_MODE_UNAVAILABLE，绝不静默降级。
+      //
+      // ⚠ 回读判据以**真机校准**为准（`.tmp/live-2026-10-19/glm-mode-calibration.md`）：
+      //   点中模式后工具行立刻淡出隐藏，`div.model-select-item.selected` 文本=模式名但
+      //   **不可见**；条目全程无 aria-selected/aria-checked。因此「已生效」只能由
+      //   siteModeVerdict 的两条证据判定：selected item 文本（不过滤可见）**或**
+      //   可见 `.selected-model-info` chip 文本。旧「只看可见 item」实现恒失败，已废弃。
       const siteModePlan = planSiteMode({ siteMode, fresh: navigate === 'fresh' });
       if (siteModePlan.apply) {
         const modePicker = site.modePicker;
         if (!modePicker || !modePicker.option) {
           throw withWebcodeCode(new Error('SITE_MODE_UNAVAILABLE: 站点 ' + siteId + ' 未声明 modePicker 契约，无法切换到任务模式「' + siteModePlan.mode + '」'), 'SITE_MODE_UNAVAILABLE');
         }
-        const modeHit = await page.evaluate(({ sel, want }) => {
+        // 真机形状：chip 是 `.selected-model-info`（点击可展开工具行）；旧契约的
+        // trigger 可能是容器，这里两个来源都试，但**只有一个读取口径**（readSiteModeState）。
+        const infoSels = [modePicker.selectedInfo, modePicker.trigger].filter((s) => typeof s === 'string' && s.trim());
+        const readSiteModeState = () => page.evaluate(({ itemSel, infoSels }) => {
           const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
           const textOf = (el) => (el && el.textContent ? el.textContent : '').trim().replace(/\s+/g, ' ');
-          const items = [...document.querySelectorAll(sel)].filter(vis);
-          const target = items.find((el) => textOf(el) === want) || null;
-          return { found: Boolean(target), list: items.map(textOf).slice(0, 20) };
-        }, { sel: modePicker.option, want: siteModePlan.mode }).catch((e) => ({ error: String(e && e.message ? e.message : e) }));
-        if (modeHit.error) {
-          throw withWebcodeCode(new Error('SITE_MODE_UNAVAILABLE: 读取任务模式条目失败（' + modeHit.error + '）'), 'SITE_MODE_UNAVAILABLE');
+          const items = [...document.querySelectorAll(itemSel)];
+          let infoText = null;
+          for (const s of infoSels) {
+            let el = null;
+            try { el = document.querySelector(s); } catch { el = null; }
+            if (el && vis(el)) { const t = textOf(el); if (t) { infoText = t; break; } }
+          }
+          return {
+            items: items.map((el) => ({ text: textOf(el), visible: vis(el) })).slice(0, 30),
+            // 真机：selected item 在淡出后**不可见**，所以这里**不过滤可见**。
+            selectedItemTexts: [...document.querySelectorAll(itemSel + '.selected')].map(textOf),
+            selectedInfoText: infoText,
+          };
+        }, { itemSel: modePicker.option, infoSels }).catch((e) => ({ error: String(e && e.message ? e.message : e) }));
+
+        let modeState = await readSiteModeState();
+        if (modeState.error) {
+          throw withWebcodeCode(new Error('SITE_MODE_UNAVAILABLE: 读取任务模式状态失败（' + modeState.error + '）'), 'SITE_MODE_UNAVAILABLE');
         }
-        if (!modeHit.found) {
-          throw withWebcodeCode(new Error('SITE_MODE_UNAVAILABLE: 页面上没有任务模式条目「' + siteModePlan.mode + '」' + (modeHit.list.length ? '（可见：' + modeHit.list.join('、') + '）' : '（一个条目都没读到）') ), 'SITE_MODE_UNAVAILABLE');
-        }
-        await page.evaluate(({ sel, want }) => {
-          const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
-          const textOf = (el) => (el && el.textContent ? el.textContent : '').trim().replace(/\s+/g, ' ');
-          const el = [...document.querySelectorAll(sel)].filter(vis).find((e) => textOf(e) === want);
-          if (el) el.click();
-        }, { sel: modePicker.option, want: siteModePlan.mode }).catch(() => {});
-        let modeConfirmed = false;
-        let modeReadback = null;
-        for (let i = 0; i < 10 && !modeConfirmed; i += 1) {
-          modeReadback = await page.evaluate(({ sel, want }) => {
+        let modeVerdict = siteModeVerdict({ selectedItemTexts: modeState.selectedItemTexts, selectedInfoText: modeState.selectedInfoText, mode: siteModePlan.mode });
+        // ③ 幂等：已在目标模式 ⇒ fresh 轮也不重复点。
+        if (!modeVerdict.confirmed) {
+          // ① 目标 item 当前不可见 ⇒ 先点 chip（.selected-model-info）展开工具行。
+          // 注：这里刻意用 for-of 循环而不是 `.some((it) => …)`——driver-scope 护栏
+          // 不收集箭头函数形参（LTI #72 的已知边界），`it` 会被误判成自由标识符，
+          // 改代码形状是仓库纪律，不去改扫描器。
+          let targetVisible = false;
+          for (const item of modeState.items || []) {
+            if (item.text === siteModePlan.mode && item.visible) { targetVisible = true; break; }
+          }
+          if (!targetVisible && infoSels.length) {
+            await page.locator(infoSels[0]).first().click({ timeout: 3000 }).catch(() => {});
+            await delay(250);
+          }
+          // 点目标 item（按文本精确匹配；不可见时先展开再点）。
+          const clicked = await page.evaluate(({ itemSel, want }) => {
             const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
             const textOf = (el) => (el && el.textContent ? el.textContent : '').trim().replace(/\s+/g, ' ');
-            for (const el of [...document.querySelectorAll(sel)].filter(vis)) {
-              if (textOf(el) !== want) continue;
-              const cls = String(el.className || '');
-              const toks = cls.split(/\s+/).filter(Boolean);
-              const selected = el.getAttribute('aria-selected') === 'true'
-                || el.getAttribute('aria-checked') === 'true'
-                || toks.indexOf('selected') !== -1
-                || toks.indexOf('active') !== -1
-                || toks.indexOf('checked') !== -1;
-              return { selected, cls: cls.slice(0, 120) };
-            }
-            return { selected: false, cls: null };
-          }, { sel: modePicker.option, want: siteModePlan.mode }).catch(() => null);
-          if (modeReadback && modeReadback.selected) { modeConfirmed = true; break; }
-          await delay(150);
+            const all = [...document.querySelectorAll(itemSel)].filter((el) => textOf(el) === want);
+            const el = all.find(vis) || all[0] || null;
+            if (el) el.click();
+            return { clicked: Boolean(el), visibleAtClick: Boolean(el && vis(el)) };
+          }, { itemSel: modePicker.option, want: siteModePlan.mode }).catch(() => ({ clicked: false }));
+          // ② 回读：selected item 文本（不过滤可见）或 chip 文本 = 目标。
+          for (let i = 0; i < 10 && !modeVerdict.confirmed; i += 1) {
+            await delay(150);
+            modeState = await readSiteModeState();
+            modeVerdict = siteModeVerdict({ selectedItemTexts: modeState.selectedItemTexts, selectedInfoText: modeState.selectedInfoText, mode: siteModePlan.mode });
+          }
+          if (!modeVerdict.confirmed) {
+            // ④ 失败带真机现场（items 文本 / selected 文本 / chip 文本），可读归因。
+            // 同上：for-of 而非 `.map((it) => …)`（driver-scope 护栏的箭头形参边界）。
+            const itemScene = [];
+            for (const item of modeState.items || []) itemScene.push(item.text + (item.visible ? '' : '(hidden)'));
+            const scene = {
+              clicked: Boolean(clicked && clicked.clicked),
+              items: itemScene.slice(0, 20),
+              selectedItemTexts: modeState.selectedItemTexts || [],
+              selectedInfoText: modeState.selectedInfoText ?? null,
+            };
+            throw withWebcodeCode(new Error('SITE_MODE_UNAVAILABLE: 已点击任务模式「' + siteModePlan.mode + '」但回读未确认（真机现场：' + JSON.stringify(scene) + '）'), 'SITE_MODE_UNAVAILABLE');
+          }
         }
-        if (!modeConfirmed) {
-          throw withWebcodeCode(new Error('SITE_MODE_UNAVAILABLE: 已点击任务模式「' + siteModePlan.mode + '」但回读未确认选中态（读回：' + JSON.stringify(modeReadback) + '）'), 'SITE_MODE_UNAVAILABLE');
-        }
-        log('site mode applied and confirmed: ' + siteModePlan.mode + ' (site=' + siteId + ')');
-      }      throwIfAborted();
+        log('site mode confirmed: ' + siteModePlan.mode + ' (site=' + siteId + ', basis=' + modeVerdict.basis + ')');
+      }
+      throwIfAborted();
       if (Array.isArray(images) && images.length) {
         // 上传后**确认**附件真的进了网页才继续（见 uploadImages 的注释）：
         // 拿不到可见证据就抛 ATTACH_NOT_CONFIRMED。

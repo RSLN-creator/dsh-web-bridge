@@ -5,6 +5,33 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.96（2026-10-19 夜第四轮：任务模式设置页 UI + GLM 模式真机校准 + zai #34 disabled 态修复；本机 web/headless 安装版；未推 GitHub/npm）
+
+### 新增：任务模式设置页 UI（用户第①项的「最后一跳」）
+
+- `lib/client.cjs` 设置页站点分区新增：**glm「任务模式」下拉**（默认（不改变网页）/ 任务 / 研究报告 / PPT制作 / 数据分析，选项逐字来自真机盘点）与 **glm/deepseek「深度思考（本站覆盖）」三态**（跟随全局 / 开 / 关；「跟随全局」=删键，不写伪值）。与既有全局「深度思考」并存、互不顶掉；保存走 `api('settings')` + settingsRevision 重拉。
+- 护栏：`test/client-render.test.mjs` **74/0**（原 72 + 2 条）；反向变异：载荷字段名写错 ⇒ 73/1、跟随全局写成 on ⇒ 73/1，还原 74/0。
+
+### 修复：GLM 任务模式「选中态回读」判据（真机校准后，原判据必失败）
+
+- 真机校准（零发送）：选择器逐字命中；**点击模式后工具行淡出隐藏**，`div.model-select-item.selected` 文本在 DOM 但 visible=false；可见证据在 `div.selected-model-info`（chip）；条目全程无 aria-selected/aria-checked ⇒ 旧判据（只看可见 item 的 aria/class）恒 false、必抛 `SITE_MODE_UNAVAILABLE`。
+- 修法：`providers.js` GLM `modePicker` 增 `trigger: '.selected-model-info'`（展开工具行）与 `selectedInfo`；`browser-driver.js` 新增纯函数 `siteModeVerdict({selectedItemTexts, selectedInfoText, mode})`（**不过滤可见性**的 selected item 文本 **或** chip 文本命中 ⇒ confirmed，并标 basis），应用段幂等/展开/点击/轮询回读/失败带真机现场。修掉上一版一处换行粘连。
+- 读数：settings-transport **20/0**、model-picker 19/0；变异：退回只看可见 item ⇒ 19/1、删 selected-item 证据 ⇒ 19/1，还原 20/0。
+- **未做**：「更多」浮层内 7 条隐藏模式（无逐个真机读数，不猜）；真实 fresh 轮端到端应用未跑（零发送校准已就位，下一次真机 send 会验证）。
+
+### 修复：z.ai 推理等级 #34 —— 「控件存在但禁用」不再误报致命 THINK_EFFORT_UI_CHANGED
+
+- 真机证据（登录态会话页只读）：`div#bits-c802[aria-label="当前场景无法取消"]` 内裸 div class 含 `opacity-50 cursor-not-allowed`，文本仍是「深度思考 最高」；控件**在**（不是契约过期），当前场景**不可操作**。
+- 修法（`lib/think-effort.js`）：`FIND_EFFORT_CONTROL` 内新增 `disabledBasis(el)`（class/aria-disabled/native disabled/计算样式/祖先 2 层），新增导出页函数 `FIND_DISABLED_EFFORT_CONTROL`；applyEffort 在幂等快路之后、fail 之前返回**非致命** `{applied:false, reason:'control-disabled', state, readback, note}`——不点、不抛、不假装成功。
+- 读数：think-effort **28/0**（原 27 + ④k 真机形状假 DOM）；变异「把禁用当可点」⇒ 27/1 红，还原 28/0。
+- **未做**：该 note 目前冒不到界面（驱动调用点只处理 applied:true，补 warn 留下轮）；未做真实发送端到端。
+
+### 边界
+
+- 本版本只装到本机 web/headless profile；未推 GitHub、未发 npm；宿主侧需重启 `dsh web` 生效。
+- ⚠ 真机校准曾把 live `glm` 页面切到「任务」模式且未找到清除 UI 路径 ⇒ **右栏 GLM 可能仍停在「任务」模式**；请在有头窗口/网页里点 chip 手动切回所需模式（或新开会话）。
+- 遗留：任务模式「更多」浮层、驱动侧 control-disabled 的 warn 推送、GLM/zai 真实 fresh 轮端到端验证。
+
 ## 0.19.95（2026-10-19 夜第三轮：全站多调用并行 + 任务模式设置层 + 三站模式补采；本机 web/headless 安装版；未推 GitHub/npm）
 
 ### 新增：全站「多调用并行」教学（0.19.94 只对 deepseek，本轮提升为公共段）

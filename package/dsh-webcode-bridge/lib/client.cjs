@@ -4316,6 +4316,14 @@ window.__ModuleLoader__.load({
       const [searchMode, setSearchMode] = React.useState('auto');
       const [searchModeSaved, setSearchModeSaved] = React.useState('auto');
       const [searchNotice, setSearchNotice] = React.useState('');
+      // 0.19.96（task-8/12）：**站点级**「深度思考」覆盖（thinkModeBySite）与 GLM 任务模式
+      // （siteModeBySite）。与全局 thinkMode 是两条独立设置：站点档优先、未配 = 跟随全局；
+      // 任务模式没有全局档（站点专属语义），默认空 = 不改网页（零位移）。
+      const [thinkModeBySite, setThinkModeBySite] = React.useState({});
+      const [thinkModeBySiteSaved, setThinkModeBySiteSaved] = React.useState({});
+      const [siteModeBySite, setSiteModeBySite] = React.useState({});
+      const [siteModeBySiteSaved, setSiteModeBySiteSaved] = React.useState({});
+      const [siteModeNotice, setSiteModeNotice] = React.useState('');
       const [subAgentMode, setSubAgentMode] = React.useState('own');
       const [subAgentSaved, setSubAgentSaved] = React.useState('own');
       const [subAgentNotice, setSubAgentNotice] = React.useState('');
@@ -4454,6 +4462,12 @@ window.__ModuleLoader__.load({
           // 前端不自己造默认值——两侧各造一份默认时，面板选中项与真实行为会分叉。
           const sm = ['on', 'off', 'auto'].includes(s.searchMode) ? s.searchMode : 'auto';
           setSearchMode(sm); setSearchModeSaved(sm);
+          // 站点级「深度思考」覆盖与 GLM 任务模式（0.19.96）：服务端 GET 已保证形状
+          //（thinkModeBySite/siteModeBySite 回空对象）；前端只做防御性兜底，不自造默认值。
+          const tmBySite = s.thinkModeBySite && typeof s.thinkModeBySite === 'object' ? s.thinkModeBySite : {};
+          setThinkModeBySite(tmBySite); setThinkModeBySiteSaved(tmBySite);
+          const smBySite = s.siteModeBySite && typeof s.siteModeBySite === 'object' ? s.siteModeBySite : {};
+          setSiteModeBySite(smBySite); setSiteModeBySiteSaved(smBySite);
           setSubAgentMode(s.subAgentMode === 'share' ? 'share' : 'own');
           setSubAgentSaved(s.subAgentMode === 'share' ? 'share' : 'own');
           const subSite = s.subAgentSite && String(s.subAgentSite) !== 'follow' ? String(s.subAgentSite) : 'follow';
@@ -4567,6 +4581,56 @@ window.__ModuleLoader__.load({
           const back = r.defaultModelBySite && typeof r.defaultModelBySite === 'object' ? r.defaultModelBySite : {};
           setModelBySite(back); setModelBySiteSaved(back);
           setSiteModelNotice('已保存 ' + siteName(siteId) + ' 的默认模型。下一轮起生效。');
+        } catch (e) { setError(e.message); }
+        finally { setPending(false); }
+      }
+
+      /**
+       * 保存某站点的**深度思考覆盖**（0.19.96，thinkModeBySite）。
+       *
+       * 与 saveSiteTransport 同一套纪律：整个字典读改写，**不碰全局 thinkMode**。
+       * `value === 'follow'` = 删除该站点键（回落到全局档）——「跟随全局」不是一个值，
+       * 而是「没有覆盖」；写成 'auto'/'on' 都会变成一条真实覆盖，与用户选择不符。
+       *
+       * @param {string} siteId 站点 id
+       * @param {'follow'|'on'|'off'} value 站点档（follow = 删键）
+       */
+      async function saveThinkModeBySite(siteId, value) {
+        const next = { ...thinkModeBySite };
+        if (value === 'on' || value === 'off') next[siteId] = value; else delete next[siteId];
+        setPending(true); setError('');
+        try {
+          const r = await api('settings', { thinkModeBySite: next });
+          applyRevision(r);
+          const back = r.thinkModeBySite && typeof r.thinkModeBySite === 'object' ? r.thinkModeBySite : {};
+          setThinkModeBySite(back); setThinkModeBySiteSaved(back);
+        } catch (e) { setError(e.message); }
+        finally { setPending(false); }
+      }
+
+      /**
+       * 保存 GLM 的**任务模式**（0.19.96，siteModeBySite[siteId]）。
+       *
+       * 始终整字典读改写（只 POST 单个键会抹掉其它站点覆盖）；空串 = 删键
+       * = 默认「不改变网页」（零位移）。模式名逐字来自真机盘点
+       * （.tmp/live-2026-10-19/mode-inventory.md §1：任务/研究报告/PPT制作/数据分析）。
+       *
+       * @param {string} siteId 站点 id
+       * @param {string} mode 模式名；'' = 删除覆盖
+       */
+      async function saveSiteMode(siteId, mode) {
+        const next = { ...siteModeBySite };
+        const m = String(mode || '').trim();
+        if (m) next[siteId] = m; else delete next[siteId];
+        setPending(true); setError(''); setSiteModeNotice('');
+        try {
+          const r = await api('settings', { siteModeBySite: next });
+          applyRevision(r);
+          const back = r.siteModeBySite && typeof r.siteModeBySite === 'object' ? r.siteModeBySite : {};
+          setSiteModeBySite(back); setSiteModeBySiteSaved(back);
+          setSiteModeNotice(m
+            ? '已保存 ' + siteName(siteId) + ' 的任务模式「' + m + '」。下一轮**新会话**起生效（续聊不改模式）。'
+            : '已恢复默认：不改变 ' + siteName(siteId) + ' 的网页任务模式。');
         } catch (e) { setError(e.message); }
         finally { setPending(false); }
       }
@@ -5031,6 +5095,42 @@ window.__ModuleLoader__.load({
                 h('option', { value: 'off', title: '旧行为：搜索被按开就点掉' }, '始终关闭')),
               h('button', { disabled: pending || searchMode === searchModeSaved, onClick: () => saveSetting('searchMode', searchMode, r => { const v = ['on', 'off', 'auto'].includes(r.searchMode) ? r.searchMode : searchMode; setSearchMode(v); setSearchModeSaved(v); setSearchNotice('已保存。下次生成起生效。'); }) }, '保存'),
               searchNotice && h('span', { className: 'hwb-hint' }, searchNotice))),
+          // 深度思考**站点级覆盖**（0.19.96，task-8/12）：deepseek / glm 各一份站点档。
+          // 与上方**全局**「深度思考」并存、互不覆盖：站点档优先，未选 = 跟随全局
+          //（保存时删键）。两站都放，是因为全局档只对 deepseek 有真机校准，而站点档的
+          // 语义是「这一站要不要覆盖全局」——glm 的站点档正是本轮要的用户可见入口。
+          (settingsTab === 'deepseek' || settingsTab === 'glm') && h('div', { className: 'hwb-row' },
+            h('span', { className: 'hwb-row-label' }, '深度思考（本站覆盖）'),
+            h('div', { className: 'hwb-row-main' },
+              h('select', {
+                className: 'hwb-model-select',
+                value: thinkModeBySite[settingsTab] || 'follow',
+                disabled: pending,
+                title: '本站点专用：优先于上方全局「深度思考」；「跟随全局」= 不覆盖（删除本站键）',
+                onChange: e => saveThinkModeBySite(settingsTab, e.target.value),
+              },
+                h('option', { value: 'follow', title: '不覆盖：完全跟随上方全局「深度思考」' }, '跟随全局'),
+                h('option', { value: 'on', title: '本站强制打开（覆盖全局；未真机校准的站点不点，见驱动）' }, '开'),
+                h('option', { value: 'off', title: '本站强制关闭（覆盖全局）' }, '关')),
+              h('span', { className: 'hwb-hint' }, '本站档优先；与上方全局设置是两条独立配置'))),
+          // GLM 任务模式（0.19.96）：写入 siteModeBySite.glm；空 = 删键 = 不动网页。
+          // 选项文本逐字来自真机盘点（mode-inventory.md §1：任务/研究报告/PPT制作/数据分析）。
+          settingsTab === 'glm' && h('div', { className: 'hwb-row' },
+            h('span', { className: 'hwb-row-label' }, '任务模式'),
+            h('div', { className: 'hwb-row-main' },
+              h('select', {
+                className: 'hwb-model-select',
+                value: siteModeBySite.glm || '',
+                disabled: pending,
+                title: 'GLM 工具选择器的任务模式（真机读数：任务/研究报告/PPT制作/数据分析）；默认不改变网页',
+                onChange: e => saveSiteMode('glm', e.target.value),
+              },
+                h('option', { value: '', title: '默认：不点网页任何模式控件（零位移）' }, '默认（不改变网页）'),
+                h('option', { value: '任务' }, '任务'),
+                h('option', { value: '研究报告' }, '研究报告'),
+                h('option', { value: 'PPT制作' }, 'PPT制作'),
+                h('option', { value: '数据分析' }, '数据分析')),
+              siteModeNotice && h('span', { className: 'hwb-hint' }, siteModeNotice))),
           h('p', { className: 'hwb-hint indent' }, '当前网页模型：' + (driver?.selectedModel ? currentModelName(driver.selectedModel) : '未选择（按默认模型）'))),
 
         // ---- 站点页：该站点的首轮提示词（0.16.38）---------------------------

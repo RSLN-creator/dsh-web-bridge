@@ -3009,3 +3009,72 @@ test('★ #60 登录三态：uncertain 必须渲染「待确认」而不是「�
   assert.equal(statusLabel({ loggedIn: true, loginState: 'uncertain' }), '待确认',
     'uncertain 优先于 loggedIn：猜测出来的 true 也必须标「待确认」');
 });
+
+/**
+ * ★ 0.19.96 设置页：站点级「深度思考覆盖」+ GLM 任务模式下拉（task-8/12 的 UI 最后一跳）。
+ *
+ * ## 背景
+ *
+ * 0.19.95 数据层已通（GET/POST settings 的 thinkModeBySite / siteModeBySite），
+ * 但设置页没有可见控件 ⇒ 用户无法配置。本用例钉住两件事：
+ *   ① **渲染层**：glm 站点 tab 真有「任务模式」下拉（选项文本逐字来自真机盘点
+ *      `.tmp/live-2026-10-19/mode-inventory.md` §1：任务/研究报告/PPT制作/数据分析），
+ *      且 deepseek/glm 都有「深度思考（本站覆盖）」并与全局「深度思考」并存；
+ *   ② **载荷层**（源码级，因为保存是异步 POST）：写的是 `siteModeBySite` /
+ *      `thinkModeBySite` 字段；「跟随全局」必须**删键**而不是写 on/auto
+ *      （写成一个值就是一条真实覆盖，与用户选择不符）。
+ */
+test('★ 0.19.96 glm 站点 tab 有任务模式下拉（选项逐字来自真机盘点）+ 深度思考本站覆盖', async () => {
+  const sites = [
+    { siteId: 'glm', siteName: 'GLM', accountKey: 'glm', displayName: 'GLM', initialized: true, loggedIn: true },
+    { siteId: 'deepseek', siteName: 'DeepSeek', accountKey: 'deepseek', displayName: 'DeepSeek', initialized: true, loggedIn: true },
+  ];
+  // ① glm 站点 tab：任务模式下拉必须渲染出来，选项文本逐字。
+  const glm = await renderPane({ payloads: [emptyWindows], which: 'settings', settingsTab: 'glm', sites });
+  assert.deepEqual(glm.errors, [], 'glm 站点页渲染抛错：' + glm.errors.map(e => e.message).join('; '));
+  const glmText = treeText(glm.tree);
+  for (const s of ['任务模式', '默认（不改变网页）', '研究报告', 'PPT制作', '数据分析', '深度思考（本站覆盖）', '跟随全局']) {
+    assert.ok(glmText.includes(s), 'glm 站点页缺少「' + s + '」——数据层通了但设置页没有入口：' + glmText.slice(0, 500));
+  }
+  // 「任务」二字是其他文案的子串风险低，但单独钉一次：它必须作为**选项**出现。
+  assert.ok(glmText.includes('任务'), 'glm 站点页缺少「任务」选项');
+
+  // ② deepseek 站点 tab：全局「深度思考」与「本站覆盖」必须**并存**（不能互相顶掉）。
+  const ds = await renderPane({ payloads: [emptyWindows], which: 'settings', settingsTab: 'deepseek', sites });
+  assert.deepEqual(ds.errors, [], 'deepseek 站点页渲染抛错：' + ds.errors.map(e => e.message).join('; '));
+  const dsText = treeText(ds.tree);
+  assert.ok(dsText.includes('深度思考（本站覆盖）'), 'deepseek 站点页缺少「深度思考（本站覆盖）」控件');
+  const thinkMentions = (dsText.match(/深度思考/g) || []).length;
+  assert.ok(thinkMentions >= 2,
+    'deepseek 站点页必须同时出现**全局**「深度思考」与「深度思考（本站覆盖）」两个控件（实际出现 ' + thinkMentions + ' 次）');
+});
+
+test('★ 0.19.96 设置页保存载荷：字段名正确、跟随全局=删键（源码级）', () => {
+  const src = bridgeSrcFrom('client.cjs');
+  // ② 载荷字段名：写错字段名后端会忽略，用户以为保存了其实没有。
+  assert.match(src, /api\('settings', \{ siteModeBySite: next \}\)/,
+    '任务模式保存必须 POST `siteModeBySite`（写错字段名 = 静默无效）');
+  assert.match(src, /api\('settings', \{ thinkModeBySite: next \}\)/,
+    '深度思考本站覆盖保存必须 POST `thinkModeBySite`');
+  // ③ 跟随全局 = 删键：写成 'on'/'auto' 会变成一条真实覆盖，与「跟随」相反。
+  assert.match(src, /if \(value === 'on' \|\| value === 'off'\) next\[siteId\] = value; else delete next\[siteId\];/,
+    '「跟随全局」必须删除站点键（不得写成第三个值）');
+  assert.match(src, /if \(m\) next\[siteId\] = m; else delete next\[siteId\];/,
+    '任务模式「默认（不改变网页）」必须删除站点键');
+  // ④ 下拉默认值与 onChange 接线。
+  assert.match(src, /value: thinkModeBySite\[settingsTab\] \|\| 'follow'/,
+    '本站覆盖下拉的「未配置」态必须显示「跟随全局」');
+  assert.match(src, /onChange: e => saveThinkModeBySite\(settingsTab, e\.target\.value\)/,
+    '本站覆盖三态必须接线到 saveThinkModeBySite');
+  assert.match(src, /onChange: e => saveSiteMode\('glm', e\.target\.value\)/,
+    'GLM 任务模式下拉必须接线到 saveSiteMode(glm, …)');
+  // ⑤ 选项文本逐字（真机盘点）：写错一个字就不符合真机控件名称。
+  for (const mode of ['任务', '研究报告', 'PPT制作', '数据分析']) {
+    assert.match(src, new RegExp("h\\('option', \\{ value: '" + mode + "' \\}, '" + mode + "'\\)"),
+      '任务模式选项文本必须逐字为「' + mode + '」（来自 mode-inventory.md 真机读数）');
+  }
+  assert.match(src, /h\('option', \{ value: 'follow'[^}]*\}, '跟随全局'\)/,
+    '本站覆盖必须提供「跟随全局」选项');
+  assert.match(src, /value: siteModeBySite\.glm \|\| ''/,
+    'GLM 任务模式下拉默认值必须是空串（默认不改变网页）');
+});
