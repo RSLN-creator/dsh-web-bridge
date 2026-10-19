@@ -5,6 +5,33 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.94（2026-10-19 夜第二轮：搜索开关 + 多调用并行教学；本机 web/headless 安装版；未推 GitHub/npm）
+
+### 新增：per-site「搜索开关」`searchMode`（auto | on | off）
+
+- 设置：`searchMode`（全局）与 `searchModeBySite`（站点级覆盖，回落链同 `sendGapMsBySite`）；非法值一律归 `auto`。
+- 驱动：`lib/browser-driver.js` 导出纯函数 `planSearchToggle({pressed, mode})`；执行段按计划——
+  `auto`=**零位移**（不点、不改网页；旧实现「按开就点掉」的强制关被取消，这是默认值变化）、
+  `off`=旧行为（按开则点掉）、`on`=未开则点开并**轮询回读 aria-pressed=true**（10×150ms）；
+  回读超时抛 `SEARCH_TOGGLE_UNCONFIRMED`（新错误码，已登记 `WEBCODE_CODES`），绝不静默当成功。
+- 无 `searchTogglePattern` 契约的站点：不点、不抛（只 onThink 提示未校准）——本设置目前只在 **deepseek** 真机校准，设置页也只在 deepseek 分区显示。
+- 真机只读证据（`GET /__webcode/diagnostics`，零发送）：deepseek 会话页 composer 控件 `[智能搜索 pressed=false]`、`[深度思考 pressed=true]`，`requestMetadata.search_enabled=false` ⇒ 控件真实存在、初始未开；`auto` 的「不点」语义有真机旁证。on/off 的点击执行由单测+3 组反向变异覆盖（本机 live profile 被运行中的桥占用，未做发消息验证）。
+
+### 新增：多调用并行教学（仅 deepseek 分支）
+
+- `lib/agent-preset.js` 补强约束式教学：「无依赖、相互独立的多个工具调用，必须合并在同一条回复里一起发起；只有存在依赖才分多轮」；
+  并把 deepseek 的「能用一次调用覆盖就不用多次」改为「同一信息不要重复获取，但独立调用要合并」。
+- **只对 deepseek 生效**：default/glm 文本被 `prompt-variants` 的 ZERO_DRIFT_BASELINE 逐字钉住，其余站点本轮零位移；要全站生效需单独一轮改基线+全站回归。
+
+### 修复（本轮集成时发现）
+
+- **`lib/index.js` executor 里 `searchModeOf(..., siteId)` 写在 `siteId` 声明之前 ⇒ TDZ（每次发送 ReferenceError）**：由 Lead 在集成时经 `prompt-compact` / `tool-loop` 端到端测试抓到并修复（先 siteId、后 searchMode，注释写明「顺序即判据」）。这直接说明「单测绿 ≠ 接线对」，故本条如实入账。
+
+### 边界（如实）
+
+- 任务模式 / 网页搜索（非 deepseek 站点）/ 智能体模式 / z.ai 推理等级：**本轮未实现**；站点「模式入口」盘点证据在 `.tmp/live-2026-10-19/mode-inventory.md`，作为下一版契约取证。
+- 本版本只装到本机 web/headless profile；未推 GitHub、未发 npm；tag 仍停在 `v0.19.92`。
+
 ## 0.19.93（2026-10-19 真机轮，本机 web profile 安装版；未推 GitHub / npm）
 
 本轮顺序：**先写风控调研，再做真机验证与修复**。调研见

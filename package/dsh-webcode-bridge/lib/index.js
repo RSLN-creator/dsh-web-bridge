@@ -935,7 +935,10 @@ export function apply(ctx, config = {}) {
     const n = Math.round(Number(s?.maxConcurrentLanes));
     return Number.isFinite(n) ? Math.min(8, Math.max(1, n)) : 2;
   };
-  const defaultConfig = { extraPrompt: '', extraPromptBySite: {}, defaultModel: 'deepseek', defaultModelBySite: {}, previewRefreshRate: 5000, thinkMode: 'on', subAgentMode: 'own', subAgentSite: 'follow', sendGapMs: 0, sendGapBasis: 'send-to-send', accounts: [], sendGapMsBySlot: {}, promptTransport: 'attach', promptTransportBySite: {}, maxConcurrentLanes: 2 };
+  // 联网搜索开关（0.19.94）：'auto'（默认：不动网页，零位移）/ 'on'（强制开 + 回读确认）/
+  // 'off'（强制关，旧行为）。站点级 searchModeBySite 只保留在编站点 id，回落链见 searchModeOf。
+  // 默认 auto：不配的用户行为只有一处变化——不再像旧实现那样把用户手动开的搜索静默关掉。
+  const defaultConfig = { extraPrompt: '', extraPromptBySite: {}, defaultModel: 'deepseek', defaultModelBySite: {}, previewRefreshRate: 5000, thinkMode: 'on', subAgentMode: 'own', subAgentSite: 'follow', sendGapMs: 0, sendGapBasis: 'send-to-send', accounts: [], sendGapMsBySlot: {}, promptTransport: 'attach', promptTransportBySite: {}, maxConcurrentLanes: 2, searchMode: 'auto', searchModeBySite: {} };
   // 设置**修订号**（0.19.33）：单调递增的进程内计数器，每次 set() 自增。
   //
   // 为什么必须有它：设置面有多处读数（提示词模板 / 再教学 / 投递形态生效值）是从
@@ -3557,6 +3560,18 @@ function imageMarkdown(images) {
   // 出现在用户面前。护栏：test/session-continuity.test.mjs ⑥（同一段剧本，断言从
   // 「拿到 WEB_SESSION_REBUILD_THROTTLED」改成「拿到提示文本、仍只发 1 次、
   // 且下一轮照旧整段重建」）。
+  // 联网搜索开关的**唯一解析点**（0.19.94）：站点档 → 全局档 → 'auto'。
+  // 与 sendGapMsBySlot / promptTransportBySite 同一条回落纪律：站点显式值优先，没配就
+  // 跟随全局；手改配置里的非法值（非三态）逐层跳过，而不是变成第三种没定义过的口径。
+  // 为什么解析放在这里而不是 buildTurn 的 meta：OpenAI 前端 / aux 轮没有 buildTurn 的
+  // 完整 meta，而**所有轮次都会经过** executor；解析点只留一处（两处各算一份必漂移）。
+  const searchModeOf = (settings, siteId) => {
+    const legal = (v) => v === 'on' || v === 'off' || v === 'auto';
+    const bySite = settings?.searchModeBySite;
+    const siteVal = bySite && typeof bySite === 'object' ? bySite[siteId] : undefined;
+    if (legal(siteVal)) return siteVal;
+    return legal(settings?.searchMode) ? settings.searchMode : 'auto';
+  };
   const SESSION_REBUILD_THROTTLE_MS = Math.max(0, Number(cfg.sessionRebuildThrottleMs ?? 60_000) || 0);
   const lastSessionRebuildAt = new Map();   // sessionKey → { at, chars }（真发生过的那次整段重放）
 
@@ -3593,7 +3608,16 @@ function imageMarkdown(images) {
       const qualified = qualifyModelId(m?.model, m?.siteId);
       // thinkMode: 'auto' | 'on' | 'off' — 设置页手动覆盖网页「深度思考」开关
       const thinkMode = ['on', 'off', 'auto'].includes(m?.thinkMode) ? m.thinkMode : 'auto';
+      // 联网搜索开关（0.19.94）：与 thinkMode 同一层收一次合法性；未知值归 auto（零位移）。
+      // 这条 executor 是 sendPrompt 形参 → driver.sendTurn 的**唯一透传点**：会话轮走
+      // turnOpts、无会话轮（OpenAI 前端）走 driver.sendPrompt，两条路都必须带同一个键，
+      // 否则「同一次发送的两条通道」会给出两种搜索开关行为（第二份真相）。
+      // ⚠ 必须先算出 `siteId`（下面一行）再解析 searchMode：本文件 0.19.94 首版把这两行
+      //   写反了，`searchModeOf(..., siteId)` 撞 TDZ（ReferenceError: Cannot access
+      //   'siteId' before initialization）——prompt-compact / tool-loop 两条端到端测试当场
+      //   红；真机上则是每次发送都抛。顺序即判据，别再调换。
       const siteId = m?.siteId || 'deepseek';
+      const searchMode = searchModeOf(configManager.get(), siteId);
       // 账户槽（0.14.7）：meta 显式带 accountKey；只有裸 id 的调用方
       // （OpenAI 前端、aux 轮）则从限定模型 id 里解出来（`glm@2:glm-5.3`）。
       // 两者都拿不到 → 默认槽，即 0.14.6 的行为。
@@ -3619,6 +3643,7 @@ function imageMarkdown(images) {
             model: qualified,
             images: m.images,
             thinkMode,
+            searchMode,
             // 思考等级（0.19.48）：由 buildTurn 的 meta 带来（源头是请求的
             // `GenerateOptions.reasoningEffort`），驱动在选完模型之后落到网页控件上。
             // null 表示「用户没选」——驱动据此**不动**网页当前档位。
@@ -3728,7 +3753,7 @@ function imageMarkdown(images) {
             throw err;
           });
         }
-        return driverFor(accountKey).sendPrompt(prompt, { signal: opts.signal, meta: m, onDelta: opts.onDelta, onThink: opts.onThink, onImage: opts.onImage, model: qualified, thinkMode });
+        return driverFor(accountKey).sendPrompt(prompt, { signal: opts.signal, meta: m, onDelta: opts.onDelta, onThink: opts.onThink, onImage: opts.onImage, model: qualified, thinkMode, searchMode });
       };
       // 投放前等待（0.19.44）：本 executor **开始跑**的那一刻。适配器的看门狗
       // 在 `relay.submit()` 之后立刻开跑，而 submit 只是入队——executor 由

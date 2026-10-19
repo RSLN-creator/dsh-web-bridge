@@ -1082,6 +1082,11 @@ export function createWebControl(deps = {}) {
         // 站点级投递形态（0.19.32）：同上——从未保存过时设置文件里没有这个键，
         // 回 undefined 会让前端渲染成「加载失败」。回空对象 = 每个站点都跟随全局。
         promptTransportBySite: config.promptTransportBySite && typeof config.promptTransportBySite === 'object' ? config.promptTransportBySite : {},
+        // 联网搜索三态（0.19.94）：**必须带默认值回给前端**（与 promptTransport /
+        // sendGapBasis 同一条理由）——从未保存过时设置文件里没有这个键，回 undefined
+        // 会让设置页三态下拉一个都不选中。站点级字典同理回空对象（未配置 = 跟随全局）。
+        searchMode: config.searchMode === 'on' || config.searchMode === 'off' ? config.searchMode : 'auto',
+        searchModeBySite: config.searchModeBySite && typeof config.searchModeBySite === 'object' ? config.searchModeBySite : {},
         maxConcurrentLanes: laneCap,
       };
     },
@@ -1188,6 +1193,22 @@ export function createWebControl(deps = {}) {
           if (text) out[sid] = text;
         }
         updated.extraPromptBySite = out;
+      }
+      // 联网搜索开关（0.19.94）：全局只认逐字 'auto'|'on'|'off'，其余一律归 'auto'
+      //（零位移默认；同 sendGapBasis / promptTransport 的「写错只许退化成默认行为」）。
+      // 站点级只保留**在编站点 id + 合法值**：未知站点的键永远不会被查表命中，留着只会
+      // 让设置文件越来越脏（与 promptTransportBySite / sendGapMsBySlot 同一条纪律）。
+      if ('searchMode' in updated) {
+        updated.searchMode = ['on', 'off', 'auto'].includes(updated.searchMode) ? updated.searchMode : 'auto';
+      }
+      if ('searchModeBySite' in updated) {
+        const src = updated.searchModeBySite && typeof updated.searchModeBySite === 'object' ? updated.searchModeBySite : {};
+        const out = {};
+        for (const [sid, val] of Object.entries(src)) {
+          if (!getSite(sid)) continue;
+          if (val === 'on' || val === 'off' || val === 'auto') out[sid] = val;
+        }
+        updated.searchModeBySite = out;
       }
       const result = settingsStore.set(updated);
       // 落盘成功后把**新的**修订号一起回（0.19.33）：客户端不必等下一次轮询才知道

@@ -43,7 +43,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { listen } from './fixtures/listen.js';
-import { promptTransportPlan } from '../lib/browser-driver.js';
+import { promptTransportPlan, planSearchToggle } from '../lib/browser-driver.js';
 
 const pkg = path.dirname(import.meta.dirname);
 const LIB = path.join(pkg, 'lib');
@@ -581,7 +581,10 @@ test('⑨ 并发车道上限：往返 + 夹取 + 保存即生效的接线', asyn
     'laneCapOf 夹取函数缺失或口径变了（数值夹 1..8，非数值归 2）——三处（index/web-control/设置页）同源');
   assert.match(src, /return Number\.isFinite\(n\) \? Math\.min\(8, Math\.max\(1, n\)\) : 2;/,
     'laneCapOf 的夹取语义必须保持：数值→1..8，NaN→默认 2（0 会堵死队列，写 0 的人要的是 1）');
-  assert.match(src, /maxConcurrentLanes: 2 \}/,
+  // 0.19.94：defaultConfig 之后又追加了 searchMode/searchModeBySite，`: 2 }` 的
+  // 「键在对象末尾」形状不再成立。判据改钉「声明 + 值」本身（`: 2,` 表示后面还有键），
+  // 语义不变——仍然是「必须声明 2，未配置用户零位移」。
+  assert.match(src, /maxConcurrentLanes: 2,/,
     'defaultConfig 必须声明 maxConcurrentLanes: 2（0.19.4 的保守起点，未配置用户零位移）');
   assert.match(src, /maxConcurrentLanes: laneCapOf\(configManager\.get\(\)\)/,
     'createRelay 必须用「设置值」覆盖 ...cfg 摊平的静态值（settings > config 优先序）');
@@ -600,3 +603,97 @@ test('⑨ 并发车道上限：往返 + 夹取 + 保存即生效的接线', asyn
   assert.match(page, /maxConcurrentLanes: laneCap,/,
     '设置页保存 payload 必须带 maxConcurrentLanes 键（键名丢了会静默保存不了上限）');
 });
+
+// ── ⑩ 联网搜索三态（0.19.94，用户需求：auto/on/off 可配 + 站点级覆盖）──────────
+//
+// ## 三组判据，缺一组就会出现「改了设置、行为没变」或「说开了、其实没开」
+//
+//   ① 判据层（纯函数）：auto 零位移；off 只关；on 未开则开、**读不到控件必须 fail**。
+//      fail 那格是「说做了、其实没做」那一族的唯一自动化防线：网页改版后控件消失，
+//      若静默 noop，用户以为联网搜索开了，实际没开。
+//   ② 配置层（真 HTTP，withControlPlane）：GET 必须带默认 'auto'（否则设置页三态
+//      下拉一个都不选中）；POST 非法值归 auto；站点级字典只留**在编站点 id + 合法值**。
+//   ③ 接线层（源码）：index.js 的 sendPrompt/executor 现读 configManager 解析生效值
+//      （不是构造期快照），并把 searchMode 透传给 **两条**驱动通道（sendTurn / sendPrompt）；
+//      driver 的 runTurn 接住它、走 planSearchToggle，且 on 的点开后必须**回读**
+//      aria-pressed 才允许算成功。
+//
+// ## 反向验证纪要（读数见 .tmp/live-2026-10-19/search-toggle-report.md）
+//
+//   变异 A：planSearchToggle 把 on+未开 判成 noop ⇒ ① 红；
+//   变异 B：auto 分支判成 turn-off ⇒ ① 红（且违反「零位移」语义）；
+//   变异 C：删掉 driver 的回读确认段 ⇒ ③ 红。
+test('⑩ 联网搜索三态：真值表 + 设置面归一化 + sendPrompt→runTurn 接线与回读确认', async () => {
+  // ① 纯函数真值表：动作与 reason 都逐格钉死（reason 供日志/报告，不许含糊）。
+  const cases = [
+    [{ pressed: true, mode: 'auto' }, 'noop', 'mode-auto'],
+    [{ pressed: false, mode: 'auto' }, 'noop', 'mode-auto'],
+    [{ pressed: null, mode: 'auto' }, 'noop', 'mode-auto'],
+    [{ pressed: true, mode: 'off' }, 'turn-off', 'mode-off-pressed'],
+    [{ pressed: false, mode: 'off' }, 'noop', 'mode-off-already-off'],
+    [{ pressed: null, mode: 'off' }, 'noop', 'mode-off-control-missing'],
+    [{ pressed: true, mode: 'on' }, 'noop', 'mode-on-already-on'],
+    [{ pressed: false, mode: 'on' }, 'turn-on', 'mode-on-not-pressed'],
+    [{ pressed: null, mode: 'on' }, 'fail', 'mode-on-control-missing'],
+    // 非法 mode 归 auto：手改配置只许退化成零位移，不许变成第三种口径。
+    [{ pressed: false, mode: 'bogus' }, 'noop', 'mode-auto'],
+    [{ pressed: null, mode: undefined }, 'noop', 'mode-auto'],
+  ];
+  for (const [input, action, reason] of cases) {
+    const plan = planSearchToggle(input);
+    assert.equal(plan.action, action,
+      'planSearchToggle(' + JSON.stringify(input) + ') 动作必须是 ' + action + '：' + JSON.stringify(plan));
+    assert.equal(plan.reason, reason,
+      'planSearchToggle(' + JSON.stringify(input) + ') 的 reason 必须是 ' + reason + '：' + JSON.stringify(plan));
+  }
+
+  // ② 设置面（真 HTTP）：默认值、写入往返、非法值归一、站点级过滤。
+  await withControlPlane({ driver: statusStub('attach') }, async ({ get, post }) => {
+    const before = await get('settings');
+    assert.equal(before.json.searchMode, 'auto',
+      'GET settings 必须带默认 searchMode=auto 回来（否则设置页三态下拉像「坏了」）：'
+      + JSON.stringify(before.json.searchMode));
+    assert.deepEqual(before.json.searchModeBySite, {},
+      'GET settings 的 searchModeBySite 缺省必须是空对象（未配置 = 每站跟随全局）：'
+      + JSON.stringify(before.json.searchModeBySite));
+
+    const w = await post('settings', { searchMode: 'on' });
+    assert.equal(w.status, 200, 'POST settings 写 searchMode 必须可用：' + w.status);
+    assert.equal((await get('settings')).json.searchMode, 'on', '写入 on 后读不回 on（读写不闭环）');
+
+    await post('settings', { searchMode: 'ON' });
+    assert.equal((await get('settings')).json.searchMode, 'auto',
+      '非法值 ON 必须归 auto（只认逐字 on/off/auto，大小写不算合法）');
+
+    await post('settings', {
+      searchModeBySite: { deepseek: 'off', kimi: 'on', __nope__: 'on', glm: 'bad', qwen: null },
+    });
+    const after = await get('settings');
+    assert.deepEqual(after.json.searchModeBySite, { deepseek: 'off', kimi: 'on' },
+      '站点级字典只许保留在编站点 id + 合法值（未知站点/非法值必须丢弃，否则设置文件越来越脏）：'
+      + JSON.stringify(after.json.searchModeBySite));
+  });
+
+  // ③ 接线层（源码级：relay/executor 是 apply() 作用域内的真对象，单测拿不到句柄）。
+  const indexSrc = fs.readFileSync(path.join(LIB, 'index.js'), 'utf8');
+  assert.match(indexSrc, /searchModeOf = \(settings, siteId\)/,
+    'index.js 必须有 searchModeOf 回落链解析（站点档 → 全局档 → auto），否则站点级覆盖无处生效');
+  assert.match(indexSrc, /const searchMode = searchModeOf\(configManager\.get\(\), siteId\);/,
+    'sendPrompt/executor 必须**现读** configManager 解析生效 searchMode（构造期快照会让设置页改了行为不变）');
+  assert.match(indexSrc, /thinkMode,\r?\n\s+searchMode,/,
+    'turnOpts 必须把 searchMode 透传给 driver.sendTurn（漏传 ⇒ 会话轮永远走默认 auto）');
+  assert.match(indexSrc, /thinkMode, searchMode \}\)/,
+    '无会话轮（driver.sendPrompt）也必须带 searchMode——两条通道两种行为就是第二份真相');
+
+  const drvSrc = fs.readFileSync(path.join(LIB, 'browser-driver.js'), 'utf8');
+  assert.match(drvSrc, /searchMode = 'auto'/,
+    'runTurn 形参必须接住 searchMode 且缺省 auto（零位移默认）');
+  assert.match(drvSrc, /planSearchToggle\(\{ pressed: beforePressed, mode: searchModeEffective \}\)/,
+    'runTurn 必须走 planSearchToggle 三态计划，不许退回「pressed=true 就点掉」的硬编码（那只有 off）');
+  assert.match(drvSrc, /afterPressed !== 'true'[\s\S]{0,500}SEARCH_TOGGLE_UNCONFIRMED/,
+    'on 的点开后必须有 aria-pressed 回读确认，且确认失败抛 SEARCH_TOGGLE_UNCONFIRMED'
+    + '——删掉回读等于「点一下就当开了」（说做了、其实没做）');
+  assert.match(drvSrc, /for \(let i = 0; i < 10; i \+= 1\)/,
+    '回读必须轮询等待（React 受控组件的 aria-pressed 在下一帧才更新；点一次立刻读会把成功误判成失败）');
+});
+

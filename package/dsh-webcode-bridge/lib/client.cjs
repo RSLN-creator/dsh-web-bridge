@@ -4311,6 +4311,11 @@ window.__ModuleLoader__.load({
       const [thinkMode, setThinkMode] = React.useState('auto');
       const [thinkSaved, setThinkSaved] = React.useState('auto');
       const [thinkNotice, setThinkNotice] = React.useState('');
+      // 联网搜索（0.19.94）：三态 auto/on/off，与 thinkMode 同一套「草稿 / 已保存 /
+      // 提示」三件套。auto = 不碰网页（零位移）/ on = 强制开并回读确认 / off = 旧行为。
+      const [searchMode, setSearchMode] = React.useState('auto');
+      const [searchModeSaved, setSearchModeSaved] = React.useState('auto');
+      const [searchNotice, setSearchNotice] = React.useState('');
       const [subAgentMode, setSubAgentMode] = React.useState('own');
       const [subAgentSaved, setSubAgentSaved] = React.useState('own');
       const [subAgentNotice, setSubAgentNotice] = React.useState('');
@@ -4445,6 +4450,10 @@ window.__ModuleLoader__.load({
           setDefaultModel(s.defaultModel || ''); setModelSaved(s.defaultModel || '');
           setThinkMode(['on', 'off', 'auto'].includes(s.thinkMode) ? s.thinkMode : 'auto');
           setThinkSaved(['on', 'off', 'auto'].includes(s.thinkMode) ? s.thinkMode : 'auto');
+          // 联网搜索三态（0.19.94）：与服务端 GET settings 同一条归一化（只认逐字三态），
+          // 前端不自己造默认值——两侧各造一份默认时，面板选中项与真实行为会分叉。
+          const sm = ['on', 'off', 'auto'].includes(s.searchMode) ? s.searchMode : 'auto';
+          setSearchMode(sm); setSearchModeSaved(sm);
           setSubAgentMode(s.subAgentMode === 'share' ? 'share' : 'own');
           setSubAgentSaved(s.subAgentMode === 'share' ? 'share' : 'own');
           const subSite = s.subAgentSite && String(s.subAgentSite) !== 'follow' ? String(s.subAgentSite) : 'follow';
@@ -5011,6 +5020,17 @@ window.__ModuleLoader__.load({
                 h('option', { value: 'off', title: '追求速度' }, '始终关闭')),
               h('button', { disabled: pending || thinkMode === thinkSaved, onClick: () => saveSetting('thinkMode', thinkMode, r => { const v = ['on', 'off', 'auto'].includes(r.thinkMode) ? r.thinkMode : thinkMode; setThinkMode(v); setThinkSaved(v); setThinkNotice('已保存。下次生成起生效。'); }) }, '保存'),
               thinkNotice && h('span', { className: 'hwb-hint' }, thinkNotice))),
+          // 联网搜索（0.19.94）：三态开关**只有 deepseek 站点显示**——搜索控件的真机校准
+          // 只在 deepseek 做过（aria-pressed 文本 = 智能搜索/联网搜索）。其余站点不暴露
+          // 未取证的开关，避免「设置了、网页那边根本没有这个控件」的假承诺。
+          settingsTab === 'deepseek' && h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '联网搜索'),
+            h('div', { className: 'hwb-row-main' },
+              h('select', { className: 'hwb-model-select', value: searchMode, disabled: pending, onChange: e => setSearchMode(e.target.value) },
+                h('option', { value: 'auto', title: '不碰网页的搜索开关（零位移，默认）' }, '自动'),
+                h('option', { value: 'on', title: '本轮强制打开；点开后回读 aria-pressed 确认，确认不了就报错' }, '始终开启'),
+                h('option', { value: 'off', title: '旧行为：搜索被按开就点掉' }, '始终关闭')),
+              h('button', { disabled: pending || searchMode === searchModeSaved, onClick: () => saveSetting('searchMode', searchMode, r => { const v = ['on', 'off', 'auto'].includes(r.searchMode) ? r.searchMode : searchMode; setSearchMode(v); setSearchModeSaved(v); setSearchNotice('已保存。下次生成起生效。'); }) }, '保存'),
+              searchNotice && h('span', { className: 'hwb-hint' }, searchNotice))),
           h('p', { className: 'hwb-hint indent' }, '当前网页模型：' + (driver?.selectedModel ? currentModelName(driver.selectedModel) : '未选择（按默认模型）'))),
 
         // ---- 站点页：该站点的首轮提示词（0.16.38）---------------------------

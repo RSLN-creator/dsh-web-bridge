@@ -944,6 +944,53 @@ export function stallStep(prevLen, curLen, stalled) {
 }
 
 /**
+ * 网页「联网搜索」开关的**计划层**（纯函数，0.19.94「搜索开关」的判据真源）。
+ *
+ * ## 为什么需要它（用户需求）
+ *
+ * 用户要求把搜索开关做成可配置的三态：`auto`（不动网页，零位移）/ `on`（强制开）/
+ * `off`（强制关，即旧行为）。旧实现只有一行硬编码：「搜索按钮是 aria-pressed=true
+ * 就点掉它」——**只有 off**，用户没有选择，而且它会在用户手动开了搜索后静默关掉。
+ *
+ * ## 三态语义（本函数只做判定，不碰页面）
+ *
+ * | mode | pressed=true | pressed=false | pressed=null（控件找不到/读不到） |
+ * | --- | --- | --- | --- |
+ * | auto | noop | noop | noop（**零位移**：不点、不退化成 off） |
+ * | off  | turn-off | noop | noop（没有可关的东西） |
+ * | on   | noop | turn-on | **fail**（用户明确要求开，却读不到控件 ⇒ 不许假装成功） |
+ *
+ * ## 为什么 `on` + 读不到必须是 fail 而不是 noop
+ *
+ * `on` 是用户的**显式要求**。网页改版后 aria-pressed 控件不见了，若静默 noop，
+ * 用户以为「已开启联网搜索」，实际网页没开——这正是本项目「说做了、其实没做」
+ * 那一族缺陷。fail 让驱动抛 `SEARCH_TOGGLE_UNCONFIRMED`，把「没确认」如实告诉用户。
+ *
+ * ## 为什么非法 mode 归 auto
+ *
+ * 设置文件可手改。写错的 mode 只许退化成**零位移**（旧用户行为不变），不许变成
+ * 第三种谁也没定义过的口径——与 sendGapBasis / promptTransport 的归一化纪律同源。
+ *
+ * @param {{pressed?: boolean|null, mode?: string}} [input]
+ *   pressed = 搜索控件当前 aria-pressed（true/false），控件不存在或读不到时 null/undefined。
+ * @returns {{action: 'noop'|'turn-on'|'turn-off'|'fail', reason: string}}
+ */
+export function planSearchToggle({ pressed = null, mode = 'auto' } = {}) {
+  // 归一化与 index.js / web-control.js 同一条纪律：只认三个合法值，其余归 auto。
+  const m = mode === 'on' || mode === 'off' ? mode : 'auto';
+  const p = typeof pressed === 'boolean' ? pressed : null;
+  if (m === 'auto') return { action: 'noop', reason: 'mode-auto' };
+  if (m === 'off') {
+    if (p === true) return { action: 'turn-off', reason: 'mode-off-pressed' };
+    return { action: 'noop', reason: p === false ? 'mode-off-already-off' : 'mode-off-control-missing' };
+  }
+  // on
+  if (p === true) return { action: 'noop', reason: 'mode-on-already-on' };
+  if (p === false) return { action: 'turn-on', reason: 'mode-on-not-pressed' };
+  return { action: 'fail', reason: 'mode-on-control-missing' };
+}
+
+/**
  * 建一个站点驱动实例：用真实 Edge 打开站点、登录、发消息、收流、回读会话 id。
  *
  * 一个实例 = **一个「站点 × 账户槽」**（0.14.7 起）。同站点两个账户是两个实例、
@@ -3402,7 +3449,7 @@ export function createBrowserDriver(options = {}) {
     return result;
   }
 
-  async function runTurn(message, { navigate, key = null, signal, onDelta, onThink, onImage, model, images, thinkMode, reasoningEffort = null } = {}) {
+  async function runTurn(message, { navigate, key = null, signal, onDelta, onThink, onImage, model, images, thinkMode, searchMode = 'auto', reasoningEffort = null } = {}) {
     if (busy || transitioning) throw new Error('driver busy');
     busy = true;
     let timer = null;
@@ -3642,9 +3689,70 @@ export function createBrowserDriver(options = {}) {
       // 上传确认结果也要可见：附件没落地时报错已经很响，但成功时给一条
       // 可核对的痕迹（张数 + 命中的证据选择器）便于真机排查。
       if (attachEvidence) onThink?.(`已附加 ${attachEvidence.attached} 张图片（页面证据：${attachEvidence.evidence}）`);
+      // 联网搜索开关（0.19.94，用户需求：三态 auto/on/off，站点级可覆盖）。
+      //
+      // 旧实现只有这里一句硬编码：「aria-pressed=true 就点掉」——等价于**只有 off**，
+      // 用户手动开了联网搜索也会被静默关掉。现在按 `planSearchToggle` 的计划执行：
+      //   · auto → 一个字都不动（零位移，默认值；与旧实现的差别是「不强制关」）；
+      //   · off  → 保持旧行为：只把已按开的点掉；
+      //   · on   → 未开则点开，并**回读 aria-pressed 确认真的变成 true**。
+      //
+      // 回读必须轮询：点击只保证事件派发，React 受控组件的 aria-pressed 属性是**下一
+      // 次渲染**才更新；点完立刻读一次会把「刚点开」误判成失败（本项目「合成点击后
+      // 立即回读」这一类早前已记过）。超时仍不是 true ⇒ 抛 SEARCH_TOGGLE_UNCONFIRMED，
+      // 绝不静默当成功——用户选了 on，网页却没开，必须让他知道。
+      //
+      // 站点没有 searchTogglePattern 契约时**不动网页也不抛错**：该设置目前只对
+      // deepseek 真机校准（设置页也只在 deepseek 分区露出这个控件）；在别的站点上
+      // 因为「读不到控件」而杀掉整轮，会把无关站点一起拖红。仅在有契约的站点上，
+      // 「契约在但控件读不到」才按 plan 的 fail 处理。
+      const searchModeEffective = searchMode === 'on' || searchMode === 'off' ? searchMode : 'auto';
       if (contract.searchTogglePattern) {
         const search = page.locator('[aria-pressed]').filter({ hasText: contract.searchTogglePattern });
-        if (await search.count() && await search.first().getAttribute('aria-pressed') === 'true') await search.first().click();
+        const searchCount = await search.count();
+        const beforePressed = searchCount ? (await search.first().getAttribute('aria-pressed')) === 'true' : null;
+        const searchPlan = planSearchToggle({ pressed: beforePressed, mode: searchModeEffective });
+        if (searchPlan.action === 'turn-off') {
+          await search.first().click();
+          log(`search toggle turned off (site=${siteId}, reason=${searchPlan.reason})`);
+        } else if (searchPlan.action === 'turn-on') {
+          await search.first().click();
+          // 回读确认：最多等 ~1.5s（10 × 150ms），读不到 true 就是没开成。
+          let afterPressed = null;
+          for (let i = 0; i < 10; i += 1) {
+            afterPressed = await search.first().getAttribute('aria-pressed');
+            if (afterPressed === 'true') break;
+            await delay(150);
+          }
+          if (afterPressed !== 'true') {
+            const toggleErr = new Error(
+              `SEARCH_TOGGLE_UNCONFIRMED: 已点击联网搜索开关但回读 aria-pressed=${JSON.stringify(afterPressed)}`
+              + `（site=${siteId}，期望 true）— 网页控件可能已改版，本轮不会假装搜索已开启`,
+            );
+            // 错误码不登记进 WEBCODE_CODES 的原因见 test/settings-transport.test.mjs ⑩
+            // 与 .tmp/live-2026-10-19/search-toggle-report.md：error-codes.js 不在本轮
+            // 改动写域内（任务边界），登记由 Lead 收口；withWebcodeCode 仍保证 failure
+            // 快照与 code 同源，码不会在 harness 边界退化成 UNKNOWN。
+            withWebcodeCode(toggleErr, 'SEARCH_TOGGLE_UNCONFIRMED');
+            toggleErr.siteId = siteId;
+            toggleErr.readback = afterPressed;
+            warn(`search toggle not confirmed (site=${siteId}, after=${JSON.stringify(afterPressed)})`);
+            throw toggleErr;
+          }
+          log(`search toggle turned on and confirmed (site=${siteId}, reason=${searchPlan.reason})`);
+        } else if (searchPlan.action === 'fail') {
+          const toggleErr = new Error(
+            `SEARCH_TOGGLE_UNCONFIRMED: 本轮要求开启联网搜索，但页面上读不到搜索控件`
+            + `（site=${siteId}，匹配 aria-pressed 文本 ${contract.searchTogglePattern}）— 网页可能已改版`,
+          );
+          withWebcodeCode(toggleErr, 'SEARCH_TOGGLE_UNCONFIRMED');
+          toggleErr.siteId = siteId;
+          throw toggleErr;
+        }
+        // noop：auto（零位移）/ off 且本来就关 / on 且本来就开 —— 一律不点。
+      } else if (searchModeEffective === 'on') {
+        // 站点没有搜索控件契约：如实提示「无法确认」，但**不杀轮**（理由见上）。
+        onThink?.(`⚠ 本轮联网搜索设为 on，但 ${siteId} 站点尚未校准搜索开关，无法确认已开启`);
       }
       throwIfAborted();
       if (Array.isArray(images) && images.length) {
@@ -4494,7 +4602,7 @@ export function createBrowserDriver(options = {}) {
     }
   }
 
-  async function sendTurn(key, message, { fresh = false, signal, onDelta, onThink, onImage, model, images, thinkMode, reasoningEffort = null } = {}) {
+  async function sendTurn(key, message, { fresh = false, signal, onDelta, onThink, onImage, model, images, thinkMode, searchMode = 'auto', reasoningEffort = null } = {}) {
     // 这个 key 就是「当前」会话槽（`status().sessionSlot` 报它）。
     lastSessionKey = String(key || 'main');
     let existing = conversationFor(key);
@@ -4626,7 +4734,7 @@ export function createBrowserDriver(options = {}) {
     try {
       // key 一并交给 runTurn：「落地即落盘」的写点在里面（见 runTurn 的
       // noteLanded）——身份必须在导航落地那一刻就记下，而不是等这里成功返回。
-      result = await runTurn(message, { key, navigate, signal, onDelta, onThink, onImage, model, images, thinkMode, reasoningEffort });
+      result = await runTurn(message, { key, navigate, signal, onDelta, onThink, onImage, model, images, thinkMode, searchMode, reasoningEffort });
     } catch (err) {
       // 会话槽里存的是一个已经死掉的网页会话：立刻丢掉，别让下一轮再撞一次。
       // 上层收到 WEB_SESSION_LOST 后作废游标并以整段首轮提示词重开。
@@ -4668,9 +4776,12 @@ export function createBrowserDriver(options = {}) {
     return result;
   }
 
-  async function sendPrompt(prompt, { signal, onDelta, onThink, onImage, meta, model, thinkMode } = {}) {
+  async function sendPrompt(prompt, { signal, onDelta, onThink, onImage, meta, model, thinkMode, searchMode } = {}) {
     return runTurn(prompt, {
       navigate: 'fresh', signal, onDelta, onThink, onImage, thinkMode,
+      // 联网搜索（0.19.94）：与 have-session 的 sendTurn 同一形参名、同一条 meta 来源，
+      // 否则「无会话轮」与「会话轮」会给出两种搜索开关行为——第二份真相。
+      searchMode,
       model: model || meta?.model,
       images: meta?.images,
       // 无会话的一轮（OpenAI 前端）同样接受思考等级：契约与有会话那一轮**同一条**
