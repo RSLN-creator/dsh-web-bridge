@@ -317,6 +317,41 @@ export function answerSelectorFor(siteId) {
   return (contract && contract.answerSelector) || ANSWER_SELECTOR;
 }
 
+/**
+ * 站点能力声明的**唯一读取点**（0.22.0 续，DeepSeek 试点第 2 步）。
+ *
+ * ## 为什么需要这个函数
+ *
+ * `browser-driver.js` 里曾有 **6 处 `siteId === 'deepseek'`** 的硬编码分支：
+ * 模型选择路径、UI 代际侦测、localStorage 令牌键（两处）、会话目录 API、历史消息 API。
+ * 它们表达的是同一件事——**DeepSeek 是唯一拥有完整网页 API 能力的站点**，
+ * 其余 9 站全靠 DOM 抓取——但它们写成了 6 段散落的 `if`。
+ *
+ * 那样的代价是可预期的：新增一个「也带会话 API」的站点时，得在驱动里找到这 6 处、
+ * 逐处判断哪些该跟着变；漏一处就是**一个站点的新能力影响另外九个**。
+ *
+ * 现在改成查声明（`lib/sites/<id>.js` 的 `capabilities`），驱动只问「声明了什么」。
+ *
+ * ## 契约（三条）
+ *
+ * 1. **未声明 = 没有这项能力**（`undefined` 一律按 falsy 处理）。这是安全的默认值：
+ *    少做一件事只会走「DOM 抓取 / 通用模型选择」这条既有的稳健路径；
+ * 2. **不在这里做 fallback 猜测**——例如 `tokenKey` 缺省就是 `null`，
+ *    不去试 `userToken` 之类「大概是这个」的名字。猜错会让抓取静默失败；
+ * 3. 允许传站点对象本身（`getSite` 的结果），也允许传 `siteId` 字符串——
+ *    驱动内部两处拿到的东西不一样（一处有 `siteId`，一处已有 site）。
+ *
+ * @param {string|object} siteOrId 站点 id 或站点声明对象
+ * @returns {object} 能力声明；未知站点返回空对象（**不抛**：见契约 1）
+ */
+export function capabilitiesOf(siteOrId) {
+  const site = typeof siteOrId === 'string' ? getSite(siteOrId) : siteOrId;
+  return (site && site.capabilities) || EMPTY_CAPABILITIES;
+}
+
+/** `capabilitiesOf` 的未知站点返回值：冻结的空对象，避免调用方误改。 */
+const EMPTY_CAPABILITIES = Object.freeze({});
+
 /** DOM 兜底抓取（decoder:'dom' 站点）：等回答区稳定后抄全文。 */
 const DOM_CAPTURE = `
 (async () => {
@@ -5025,7 +5060,11 @@ export function createBrowserDriver(options = {}) {
     }
     // 手动覆盖 > 模型默认;auto 时不干预 pill 之外的既有逻辑
     const label = new RegExp('^(?:' + model.labels.join('|') + ')$', 'i');
-    if (siteId === 'deepseek') return selectModelDeepSeek(model, { hasImages, label, thinkOverride });
+    // 0.22.0 续：原先写死 `siteId === 'deepseek'`。现在查站点声明（见 capabilitiesOf）。
+    // 未声明 modelSelect 的站点一律走通用 picker —— 与改前逐字相同的默认值。
+    if (capabilitiesOf(siteId).modelSelect === 'pill') {
+      return selectModelDeepSeek(model, { hasImages, label, thinkOverride });
+    }
     return selectModelGeneric(model, { label, resume });
   }
 
@@ -5157,7 +5196,9 @@ export function createBrowserDriver(options = {}) {
    *  带图发送同样是 default + ref_file_ids，识图不再单独占一个 model_type）。
    *  判定缓存到 dsUi，页面重装（installPage）时失效。 */
   async function detectDeepSeekUi() {
-    if (siteId !== 'deepseek' || !page || page.isClosed?.()) return null;
+    // 0.22.0 续：原先写死 `siteId !== 'deepseek'`。现在只问站点有没有声明 uiGenerations。
+    // 未声明 ⇒ 返回 null（与改前其余 9 站的行为逐字相同）。
+    if (!capabilitiesOf(siteId).uiGenerations || !page || page.isClosed?.()) return null;
     if (dsUi) return dsUi;
     try {
       if (await page.getByText(/^(快速模式|专家模式|识图模式)$/).filter({ visible: true }).count() > 0) {
@@ -5390,7 +5431,9 @@ export function createBrowserDriver(options = {}) {
     if (origin !== new URL(cfg.site).origin) {
       await page.goto(cfg.site, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => {});
     }
-    const key = siteId === 'deepseek' ? 'userToken' : null;
+    // 0.22.0 续：令牌键改由站点声明。未声明 ⇒ null ⇒ 直接返回 null（与改前逐字相同：
+    // 其余 9 站从没有这套 localStorage 令牌，抓取走 DOM）。
+    const key = capabilitiesOf(siteId).tokenKey || null;
     if (!key) return null;
     return page.evaluate((k) => {
       const raw = localStorage.getItem(k);
@@ -5877,11 +5920,15 @@ export function createBrowserDriver(options = {}) {
       } finally {
         clearTimeout(t);
       }
-    }, { apiPath, method, body, timeoutMs, tokenKey: siteId === 'deepseek' ? 'userToken' : null });
+    }, { apiPath, method, body, timeoutMs, tokenKey: capabilitiesOf(siteId).tokenKey || null });
   }
 
   async function listSessions(count = 100) {
-    if (siteId !== 'deepseek') throw new Error('listSessions: 仅 DeepSeek 支持会话目录 API');
+    // 0.22.0 续：能力声明取代站点点名。错误文案保持「可读 + 说清为什么」：
+    // 未声明 sessionApi 的站点不是「坏了」，是它只有 DOM、没有会话目录接口。
+    if (!capabilitiesOf(siteId).sessionApi) {
+      throw new Error(`listSessions: 站点 ${siteId} 未声明 sessionApi（它没有会话目录 API，只能靠 DOM 抓取）`);
+    }
     const r = await webApi('/api/v0/chat_session/fetch_page?count=' + Math.min(500, Math.max(1, Number(count) || 100)));
     const data = r.json?.data ?? r.json;
     const biz = data?.biz_data ?? data;
@@ -5902,7 +5949,10 @@ export function createBrowserDriver(options = {}) {
   }
 
   async function fetchHistory(sessionId) {
-    if (siteId !== 'deepseek') throw new Error('fetchHistory: 仅 DeepSeek 支持历史消息 API');
+    // 0.22.0 续：同 listSessions，改查能力声明。
+    if (!capabilitiesOf(siteId).historyApi) {
+      throw new Error(`fetchHistory: 站点 ${siteId} 未声明 historyApi（它没有历史消息 API，只能靠 DOM 抓取）`);
+    }
     if (!/^[0-9a-zA-Z-]{8,64}$/.test(String(sessionId || ''))) throw new Error('invalid sessionId');
     const r = await webApi('/api/v0/chat/history_messages?chat_session_id=' + encodeURIComponent(sessionId));
     const data = r.json?.data ?? r.json;

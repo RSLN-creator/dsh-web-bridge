@@ -70,4 +70,43 @@ export const deepseekSite = {
   models: [
     { id: 'deepseek', name: 'DeepSeek', labels: ['专家模式', 'DeepSeek'], thinking: true, context: 1_000_000, budget: 1_000_000, acceptsImages: true },
   ],
+
+  // ── 能力声明（0.22.0 续：DeepSeek 试点的第 2 步）───────────────────────────
+  //
+  // ## 为什么要有这一块
+  //
+  // 此前 `browser-driver.js` 里有 **6 处 `siteId === 'deepseek'` 硬编码**，把它们
+  // 读成一句话就是：**DeepSeek 是唯一拥有完整网页 API 能力的站点，其余 9 站全靠 DOM 抓取**。
+  // 那 6 处是行为差异，不是形状差异，所以它们搬不进上面那些选择器字段里。
+  //
+  // 现在把它们降为**声明**：驱动只问「这个站点声明了什么能力」，不再点名站点。
+  // 新增站点要补的是一行数据，而不是去改驱动里的 if。
+  //
+  // ## 边界（不要把这层说大）
+  //
+  // 这里是**声明式路由**，不是插件系统：值仍然是「用哪条已有代码路径」，
+  // 不引入注册表、不加载外部模块、不允许站点自带逻辑。判据是
+  // 「同一个判断在驱动里出现两次以上，就该变成声明」。
+  capabilities: {
+    // 模型选择走哪条实现：`pill` = DeepSeek 专用的三 pill/深度思考开关路径，
+    // `picker` = 通用 modelPicker 契约（精确匹配 + 回读确认）。
+    // 真机背景：旧三 pill UI 已随 2026-09-10 新版取消，`selectModelDeepSeek`
+    // 现在实际只操作「深度思考」开关 + 回读；保留独立实现是因为它的判据
+    // 按 UI 代际分叉（见 uiGenerations）。
+    modelSelect: 'pill',
+
+    // UI 代际侦测：只有声明了这项的站点才会去跑 `detectDeepSeekUi`。
+    // classic = 输入框上方三 pill（≤0.7.2）；unified = 2026-09-10 新版（只有深度思考开关）。
+    uiGenerations: true,
+
+    // 网页 API 鉴权令牌在 localStorage 里的键名。null = 该站点没有这套 API。
+    // DeepSeek 是 `userToken`（真机 2026-09-13 实测）；其余站点一律走 DOM 抓取。
+    tokenKey: 'userToken',
+
+    // 网页 API 能力（会话目录 / 历史消息）。**只有 DeepSeek 声明**。
+    // 驱动侧对未声明的站点抛可读错误，而不是静默回空数组——
+    // 「读不到」与「确实没有」必须能分辨（本仓库一贯纪律）。
+    sessionApi: true,
+    historyApi: true,
+  },
 };
