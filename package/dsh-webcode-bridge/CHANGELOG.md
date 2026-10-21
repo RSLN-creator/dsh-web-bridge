@@ -5,6 +5,75 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.22.1（2026-10-21：webcode 模式与官方 `standard` 的漂移闸门 —— 一条漏项 + 一条假红）
+
+### 修复 ①：`tool-plugin-market` 未被交代 —— 与官方 `standard` 静默漂移
+
+官方 `@deepseek-ai/dsh-web-app`（DSH **0.2.1-rc.2**）的 `presets/standard.patch.yml`
+第 126 行新增了一行：
+
+```yaml
+- id: tool-plugin-market
+  name: '@deepseek-ai/dsh-plugin-market/tools'
+  disabled: true
+```
+
+本插件的「wecode 模式」以「与 shipped standard 做减法」为存在理由，而它的
+**漂移闸门**（`test/webcode-preset.test.mjs` ②c）要求 standard 的**每一行**都被交代：
+要么在本模式里，要么在三份差集清单之一。`tool-plugin-market` 两边都没有 ⇒ 闸门变红。
+
+**判读与处置**：`tool-plugin-market` 与清单里已有的 `tool-plugin-manager` **同族**——
+在 standard 里就 `disabled: true` ⇒ **不进提示词、不注册工具** ⇒ 本模式省略它
+**不改变能力面**。因此按 `DISABLED_IN_STANDARD_ROWS` 的口径补进清单（同 `tool-plugin-manager`），
+而不是把它加进本模式。
+
+> ⚠ **这条闸门在 CI 上是 skip 的**：CI runner 没装 DSH，装机目录不存在 ⇒
+> `officialStandardBlocks()` 返回 `null` ⇒ ②c/②e 整体跳过。
+> ⇒ **CI 绿不等于没漂移**，只有开发者本机跑全量才会看到。这与 0.21.3 是**同一形状**
+> （那次上游删了 `tool-subagent-codex` / `tool-subagent-claude-code` / `tool-ralph`）。
+> 本轮的机制没有变强，但**记录**里多了一次同形状的实证。
+
+### 修复 ②：漂移闸门自己把**注释**当成了行（假红）
+
+补清单时，差集表里照抄了官方 standard 的原文形状（`- id: tool-plugin-market`），
+②d 立刻红：
+
+```
+✖ ②d 三份差集清单里的每一项都真的不在本模式里
+  AssertionError: 差集清单声明 tool-plugin-market 不在本模式里，但它出现在 cordis.patch.yml 中
+```
+
+而那是**假红**：本模式确实没有这一行，注释只是引用它。
+根因是 `hasRow()` 直接拿整份 `cordis.patch.yml` 做正则匹配 ⇒ **注释里出现一次行 id
+就被算成「本模式里有这一行」**。
+
+**修法是改判据，不是改措辞**：判据现在只读 **YAML 行**（整行注释剔除），
+`hasRow()` / ② / ②b / ②d 三处统一走它。理由与本仓库纪律一致——
+**判据自己有洞时，改措辞去迁就判据 = 把「判据不可信」这件事藏起来**。
+
+### 反向验证（先证明护栏能红）
+
+四个变异体（各自只动一处，逐个确认**变异真的落盘**后才跑）：
+
+| 变异体 | 期望 | 实测 |
+| --- | --- | --- |
+| M1 清单里拿掉 `tool-plugin-market` | ②c 红 | ✔ 红 |
+| M2 本模式真加一行 `tool-plugin-market` | ②b/②d 红 | ✔ 红 |
+| M3 只在**注释**里出现该行 | **全绿**（假红已消除） | ✔ 绿 |
+| M4 差集清单整体清空 | ②c 红 | ✔ 红 |
+
+> ⚠ M2 的第一版**没有真的落盘**（锚点 `- id: present` 的缩进比正则允许的深），
+> 于是它「绿」了——但那是**证明了零件事的绿**。因此脚本现在对每个变异体
+> 都先断言「文件确实变了」，变了才跑测试。**「假绿比假红更贵」**。
+
+### 读数
+
+| 项 | 值 |
+| --- | --- |
+| `test/webcode-preset.test.mjs` | **12/12** |
+| 全量单测（`test/*.test.mjs`，逐文件） | **125/125**（此前 123/125） |
+| 闸门 | `ci-local --fast` **12/12 PASS** |
+
 ## 0.22.0（2026-10-21：删除「任务板」与「并发会话」两块 —— 一次纯减法）
 
 ### 移除：任务板（含花名册）整条链

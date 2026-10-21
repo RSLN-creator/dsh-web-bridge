@@ -57,7 +57,7 @@
 #     subagent_fork 1,466 字符——即每轮首轮教学里有 4,117 字符（13.6%）是在教
 #     两个从未被调用过的入口。
 #
-# ## 与 shipped standard 的**当前**差集（0.2.0-rc.2 实测，逐项给判定）
+# ## 与 shipped standard 的**当前**差集（0.2.1-rc.2 实测，逐项给判定）
 #
 # | standard 有 / 本模式没有 | standard 侧状态 | 判定 |
 # | --- | --- | --- |
@@ -68,6 +68,7 @@
 # | `tool-subagent-claude-code` | **0.21.3 起 standard 里已无此项** | 不复制；清单同步移除（同上证据） |
 # | `tool-ralph` | **0.21.3 起 standard 里已无此项** | 不复制；清单同步移除（同上证据） |
 # | `tool-plugin-manager` | `disabled: true` | 同上 |
+# | `tool-plugin-market` | `disabled: true`（**0.22.1 补**） | 同上——官方 0.2.1-rc.2 的 standard 第 126 行有 `- id: tool-plugin-market` / `name: '@deepseek-ai/dsh-plugin-market/tools'` / `disabled: true`，与 `tool-plugin-manager` 同族：standard 里本就 disabled ⇒ 不进提示词、不注册工具 ⇒ 省略它不改变能力面。**发现路径**：本机全量单测 ②c 变红并点名它（该闸门在 CI 上是 skip 的——CI runner 没装 DSH，装机目录不存在⇒ ②c/②e 整体跳过⇒ **CI 绿不等于没漂移**，这是本仓库 0.21.3 已经吃过一次的同一形状）。
 #
 # `workflow-ptc` **不是**一处待定的差集，它随 `tool-workflow` 一起删：实测
 # `dsh-workflow` 定义的是**服务缝** `ctx.workflowEngine`，而 `workflow-ptc` 只是它的

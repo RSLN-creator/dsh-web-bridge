@@ -63,9 +63,25 @@ const DROPPED_ROWS = [
  * 这**不是**「按错理由删东西」：事实侧变了，声明必须跟着变。
  * （注意：CI runner 上没有这份装机目录，②e 在那里整体 skip；本条只在开发者本机生效——
  * 正因如此，靠它「在 CI 上变红」来提醒是不可能的，只有人跑全量才会看到。）
+ *
+ * 0.22.1：`tool-plugin-market` 补进本清单——**同一族的新成员**。
+ * 事实（本机 DSH 0.2.1-rc.2 装机目录 `…/dsh-web-app/presets/standard.patch.yml`
+ * 逐项实读，第 126 行）：官方 standard 里有
+ *   `- id: tool-plugin-market` / `name: '@deepseek-ai/dsh-plugin-market/tools'` /
+ *   `disabled: true`
+ * ⇒ 它与 `tool-plugin-manager` **同族**：在 standard 里本就 disabled ⇒ **不进提示词、
+ * 不注册工具** ⇒ 本模式省略它**不改变能力面**，与清单另一份的判定口径完全一致。
+ *
+ * ⚠ 它为什么之前没被发现：②c 遍历的是**官方全部行**（含 disabled），所以上游
+ * 新增这一行的瞬间就该红——事实上也红了（2026-10-21 本机全量跑，②c 红并点名
+ * `tool-plugin-market`）。但**这条闸门在 CI 上是 skip 的**（CI runner 没装 DSH，
+ * 装机目录不存在 ⇒ `officialStandardBlocks()` 返回 null ⇒ ②c/②e 整体跳过）。
+ * ⇒ 这正是「只有开发者本机跑全量才会看到」的那一类漂移：CI 绿不等于没漂移。
+ * （同一形状在 0.21.3 已经发生过一次，见上。）
  */
 const DISABLED_IN_STANDARD_ROWS = [
   'tool-plugin-manager',
+  'tool-plugin-market',
 ];
 
 /**
@@ -98,9 +114,28 @@ function officialPresetDir() {
   return fs.existsSync(dir) ? dir : null;
 }
 
-/** 本模式里是否出现了某一行 `- id: <id>`。 */
+/**
+ * 本模式的 **YAML 正文**（整行注释已剔除）。
+ *
+ * ⚠ 0.22.1 修：判据刻意**只认 YAML 行、忽略注释行**。
+ * 原实现直接拿整份 `cordis.patch.yml` 做正则匹配，于是**注释里引用一次行 id
+ * 就被算成「本模式里有这一行」**。这不是理论风险——本轮给差集表补
+ * `tool-plugin-market` 的说明时，注释里照抄了官方 standard 的原文形状
+ * （`- id: tool-plugin-market`），②d 立刻红：「清单声明 tool-plugin-market
+ * 不在本模式里，但它出现在 cordis.patch.yml 中——清单与事实不符」。
+ *
+ * 而那正是**假红**：本模式确实没有这一行，注释只是引用它。
+ * ⇒ 修法是让判据**只读 YAML 行**，而不是改注释措辞去迁就判据——后者会把
+ * 「判据本身有洞」这件事藏起来，与本仓库的纪律相反。
+ *
+ * 只剔「整行注释」（行首为 `#`）：YAML 的行内注释跟在内容后面，而本判据的
+ * 正则本来就从行首的 `- id:` 起算，行内注释不会造成误判。
+ */
+const patchBody = patch.split(/\r?\n/).filter((l) => !/^\s*#/.test(l)).join('\n');
+
+/** 本模式里是否出现了某一行 `- id: <id>`（只认 YAML 行，注释不算）。 */
 function hasRow(id) {
-  return new RegExp(`- id: ${id}\\b`).test(patch);
+  return new RegExp(`^\\s*- id: ${id}\\b`, 'm').test(patchBody);
 }
 
 /**
@@ -172,14 +207,14 @@ test('①b 展示名与描述是面向用户的短声明（不是解释文档、
 
 test('② 用读数删掉的启用项确实不在本模式里', () => {
   for (const id of DROPPED_ROWS) {
-    assert.ok(!new RegExp(`- id: ${id}\\b`).test(patch),
+    assert.ok(!hasRow(id),
       `${id} 在 23,636 次真实调用里 0 次命中，不该再出现在本模式的工具面里`);
   }
 });
 
 test('②b standard 里 disabled 的行与随之删的提供者也不在本模式里', () => {
   for (const id of [...DISABLED_IN_STANDARD_ROWS, ...PROVIDER_ROWS]) {
-    assert.ok(!new RegExp(`- id: ${id}\\b`).test(patch),
+    assert.ok(!hasRow(id),
       `${id} 在 standard 里就是 disabled（或只是 tool-workflow 的服务提供者），省略它不改变能力面`);
   }
 });
