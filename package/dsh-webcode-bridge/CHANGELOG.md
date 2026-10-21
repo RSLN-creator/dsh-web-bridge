@@ -5,6 +5,87 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.22.0（2026-10-21：删除「任务板」与「并发会话」两块 —— 一次纯减法）
+
+### 移除：任务板（含花名册）整条链
+
+用户 2026-10-21 指令：「现状插件我不想要任务版和并发会话了」。
+
+- **`lib/` 删 6 个模块**：`task-ledger.js`（669）、`task-graph.js`（184）、`task-plan.js`（427）、
+  `task-split.js`（238）、`team-state.js`（240）、`roster.js`（595）—— 共 2,353 行。
+  `roster.js` 一起删的理由：它只被 `lib/index.js` 的一处注入消费，而那个注入只喂
+  `/status` 的花名册字段，花名册唯一的界面消费者就是任务板面板。
+- **控制面删 7 个动作**：`GET task-ledger`、`POST task-{create,update,delete,comment,comment-resolve,implement}`，
+  连同它们的存储根解析器 `taskRootOf` 与 `resolveWorkspaceRoot` 注入。
+- **`/status` 删花名册分区**：`subAgents` / `team` / `members` / `tasks` / `graph` / `plan` /
+  `planError` / `taskError` / `teamSource` / `tasksSource`。⚠ 是**字段缺席**而不是「字段为空」——
+  字段为空会被读成「确实没有」，字段缺席是显式的 `undefined`，不会被误读。
+- **界面删 1,136 行**：`useRoster` / `taskStatusOf` / `TaskBoardPanel` / `NewTaskModalDialog` /
+  `TaskDetailNotionView` / `TaskBoardPanelIcon` / `TaskBoardMain`，以及左栏 `sidebar.panellist`
+  行与中央 `main` 座位的成对注册。
+
+### 移除：并发会话的界面层（并发能力本身一行未动）
+
+**这是本轮最容易被误读的一点**，用户原话已澄清：
+
+> 「功能需要能够用户单对话时候还能并发，但是左侧面板自己设计的并发会话去除」
+
+| | 处置 |
+| --- | --- |
+| **真并发**：`lib/relay.js` 的每账号车道、`maxConcurrentLanes`、`lib/accounts.js` 的 per-slot profile | **一行未动**（provider 通路，与界面无关） |
+| **并发的界面**：左栏行 / 中央面板 / 右栏页签 / 列顶栏 / 列沙箱 | **全部删除** |
+
+- **`lib/` 删 3 个模块**：`column-context.js`（127）、`column-fs.js`（142）、
+  `comparison-view.js`（522）—— 共 791 行。`comparison-view.js` 是并发面板 0.17 时代的静态
+  HTML 前身，在 0.19.55 被「每列一条真官方会话」取代后**界面上再无任何入口**
+  （`client.cjs` 全文 0 处指向 `/__webcode/comparison`，只能手敲 URL）。
+- **`client.cjs` 删 1,906 行**：`ColumnHeader` / `ConcurrentColumn` / `ConcurrentColumns` /
+  `ConcurrentPanel` / `ConcurrentPanelIcon` / `HwbBoundary` / `sessionViewsFor` / 面板守卫族 /
+  `OFFICIAL_CSS` 与全套 `oc()` 类名，以及三处座位注册（左栏行、中央 `main`、右栏页签）
+  与列子槽声明。
+- **控制面删 `POST chat`**：它的**唯一消费者是任务板的「按批注派发」**（`client.cjs:1401`），
+  随任务板一起失去调用方。同批移除的还有它用到的 `saveColumnReply` 与 `columnContext`
+  拼装（列身份 → 提示词的引导）。
+
+### 修复：三处「留着就撒谎」的接线（删的过程中发现）
+
+1. **`lib/index.js` 的 `inject` 从 5 项收窄为 1 项**（`['llm']`）。
+   `agents` / `sessions` / `sessionProjections` / `subagents` 是 0.15.0 专为 `roster.js`
+   逐个核实注册点后声明的；花名册删掉后**全包零读取点**。留着不是无害的：cordis 会等到
+   声明齐备才调用 `apply()`，任何一个缺席的 profile 都会停在 `pending (waiting for service: …)`。
+   **不用的 inject = 给插件多上一道可能挂住的门。**
+2. **`client.cjs` 的 `inject` 从 8 项收窄为 3 项**（`['slots','sidebarRightTabs','sidebarRight']`）。
+   移除 `sessions` / `layout` / `uiWorkspace` / `jobs` / `configForms` —— 同一纪律，同一理由。
+3. **`web-control.js` 删掉 `POST status` 别名**。它存在的唯一理由是客户端要带会话身份
+   （`api('status', { sessionId })`）去轮询会话级花名册；花名册删除后客户端只剩无 body 的
+   `api('status')`（GET），`test/client-server-contract.test.mjs` 会把多注册的 POST 判成死路由。
+
+### 删除的测试（9 个文件 + 24 条用例）
+
+`task-ledger` / `task-graph` / `task-plan` / `roster` / `wiring-roster` / `column-context` /
+`column-fs` / `team-compare` / `comparison-view` —— 被测模块本身已删，判据的对象不存在了。
+另从 `client-render` 删 22 条、`control-routes` 删 2 条。**133 → 124 个测试文件。**
+
+⚠ **删测试时保住的知识没有被丢掉**（写在各文件原位注释里）：`control-routes` 保留
+「每个动作都必须能被真实 HTTP 命中」这条判据（它对**当前**动作表继续生效），并注明
+「写路径的根必须单一取法」这条判据**若将来再加任何落盘族要原样重建，不要另立第二套取法**。
+
+### 读数（改前 → 改后）
+
+| 项 | 改前 | 改后 |
+| --- | --- | --- |
+| `lib/` 模块数 | 53 | **44**（含 `sites/` 共 46） |
+| `lib/` 总行数 | 39,973 | **33,324** |
+| `client.cjs` | 8,063 行 | **5,010 行** |
+| 测试文件 | 133 | **124** |
+
+### 本轮没做的事（如实登记）
+
+- `lib/tool-parser.js` 仍是「未接线、只被单测引用」的状态（它自己的文件头已如实写明）。
+  它**不是本轮的目标**，因此未动。
+- 未真机验证。本轮是纯删除，判据是「全量单测 + 三条闸门 + 索引一致」，**不冒充真机通过**。
+- 未打包、未装入 profile、未发布。
+
 ## 0.21.3（2026-10-20：会话界面补上「联网搜索」开关）
 
 ### 修复：用户报「缺少点击联网搜索的按钮/功能」（以 DeepSeek 为例）

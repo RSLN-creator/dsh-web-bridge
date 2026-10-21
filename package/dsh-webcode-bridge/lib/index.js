@@ -85,51 +85,38 @@ function readSessionPrompt(sessionKey) {
 import { createMirror } from './mirror.js';
 import { httpFetch } from './upstream.js';
 import { textOfBlocks } from './flatten.js';
-// 真实花名册（0.15.0）。**这行曾经漏掉过**：下面的 `rosterOf` 注入点照样写着
-// `projectRoster(ctx, sessionId)`，而它是箭头函数体、创建时不求值 —— 于是模块能加载、
-// 全量单测全绿，只有真机 `/__webcode/status` 真的调用时才抛 ReferenceError，
-// 被 web-control 的 try/catch 降级成 `subAgentsError: "roster-threw: projectRoster is not defined"`，
-// 面板永久空白（与 0.14.9「写死空数组」的可见后果一致）。
-// 护栏：test/wiring-roster.test.mjs 走真实 apply() → HTTP → /status 钉住整条路径。
-// workspaceRootOf 供控制面解析任务台账的存储根：与 projectTasks 内部的 cwdOf
-// 是**同一个函数**，两侧因此不可能对「工作目录是什么」有第二种判据。
-import { projectRoster, workspaceRootOf } from './roster.js';
 import { estimateTokens, computeSendGap, checkContextBudget } from './metrics.js';
 import { accumulateWait, sanitizeWaitStats, emptyWaitStats, composerWaitLine, waitStatRows, formatDuration } from './wait-stats.js';
 import { renderSettingsPage } from './settings-page.js';
-import { renderComparisonView } from './comparison-view.js';
 
 export const name = 'webcode-bridge';
 
 // cordis service injection: declaring these is REQUIRED before ctx.webServer /
 // ctx.llm property access is permitted ("cannot get property ... without inject").
 //
-// 0.15.5（P2-1）：把 roster.js 真正依赖的服务**显式声明**出来。
-// 旧实现只有 llm/webServer，其余全靠 roster.js 的 serviceOf() 用 ctx.get 兜底——
-// 那条兜底路径是必要的（cordis 版本差异下取法不稳），但**不能是唯一**路径：
-// 未声明时取属性会抛，兜底一旦失效，整块花名册会静默消失。
+// ## 为什么只剩 `llm`（0.22.0）
 //
-// 服务名逐个核实过注册点，不是凭印象写的（本轮实测）：
-//   agents               ← dsh-agent/lib/index.js:299            super(ctx,'agents')
-//   sessions             ← dsh-session/lib/index.js:1315          super(ctx,'sessions')
-//   sessionProjections   ← dsh-session-projection/lib/index.js:52 super(ctx,'sessionProjections')
-//   subagents            ← dsh-subagent/lib/index.js:2853         super(ctx,'subagents')
+// 这里曾声明 `['llm', 'agents', 'sessions', 'sessionProjections', 'subagents']`：
+// 后四个是 0.15.0 为 `roster.js`（真实花名册）逐个核实注册点后加的。0.22.0 按用户指令
+// 删掉任务板/花名册整条链之后，这四个服务**整个包内已无任何读取点**
+// （`grep 'ctx\.agents|ctx\.sessions|ctx\.sessionProjections|ctx\.subagents'` 零命中）。
 //
-// **故意不加 `agentTeams`**：它由实验包 `@deepseek-ai/dsh-experimental-agent-team` 提供，
-// 是否挂载取决于 profile 组合。把它写进 inject 会让整个插件在未挂载该实验包的
-// profile 上卡在 waiting——症状是「桥整个不见了」，比花名册少一块严重得多。
-// 它继续走 serviceOf 的可选读取 + 独立降级（teamError 如实说明原因）。
+// 留着它们不是「无害的兼容」而是**实实在在的启动条件**：cordis 会等到这些服务出现
+// 才调用本插件，任何一个缺席的 profile 都会停在 `pending (waiting for service: …)`。
+// 也就是说「不用的注入」= 给插件多上一道可能挂住的门。
 //
+// 这条纪律与本文件下面关于 `webServer` 的长注释是同一件事：
+// **只声明真正会读的服务**。曾经的 `agentTeams` 就是反例（实验包未挂载时整块花名册静默消失）。
 //
-// **webServer 不在这个列表里**（0.16.5，真机 2026-09-18）。它只有 web 应用提供；
+// `webServer` 仍**不在**这个列表里（0.16.5，真机 2026-09-18）：它只有 web 应用提供，
 // 写进 inject 会让没有 webServer 的 profile（headless）整条 entry pending——
 // 真机复现：`dsh --profile headless "回复两个字：收到"` →
 // `webcode-bridge: pending (waiting for service: webServer)`，退出 1。
-// 而「无外部干扰长跑」正要用 headless 这类没有 webServer 的 profile 驱动，
-// 所以它必须是**可选**依赖：路由挂载改走 apply() 里的嵌套 ctx.inject(['webServer'], …)。
-// 同一份纪律也适用于 agentTeams（见下）。
-// 兜底路径保留：serviceOf 仍同时试 ctx[name] 与 ctx.get(name)。
-export const inject = ['llm', 'agents', 'sessions', 'sessionProjections', 'subagents'];
+// 所以它必须是**可选**依赖：路由挂载走 apply() 里的嵌套 ctx.inject(['webServer'], …)。
+//
+// 兜底读取路径（`serviceOf` 式的 ctx[name] vs ctx.get(name) 双试）随 roster.js 一并删除：
+// 它存在的唯一理由是那批可选服务取法不稳，而现在没有可选服务要取了。
+export const inject = ['llm'];
 
 /**
  * 哪些失败码才有资格**作废发送游标**（`sessionState.delete(keyPath)`）。
@@ -786,9 +773,6 @@ function isInjectedDefaultSlot(siteId, slot) {
  * @returns {void}
  */
 export function apply(ctx, config = {}) {
-  // 最近一次被 `/status` 投影过的会话 id（0.19.0）。任务台账的**写**路径不带会话身份，
-  // 用它与 roster 的任务投影共用同一个工作目录根，避免「任务板与花名册各读一份台账」。
-  let lastProjectedSessionId = null;
   const cfg = { ...DEFAULTS, ...(config || {}) };
   // Stable fingerprint surfaced in /__webcode/status so a packed installation
   // can be compared with the workspace build without restarting the GUI here.
@@ -4276,26 +4260,6 @@ function imageMarkdown(images) {
     // 会话 → 站点（0.19.97）：会话界面的「联网搜索」开关按这个会话真正落在的站点
     // 显示与写回。没发过言时回 null —— 控制面如实回「未知」，不编默认站点。
     sessionSiteOf: (sessionId) => sessionSiteOf(sessionId),
-    // 真实花名册（0.15.0）：子代理来自本会话的 subagentCatalog 持久化投影，
-    // Team 成员来自官方 agentTeams 服务。两者各自独立降级，读不到时给空数组
-    // 并把原因放进 *Error（面板据此区分「确实没有」与「读不到」）。
-    // sessionId 决定看**哪个会话**的子代理目录——面板轮询时会带上它。
-    rosterOf: (sessionId) => {
-      // 记下最近一次被投影的会话：任务台账的写路径（下面 `resolveWorkspaceRoot`）
-      // 没有会话身份可拿，用「面板此刻正在看的那个会话」作为同源依据。
-      if (sessionId) lastProjectedSessionId = String(sessionId);
-      return projectRoster(ctx, sessionId);
-    },
-    // 任务台账的存储根（0.19.0）：与上面的任务投影**共用同一套判据**
-    //（`roster.workspaceRootOf` 就是 `projectTasks` 用的那个 `cwdOf`）。
-    //
-    // 为什么现在只取「最近一次投影过的会话」而不是从请求里拿 sessionId：
-    // 控制面请求里**没有**会话身份（随包客户端调 task 族端点时不带 body），
-    // 而现编一个会话 id 去猜工作目录正是本项目禁止的那类猜测。因此这里用任务
-    // 投影最近一次用过的会话做根（与「面板正在看的那个人」同源），拿不到就返回
-    // null 让路由回落 `process.cwd()`——`GET task-ledger` 会把实际用的根透出。
-    // 「客户端带上 sessionId」是遗留收口项，见 doc/progress.md 对应行。
-    resolveWorkspaceRoot: () => workspaceRootOf(ctx, lastProjectedSessionId),
     // 「用系统默认程序打开提示词文件」（0.16.38）：平台差异收在 openPathWithDefaultApp。
     openPath: (absPath) => openPathWithDefaultApp(absPath),
   });
@@ -4854,48 +4818,15 @@ function imageMarkdown(images) {
       warn('webServer settings-page route failed:', e?.message);
     }
 
-    // 对比视图页面 (HTML) - 2026-09-18
-    try {
-      // 辅助函数：获取某个站点的所有已登录槽位
-      const slotsForSite = (siteId) => {
-        try {
-          const status = relay?.config?.driverStatus?.();
-          if (!status || !Array.isArray(status.sites)) return [];
-
-          return status.sites
-            .filter(s => s.siteId === siteId && s.loggedIn === true)
-            .map(s => ({
-              slot: s.slot || '1',
-              label: s.displayName || s.siteName || siteId,
-              accountKey: s.accountKey || siteId,
-            }));
-        } catch (err) {
-          warn('slotsForSite error:', err?.message);
-          return [];
-        }
-      };
-
-      routeDisposers.push(webServer.register({
-        kind: 'exact',
-        path: '/__webcode/comparison',
-        handler: (req, res) => {
-          // 收集所有已登录账号
-          const allSlots = new Map();
-          for (const site of SITES) {
-            const slots = slotsForSite(site.id);
-            if (slots.length > 0) {
-              allSlots.set(site.id, slots);
-            }
-          }
-          const html = renderComparisonView({ allSlots });
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(html);
-        }
-      }));
-      log('comparison-view route mounted');
-    } catch (e) {
-      warn('webServer comparison-view route failed:', e?.message);
-    }
+    // 对比视图页面 (HTML) —— 0.22.0 已删除。
+    //
+    // 删除理由（用户 2026-10-21 指令「不想要任务板、并发会话，左侧面板自己设计的并发会话去除」）：
+    // 这一页是「并发会话」的 0.17 前身（静态 HTML 版多列对比），在 0.19.55 被「每列一条真官方
+    // 会话」取代之后**界面上再无任何入口**——`client.cjs` 全文 0 处指向 `/__webcode/comparison`，
+    // 用户只能手敲 URL 打开。按「若无必要勿增实体」，它与 `lib/comparison-view.js` 同批删除。
+    //
+    // 注意它与 `POST chat` 无关：它自己走 OpenAI 前端 `/v1/chat/completions`，
+    // 因此删它**不影响**任何仍在用的通路。
 
   };
   // cordis 的 ctx.inject 会等服务出现后回调、服务消失后自动卸载（web profile 走这条）；

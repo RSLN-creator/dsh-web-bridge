@@ -12,6 +12,20 @@
 // 其实和官方不是一回事」。上面那句话要的就是：让失同步**在提交前被点名**，而不是等用户在
 // 界面上发现「怎么和官方不一样」。
 //
+// ## 2026-10-21（0.22.0）：20 段删到 1 段，判据本身也跟着「无消费者即删」
+//
+// 那个闸门此前登记 20 段，**其中 19 段服务的都是并发会话的「列顶栏复刻」**——
+// 列头那一行要按官方 DOM 逐字复刻，所以官方改文案/改槽结构就得同步我们那份。
+// 用户 2026-10-21 删掉任务板与并发会话之后，那 19 段的**实现已经不存在**：
+// 逐项在 `lib/client.cjs` 里搜代表串，19 项全部 0 命中（唯一例外是宿主侧的
+// `client-hmr-reload`，它服务的是「桌面端不重启就生效」的热换链，与本插件界面无关）。
+//
+// 它们不只是「多余」——它们让 pre-commit 在真机上报 `? 缺失 primitives-button-and-chevrons`
+// 并退出 1，也就是**一个为已删功能而存在的闸门在拦所有提交**。
+//
+// 留下的 `client-hmr-reload` 是唯一仍在服役的照抄段落。**新增照抄段落时照旧在这里登记**，
+// 但判据加一条：**登记前先确认那段代码真的还在**（否则就是给已删功能立一块碑）。
+//
 // ## 判据（事实来源 vs 仓库快照）
 //
 // 1. 从**当前安装的** DSH 里读官方客户端代码（`app.asar`，路径可用 `--asar` 覆盖）；
@@ -52,129 +66,10 @@ const DEFAULT_ASAR = 'D:/2_Download_Main/4_DeepSeek Harness_code/resources/app.a
  */
 const SEGMENTS = [
   {
-    id: 'conversation-view-switcher',
-    file: 'dsh-client-ui-conversation/lib/client.js',
-    why: '视图切换（对话⇄轨迹）的渲染位置；我们不再自绘页签，视图交给会话自己记住的那一个',
-    patterns: [/renderSlot\("conversation\.view"/, /viewId !== void 0/],
-  },
-  {
-    id: 'conversation-header-slot',
-    file: 'dsh-client-ui-conversation/lib/client.js',
-    why: '顶部那一行（标题/子智能体/团队/标准模式/后台任务）= conversation.header 槽；列头要在同一位置照抄',
-    patterns: [/renderSlot\("conversation\.header"/, /name: "conversation\.header"/, /conversation\.header\.leading/],
-  },
-  {
-    id: 'conversation-content-factory',
-    file: 'dsh-client-ui-conversation/lib/client.js',
-    why: '列里渲染的就是这个 factory（embedded 形态）；相位/局部槽的接法一旦变，列会跟着变',
-    patterns: [/name: "conversation\.content"/, /scope: "session-maybe"/, /renderSlot\("conversation\.session"/],
-  },
-  {
-    id: 'session-view-ids',
-    file: 'dsh-client-ui-chat/lib/client.js',
-    why: '「对话」视图的注册（id 与位置）——会话自己记住的视图 id 来源',
-    patterns: [/inject\("conversation\.view"/, /name: "conversation\.view"/],
-  },
-  {
-    id: 'trajectory-view-ids',
-    file: 'dsh-client-ui-trajectory/lib/client.js',
-    why: '「轨迹」视图的注册（id 与位置）',
-    patterns: [/inject\("conversation\.view"/, /name: "conversation\.view"/],
-  },
-  {
-    id: 'rightbar-gate',
-    file: 'dsh-client-ui-sidebar-right/lib/client.js',
-    why: '右栏的显示闸门（activePanelId === null 才显示）——决定了「面板开着时右侧 tab 为什么没了」，也是照抄右栏时的依据',
-    patterns: [/activePanelId === null/],
-  },
-  {
-    id: 'rightbar-session-seat',
-    file: 'dsh-client-ui-sidebar-right/lib/client.js',
-    why: '右栏 per-session 座位（rightbar.session）——照抄右栏内容时的落点',
-    patterns: [/rightbar\.session/],
-  },
-  {
-    id: 'slot-ownership-rule',
-    file: 'dsh-client-ui-renderer/lib/client.js',
-    why: '槽归属校验（renderSlot 只允许声明者渲染 / renderFactorySlot 不校验）——「能不能把官方 header 搬进列」的判据',
-    patterns: [/is not declared by this entry's children/, /is not declared by this Factory/],
-  },
-  {
-    id: 'agent-preset-labels',
-    file: 'dsh-client-ui-agent-preset/lib/client.js',
-    why: '列头「模式」chip 复刻的官方文案与投影键（标准模式 / PTC 模式 / projectionValues.agentPreset）——官方改名或改键就必须同步我们的 PRESET_LABELS 与取值路径',
-    patterns: [/presetStandardName: "标准模式"/, /presetPtcName: "PTC 模式"/, /projectionValues\?\.agentPreset/],
-  },
-  {
-    id: 'jobs-count-label',
-    file: 'dsh-client-ui-jobs/lib/client.js',
-    why: '列头「后台任务」chip 复刻的官方计数口径与文案（liveRows.length + count.live.one）',
-    patterns: [/count\.live\.one/, /liveRows\.length/],
-  },
-  {
     id: 'client-hmr-reload',
     file: 'dsh-client-hmr/lib/index.js',
     why: '客户端热换链（mtime/ctime/size → rebuilt 帧）——桌面端「不重启就生效」的全部依据',
     patterns: [/artifactRevision|mtimeMs/, /clientModules\.rebuilt/, /pollIntervalMs/],
-  },
-  {
-    id: 'session-mention-encoding',
-    file: 'dsh-session-reference/lib/index.js',
-    why: '会话引用的官方编码（@[label](dsh-session:<base64url(JSON(id))>)）——跨列引用「⇥ 引用」按钮已按用户 10-08 口径删除，但**宿主原生语法仍在**（用户可手打），官方改形状则手打的引用也会失效，故保留监控',
-    patterns: [/function encodeSessionReferenceUri/, /function formatSessionReferenceMention/, /function escapeLabel/],
-  },
-  {
-    id: 'session-header-children',
-    file: 'dsh-client-ui-conversation/lib/client.js',
-    why: '列顶栏复刻的官方 header 子槽结构（registerSessionHeader 声明 lineage/actions/utilities/corner）——0.19.68（10-08 轮）ColumnHeader 按这棵树逐字复刻 DOM，官方增删子槽则复刻失同步',
-    patterns: [/name: "conversation\.session\.header"/, /"conversation\.session\.header\.actions"/, /"conversation\.session\.header\.utilities"/, /"conversation\.session\.header\.corner"/],
-  },
-  {
-    id: 'preset-readonly-label',
-    file: 'dsh-client-ui-agent-preset/lib/client.js',
-    why: '列顶栏「模式」chip 的只读形态（AgentPresetLabel 渲染 span 而非按钮 + Read-only by construction）——复刻成只读标签的依据，官方改成可点则复刻失同步',
-    patterns: [/function AgentPresetLabel/, /Read-only by construction/],
-  },
-  {
-    id: 'subagent-count-i18n',
-    file: 'dsh-client-ui-subagent/lib/client.js',
-    why: '列顶栏「子智能体」chip 复刻的官方文案（count.total.one「{count} 个子智能体」）——官方改字则 HEADER_TEXT.subagents 失同步',
-    patterns: [/"count\.total\.one": "\{count\} 个子智能体"/],
-  },
-  {
-    id: 'team-action-i18n',
-    file: 'dsh-experimental-client-ui-agent-team/lib/client.js',
-    why: '列顶栏「团队」chip 复刻的官方文案（trigger「智能体团队」）与投影键（projectionsBySession[lead].values.agentTeam）——官方改字/改键则复刻失同步',
-    patterns: [/trigger: "智能体团队"/, /projectionsBySession\[leadSessionId\]/],
-  },
-  {
-    id: 'open-in-app-routes',
-    file: 'dsh-client-ui-open-in-app/lib/client.js',
-    why: '列顶栏「用 X 打开 / 更多打开方式」走的官方公开路由（apps/open/icon）——官方改路由则复刻的按钮 404',
-    patterns: [/OPEN_IN_APP_APPS_ROUTE = "\/open-in-app\/apps"/, /OPEN_IN_APP_OPEN_ROUTE = "\/open-in-app\/open"/, /OPEN_IN_APP_ICON_PREFIX_ROUTE = "\/open-in-app\/icon"/],
-  },
-  {
-    id: 'session-export-route',
-    file: 'dsh-session-log-export/lib/client.js',
-    why: '列顶栏「更多操作 → 下载 Session 日志」走的官方路由（api/session.export）与 zip 文件名口径——官方改路由/文件名则复刻的下载失效',
-    patterns: [/SESSION_LOG_EXPORT_ROUTE = "\/api\/session\.export"/, /function sessionLogZipFilename/],
-  },
-  {
-    id: 'primitives-button-and-chevrons',
-    file: 'dsh-client-ui-primitives/lib/index.js',
-    why: '列平移按钮用的官方原子（0.19.69，用户口径 A：直接用 primitives.Button + 官方 chevron）——'
-      + 'Button 的 variant/size 取值与两颗 chevron 图标的导出名一旦变，我们的按钮会掉样式或画不出图标',
-    patterns: [
-      /const Button = forwardRef\(function Button\(\{ variant = "ghost", size = "md"/,
-      /const IconChevronLeftOutlineRegular = /,
-      /const IconChevronRightOutlineRegular = /,
-    ],
-  },
-  {
-    id: 'jobs-live-status',
-    file: 'dsh-client-ui-jobs/lib/client.js',
-    why: '列顶栏「后台任务」chip 的「运行中」判据（status running/stopping，与官方 isLive 同义）——官方改状态字面量则计数失同步',
-    patterns: [/status === "running"/, /status === "stopping"/],
   },
 ];
 

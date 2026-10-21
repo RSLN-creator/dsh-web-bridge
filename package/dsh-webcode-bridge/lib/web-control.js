@@ -38,9 +38,6 @@ import { httpFetch } from './upstream.js';
 import {
   fetchReleases, updateDecision, installFromReleases, PACKAGE_NAME, GITHUB_REPO,
 } from './update.js';
-// 并列多会话的列身份 → 提示词（0.19.21，用户 Q5 的沙箱适配）。
-import { withColumnGuidance, normalizeColumnContext } from './column-context.js';
-import { writeColumnArtifact, fencedBlocks, ColumnFsDenied } from './column-fs.js';
 
 /**
  * 站点级 `thinkMode` 的**唯一回落链**（与 `searchModeOf` 同一形状）：
@@ -103,10 +100,12 @@ export function siteModeOf(settings, siteId) {
 // 用户明令「文件夹内一个会话一行！！不是每个会话一个文件夹！」⇒ 并发列不再自建目录，
 // 就在当前工作区里普通新建会话（官方「新会话」同路径）。`lib/concurrent-workspace.js`
 // 与两条路由（POST concurrent-workspace / GET concurrent-worktrees）一并删除，不留死代码。
-import {
-  readLedger, writeLedger, applyCreate, applyUpdate, applyDelete,
-  applyAddComment, applyResolveComment, rowsOf,
-} from './task-ledger.js';
+//
+// 任务台账的 7 个动作（`GET task-ledger` / `POST task-{create,update,delete,comment,
+// comment-resolve,implement}`）与其数据层 `lib/task-ledger.js` 于 **0.22.0 整批删除**：
+// 用户 2026-10-21 明令「现状插件我不想要任务板和并发会话」。
+// 同批删除的还有 `task-graph` / `task-plan` / `task-split` / `team-state` / `roster`
+// —— 它们只服务任务板的图诊断与花名册投影，删掉任务板后全包零读取点。
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -276,19 +275,10 @@ export function createWebControl(deps = {}) {
     settingsRevision = null,
     contextWindowOf = null, // (model) → number — 与 resolveModel/预算闸同一个取值函数
     waitStatsOf = null,     // (sessionId?) → { total, session } — 等待发送时长累计账本
-    // (sessionId?) → { team, subAgents, teamError, subAgentsError } — 真实花名册
-    // 的取值函数（0.15.0）。由 lib/index.js 注入，内部走 lib/roster.js。
-    // 缺省 null 时 /status 给空数组 + 'roster-not-wired'，独立启动的桥
-    // （无 DSH 上下文，也就没有 agents/sessionProjections 服务）因此仍然可用。
-    rosterOf = null,
     // (absPath) → Promise<{ok:boolean, error?:string}>：用**系统默认程序**打开一个
     // 本机文件（0.16.38）。由宿主侧注入（argv 调用，不经 shell）；缺省 null 时
     // 「打开文件」这条路如实回 unavailable，而不是假装成功。
     openPath = null,
-    // () → string|null：当前会话的工作目录（0.19.0）。由宿主注入，使任务台账的
-    // 读写根与 `roster.js` 的任务投影**同源**（两侧各取各的根会让同一块界面拿到
-    // 两份互不可见的台账）。缺省 null 时回落 config / process.cwd()，见 `taskRootOf`。
-    resolveWorkspaceRoot = null,
   } = deps;
   const log = (...a) => logger.log?.('[webcode-web]', ...a);
   const warn = (...a) => logger.warn?.('[webcode-web]', ...a);
@@ -421,93 +411,6 @@ export function createWebControl(deps = {}) {
       });
       req.on('error', () => resolve({}));
     });
-  }
-
-  /**
-   * 任务台账的存储根 —— **全族路由的唯一取法**（0.19.0 收口）。
-   *
-   * ## 为什么必须收敛成一处
-   *
-   * 这条表达式原先在 7 条 `task-*` 路由里各内联了一份
-   * （`body?.workspaceRoot || config.workspaceRoot || process.cwd()`），而**读**任务板
-   * 的另一侧（`roster.js` 的 `projectTasks`）用的是 `cwdOf(ctx, sessionId)` ——
-   * **会话的工作目录**。两边因此可以指向两个不同的 `.webcode-tasks/ledger.json`：
-   * 同一块界面上，任务板与花名册会拿两份互不可见的数据（0.19.0 独立审查发现）。
-   * 这正是本项目记过的「同一件事两份真相」。
-   *
-   * 而 `config.workspaceRoot` 在本仓库里**从未被赋值**、`workspaceRoot` 也**从未被
-   * 任何随包客户端发送**（客户端调 `api('task-ledger')` 时不带 body），所以那两段
-   * 其实从不生效，路由侧恒定落到 `process.cwd()` —— 那是**宿主进程**的目录，
-   * 不是用户打开的那个项目。
-   *
-   * ## 取法（按「具体到笼统」）
-   *
-   *   ① 调用方显式给的 `workspaceRoot`（脚本 / 测试 / 将来的多工作区前端）；
-   *   ② `config.workspaceRoot`（宿主注入）；
-   *   ③ 注入的 `resolveWorkspaceRoot()`（宿主在这里给出**当前会话的工作目录**，
-   *      与 roster 侧同源——index.js 接上之后两侧就永远看同一份台账）；
-   *   ④ `process.cwd()`。
-   *
-   * 末端仍回落 `process.cwd()`（不抛错）：拿不到根时「能读能写」比「整块面板报错」
-   * 更有用，且 `readLedger` 对不存在的文件返回的是**真实的「没有任务」**。
-   * 返回值经 `GET task-ledger` 的 `workspaceRoot` 字段如实透出，让「面板读的到底是
-   * 哪一份台账」成为可核对的读数，而不是要人去猜。
-   *
-   * @param {object|null} body 请求体 / query
-   * @returns {string} 绝对目录（不做存在性检查）
-   */
-  function taskRootOf(body) {
-    const given = String(body?.workspaceRoot || '').trim();
-    if (given) return given;
-    const fromConfig = String(config.workspaceRoot || '').trim();
-    if (fromConfig) return fromConfig;
-    try {
-      const resolved = resolveWorkspaceRoot?.();
-      if (typeof resolved === 'string' && resolved.trim()) return resolved.trim();
-    } catch { /* 宿主给的解析器抛错不该让写路径失败，落到 cwd */ }
-    return process.cwd();
-  }
-
-  /**
-   * 把一列的回复落到**本列目录**（0.19.29）。
-   *
-   * 返回 `{ dir, files, error }`：成功时 `error` 为 null；失败时**如实**放进 `error`，
-   * 而调用方（`POST chat`）**不**因此把整轮判为失败 —— 消息确实发出去了、回复确实
-   * 拿到了，落盘是附带的。把附带的事故报成主流程失败，是本项目反复记过的假失败。
-   *
-   * 只认带**有效列身份**的请求（`normalizeColumnContext` 返回 null 就整体不落盘）：
-   * 没有列身份的 `POST chat` 是普通调用，不该往磁盘上写东西。
-   *
-   * @param {unknown} rawCtx 请求体的 columnContext（未归一化）
-   * @param {string} workspaceRoot 工作区根
-   * @param {string} reply 模型回复原文
-   * @param {string} sessionKey 本列的网页会话键（用于文件名，便于与别轮区分）
-   * @returns {{dir:(string|null), files:string[], error:(string|null)}|null} 落盘读数，或 null（未落盘）
-   */
-  function saveColumnReply(rawCtx, workspaceRoot, reply, sessionKey) {
-    const ctx = normalizeColumnContext(rawCtx);
-    if (!ctx) return null;
-    const text = String(reply ?? '');
-    if (!text.trim()) return null;
-    // 文件名带时间戳 + 会话键后缀：同一列多轮不会互相覆盖，用户也能按轮次找。
-    const stamp = Date.now().toString(36);
-    const tag = String(sessionKey || '').slice(-6).replace(/[^A-Za-z0-9_-]/g, '') || 's';
-    try {
-      const files = [];
-      const main = writeColumnArtifact(workspaceRoot, ctx, `${stamp}-${tag}-reply.md`, text);
-      files.push(main);
-      // 围栏代码块单独落成真文件：探索列的「方案」这才可打开、可 diff。
-      fencedBlocks(text).forEach((b, i) => {
-        files.push(writeColumnArtifact(workspaceRoot, ctx, `${stamp}-${tag}-block${i + 1}.${b.ext}`, b.code));
-      });
-      return { dir: path.dirname(main), files, error: null };
-    } catch (e) {
-      const why = e instanceof ColumnFsDenied
-        ? e.code + '（围栏拒绝了本次写入，产物未落盘）'
-        : String(e?.message || e);
-      log('column-artifact: 落盘失败（消息本身已成功）：' + why);
-      return { dir: null, files: [], error: why };
-    }
   }
 
   /**
@@ -763,80 +666,19 @@ export function createWebControl(deps = {}) {
     'GET status': async (body) => ({
       ok: true,
       build: { hash: config.buildHash || null, version: config.version || null },
-      // 花名册的两个分区（用户要求「子代理和team效果需要单独区分」）。
+      // 花名册两个分区（`subAgents` / `team` / `tasks` / `graph` / `plan` 及四个
+      // `*Error` 与 `teamSource`/`tasksSource`）于 **0.22.0 整批删除**。
       //
-      // 为什么**分两个字段**而不是一个带 type 的数组：两者的信息结构本来就不同
-      //（子代理从属于发起它的会话，Team 成员平级、带任务板归属），前端要按不同
-      // 缩进与分组渲染（doc/research/agent-ui-design-references.md §4.5）。
-      // 合成一个数组会把「谁从属于谁」这个结构丢掉。
+      // 删除依据：用户 2026-10-21 明令「现状插件我不想要任务板和并发会话」。这些字段
+      // 的唯一界面消费者是任务板面板（`client.cjs` 的 `useRoster` 只被 `TaskBoardPanel`
+      // 调用），而数据侧来自 `lib/roster.js`——该模块也在同批删除。
       //
-      // 0.15.0 起这两个字段接的是**真实数据源**（lib/roster.js）：
-      //   • team ← 官方 agentTeams 服务的 listMembers（Team 花名册，带 role/status）；
-      //   • subAgents ← 本会话 subagentCatalog 持久化投影（父会话记下的直接子代理目录）。
-      // 两个 `*Error` 字段是这次一并加上的：旧实现恒给空数组，于是面板上的
-      // 「当前没有正在运行的子代理或 Team 成员」既可能是**确实没有**，也可能是
-      // **读不到**（官方包没装、服务未注册、凭据解析失败）——两者长得一模一样。
-      // 现在读不到时 `*Error` 非空，面板照实说「读不到花名册」并给出原因，
-      // 仍然坚持「不得造假状态」：宁可为空 + 带原因，也不编一个 roster。
-      ...(typeof config.rosterOf === 'function' || typeof rosterOf === 'function'
-        ? (() => {
-          try {
-            const r = (rosterOf || config.rosterOf)(body?.sessionId || null) || {};
-            const fail = (m) => {
-              const msg = `roster-threw: ${String(m).slice(0, 160)}`;
-              return { subAgents: [], team: [], tasks: [], subAgentsError: msg, teamError: msg, tasksError: msg };
-            };
-            try {
-              return {
-                subAgents: Array.isArray(r.subAgents) ? r.subAgents : [],
-                // Team 成员（平级）。`members` 是官方 TeamView 的词，`team` 是
-                // 0.15.0 起的旧名——**两个都给**，任何一端的改名都不会让另一端
-                // 读到 undefined（本文件顶部记的那一族缺陷正是「一端改了、
-                // 另一端不存在」，不值得在同一个字段上再犯一次）。
-                team: Array.isArray(r.team) ? r.team : (Array.isArray(r.members) ? r.members : []),
-                members: Array.isArray(r.members) ? r.members : (Array.isArray(r.team) ? r.team : []),
-                // 任务板是**团队级**事实（官方 TeamView.tasks）：状态、被谁卡住、
-                // 写哪些文件、是否就绪。没有它，「Team 成员平级」只剩一个名字。
-                tasks: Array.isArray(r.tasks) ? r.tasks : [],
-                // 图诊断（0.15.12）：官方逐行事实之外的**图级**视角——就绪集、
-                // 当前阻塞点、关键路径、环/自环/悬空边。官方数据里没有这一层，
-                // 而任务板面板要回答的正是「为什么整块板没动 / 在等谁 / 还要多久」
-                //（对照研究 doc/research/task-board-vs-agentteams-graph.md §3⑧）。
-                // 拿不到时为 null，面板如实说「图诊断不可用」，不编造。
-                graph: r.graph && typeof r.graph === 'object' ? r.graph : null,
-                // 执行语义（0.16.2）：可派发集 / 等依赖 / 等资源 / 可重试 / 终止性 /
-                // 结构校验 / 写范围冲突。与 graph 同一性质——是 tasks 的补充视角，
-                // 算不出来时为 null 并带 `planError`，**不连坐** tasks 与 graph。
-                // 为什么由服务端算：两条轴（依赖 / 资源）的判据必须与成员状态同源，
-                // 浏览器侧重算会立刻产生「面板说能开工、服务端说不能」两份真相。
-                plan: r.plan && typeof r.plan === 'object' ? r.plan : null,
-                planError: r.planError ?? null,
-                subAgentsError: r.subAgentsError ?? null,
-                teamError: r.teamError ?? r.membersError ?? null,
-                tasksError: r.tasksError ?? null,
-                // 来源标注（0.16.1）：`service` = 官方 agentTeams 服务，`disk` = 磁盘
-                // 回落，`null` = 两边都没读到。卸载 AgentTeams 之后用户看到的应当是
-                // `disk`——把这层透出去，用户才能判断「面板空了」是没团队还是没数据源。
-                teamSource: r.teamSource ?? null,
-                tasksSource: r.tasksSource ?? null,
-              };
-            } catch (e) {
-              return fail(e?.message || e);
-            }
-          } catch (e) {
-            // 花名册读失败**不能**让整个 /status 挂掉：状态页还有登录、
-            // 限流、恢复轮次等一堆更要紧的信息，那些与花名册无关。
-            const msg = `roster-threw: ${String(e?.message || e).slice(0, 160)}`;
-            return {
-              subAgents: [], team: [], members: [], tasks: [],
-              subAgentsError: msg, teamError: msg, tasksError: msg,
-            };
-          }
-        })()
-        : {
-          subAgents: [], team: [], members: [], tasks: [],
-          subAgentsError: 'roster-not-wired', teamError: 'roster-not-wired', tasksError: 'roster-not-wired',
-        }),
+      // ⚠ 这里**保留 `GET status` 本身**且不删任何既有调用点：登录态、限流、恢复轮次、
+      // 会话槽等其余字段与花名册无关，且 `/status` 是对外可读的状态入口。
+      //
+      // ⚠ 与「不得造假状态」的关系：这里不是把「读不到」写成「确实没有」，而是**这个
+      // 分区整体不存在了**（字段缺席而非字段为空）。字段缺席对调用方是显式的 KeyError /
+      // undefined，不会被误读成「当前没有子代理」。
       relay: relay ? (({ running, consent, consentPersistent, requireConsent, busy, queueLength, activeRequests, lastError, metrics }) => ({
         running, consent, consentPersistent, requireConsent, busy, queueLength, activeRequests, lastError, metrics,
       }))(relay.status()) : null,
@@ -1861,234 +1703,9 @@ export function createWebControl(deps = {}) {
     // ⇒ 路由与模块一并删除（**不留死代码**）；并发列现在就在**当前工作区**里普通新建会话，
     //   与官方「新会话」同路径，官方左栏自然呈现「一个文件夹内一条会话一行」。
     //   `test/concurrent-workspace.test.mjs` 同步删除，`client-server-contract` 判据同步。
-    // ── 任务看板独立数据层与控制面动作（0.17.3，对齐 dsh-task-board 与 Notion 式批注）──
-    //
-    // 台账存储根走**同一个**解析器 `taskRootOf`（0.19.0 收口），理由见它自己的注释。
-    'GET task-ledger': async (body) => {
-      const root = taskRootOf(body);
-      const { ledger, error } = readLedger(root);
-      return { ok: error === null, ledger, tasks: rowsOf(ledger), error, workspaceRoot: root };
-    },
-    'POST task-create': async (body) => {
-      const root = taskRootOf(body);
-      const { ledger: cur, error: rErr } = readLedger(root);
-      if (rErr) return { ok: false, error: rErr };
-      const now = Date.now();
-      const res = applyCreate(cur, {
-        subject: body?.subject,
-        description: body?.description,
-        ownerName: body?.ownerName,
-        assignedModel: body?.assignedModel,
-        sessionKey: body?.sessionKey,
-        projectId: body?.projectId,
-        writeScopes: body?.writeScopes,
-        maxAttempts: body?.maxAttempts,
-        // 排期与执行面（0.19.0）：用户要求「设置接任务智能体和时间，以及模式，权限」。
-        // 不在这里透传的话，界面填了、客户端发了，服务端**丢掉**——那是静默失败。
-        schedule: body?.schedule,
-        startAt: body?.startAt,
-        cron: body?.cron,
-        mode: body?.mode,
-        permission: body?.permission,
-        reuseSession: body?.reuseSession,
-      }, now);
-      if (res.error) return { ok: false, error: res.error };
-      const wRes = writeLedger(root, res.ledger);
-      if (wRes.error) return { ok: false, error: wRes.error };
-      return { ok: true, task: res.task, tasks: rowsOf(res.ledger) };
-    },
-    'POST task-update': async (body) => {
-      const root = taskRootOf(body);
-      const { ledger: cur, error: rErr } = readLedger(root);
-      if (rErr) return { ok: false, error: rErr };
-      const now = Date.now();
-      const res = applyUpdate(cur, body?.taskId, body?.patch || {}, now, body?.expectedRevision ?? null);
-      if (res.error) return { ok: false, error: res.error };
-      const wRes = writeLedger(root, res.ledger);
-      if (wRes.error) return { ok: false, error: wRes.error };
-      return { ok: true, task: res.task, tasks: rowsOf(res.ledger) };
-    },
-    'POST task-delete': async (body) => {
-      const root = taskRootOf(body);
-      const { ledger: cur, error: rErr } = readLedger(root);
-      if (rErr) return { ok: false, error: rErr };
-      const now = Date.now();
-      const res = applyDelete(cur, body?.taskId, now);
-      if (res.error) return { ok: false, error: res.error };
-      const wRes = writeLedger(root, res.ledger);
-      if (wRes.error) return { ok: false, error: wRes.error };
-      return { ok: true, task: res.task, prunedFrom: res.prunedFrom, tasks: rowsOf(res.ledger) };
-    },
-    'POST task-comment': async (body) => {
-      const root = taskRootOf(body);
-      const { ledger: cur, error: rErr } = readLedger(root);
-      if (rErr) return { ok: false, error: rErr };
-      const now = Date.now();
-      const res = applyAddComment(cur, body?.taskId, {
-        quote: body?.quote,
-        text: body?.text,
-        author: body?.author || 'user',
-      }, now, body?.expectedRevision ?? null);
-      if (res.error) return { ok: false, error: res.error };
-      const wRes = writeLedger(root, res.ledger);
-      if (wRes.error) return { ok: false, error: wRes.error };
-      return { ok: true, comment: res.comment, tasks: rowsOf(res.ledger) };
-    },
-    'POST task-comment-resolve': async (body) => {
-      const root = taskRootOf(body);
-      const { ledger: cur, error: rErr } = readLedger(root);
-      if (rErr) return { ok: false, error: rErr };
-      const now = Date.now();
-      const res = applyResolveComment(cur, body?.taskId, body?.commentId, now, body?.expectedRevision ?? null);
-      if (res.error) return { ok: false, error: res.error };
-      const wRes = writeLedger(root, res.ledger);
-      if (wRes.error) return { ok: false, error: wRes.error };
-      return { ok: true, comment: res.comment, tasks: rowsOf(res.ledger) };
-    },
-    'POST task-implement': async (body) => {
-      const root = taskRootOf(body);
-      const { ledger: cur, error: rErr } = readLedger(root);
-      if (rErr) return { ok: false, error: rErr };
-      const taskId = String(body?.taskId || '');
-      const task = (Array.isArray(cur?.tasks) ? cur.tasks : []).find((t) => String(t.id) === taskId);
-      if (!task) return { ok: false, error: 'task-not-found' };
-
-      const instructions = String(body?.instructions || body?.commentText || '').trim();
-      const quote = String(body?.quote || '');
-      const assignedModel = task.assignedModel || null;
-
-      // 组装派发指令
-      const prompt = [
-        `【任务执行指令】针对任务 [${task.id}] ${task.subject}:`,
-        task.description ? `任务说明:\n${task.description}` : '',
-        quote ? `针对正文片段的批注引用:\n> ${quote}` : '',
-        instructions ? `用户反馈与实施要求:\n${instructions}` : '',
-        '请根据以上批注和要求，真实执行并实现代码修改或分析。',
-      ].filter(Boolean).join('\n\n');
-
-      // 诚实字段：本动作**只组装指令**，真正的派发由客户端拿着 `prompt` 调
-      // `POST chat`（见 lib/client.cjs 的 onImplement）。0.17.3 之前这里写的是
-      // `dispatched: true`，而当时客户端根本不派发 —— 那个字段是假的。
-      return {
-        ok: true,
-        dispatched: false,
-        dispatchBy: 'client',
-        taskId: task.id,
-        sessionKey: task.sessionKey,
-        assignedModel,
-        prompt,
-      };
-    },
-    'POST chat': async (body) => {
-      const siteId = String(body?.siteId || 'deepseek');
-      const prompt = String(body?.prompt || '').trim();
-      if (!prompt) return { ok: false, error: 'empty-prompt' };
-      if (!relay?.status().consent) return { ok: false, error: '请在设置中启用网页自动化' };
-
-      // 任务侧派发要能落到**该任务自己的会话**上（`task.sessionKey`），否则「以任务
-      // 为核心实现会话」就断了：同一任务的多轮实施会各自开一个新会话。
-      //
-      // ⚠️ `fresh` 的判据必须是「**槽里确实存着**一个可续的会话」，而不是「调用方
-      // 传了 sessionKey」。0.17.3 第三轮真机抓到的严重缺陷就出在这里：
-      //
-      //   我一度写成 `fresh = !body?.sessionKey`，于是**全新**的 `task-session-t3-…`
-      //   带着 fresh=false 进入 `driver.sendTurn`；而驱动的 url-heal 分支
-      //   （`browser-driver.js:2624`）在「槽为空且 fresh=false」时会把**页面当前所在
-      //   的会话**采纳为本轮会话 —— 当时浏览器正开着我自己的 DSH 会话，于是任务指令
-      //   被发进了**用户当前正在看的那个对话**，`chat` 读回来的「回复」是我上一条消息
-      //   的原文。真机证据：`navTrace` 里 `task-session-t3-muc2xo2n` 与
-      //   `session-0f9fe6cf-…` 的 `landedId` 同为 `37820be9-…`。
-      //
-      // url-heal 本身是对的（它救的是「失败轮次没落盘」的历史槽，见那里的长注释），
-      // 不该动它；错的是调用方把一个**从未建立过**的会话键当成可续会话递给它。
-      // 判据：先问驱动有没有这个槽，有才 resume。
-      // ── 会话内容引用（0.19.19，用户 Q2「完整实现引用会话内容」）───────────────
-      //
-      // 在此之前，「引用」只有**一半**：任务板批注能把正文片段带下去（`POST
-      // task-implement` 的 `quote`，本文件上方），而**会话消息级**的引用不存在——
-      // 用户引用上一条回复再提问的链路整条缺失，并列多会话之间也没法互相引。
-      //
-      // 这里补上另一半，刻意沿用 task-implement 的同一套拼接习惯（`> ` 块引 +
-      // 一行出处），理由是一条事实只写一处语义：两处引用格式不同会让模型
-      // 面对两种「引用」先验。
-      //
-      // ⚠️ 截断规则是**必须**的，不是锦上添花：引用整条长回复会把上下文预算
-      // 瞬间吃掉（GLM 站点声明 1M，一次长引用就顶掉大半），而用户的意图通常
-      // 只需要那句被指着的话。这里取 4000 字符，**截前保尾**（保留开头，
-      // 尾部用省略号）——被引用的结论通常在开头，而尾部常是寒暄。
-      const quoteText = String(body?.quote || '').trim();
-      const quoteFrom = String(body?.quoteFrom || '').trim();
-      const QUOTE_LIMIT = 4000;
-      const quoted = quoteText.length > QUOTE_LIMIT
-        ? quoteText.slice(0, QUOTE_LIMIT) + '\n…（引用过长，此处已截断）'
-        : quoteText;
-      // ── 列身份与沙箱约定（0.19.21，用户 Q5 的后半问）───────────────────────
-      //
-      // 「并列多会话」里每一列都该知道**自己是哪一列、该把产出放哪**：
-      // 探索列写 `<workspace>/.hwb/cols/<列键>/`，主审列负责汇总。
-      // 不这么做，三列就只是三个并排的聊天窗口——各自为战，还会同时改同一个文件。
-      //
-      // ⚠️ 边界（不要夸大）：本插件**只做约定，不做拦截**。模型发起的
-      // `edit` / `pwsh` 由 Harness 的工具执行器落地，那条链路上没有本插件的插槽；
-      // 要真在文件系统层拦住越界写，必须在 provider → adapter → 工具调用元数据
-      // 全链带上列身份。完整论证见 `lib/column-context.js` 的文件头。
-      //
-      // 拼装顺序刻意是「列身份 → 引用 → 用户原文」：身份是**本轮语境**，
-      // 引用是**材料**，用户那句话才是**任务**——任务放最后，模型读到的最后一句
-      // 就是它要回答的东西（这也是本项目提示词组装的一贯顺序）。
-      const columnText = withColumnGuidance(prompt, body?.columnContext);
-      const promptText = quoted
-        ? [
-          quoteFrom ? `引用会话内容（来自「${quoteFrom}」的回复片段）:` : '引用会话内容:',
-          '> ' + quoted.split(/\r?\n/).join('\n> '),
-          '',
-          columnText,
-        ].join('\n')
-        : columnText;
-
-      const sessionKey = String(body?.sessionKey || `chat-${siteId}-${Date.now().toString(36)}`);
-      const target = relay?.config?.siteConnect?.(accountKeyOf(body)) || driver;
-      const stored = typeof target?.conversationFor === 'function'
-        ? target.conversationFor(sessionKey)
-        : null;
-      const fresh = !stored?.webSessionId;
-      if (typeof target?.sendTurn === 'function') {
-        // 0.19.30（用户第 2 点「保留完整的切换模式」）：把本列的思考模式交给
-        // `sendTurn`。它的形参**本来就有** `thinkMode`（`browser-driver.js:3309`，
-        // 三态 'auto'|'on'|'off'，见同文件 2840 行），这里此前没透传 ——
-        // 于是「界面选得动、服务端收下、真正生成时不生效」：静默失败，
-        // 正是本仓库反复记过的那个坑。本条只接线，不新增任何后端路径。
-        const res = await target.sendTurn(sessionKey, promptText, {
-          fresh, model: body?.model, thinkMode: body?.thinkMode,
-        });
-        const reply = res?.text || res || '';
-        // ── 0.19.29：把本列产出落到**本列目录**（用户「沙箱」需求的落地）────────
-        //
-        // 为什么必须落盘（两轮思考的第一条结论）：并列三列走的是**控制面通路**，
-        // 它只回文本、不执行工具，所以那句「你的产出请写入 .hwb/cols/<键>/」在
-        // 这条路上**根本做不到** —— 网页聊天模型没有文件工具。那是一句谎话。
-        // 落盘让它变成事实：约定说的目录**真的存在**，主审列的「统一审查」也终于
-        // 有实物可吃（而不是只有引用通道里的一段文本）。
-        //
-        // 围栏在本插件唯一的写入口上（`column-fs.js`）：目标必须落在本列目录内，
-        // 越界抛 `COLUMN_FS_DENIED`。它**只**保护这个写入口，不是内核边界、也不
-        // 拦截模型（模型侧本来就没有写的能力）—— 这条边界在 `column-fs.js` 文件头
-        // 与两份思考文档里写死了，不许在这里被说大。
-        //
-        // **best-effort**：落盘失败绝不能让「消息已经发出去并拿到回复」变成一次失败
-        // 上报 —— 那会让用户以为消息没发出去（真机最恼人的一类假失败）。失败只记
-        // 一行日志，并把原因放进 `artifacts.error` 如实透出。
-        const artifacts = saveColumnReply(body?.columnContext, taskRootOf(body), reply, sessionKey);
-        return { ok: true, reply, sessionKey, fresh, resumed: !fresh, ...(artifacts ? { artifacts } : {}) };
-      }
-      // 没有可用的驱动时**如实报错**。原先这里回 `{ok:true, reply:'[已向 X 投递: …]'}`
-      // —— 那是一条编出来的「成功」，用户会以为消息真的发出去了。
-      // 本项目对「说做了、其实没做」有明确纪律，故改为 `ok:false`。
-      return { ok: false, error: `no-driver-for-site: ${siteId}（网页驱动不可用，消息未发出）` };
-    },
   };
 
-  // ── `status` 必须同时接受 GET 与 POST（0.15.3，真机缺陷修复）────────────────
+  // ── GET/POST 方法别名（0.15.3 族缺陷的机制，0.22.0 收窄）────────────────
   //
   // 真机 2026-09-16：设置页「正在运行（子代理 / Team）」那一栏永远读不到花名册。
   // 根因不是花名册本身，而是**两端对同一个动作的方法不一致**：
@@ -2096,25 +1713,18 @@ export function createWebControl(deps = {}) {
   //     lib/client.cjs      api('status', { sessionId })  ← 带 body ⇒ POST
   //     lib/web-control.js  'GET status'                  ← 只注册了 GET
   //
-  // 于是真机 POST /__webcode/status ⇒ **405**（上面的 `if (!actions[key])` 分支
-  // 发现同名后缀存在、方法不匹配，就带 Allow 头回 405）。花名册这一栏因此永远
-  // 停在「读不到」，而 `subAgentsError` 报的是 `no-session-id` —— 那个原因本身
-  // 也是真的（sessionId 根本没送达），但它是**后果**，不是根因。
+  // 于是真机 POST /__webcode/status ⇒ **405**。为什么离线全绿：`client-render.test.mjs`
+  // 的 mock fetch **不看方法**，任何 URL 都回 200 + JSON —— 护栏自己的建模失真，
+  // 把「服务端没这条路由」整个盖住了。
   //
-  // 为什么离线全绿：`client-render.test.mjs` 的 mock fetch **不看方法**，任何
-  // URL 都回 200 + JSON。护栏自己的建模失真，把「服务端没这条路由」整个盖住了。
-  //
-  // 为什么不把客户端改成 GET：花名册的 subagentCatalog 是**会话级**投影，
-  // sessionId 必须随请求送达，而客户端统一走 `request()` 的「有 body 就 POST」
-  // 契约。两头都收才是对调用方无假设的形态（外部脚本用 GET 也照旧可用）。
-  //
-  // 这里用**别名**而不是复制一份实现：两个方法必须返回逐字节相同的形状，
-  // 复制一份迟早会漂移——那正是这次故障的同族病（两端各写各的）。
+  // 那条 `POST status` 别名随花名册一起在 0.22.0 删除：它存在的唯一理由是客户端要
+  // **带回话身份的 body**（`api('status', { sessionId })`）去轮询会话级的花名册投影。
+  // 花名册删掉之后，客户端只剩 `api('status')` 一种调用（无 body ⇒ GET），
+  // `test/client-server-contract.test.mjs` 会当场把「多注册的 POST」判成死路由。
   //
   // 判据由 `test/client-server-contract.test.mjs` 钉住：它把客户端
-  // `api(action, body)` 推导出的方法与服务端动作表直接对齐，于是这一族
-  // 「调用点存在、另一端没有」的缺陷从此在离线就能红。
-  actions['POST status'] = actions['GET status'];
+  // `api(action, body)` 推导出的方法与服务端动作表直接对齐，于是「调用点存在、
+  // 另一端没有」这一族缺陷从此在离线就能红。**新增参数时照它对齐，不要凭印象加别名。**
   actions['POST session-slot'] = actions['GET session-slot'];
   // attach-status 同理（0.19.32）：客户端带 body（`api('attach-status', { siteId })`）
   // 就会走 POST，而服务端只注册了 GET ⇒ 真机 405 + 空 body，面板那一行永远显示

@@ -1,6 +1,6 @@
-# 代码结构归类：lib 的 55 个模块分几层
+# 代码结构归类：lib 的 46 个模块分几层
 
-本文件把 `package/dsh-webcode-bridge/lib/` 的 **55 个模块 / 39,710 行**按**职责**归类，
+本文件把 `package/dsh-webcode-bridge/lib/` 的 **46 个模块 / 34,454 行**按**职责**归类，
 并给出实测依赖方向。目的：让「改一处要动几个文件」这个问题有确定答案。
 
 **口径（重要）**：行数是 `readFileSync(...).split(/\r?\n/).length` 的读数，与
@@ -8,11 +8,11 @@
 不计末尾空行）。模块数与测试文件数由机器判：`node scripts/check-ledger.mjs` 与
 `node wiki/tools/gen-index.mjs --check`。
 
-实测时间 2026-10-17，基线 `0.19.76`，宿主 `dsh@0.2.1-alpha.2`。
+实测时间 2026-10-21，基线 `0.22.0`。
 
-> **本文件两次过期，两次都是「人写的数字」先烂**（2026-09-17 读数 30 个模块 / 15,175 行；
+> **本文件三次过期，三次都是「人写的数字」先烂**（2026-09-17 读数 30 个模块 / 15,175 行；
 > 2026-09-30 重算为 48 / 34,570；2026-10-14 重算为 **53 / 38,662**；2026-10-17 重算为
-> **55 / 39,710**）。
+> **55 / 39,710**；2026-10-21 因 0.22.0 删除 9 个模块重算为 **46 / 34,454**）。
 > 因此：**凡本节数字与 `gen-index.mjs` / `check-ledger.mjs` 冲突，一律以后两者为准**
 > ——它们是机器现扫的，本节是人写的。改写本节时**先跑那两条命令，再抄读数**，
 > 不要凭记忆改。
@@ -23,14 +23,18 @@
 
 | 项 | 值 | 取法 |
 | --- | --- | --- |
-| `lib/` 模块数 / 总行数 | **55 / 39,710** | `node wiki/tools/gen-index.mjs --check` |
-| 最大模块 | `client.cjs` **7,826 行** | 浏览器侧单文件 bundle（非 ESM） |
-| 次大 | `browser-driver.js` **5,397**、`index.js` **4,862**、`agent-preset.js` **3,072** | 同上 |
-| 再次 | `web-control.js` 2,134、`think-effort.js` 1,199、`providers.js` 1,188、`decoder.js` 1,163 | 同上 |
-| 测试文件 | **133 个** `*.test.mjs` | `node scripts/check-ledger.mjs` |
+| `lib/` 模块数 / 总行数 | **46 / 34,454**（44 个根模块 + `sites/` 2 个） | `node wiki/tools/gen-index.mjs --check` |
+| 最大模块 | `browser-driver.js` **6,016 行** | 同上 |
+| 次大 | `client.cjs` **5,011**、`index.js` **4,875**、`agent-preset.js` **3,089** | 同上 |
+| 再次 | `web-control.js` 1,929、`think-effort.js` 1,373、`providers.js` 1,300、`decoder.js` 1,164 | 同上 |
+| 测试文件 | **124 个** `*.test.mjs` | `node scripts/check-ledger.mjs` |
 | 真机夹具 | `test/fixtures/` 下的 `dsml-real-*.txt` 与具名形态 | `test/fixtures/` |
 | 入口 | `main: ./lib/index.js`；`exports` 另含 `./client`、`./cordis.patch.yml` | `package.json` |
 
+> **0.22.0 的减法读数**（用户 2026-10-21 明令删除任务板与并发会话）：
+> 模块 53 → **44**（根目录口径），行数 39,973 → **33,324**，`client.cjs` 8,063 → **5,011**。
+> 逐项删除清单见 [`progress.md`](progress.md) 的 0.22.0 节。
+>
 > `client.cjs` 是**官方要求的单文件 CJS bundle**（它不能 `import` 自己的 `lib/`），
 > 因此它的行数**不构成**「该拆」的信号——拆分它会破坏官方客户端契约。
 > 这一点已写进 [`permissions-and-boundaries.md`](permissions-and-boundaries.md) §1.3。
@@ -107,41 +111,34 @@
 
 | 模块 | 行数 | 职责 |
 | --- | --- | --- |
-| `client.cjs` | 7826 | DSH Web 客户端面（浏览器侧单文件 bundle，**非 ESM**，不能 import lib/） |
-| `settings-page.js` | 1023 | 独立设置页 `/__webcode/settings-page` 的静态 HTML |
-| `comparison-view.js` | 522 | 多列对比视图 `/__webcode/comparison` 的静态 HTML |
+| `client.cjs` | 5011 | DSH Web 客户端面（浏览器侧单文件 bundle，**非 ESM**，不能 import lib/） |
+| `settings-page.js` | 1024 | 独立设置页 `/__webcode/settings-page` 的静态 HTML |
 
 ### H · 记录/卫生
 
 | 模块 | 行数 | 职责 |
 | --- | --- | --- |
-| `reply-log.js` | 134 | 网页**原始回复全文**的落盘日志（未归一化、未截断） |
-| `prompt-store.js` | 181 | 提示词/上下文的每站点、每会话落盘 |
-| `notices.js` | 70 | 交回会话的**展示文案**（协议安全 + 不许静默降级） |
+| `reply-log.js` | 135 | 网页**原始回复全文**的落盘日志（未归一化、未截断） |
+| `prompt-store.js` | 182 | 提示词/上下文的每站点、每会话落盘 |
+| `notices.js` | 71 | 交回会话的**展示文案**（协议安全 + 不许静默降级） |
 
-### I · 任务/团队
+### 0.22.0 删除的两层（原 I / 原 J）
 
-| 模块 | 行数 | 职责 |
-| --- | --- | --- |
-| `task-ledger.js` | 669 | 桥**自己**的任务台账：任务是一等公民，不寄生在任何会话上 |
-| `task-graph.js` | 237 | 任务图的**结构诊断**：就绪集、阻塞原因、关键路径、环与悬空边 |
-| `task-plan.js` | 427 | 任务图的**执行语义**：准入判定（能不能开工、为什么不能） |
-| `task-split.js` | 238 | 把一个目标拆成依赖图（AI 拆分 + 分配 + 结构校验） |
-| `team-state.js` | 240 | Team/任务状态的磁盘投影（AgentTeams 包不在时的权威） |
-| `roster.js` | 595 | 真实花名册投影：把「谁在跑」变成可从服务端读取的事实 |
+| 原层 | 模块 | 行数 | 为什么删 |
+| --- | --- | --- | --- |
+| 原 I · 任务/团队 | `task-ledger` `task-graph` `task-plan` `task-split` `team-state` `roster` | 2,353 | 用户 2026-10-21 明令「不想要任务板」。`roster` 一起删：它只被 `index.js` 的一处注入消费，而那个注入只喂 `/status` 的花名册字段，花名册唯一界面消费者就是任务板面板 |
+| 原 J · 并列多会话 | `column-context` `column-fs` | 269 | 「左侧面板自己设计的并发会话去除」。⚠ **并发能力本身一行未动**（见下方 §三 的结构性事实） |
+| 原 G 之一 | `comparison-view` | 522 | 并发面板 0.17 时代的静态 HTML 前身；0.19.55 被「每列一条真官方会话」取代后**界面上再无入口**（`client.cjs` 全文 0 处指向 `/__webcode/comparison`） |
 
-### J · 并列多会话
-
-| 模块 | 行数 | 职责 |
-| --- | --- | --- |
-| `column-context.js` | 181 | 并列多会话的列身份与工作区约定（**只做约定，不做拦截**） |
-| `column-fs.js` | 194 | 并列三列的产物围栏（照抄官方 canonicalize-then-contain 口径） |
+> **不要把这次删除读成「并发没了」**：`relay.js` 的每账号车道、`maxConcurrentLanes`、
+> `accounts.js` 的 per-slot profile 全部保留 —— 那是 **provider 通路**，与界面无关。
+> 删掉的是「并发的界面 + 它的列沙箱约定」。用户原话已在 `progress.md` 0.22.0 节逐字留存。
 
 ### 不在生产链路上
 
 | 模块 | 行数 | 状态 |
 | --- | --- | --- |
-| `tool-parser.js` | 53 | ⚠ **未接线**，只被单测引用。留着是一份**待决的产品决定**，不是死代码——删之前先读它的文件头 |
+| `tool-parser.js` | 54 | ⚠ **未接线**，只被单测引用。留着是一份**待决的产品决定**，不是死代码——删之前先读它的文件头 |
 
 ---
 

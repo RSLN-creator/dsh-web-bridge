@@ -287,6 +287,24 @@ function zcodeDbPath() {
  * 不让整轮抽词失败，只在返回值里带 `reason`，由 main 如实打印。会话/消息两级都在
  * SQL 侧用 `json_extract` 过滤，part 侧再按 `type === 'text'` 拼正文——image 等
  * 非文本 part 静默跳过（没有正文的消息本来就不成条目）。
+ *
+ * ## 为什么用 `immutable=1` 而不是裸 `readOnly: true`（2026-10-21 实测修复）
+ *
+ * 裸 `new DatabaseSync(dbFile, { readOnly: true })` 在本机实测抛
+ * `ERR_SQLITE_ERROR: unable to open database file`（**stat 成功、打开失败**，
+ * 所以不是路径问题，也不是权限位问题）。真因是 SQLite 的 WAL 协议：
+ *
+ *   · 该库**没有配套的 `-shm` / `-wal` 文件**（实测目录里只有 `db.sqlite` 一个文件）；
+ *   · 只读连接仍要在**同目录**创建/映射 `-shm` 共享内存；
+ *   · 而这个目录在 DSH 的文件沙箱**读写范围之外** ⇒ 创建被拒 ⇒ 打开失败。
+ *
+ * `immutable=1` 明确告诉 SQLite「这个文件不会被任何人写」，于是它**跳过锁与 WAL
+ * 恢复**，不需要 `-shm`。这与本脚本的用途完全一致：它是**只读取证**工具，不是
+ * 会话库的并发读者——库的写入者（ZCode CLI）在另一套生命周期里。
+ *
+ * 代价（如实登记）：`immutable=1` 期间若库**正被写入**，可能读到不一致快照。
+ * 对本脚本可接受——它汇总的是历史原话，不是事务性数据；且它原本就读一个
+ * 8 天前最后修改的文件（`LastWriteTime` 实测）。
  */
 export async function collectZcodeVoice({ workspaces = [DEFAULT_WORKSPACE] } = {}) {
   const empty = { entries: [], sessions: 0, skipped: 0, subagentSessions: 0, reason: null };
@@ -294,7 +312,9 @@ export async function collectZcodeVoice({ workspaces = [DEFAULT_WORKSPACE] } = {
   if (!fs.existsSync(dbFile)) return { ...empty, reason: 'ZCode 会话库不存在（' + dbFile + '）' };
   let DatabaseSync;
   try { ({ DatabaseSync } = await import('node:sqlite')); } catch { return { ...empty, reason: '当前 Node 没有 node:sqlite（需 ≥22.13）' }; }
-  const db = new DatabaseSync(dbFile, { readOnly: true });
+  // `immutable=1` 的理由见本函数头注释。路径要按 file: URI 规范转义（Windows 反斜杠会破坏 URI）。
+  const dbUri = 'file:' + dbFile.replace(/\\/g, '/') + '?immutable=1';
+  const db = new DatabaseSync(dbUri, { readOnly: true });
   const sessionRows = db.prepare('SELECT id, directory FROM session').all();
   const msgStmt = db.prepare(
     "SELECT id, sequence, time_created, data FROM message WHERE session_id = ? "
