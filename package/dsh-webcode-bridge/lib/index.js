@@ -4291,6 +4291,9 @@ function imageMarkdown(images) {
     getToken: () => driver.getToken(),
     logger: console,
     assetOrigins: getSite('deepseek')?.staticOrigins || [],
+    // 令牌键从站点声明取（0.22.0 续）：镜像注入脚本要往 localStorage 写的键名，
+    // 此前在 mirror.js 里硬编码成 'userToken'。见该参数在 mirror.js 的注释。
+    tokenKey: capabilitiesOf('deepseek').tokenKey || null,
     mountPrefix: '',
     getCookies: (origin) => driver.profileCookies(origin),
     setCookies: (headers, origin) => driver.writeProfileCookies(headers, origin),
@@ -4328,6 +4331,8 @@ function imageMarkdown(images) {
         getToken: () => drv().getToken(),
         logger: console,
         assetOrigins: st.staticOrigins || [],
+        // 令牌键由该站点声明（0.22.0 续）：未声明的站点不往 localStorage 写任何令牌。
+        tokenKey: capabilitiesOf(st).tokenKey || null,
         // 子域形态下站点就住在根上，不需要任何前缀；路径形态才带前缀。
         mountPrefix: prefixed ? '/__webcode/site/' + sid : '',
         // 子域形态 pathname 与真实站点逐字一致，SPA router 基线天然正确——

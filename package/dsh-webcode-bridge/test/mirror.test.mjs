@@ -23,6 +23,9 @@ test('mirror serves a fixed upstream for the sidebar iframe', async (t) => {
   const mirror = createMirror({
     siteOrigin: `http://127.0.0.1:${upstreamPort}`,
     getToken: async () => 'test-token',
+    // 令牌键由调用方按站点声明传入（0.22.0 续）。不传 = 不写 localStorage，
+    // 因此这里必须显式给一个，才谈得上「注入脚本带令牌」。见下面 ①b 那条判据。
+    tokenKey: 'userToken',
     logger: { log() {}, warn() {} },
   });
   const relay = http.createServer((req, res) => {
@@ -406,4 +409,63 @@ test('mirror /wr/：运行时未知域绝对 URL 的带 cookie 转发（0.19.14 
   assert.equal(bad.status, 502, '公网目标放行到转发层，不可达时报 502');
   const errBody = await bad.json();
   assert.match(errBody.error.message, /wrapped upstream unreachable/);
+});
+
+// ── 0.22.0 续：令牌键由站点声明决定，镜像不自己写死 ────────────────────────────
+//
+// 背景：`mirror.js` 的 bootstrap 注入脚本原先硬编码
+// `localStorage.setItem('userToken', …)`。而令牌键的真源已经移到
+// `lib/sites/deepseek.js` 的 `capabilities.tokenKey`。
+//
+// 两处写同一个键名的代价不是「不好看」，是**静默失配**：声明改成别的键名时，
+// 镜像仍往旧键写 ⇒ 页面里的 API 调用拿不到令牌 ⇒ 静默 401，只能靠真机抓包发现。
+//
+// 判据两条：
+//   ① 传了 tokenKey ⇒ 注入脚本用**传入的**键名（不是写死的 'userToken'）；
+//   ② 没传 tokenKey ⇒ **一个 localStorage 写入都不发生**（往没有这套 API 的
+//      站点塞 `userToken` 是污染，不是兼容）。
+test('mirror 注入脚本的令牌键来自调用方（未声明就不写），不写死 userToken', async (t) => {
+  const upstream = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end('<!doctype html><html><head></head><body>ok</body></html>');
+  });
+  const upstreamPort = await listen(upstream);
+
+  /** 起一个只服务 bootstrap 的最小 relay，取回注入脚本那段 HTML。 */
+  async function htmlFrom(options) {
+    const mirror = createMirror({
+      siteOrigin: `http://127.0.0.1:${upstreamPort}`,
+      getToken: async () => 'tok-123',
+      logger: { log() {}, warn() {} },
+      ...options,
+    });
+    const relay = http.createServer((req, res) => {
+      const url = new URL(req.url, 'http://loopback');
+      mirror.handle(req, res, url.pathname, url.search)
+        .then((handled) => { if (!handled) { res.writeHead(404); res.end(); } })
+        .catch(() => { try { res.writeHead(500); res.end(); } catch {} });
+    });
+    const port = await listen(relay);
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/`);
+      return await r.text();
+    } finally { relay.close(); }
+  }
+
+  t.after(() => upstream.close());
+
+  // ① 传了键名 ⇒ 用它（且令牌真的写进去）
+  const withKey = await htmlFrom({ tokenKey: 'mySiteToken' });
+  assert.match(withKey, /localStorage\.setItem\("mySiteToken"/,
+    '注入脚本必须用调用方传入的令牌键');
+  assert.match(withKey, /tok-123/, '令牌内容必须真的写进脚本');
+  assert.doesNotMatch(withKey, /localStorage\.setItem\("userToken"/,
+    '不许再出现写死的 userToken 键名');
+
+  // ② 没传键名 ⇒ 不写 localStorage
+  const withoutKey = await htmlFrom({});
+  assert.doesNotMatch(withoutKey, /localStorage\.setItem/,
+    '未声明 tokenKey 的站点不该被写入任何 localStorage 项');
+  assert.match(withoutKey, /未声明 tokenKey/,
+    '应留一行可读注释说明「为什么不写」，而不是静默省略');
 });

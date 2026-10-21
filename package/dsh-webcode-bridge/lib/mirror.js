@@ -38,6 +38,15 @@ export function createMirror(options = {}) {
     getCookies = null,
     setCookies = null,
     getUserAgent = null,
+    // 网页 API 令牌在 localStorage 里的键名（0.22.0 续）。
+    //
+    // 真源是站点声明的 `capabilities.tokenKey`（见 `lib/sites/deepseek.js`）。
+    // 此前这里**硬编码** `localStorage.setItem('userToken', …)`：声明改了它不跟着变，
+    // 而症状是「镜像页面里的 API 调用拿不到令牌 → 静默 401」，只能靠真机抓包才能发现。
+    //
+    // 默认 null = 不写令牌：没有 tokenKey 的站点本来就没有这套 API，
+    // 往它的 localStorage 里塞一个 `userToken` 反而是污染。
+    tokenKey = null,
     // 驱动 cookie 的缓存窗口（毫秒）。0 = 不缓存。
     //
     // 为什么必须有（0.14.4）：合并 cookie 之后每次代理请求都要读一次驱动 profile，
@@ -499,8 +508,13 @@ export function createMirror(options = {}) {
     const rootPathFix = rootPathForSpa
       ? '<script data-webcode-rootpath>try{if(location.pathname!==\'/\')history.replaceState(null,\'\',\'/\');}catch(e){}</script>\n'
       : '';
+    // 令牌键由调用方按站点声明传入（0.22.0 续）。没有 tokenKey ⇒ 不写令牌：
+    // 往一个没有这套 API 的站点 localStorage 里塞 `userToken` 是污染，不是兼容。
+    const tokenScript = tokenKey
+      ? `\ttry{if(${tokenLiteral}!==null)localStorage.setItem(${JSON.stringify(tokenKey)},${tokenLiteral});}catch(e){}`
+      : '\t/* 本站点未声明 tokenKey：不写 localStorage（见 mirror.js 的 tokenKey 参数注释） */';
     return rootPathFix + `<script data-webcode-mirror>(function(){
-	try{if(${tokenLiteral}!==null)localStorage.setItem('userToken',${tokenLiteral});}catch(e){}
+${tokenScript}
 	try{if(navigator.serviceWorker)navigator.serviceWorker.register=function(){return Promise.reject(new Error('mirror: service worker disabled'));};}catch(e){}
 	var UP=${originLiteral};
 	// 只存 host：匹配与拼接都用纯字符串，避免正则转义在模板里失真。
