@@ -116,19 +116,29 @@ function installInto(tarball, profileDir) {
  * ReferenceError，被 web-control 的 try/catch 降级成
  * `subAgentsError: "roster-threw: projectRoster is not defined"` —— 面板永久空白，
  * 而所有「文件都在」的探针都是绿的。所以这里必须在安装时就当场发现。
+ *
+ * ## 0.22.0：那条判据的对象被删了，因此清单清空（**教训留下**）
+ *
+ * 本轮删掉任务板与花名册，`roster.js` 与那处注入都不存在了。于是这条**曾抓到真缺陷的**
+ * 判据变成了「在守一个已删的模块」——真机跑 install 会报
+ * `✖ 接线断裂: projectRoster`，而实际上没有任何问题。
+ *
+ * ⚠ 判据本身没被否定，**只是它守的那个引用没了**。将来任何「调用点在、import 漏了、
+ * 单测全绿、只在真机调用才炸」的引用，都应该加回这里（连同「为什么漏了不报错」）。
+ * 今天同类问题共三处同时清理：`verify-pack.mjs` 的 WIRING、`check-official-drift.mjs`
+ * 的 19 段、以及本文件的 probes 里的 `lib/roster.js`。
  */
-const WIRING = [
-  { need: 'projectRoster', from: './roster.js', file: 'lib/index.js' },
-];
+const WIRING = [];
 
 function verify(target) {
   const pkgJson = JSON.parse(fs.readFileSync(path.join(target, 'package.json'), 'utf8'));
+  // 探针：几个「真机一装就该在」的代表文件。0.22.0 去掉了 `lib/roster.js`（模块已删）；
+  // 其余四个都还在服役，且分属不同层（纯计算 / 凭据 / 界面 / 驱动），一个漏装就说明整包没落盘。
   const probes = [
     'lib/wait-stats.js',
     'lib/cookies.js',
     'lib/client.cjs',
     'lib/browser-driver.js',
-    'lib/roster.js',
   ];
   const missing = probes.filter((p) => !fs.existsSync(path.join(target, p)));
   const wiring = [];

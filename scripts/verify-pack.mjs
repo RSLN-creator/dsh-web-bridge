@@ -44,14 +44,25 @@ function sha256(buf) {
  *
  * 每一条都对应一次真机踩坑，或者一个「漏了也不会报错、只在真机调用时才炸」的引用。
  * 加新条目时请连同「为什么漏了不报错」写进注释——否则下一个人会以为这是形式主义。
+ *
+ * ## 0.22.0：唯一一条被删了，因为**它守的东西不存在了**
+ *
+ * 原条目是 `{ need: 'projectRoster', from: './roster.js', file: 'lib/index.js' }`，
+ * 守着 2026-09-15 那次真机事故：`rosterOf` 的箭头函数体里调 `projectRoster`，
+ * 但 import 漏了 —— 模块加载成功、单测全绿，只有 `/status` 真调用才抛，
+ * 被 try/catch 降级成 `subAgentsError: "roster-threw: projectRoster is not defined"`。
+ *
+ * 0.22.0 删掉任务板与花名册之后，`roster.js` 与那处注入都不存在了，
+ * 这条判据变成**在守一个已删的模块**——它会让每一次 `verify-pack` 都报「接线断裂」，
+ * 而那是个假红（真机不会有任何问题）。
+ *
+ * ⚠ **这不是「删掉烦人的闸门」**：判据本身（「跨模块引用的另一端必须真的在」）仍然成立，
+ * 而且仍然值得为**当前存在的**引用重建。这里保留空数组 + 这段注释，是在提醒下一个人：
+ * **加条目前先确认真有一个「漏了不报错」的引用**，别把已经删掉的东西的骨架留在闸门里。
+ * （同一天同类问题共三处：`check-official-drift.mjs` 的 19 段、本文件这 1 条、
+ *   以及 `web-control.js` 的 `POST status` 别名。）
  */
-const WIRING = [
-  // 2026-09-15 真机：index.js 里 `rosterOf: (sessionId) => projectRoster(ctx, sessionId)`
-  // 在，import 漏了。箭头函数体创建时不求值 → 模块加载成功、33/33 单测全绿，
-  // 只有 /__webcode/status 真的调用才抛 ReferenceError，被 try/catch 降级成
-  // subAgentsError:"roster-threw: projectRoster is not defined"，面板永久空白。
-  { need: 'projectRoster', from: './roster.js', file: 'lib/index.js' },
-];
+const WIRING = [];
 
 /** 自动挑 package/ 下 mtime 最新的 tarball。 */
 function newestTarball() {
