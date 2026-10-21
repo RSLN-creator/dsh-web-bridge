@@ -8,16 +8,34 @@
 import { DEEPSEEK, SITES, resolveWebModel, getSite, conversationIdFromUrl, conversationUrlFor } from './providers.js';
 import { expectedModelType, expectedRequestMetadata } from './metrics.js';
 
-export const DEEPSEEK_WEB_CONTRACT = Object.freeze({
-  siteOrigin: DEEPSEEK.origin,
-  completionPath: DEEPSEEK.completionPaths[0],
-  completionPaths: DEEPSEEK.completionPaths,
-  inputSelector: DEEPSEEK.input,
-  sendButtonSelector: DEEPSEEK.sendButton,
-  stopButtonSelector: DEEPSEEK.stopButton,
-  attachSelector: DEEPSEEK.attachSelector,
-  attachPreviewSelector: DEEPSEEK.attachPreview,
-  decoder: DEEPSEEK.decoder,
+/**
+ * DeepSeek 的网页契约。
+ *
+ * ## 0.22.2（DeepSeek 试点第一步）：这里只写「独有知识」，不再手抄第二份选择器
+ *
+ * 本对象此前是 **14 个键手写一遍**，其中 **9 个是 `DEEPSEEK.*` 的逐字照抄**
+ * （`siteOrigin←origin` / `completionPath←completionPaths[0]` / `inputSelector←input` /
+ *  `sendButtonSelector←sendButton` / `stopButtonSelector←stopButton` /
+ *  `attachSelector` / `attachPreviewSelector←attachPreview` / `completionPaths` / `decoder`）。
+ *
+ * 那不是「集中维护」，那是**同一份信息写两遍**——`doc/CODE-STRUCTURE.md` 里记的
+ * 「修一处忘两处」正是这一类；`browser-driver.js` 里曾有三份逐字相同的
+ * `ANSWER_SELECTOR` 字面量，代价是判据用的节点与兜底交出去的节点不是同一个。
+ *
+ * 现在改成：**`providers.js` 的站点声明是唯一真源**，本对象只保留
+ * 「站点声明里没有、又确实只有 DeepSeek 有」的 5 类知识：
+ *
+ * | 键 | 为什么必须留在这里（不能从 site 派生） |
+ * | --- | --- |
+ * | `searchTogglePattern` | 网页控件**文本**的匹配式（`智能搜索/联网搜索/Search`），不是选择器 |
+ * | `requestMetadataKeys` | 发送后要核验的请求体元数据键，属于「怎么验」而非「站点长什么样」 |
+ * | `strictModelType` | 本仓库红线 1 的开关：站点元数据与所选模式不符必须报错 |
+ * | `expectedModelType` / `expectedRequestMetadata` | 两个判据函数，按 UI 代际取期望值 |
+ *
+ * 判据（改这里的唯一标准）：**凡是能从 `DEEPSEEK` 读到的，就不要在这里再写一份**。
+ * 派生关系见下方 `deriveContractFromSite`，它对 10 个站点一视同仁。
+ */
+const DEEPSEEK_ONLY = Object.freeze({
   searchTogglePattern: /^(智能搜索|联网搜索|Search)$/,
   requestMetadataKeys: ['model_type', 'thinking_enabled', 'search_enabled'],
   strictModelType: true,
@@ -27,8 +45,39 @@ export const DEEPSEEK_WEB_CONTRACT = Object.freeze({
   expectedRequestMetadata: (modelId, opts) => expectedRequestMetadata(resolveWebModel(modelId).id, opts),
 });
 
-function genericContract(st) {
-  return Object.freeze({
+/**
+ * 从站点声明派生契约里那 9 个「形状」字段——**单一取法，各站点共用**。
+ *
+ * 这是 0.22.2 试点要验的那件事：站点之间的差异应该只有**数据**（声明里有什么），
+ * 而不是**又一段代码**（再手写一遍同名字段）。派生是纯字段改名，没有逻辑分支，
+ * 因此 `provider-surface.test.mjs` 钉住的对外面逐字不变。
+ *
+ * ## 一条必须守住的等价性（本轮踩到的真问题，写下来免得下一个人重踩）
+ *
+ * 「键存在但值为 undefined」与「键根本不存在」**在 `Object.keys()` 上不同**；
+ * 更麻烦的是：**同一个派生函数不能同时服务两种历史形状**。
+ *
+ * 实测（0.22.2 第一版）：把「可选字段只在声明时出现」这条规则套到**所有站点**上，
+ * DeepSeek 完全等价，但**其余 8 站不等价** —— 通用契约历来**无条件**带
+ * `answerSelector` 与 `experimental`（哪怕值是 null/false），收窄它们等于改变了
+ * 对外面。`provider-surface.test.mjs` 存在的意义正是钉住这个面。
+ *
+ * 因此本函数带一个开关：
+ *   · `alwaysOptionals: true`（通用契约，即历史行为）→ 可选键**恒在**；
+ *   · `alwaysOptionals: false`（DeepSeek）→ 可选键**只在声明里有时才出现**
+ *     （DeepSeek 契约历史上就没有这两键，多出来就是漂移）。
+ *
+ * 这就是「只动 DeepSeek」这条试点纪律在代码里的落点：**没有顺手动别人的形状**。
+ *
+ * @param {object} st 站点声明（`providers.js` 的 SITE 或 `lib/sites/<id>.js` 的导出）
+ * @param {object} [extra] 该站点独有的其余契约字段（DeepSeek 用 DEEPSEEK_ONLY）
+ * @param {object} [opts]
+ * @param {boolean} [opts.alwaysOptionals=false] 可选键是否恒在（默认否，按声明）
+ * @returns {object} 冻结后的契约
+ */
+function deriveContractFromSite(st, extra = {}, { alwaysOptionals = false } = {}) {
+  // 必填字段：每个站点都有（providers.js 的 SITE 形状保证了这一点）。
+  const base = {
     siteOrigin: st.origin,
     completionPath: st.completionPaths[0] ?? null,
     completionPaths: st.completionPaths,
@@ -41,17 +90,38 @@ function genericContract(st) {
     //（0.12.9 之前固定 waitForTimeout(500) 就当成功，这正是「有图说没图」
     // 的链路：桥以为传完了，网页端其实一个附件都没有）。
     attachPreviewSelector: st.attachPreview ?? null,
-    // 助手回复节点选择器（0.19.19）：站点声明里有就用它，没有则 null ——
-    // 驱动侧对 null 的处理是回落到那份 DeepSeek 串（行为与今天逐字相同，
-    // 因此这是一条**纯增量**声明，不会把任何一个站点改坏）。
-    answerSelector: st.answerSelector ?? null,
     decoder: st.decoder,
+    // 默认值：通用契约的基线；DeepSeek 这类站点在 extra 里覆盖。
     searchTogglePattern: null,
     requestMetadataKeys: [],
     strictModelType: false,
     expectedModelType: () => null,
-    experimental: Boolean(st.experimental),
-  });
+  };
+
+  // 可选字段（0.19.19 的 answerSelector / 站点 experimental 标记）。
+  // 出现规则见函数头「一条必须守住的等价性」——两种历史形状都要逐字保住。
+  if (alwaysOptionals || st.answerSelector !== undefined) {
+    base.answerSelector = st.answerSelector ?? null;
+  }
+  if (alwaysOptionals || st.experimental !== undefined) {
+    base.experimental = Boolean(st.experimental);
+  }
+
+  // 站点独有知识（最后铺开，允许覆盖上面的默认值）。
+  return Object.freeze({ ...base, ...extra });
+}
+
+/** DeepSeek 契约：9 项形状字段派生自 `DEEPSEEK`，5 项独有知识在这里声明。 */
+export const DEEPSEEK_WEB_CONTRACT = deriveContractFromSite(DEEPSEEK, DEEPSEEK_ONLY);
+
+/**
+ * 通用契约：**保持历史形状**（可选键恒在）。
+ *
+ * 0.22.2 没有改动任何一个非 DeepSeek 站点的对外形状——这是「只动 DeepSeek」
+ * 这条试点纪律的直接后果，也是 `provider-surface.test.mjs` 能继续绿的原因。
+ */
+function genericContract(st) {
+  return deriveContractFromSite(st, {}, { alwaysOptionals: true });
 }
 
 export const SITE_CONTRACTS = Object.freeze(
