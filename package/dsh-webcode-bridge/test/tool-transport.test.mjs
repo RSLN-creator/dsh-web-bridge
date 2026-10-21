@@ -10,7 +10,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { transportShapeForSite, teachFor, parseReply, TRANSPORT_SHAPES } from '../lib/tool-transport.js';
-import { createToolParser, parseToolFence } from '../lib/tool-parser.js';
 import { serializeDelta } from '../lib/agent-preset.js';
 
 const TOOLS = [
@@ -62,35 +61,7 @@ test('parseReply：codeblock（glm）形状解析成真调用', () => {
   assert.equal(calls[0].name, 'read');
 });
 
-test('parseToolFence：返回形状标签并正确求值', () => {
-  const r = parseToolFence('<tool_call>{"mcp_action":"call","name":"read","arguments":{"path":"x"}}</tool_call>', 'qwen');
-  assert.equal(r.shape, 'tag');
-  assert.equal(r.calls.length, 1);
-  const g = parseToolFence('```json\n{"mcp_action":"call","name":"read","arguments":{"path":"y"}}\n```', 'glm');
-  assert.equal(g.shape, 'codeblock');
-  assert.equal(g.calls[0].arguments.path, 'y');
-});
 
-test('createToolParser：状态机大量吸收、finish 求值、reset 归零', () => {
-  const p = createToolParser({ shape: 'tag' });
-  assert.equal(p.state, 'accumulating');
-  p.push('<tool_');
-  p.push('call>{"mcp_action":"call","name":"read","arguments":{"path":"a"}}</tool_call>');
-  const r = p.finish();
-  assert.equal(p.state, 'done');
-  assert.equal(r.calls.length, 1);
-  assert.equal(r.calls[0].name, 'read');
-  // finish 后再 finish：标记 stale，不再误报新调用
-  p.push('<tool_call>{"mcp_action":"call","name":"read","arguments":{"path":"b"}}</tool_call>');
-  const r2 = p.finish();
-  assert.equal(r2.stale, true);
-  assert.equal(r2.calls.length, 1);
-  // reset 后可重新累积
-  p.reset();
-  assert.equal(p.state, 'accumulating');
-  p.push('<tool_call>{"mcp_action":"call","name":"read","arguments":{"path":"c"}}</tool_call>');
-  assert.equal(p.finish().calls[0].arguments.path, 'c');
-});
 
 test('未闭合 tag 不误拆成调用（行为不漂移）', () => {
   // parseAgentReply 对未闭合围栏的既有语义：委托层不放大、不重复实现破坏它。

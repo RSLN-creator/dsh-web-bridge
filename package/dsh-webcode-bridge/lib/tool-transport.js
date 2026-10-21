@@ -8,6 +8,9 @@
 //
 // 计划《2026-09-21-domestic-sites-protocol.md》Task 1 本想在新建的
 // lib/tool-parser.js / lib/tool-transport.js 里「建立统一工具调用转换层」。
+// （0.22.0：`tool-parser.js` 已删除 —— 它从未接线、只被单测引用，文件头自己就写着「未接线」。
+//   本模块是那次计划里**唯一存活**的一半：`teachFor` 在 index.js 有真调用，
+//   `transportShapeForSite` 由 tool-transport.test.mjs 的 8 条用例钉住。）
 // 但真机勘察（见 doc/research/2026-09-21-login-probe-matrix.md §Task1 结论）确认：
 // **该层在 lib/agent-preset.js 里已经存在且成熟**，被 836 项既有测试钉住：
 //

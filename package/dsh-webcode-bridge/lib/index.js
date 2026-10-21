@@ -30,7 +30,7 @@ import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart,
 // 只用 `teachFor`（1146 的续跑重申、3290 的首轮落盘）——那两处是**真调用**，
 // 即计划 Task 1.4 所说的「教学提示按 teachShape 选支」。
 // `transportShapeForSite` 曾一并 import 但全文件零调用（第三轮自审发现），已移除；
-// 它仍是 tool-transport.js 的公开导出，被 tool-parser.js 与 tool-transport.test.mjs 用。
+// 它仍是 tool-transport.js 的公开导出，由 tool-transport.test.mjs 钉住（8 条用例）。
 import { teachFor } from './tool-transport.js';
 // 展示文案（自动续跑进度说明）单独一个文件：它只在「外发」这一层有约束
 // （协议安全 / 不许静默降级 / 与事实一致），而这三条都需要独立护栏——
@@ -49,11 +49,10 @@ import { createContinueCounter, continueFormFor, DEFAULT_CONTINUE_COMPLETE_AFTER
 // 正是官方 `compaction-basic` 触发「超限自动压缩」的唯一判据，丢了它等于把官方的
 // 上下文自动修复关掉（实测 137/137 丢码）。见 lib/error-codes.js 文件头。
 import { webcodeError, withWebcodeCode, WEBCODE_RETRY_POLICY } from './error-codes.js';
-// 注意（0.17.3）：这里**不再** import `tool-parser.js`。它是一层对 `parseAgentReply`
-// 的纯委托薄壳，本文件已经直接用 agent-preset 的解析器 + 自己的流式状态机，接上它
-// 只会多一跳而行为逐字不变。原先那行 import 是**死的**（全文件零调用），而
-// tool-parser.js 的头注却写着「已正式接线」——两者都是假话，第三轮自审发现后按本项目
-// 纪律改回事实。该模块仍被单测引用，去留见计划 Task 1.4。
+// 0.17.3 起本文件**不 import** 任何解析薄壳：已经直接用 agent-preset 的解析器 +
+// 自己的流式状态机。0.22.0 把那层薄壳（`tool-parser.js`）整个删除了 ——
+// 它当时只被单测引用、零调用点，文件头也自己写着「未接线」。
+// **协议解析的唯一去处仍是 `agent-preset.js`**（红线 3）。
 import { appendReplyLog } from './reply-log.js';
 import { contractFingerprintOf, reanchorSent, messageHash, ANCHOR_LEN } from './session-anchor.js';
 import { writePromptFiles, readPromptFile, sitePromptPath, sessionPromptPath, DEFAULT_PROMPT_STORE_DIR } from './prompt-store.js';
