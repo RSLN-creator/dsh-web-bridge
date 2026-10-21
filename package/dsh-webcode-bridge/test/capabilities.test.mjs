@@ -113,3 +113,43 @@ test('⑦ getSite 与 capabilitiesOf 对同一站点给同一份声明（两条�
   assert.equal(capabilitiesOf('deepseek'), capabilitiesOf(ds),
     '传 siteId 与传站点对象必须读到同一份 capabilities');
 });
+
+test('⑧ fallbackContext 必须与 models[0] 的声明窗口相等（同一个数不许写两处）', () => {
+  // 背景（0.22.0 续）：index.js 的 contextWindowFor 里曾写死
+  // `(m?.siteId === 'deepseek' ? 1_000_000 : 64_000)` —— 把 DeepSeek 的上下文窗口
+  // 又手抄了一遍（真值在 sites/deepseek.js 的 models[0].budget）。
+  // 两处写同一个数的代价是**静默漂移**：改声明不改兜底，预算闸用的仍是旧值。
+  //
+  // 现在兜底从 capabilities.fallbackContext 取，本判据钉住它与模型声明**必须同值**。
+  const ds = getSite('deepseek');
+  const declared = capabilitiesOf('deepseek').fallbackContext;
+  assert.equal(typeof declared, 'number', 'deepseek 必须声明 fallbackContext（数字）');
+  assert.equal(declared, ds.models[0].budget,
+    `fallbackContext (${declared}) 必须等于 models[0].budget (${ds.models[0].budget})，`
+    + '否则兜底分支与模型声明会给出两个不同的上下文窗口');
+
+  // 反向：未声明 fallbackContext 的站点读到 undefined —— index.js 会回落到 64_000 保守值。
+  for (const id of ['glm', 'kimi', 'qwen', 'doubao', 'grok', 'claude', 'gemini', 'zai', 'zai-cn']) {
+    assert.equal(capabilitiesOf(id).fallbackContext, undefined,
+      `${id} 不该声明 fallbackContext（它没有 1M 窗口，兜底应走 64_000 保守值）`);
+  }
+});
+
+test('⑨ 源码级：index.js 不再按站点名决定上下文窗口兜底', () => {
+  const INDEX = path.resolve(here, '../lib/index.js');
+  const lines = readFileSync(INDEX, 'utf8').split(/\r?\n/);
+  const offenders = [];
+  lines.forEach((line, i) => {
+    const t = line.trim();
+    if (t.startsWith('//') || t.startsWith('*')) return;
+    if (/siteId\s*(===|!==|==|!=)\s*'deepseek'/.test(line)) offenders.push(`${i + 1}: ${t.slice(0, 90)}`);
+  });
+  // index.js 里允许保留一处：`isInjectedDefaultSlot`（测试注入契约，不是站点特例，
+  // 已抽成具名谓词并写明理由）。因此判据是「最多一处，且必须在那个函数里」。
+  assert.ok(offenders.length <= 1,
+    'index.js 里按站点名分叉的地方超过 1 处（只允许 isInjectedDefaultSlot）：\n  ' + offenders.join('\n  '));
+  if (offenders.length === 1) {
+    assert.match(offenders[0], /isInjectedDefaultSlot|return siteId === 'deepseek' && slot === DEFAULT_SLOT/,
+      'index.js 里仅剩的那处按站点名分叉必须是 isInjectedDefaultSlot（测试注入契约）：' + offenders[0]);
+  }
+});

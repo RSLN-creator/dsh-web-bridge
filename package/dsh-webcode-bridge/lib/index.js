@@ -20,7 +20,7 @@ import path from 'node:path';
 import { createRelay } from './relay.js';
 import { reasoningEffortsFor } from './think-effort.js';
 import { createOpenAiFront } from './openai.js';
-import { createBrowserDriver } from './browser-driver.js';
+import { createBrowserDriver, capabilitiesOf } from './browser-driver.js';
 import { zeroProgressDecision } from './zero-progress.js';
 import { findDegenerateRepeat } from './repeat-detect.js';
 import { idleWindowDecision } from './idle-window.js';
@@ -1040,7 +1040,7 @@ export function apply(ctx, config = {}) {
    *
    * 优先级（0.16.22 调整）：cfg.contextWindowBySite[siteId]（运维/测试覆盖，
    * **最高**）> 模型自带 context（providers.js 各站点，glm/zai 已是真机实测下界）
-   *        > deepseek 1_000_000 / 其余 64_000 的诚实兜底。
+   *        > **站点声明的兜底**（`siteFallbackContext`）/ 未声明站点 64_000。
    *
    * 为什么 cfg 必须排在模型声明前面（0.16.22 修）：内置模型全部声明了 context，
    * 旧优先级下 `contextWindowBySite` 永远轮空——预算闸报错文本里「在设置里调大
@@ -1049,12 +1049,36 @@ export function apply(ctx, config = {}) {
    *
    * 未校准站点的 64_000 是**保守值**，含义是「宁可让 DSH 早一点压缩，也不要
    * 发出去被网页端截半截」；越界同样由 PROMPT_TRUNCATED 与预算闸双重兜底。
+   *
+   * ## 0.22.0 续：兜底不再写死站点名
+   *
+   * 这行原先是 `(m?.siteId === 'deepseek' ? 1_000_000 : 64_000)` —— 把 DeepSeek 的
+   * 上下文窗口**又手抄了一遍**（真值在 `lib/sites/deepseek.js` 的 `models[0].budget`）。
+   * 两处写同一个数就会漂移：改声明不改这里，兜底仍是旧值；而且它是**静默**的。
+   *
+   * 现在改成「先查站点声明的 `capabilities.fallbackContext`，没有就 64_000」。
+   * DeepSeek 在声明里给 `fallbackContext: 1_000_000`，与 `models[0].budget` 同值；
+   * `test/capabilities.test.mjs` ⑧ 钉住这两个数**必须相等**（防止将来只改一处）。
+   *
+   * 实测边界（如实）：当前 11 个站点的模型**全部**声明了 `context`，因此本行兜底
+   * 在任何现有站点上都不会被执行——它是防御性分支，不是活路径。
+   * 保留它是因为「模型没声明 context」这件事将来可能发生，而那时给它 `undefined`
+   * 会让预算闸算出 NaN。
    */
+  /**
+   * 未校准站点的上下文窗口兜底（token）—— **保守值**。
+   *
+   * 含义：「宁可让 DSH 早一点压缩，也不要发出去被网页端截半截」。
+   * 站点若在 `capabilities.fallbackContext` 里声明了更大的值（DeepSeek = 1_000_000），
+   * 用声明的；否则用它。**不在这里写任何站点名**（0.22.0 续）。
+   */
+  const UNVERIFIED_CONTEXT_WINDOW = 64_000;
+
   function contextWindowFor(m) {
     return cfg.contextWindowBySite?.[m?.siteId]
       ?? m?.budget
       ?? m?.context
-      ?? (m?.siteId === 'deepseek' ? 1_000_000 : 64_000);
+      ?? (capabilitiesOf(m?.siteId).fallbackContext || UNVERIFIED_CONTEXT_WINDOW);
   }
 
   /**

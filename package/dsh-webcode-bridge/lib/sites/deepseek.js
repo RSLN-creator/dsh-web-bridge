@@ -108,5 +108,14 @@ export const deepseekSite = {
     // 「读不到」与「确实没有」必须能分辨（本仓库一贯纪律）。
     sessionApi: true,
     historyApi: true,
+
+    // 上下文窗口的**兜底值**（token），只在「模型自己没声明 context/budget」时用到。
+    //
+    // ⚠ 必须与 `models[0].budget` 相等：同一个数写两处就会漂移，而漂移是静默的
+    //（预算闸用一个数、界面显示另一个数）。`test/capabilities.test.mjs` ⑧ 钉住这条相等。
+    //
+    // 如实边界：11 个站点的模型当前**全部**声明了 context，所以这个兜底在现有站点上
+    // 从不执行——它是防御性声明，不是活路径。
+    fallbackContext: 1_000_000,
   },
 };
