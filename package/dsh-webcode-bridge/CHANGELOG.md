@@ -74,6 +74,18 @@ this file is the package-facing release history.
 | 全量单测（`test/*.test.mjs`，逐文件） | **125/125**（此前 123/125） |
 | 闸门 | `ci-local --fast` **12/12 PASS** |
 
+### 已发布
+
+| 渠道 | 读数 |
+| --- | --- |
+| GitHub Release | [v0.22.1](https://github.com/RSLN-creator/dsh-web-bridge/releases/tag/v0.22.1) —— 资产 `dsh-webcode-bridge-0.22.1.tgz`（941,971 B） |
+| npm | `dsh-webcode-bridge@0.22.1`，`dist-tags.latest` = **0.22.1** |
+| CI | run `39593226054` **success**（4 个 job：ubuntu/windows × Node 22/24） |
+
+> 两个产物的**归档字节**不同（npm 会重打包）且都不等于本地 tarball 的 sha256 ——
+> **这是正常的**（tar 归档含 mtime 与压缩顺序）。判据是**包内每个文件的内容逐字相同**：
+> npm 上的 0.22.1 解包后与工作树 **54/54 逐字相同**。
+
 ## 0.22.0（2026-10-21：删除「任务板」与「并发会话」两块 —— 一次纯减法）
 
 ### 移除：任务板（含花名册）整条链
