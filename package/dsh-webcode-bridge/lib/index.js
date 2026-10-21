@@ -3219,7 +3219,20 @@ function imageMarkdown(images) {
           || (typeof d.conversationForSession === 'function' ? d.conversationForSession(key) : null);
         const webSessionId = conv?.webSessionId;
     if (!webSessionId) return null;
-    const dir = await d.listSessions(100);
+    // 0.22.0 续：`listSessions` 现在按站点能力声明判定，未声明 sessionApi 的站点会**抛**
+    // （改前也是抛，只是文案写「仅 DeepSeek 支持」）。调用方（`localAnswer:713`）已用
+    // try/catch 兜住并回落本地启发式，**行为不变**。
+    //
+    // 这里补一行 warn 是因为：兜底是静默的，排障时「网页标题一直没同步过来」看不出原因。
+    // 记一行就能一眼分开两种情况——「站点没有会话 API」与「站点有但这次没取到」。
+    // **不改行为**：仍然原样抛出，让调用方按既定契约回落。
+    let dir;
+    try {
+      dir = await d.listSessions(100);
+    } catch (e) {
+      warn('webConversationTitle: 读不到网页会话目录（命名回落本地启发式）:', e?.message);
+      throw e;
+    }
     const hit = (dir?.sessions || []).find((s) => s.id === webSessionId);
     const title = String(hit?.title || '').replace(/\s+/g, ' ').trim();
     if (!title || title === '(无标题)') return null;
