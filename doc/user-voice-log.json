@@ -1,5 +1,5 @@
 {
-  "generatedAt": 1792585538148,
+  "generatedAt": 1792781471564,
   "scope": "`dsh-webcode-bridge`",
   "command": "node scripts/user-voice-log.mjs",
   "rows": [
@@ -770,6 +770,16 @@
       "text": "你好",
       "hash": "440ee085",
       "also": [
+        {
+          "sessionId": "session-70169ffa-cdad-4d62-b74f-a13a14f42560",
+          "at": 1792586884915,
+          "origin": "user"
+        },
+        {
+          "sessionId": "session-2f030975-8cb4-4a7a-8c7b-76a4ac08ce80",
+          "at": 1792431241707,
+          "origin": "user"
+        },
         {
           "sessionId": "session-f50154e5-ed08-4a5c-9b51-b0a5007f7108",
           "at": 1791984132560,
@@ -15033,6 +15043,18 @@
       "round": null,
       "text": "法连接 DeepSeek Harness\n无法连接 http://127.0.0.1:3080，且自动启动未成功（或已关闭自动启动）。\n请确认 dsh 已安装，或点击面板顶部的“刷新”重试。\n如未安装 dsh 请参考：https://www.runoob.com/deepseek-harness/deepseek-harness-install.html\n\n1.为什么cli无法打开，dsh\n2.请你将最小版本插件上传啊，ci pass ！",
       "hash": "f2258f80",
+      "also": []
+    },
+    {
+      "sessionId": "session_c992f20bb3ef7675b034924311f55eb0",
+      "workspace": "D:\\9_Code_Workspace\\dsh-webcode-bridge",
+      "at": 1792777584081,
+      "seq": 0,
+      "origin": "zcode-user",
+      "goalId": null,
+      "round": null,
+      "text": "1.确认新版本更新你的记忆\n2.直接将桥接调用本地工具的能力做成显眼的开关按钮放置合适位置，开启要弹窗提醒：就是现在改为常时是默认桥接网页就是只单独保留网页会话，保证在dsh中不用打开浏览器就是和浏览器一样体验：保证不超出一点点风险，然后开启后才是现在这样的：提示词注入新工具调用--明白了吗？\n3.然后按照你的审美进行设置界面的优化和图标绘制优化：注意deepseek等网站的账号缓存你不要碰：我一个ds网页已经被限制了\n\n1.你先必须学习和调研\n2.全部同步github:更新readme告知风险+这是正在开发中的项目欢迎fork+pr",
+      "hash": "494d81d2",
       "also": []
     }
   ]
