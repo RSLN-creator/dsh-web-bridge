@@ -87,6 +87,8 @@ function mockCtx() {
     get(name) {
       if (name === 'llm') return llm;
       if (name === 'webServer') return { register: ({ path: p, handler }) => { registered.routes.set(p, handler); } };
+      // 0.22.2：本文件钉的是**工具协议**的会话连续性（含契约指纹 ⑪）——总闸开着才成立。
+      if (name === 'settings') return { get: () => ({ toolsEnabled: true }), set: () => {} };
       return undefined;
     },
   };
