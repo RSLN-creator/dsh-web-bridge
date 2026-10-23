@@ -53,7 +53,7 @@ function mockDriver({ failWhen = null, failWith = null } = {}) {
 function boot(driver) {
   let adapter;
   const dispose = apply(
-    { llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null },
+    { llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null, settings: { get: () => ({ toolsEnabled: true }), set: () => {} } },
     { port: 0, requireConsent: false, contextMode: 'session', driver },
   );
   return { adapter, dispose };

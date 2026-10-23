@@ -59,7 +59,7 @@ const call = (name, args) => '```json\n' + JSON.stringify({ mcp_action: 'call', 
 async function run(reply, sliceChars = 1, tools = TOOLS) {
   let adapter;
   const dispose = apply(
-    { llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null },
+    { llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null, settings: { get: () => ({ toolsEnabled: true }), set: () => {} } },
     {
       port: 0, requireConsent: false,
       driver: {

@@ -218,7 +218,7 @@ async function runTurn({ text, thinking = '' }) {
     },
     sendPrompt: async (prompt) => { prompts.push(String(prompt)); return { text }; },
   };
-  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null, settings: { get: () => ({ toolsEnabled: true }), set: () => {} } }, { port: 0, requireConsent: false, driver });
   try {
     const chunks = [];
     for await (const c of adapter.stream({

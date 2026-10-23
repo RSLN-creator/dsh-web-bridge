@@ -75,7 +75,7 @@ test('端到端：首轮 PROMPT_TRUNCATED 自动按 accepted 压缩重试一次'
   let calls = 0;
   let adapter;
   const dispose = apply(
-    { llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null },
+    { llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null, settings: { get: () => ({ toolsEnabled: true }), set: () => {} } },
     {
       port: 0, requireConsent: false, contextMode: 'session',
       driver: {

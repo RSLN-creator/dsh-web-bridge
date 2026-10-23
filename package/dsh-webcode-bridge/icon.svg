@@ -1,39 +1,48 @@
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
   <title>Web Bridge</title>
   <!--
-    品牌图标定稿（0.19.58），按用户用 appicon-forge 微调后的稿子逐项还原：
-      图标形状  Iconoir `bridge-3d`（作者 Luca Burgio，MIT，https://github.com/iconoir-icons/iconoir）
-      底色/圆角  #ffffff · borderRadius 77 · 描边 #D1D1D1（0.5px，1:1 映射到 1024）
-      图标颜色  #000000（iconColor）
-      旋转      iconRotation 90 ⇒ 整体 rotate(90 512 512)
-      副影      #65b3fc，offset (−2, +3) / blur 1（iconShadow），按 1024/24 换算
-      占画比    iconSize 149/256 ⇒ 内容 596px、四周留白 214px
-    许可：MIT 要求保留许可与作者声明（见上方注释）。
+    品牌图标重绘（0.22.2，2026-10-24 用户授权「品牌图标也重绘，旧版保留可回退」）。
+
+      形状    自绘悬索桥：24 网格，全部直线 + 一条二次贝塞尔（主缆），无自由弧参数
+              ——每个坐标可离线核对。与 lib/client.cjs 的 DwbMark/DwbMarkColor
+              共用同一组路径数据（scale 34 放大），两处漂移在结构上不可能。
+              几何：桥面 M3.5 17.5H20.5；两塔 M7 6.5V17.5 / M17 6.5V17.5；
+              锚缆 M3.5 17.5 7 6.5 / M17 6.5 20.5 17.5；
+              主缆 M7 6.5Q12 12.1 17 6.5（垂度解析值 9.3）；
+              吊索 M9.5 8.6V17.5 / M14.5 8.6V17.5（y = 6.5+11.2t−11.2t²，t=0.25）。
+      底色    #ffffff · rx 77 · 描边 #D1D1D1（0.5px，与 0.19.58 定稿一致）
+      本体    #000000；主缆+吊索 #65b3fc（品牌蓝青，自 0.19.57 沿用的品牌色）
+      副影    #65b3fc，offset (−2,+3)（0.19.58 用户稿 iconShadow 原参数），opacity .55
+      占画    内容 578×374，居中：translate(104 104) scale(34)
+      旧版    0.19.58 定稿（Iconoir bridge-3d 旋转 90°，作者 Luca Burgio，MIT）
+              在 git 历史可回退；本次自绘几何无第三方许可义务。
   -->
-  <!-- 底：白底圆角方块 + 1px 描边（borderWidth 0 在 1024 画布上按 0.5px 呈现） -->
+  <!-- 底：白底圆角方块 + 1px 描边 -->
   <rect x="0.5" y="0.5" width="1023" height="1023" rx="77" fill="#ffffff" stroke="#D1D1D1" />
 
-  <!-- 副影（iconShadow：#65b3fc，offset −2,+3，blur 1） -->
+  <!-- 副影（#65b3fc，offset −2,+3，1024 画布空间） -->
   <g transform="translate(-2 3)" opacity="0.55">
-    <g transform="rotate(90 512 512)">
-      <g transform="translate(214 214) scale(24.8333)">
-        <path d="M18 4L21 4" stroke="#65b3fc" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
-        <path d="M10 21C10.5523 21 11 20.5523 11 20C11 19.4477 10.5523 19 10 19C9.44772 19 9 19.4477 9 20C9 20.5523 9.44772 21 10 21Z" fill="#65b3fc" stroke="#65b3fc" stroke-linecap="round" stroke-linejoin="round" />
-        <path d="M14 5C14.5523 5 15 4.55228 15 4C15 3.44772 14.5523 3 14 3C13.4477 3 13 3.44772 13 4C13 4.55228 13.4477 5 14 5Z" fill="#65b3fc" stroke="#65b3fc" stroke-linecap="round" stroke-linejoin="round" />
-        <path d="M10 20C10 20 16.5 17.5 12 12C7.5 6.5 14 4 14 4" stroke="#65b3fc" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
-        <path d="M3 20H6" stroke="#65b3fc" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
-      </g>
+    <g transform="translate(104 104) scale(34)" stroke="#65b3fc" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3.5 17.5H20.5" stroke-width="1.6" />
+      <path d="M7 6.5V17.5" stroke-width="1.6" />
+      <path d="M17 6.5V17.5" stroke-width="1.6" />
+      <path d="M3.5 17.5 7 6.5" stroke-width="1.4" />
+      <path d="M17 6.5 20.5 17.5" stroke-width="1.4" />
+      <path d="M7 6.5Q12 12.1 17 6.5" stroke-width="1.4" />
+      <path d="M9.5 8.6V17.5" stroke-width="1.3" />
+      <path d="M14.5 8.6V17.5" stroke-width="1.3" />
     </g>
   </g>
 
-  <!-- 本体：黑色（iconColor #000000），同一套官方几何 + 旋转 90° -->
-  <g transform="rotate(90 512 512)">
-    <g transform="translate(214 214) scale(24.8333)">
-      <path d="M18 4L21 4" stroke="#000000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
-      <path d="M10 21C10.5523 21 11 20.5523 11 20C11 19.4477 10.5523 19 10 19C9.44772 19 9 19.4477 9 20C9 20.5523 9.44772 21 10 21Z" fill="#000000" stroke="#000000" stroke-linecap="round" stroke-linejoin="round" />
-      <path d="M14 5C14.5523 5 15 4.55228 15 4C15 3.44772 14.5523 3 14 3C13.4477 3 13 3.44772 13 4C13 4.55228 13.4477 5 14 5Z" fill="#000000" stroke="#000000" stroke-linecap="round" stroke-linejoin="round" />
-      <path d="M10 20C10 20 16.5 17.5 12 12C7.5 6.5 14 4 14 4" stroke="#000000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
-      <path d="M3 20H6" stroke="#000000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
-    </g>
+  <!-- 本体：黑色结构 + 品牌蓝青主缆/吊索 -->
+  <g transform="translate(104 104) scale(34)" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3.5 17.5H20.5" stroke="#000000" stroke-width="1.6" />
+    <path d="M7 6.5V17.5" stroke="#000000" stroke-width="1.6" />
+    <path d="M17 6.5V17.5" stroke="#000000" stroke-width="1.6" />
+    <path d="M3.5 17.5 7 6.5" stroke="#000000" stroke-width="1.4" />
+    <path d="M17 6.5 20.5 17.5" stroke="#000000" stroke-width="1.4" />
+    <path d="M7 6.5Q12 12.1 17 6.5" stroke="#65b3fc" stroke-width="1.4" />
+    <path d="M9.5 8.6V17.5" stroke="#65b3fc" stroke-width="1.3" />
+    <path d="M14.5 8.6V17.5" stroke="#65b3fc" stroke-width="1.3" />
   </g>
 </svg>

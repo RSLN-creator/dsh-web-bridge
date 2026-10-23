@@ -44,7 +44,7 @@ async function runTurn({ reply, think, tools, sessionId, message = '看时间', 
     sendTurn: async (key, prompt, opts) => { if (think) opts.onThink?.(think); opts.onDelta?.(reply); return { text: reply }; },
     sendPrompt: async () => ({ text: '' }),
   };
-  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver, profileDir: TEST_PROFILE_DIR, ...(config || {}) });
+  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null, settings: { get: () => ({ toolsEnabled: true }), set: () => {} } }, { port: 0, requireConsent: false, driver, profileDir: TEST_PROFILE_DIR, ...(config || {}) });
   try {
     const chunks = [];
     for await (const c of adapter.stream({

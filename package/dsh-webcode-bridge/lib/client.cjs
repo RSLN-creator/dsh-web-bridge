@@ -794,6 +794,123 @@ window.__ModuleLoader__.load({
         notice ? h('span', { className: 'hwb-hint' }, notice) : null);
     }
 
+    // ---- 本地工具调用的三件自绘资产（0.22.2）------------------------------------
+    //
+    // 为什么自绘而不用 iconOf（官方 primitives）：官方包里没有工具/开关语义的线框图标
+    //（同前例「没有 gauge/clock，队列图标是最近语义」）。三颗都是**自己的几何构造**
+    //（直线 + 圆），24×24 视箱、currentColor 随主题、1.6px 描边与官方 14px 线框族
+    // 并排不违和。几何全部可离线核对：没有任何一条曲线弧，不存在「路径参数写错画出
+    // 鬼画符」的形态。
+
+    /** 「能力开关」图标：三根滑轨 + 两枚滑块。用于 dock 药丸与弹窗标题。 */
+    const IconToolsSwitch = ({ size = 14 }) => h('svg', {
+      width: size, height: size, viewBox: '0 0 24 24', fill: 'none', 'aria-hidden': 'true',
+    }, h('g', { stroke: 'currentColor', 'stroke-width': 1.6, 'stroke-linecap': 'round' },
+      h('path', { d: 'M4 7h7.9M16.5 7H20' }),
+      h('circle', { cx: '14.4', cy: '7', r: '2.1' }),
+      h('path', { d: 'M4 12h2.5M11 12h9' }),
+      h('circle', { cx: '8.9', cy: '12', r: '2.1' }),
+      h('path', { d: 'M4 17h7.9M16.5 17H20' }),
+      h('circle', { cx: '14.4', cy: '17', r: '2.1' })));
+
+    /** 确认弹窗的警示图标：三角 + 感叹号（几何同样全直线/圆点）。 */
+    const IconAlert = ({ size = 16 }) => h('svg', {
+      width: size, height: size, viewBox: '0 0 24 24', fill: 'none', 'aria-hidden': 'true',
+    }, h('path', {
+      d: 'M12 4.4 21 19.6H3L12 4.4Z',
+      stroke: 'currentColor', 'stroke-width': 1.6, 'stroke-linejoin': 'round',
+    }), h('path', { d: 'M12 10.2v3.6', stroke: 'currentColor', 'stroke-width': 1.6, 'stroke-linecap': 'round' }),
+    h('circle', { cx: '12', cy: '16.6', r: '0.95', fill: 'currentColor' }));
+
+    /**
+     * 开启本地工具调用的**确认弹窗**（0.22.2，用户原话「开启要弹窗提醒」）。
+     *
+     * 复用任务板时代留下的 `.hwb-modal-*` 样式族（0.19.7 建的，任务板删除后样式
+     * 仍在样式表里且没有其它使用者）——不新造一套弹窗视觉。createPortal 到
+     * document.body：dock 药丸的宿主容器带 transform 包含块，fixed 定位会被劫持
+     *（WaitLine 面板 0.16.39 的同一坑），portal 出去是唯一稳妥落点。
+     *
+     * 文案口径（与服务端行为逐字对应，不许夸大也不许轻描淡写）：
+     *   · 开 = 首条消息注入工具调用教学；网页模型**提议**调用，执行与审批都在 DSH。
+     *   · 注入内容对站点可见 —— 这是与纯网页会话的真实差异，必须说出来。
+     *   · 关 = 纯网页透传，与浏览器一致（零注入、零重放，见 index.js 的 toolsOn）。
+     */
+    function ToolsEnableDialog({ open, busy, onConfirm, onCancel }) {
+      if (!open) return null;
+      const card = h('div', { className: 'hwb-modal-content', role: 'dialog', 'aria-modal': 'true', 'aria-label': '开启本地工具调用' },
+        h('div', { className: 'hwb-modal-header' },
+          h('h3', { className: 'hwb-tools-dialog-title' }, h(IconAlert, { size: 16 }), '开启本地工具调用？')),
+        h('div', { className: 'hwb-modal-form' },
+          h('p', { className: 'hwb-tools-dialog-lead' },
+            '开启后，桥会在网页会话的首条消息里注入本地工具调用教学（提示词注入）：网页模型将能够',
+            h('b', null, '提议'), '调用你本机的工具——真正的执行与逐次审批仍由 DSH 的权限系统完成。'),
+          h('p', { className: 'hwb-hint' },
+            '注入内容对站点可见；与浏览器原样对话相比，被站点识别为自动化的面会变宽。'),
+          h('p', { className: 'hwb-hint' },
+            '保持关闭（默认）时，桥只做纯网页会话：网页模型收到你的原话，与浏览器一字不差。'),
+          h('div', { className: 'hwb-modal-actions' },
+            h('button', { type: 'button', disabled: busy, onClick: onCancel }, '取消'),
+            h('button', { type: 'button', className: 'hwb-btn-primary', disabled: busy, onClick: onConfirm },
+              busy ? '开启中…' : '仍要开启'))));
+      // 降级不是崩溃（0.16.23 立的规矩）：react-dom 缺位（老宿主/测试桩）时内联渲染
+      // ——弹窗贴在卡片/药丸旁边而不是屏幕中央，确认语义完整，绝不在渲染期抛错。
+      const overlay = h('div', {
+        className: 'hwb-modal-overlay',
+        onClick: (e) => { if (e.target === e.currentTarget && !busy) onCancel(); },
+      }, card);
+      return typeof createPortal === 'function' ? createPortal(overlay, document.body) : overlay;
+    }
+
+    /**
+     * 会话界面 dock 上的「本地工具」药丸（0.22.2）。
+     *
+     * 与 SearchToggle 同一座位（conversation.composer.dock）、同一套尺寸 token，
+     * 但它是**全局**开关：不依赖 sessionId（关闸/开闸作用于桥的一切后续轮次），
+     * 读数来自 GET settings，写入走 POST settings——与服务端归一化同源，前端不造
+     * 第二份判据。会话切换时重拉一次（同一颗 dock 会被不同会话复用，读数可能已被
+     * 设置页改过）。
+     */
+    function ToolsToggle(owner) {
+      const sessionId = useCurrentSessionId(owner);
+      const [on, setOn] = React.useState(null);
+      const [pending, setPending] = React.useState(false);
+      const [dialog, setDialog] = React.useState(false);
+      // 失败读数（与 SearchToggle 同一套「读不到就说读不到」的纪律）：写入失败必须
+      // 在药丸旁边留一句人话，绝不静默——「看起来关了、实际没关」比报错更糟。
+      const [notice, setNotice] = React.useState('');
+      React.useEffect(() => {
+        let alive = true;
+        api('settings').then(s => { if (alive) setOn(s.toolsEnabled === true); })
+          .catch(() => { if (alive) setOn(false); });
+        return () => { alive = false; };
+      }, [sessionId]);
+      const apply = (v) => {
+        setPending(true);
+        setNotice('');
+        api('settings', { toolsEnabled: v }).then(r => {
+          setOn(r && r.toolsEnabled === true);
+          setDialog(false);
+        }).catch(e => { setNotice(e.message || '保存失败'); })
+          .then(() => setPending(false));
+      };
+      const label = on === null ? '读取中' : on ? '开' : '关';
+      const title = on === null ? '正在读取当前状态…'
+        : on ? '本地工具调用：已开启。点击关闭，回到纯网页会话（下一次发送起生效）'
+          : '本地工具调用：已关闭（默认，纯网页会话）。点击开启——会先弹出确认';
+      return h('div', { className: 'hwb-searchwrap' },
+        h('button', {
+          type: 'button',
+          className: 'hwb-searchpill hwb-toolspill' + (on ? ' on' : ''),
+          disabled: pending || on === null,
+          title,
+          'aria-label': '本地工具调用：' + label,
+          'aria-pressed': on === true,
+          onClick: () => { if (on) apply(false); else setDialog(true); },
+        }, h(IconToolsSwitch, { size: 14 }), h('span', { className: 'hwb-searchpill-label' }, '本地工具 · ' + label)),
+        notice ? h('span', { className: 'hwb-hint' }, notice) : null,
+        h(ToolsEnableDialog, { open: dialog, busy: pending, onConfirm: () => apply(true), onCancel: () => setDialog(false) }));
+    }
+
     /**
      * 首轮提示词面板（0.14.0）。
      *
@@ -1090,39 +1207,33 @@ window.__ModuleLoader__.load({
 
 
     /**
-     * **dwb 品牌标记**（0.19.39 引入；0.19.56 改同构；**0.19.57 换 Iconoir
-     * `bridge-3d`；0.19.58 按用户微调稿定稿** —— 黑色 + 旋转 90° + 浅蓝副影）。
+     * **dwb 品牌标记**（0.19.39 引入；0.19.56 改同构；0.19.57 换 Iconoir
+     * `bridge-3d`；0.19.58 按用户微调稿定稿；**0.22.2 用户授权重绘**）。
      *
-     * 用户原话（0.19.57）：「名称 bridge-3d 作者 Luca Burgio 许可 MIT 集合下，
-     * https://github.com/iconoir-icons/iconoir，请你查看本地图片
-     * iconoir_bridge-3d.png 进行使用替换本地全部形象」。
+     * ## 0.22.2 这次为什么重绘、凭什么可以重绘
      *
-     * ⚠ **0.19.58 的教训**：0.19.57 我拿到图却没照图改——自选了蓝青渐变配色，
-     * 而用户的稿子（appicon-forge 微调导出）恰恰是**黑色 + 旋转 90°**。
-     * 品牌形象**以用户微调后的稿子为准**，不是以「我觉得好看」为准。
+     * 0.19.58 的定稿（Iconoir bridge-3d + 旋转 90°）被护栏 `test/client-render.test.mjs`
+     * 钉死，原因写在那条测试里：0.19.39/0.19.56/0.19.57 三次自绘/未照稿改的教训。
+     * 本轮（2026-10-24）用户**明确授权**「品牌图标也重绘（旧版保留可回退）」——
+     * 授权来自用户本人，护栏随之改判据并反向验证；这不是又一次「我觉得好看」，
+     * 但新稿同样**只有这一轮授权、没有下一轮**：再改仍需用户点头。
      *
-     * ## 几何：Iconoir `bridge-3d` regular 的逐字路径 + 整体旋转 90°
+     * ## 几何：自绘悬索桥（24 网格，全部直线 + 一条二次贝塞尔）
      *
-     * 官方 SVG（unpkg `iconoir` npm 包，MIT，作者 Luca Burgio）5 条元素：
-     *   · `M18 4L21 4`   —— 短竖线 · `M3 20H6` —— 短竖线
-     *   · S 形桥体 `M10 20C10 20 16.5 17.5 12 12C7.5 6.5 14 4 14 4`
-     *   · 两个实心圆点 (14,4) 与 (10,20)（r=1）
-     * 路径坐标**一个不改**，整体套 `rotate(90 12 12)` —— 用户稿的
-     * `iconRotation: 90` 就是它。旋转后落点（1024 画布实测）：左上端点
-     * ≈(313,462)、右下端点 ≈(711,562)、两条竖线在各自端点外侧，
-     * 与 iconoir_bridge-3d.png 逐点吻合。
+     * 不再引用第三方几何（Iconoir MIT 稿随 0.19.58 留在 git 历史）：
+     *   · 桥面 `M3.5 17.5H20.5`；两塔 `M7 6.5V17.5` / `M17 6.5V17.5`
+     *   · 两侧锚缆 `M3.5 17.5 7 6.5` / `M17 6.5 20.5 17.5`
+     *   · 主缆 `M7 6.5Q12 12.1 17 6.5`（唯一一条曲线；垂度 9.3 可解析算出）
+     *   · 两根吊索 `M9.5 8.6V17.5` / `M14.5 8.6V17.5`（y = 6.5+11.2t−11.2t²，t=0.25）
+     * 与 `icon.svg` 共用同一组路径数据（两处漂移在结构上不可能，0.19.56 立的规矩）。
      *
-     * ## 颜色按位置分（用户 0.19.56 立的规则，0.19.58 按稿定稿）
+     * ## 颜色按位置分（0.19.56 立的规则，0.22.2 沿用同一色法）
      *
      *   · 线稿位 `DwbMark`（左栏行 / 右栏 tab 标题 / guide 图标）：**currentColor
-     *     不描影**。这些位置与官方图标并排，描影会显脏；currentColor 让明暗主题与
-     *     选中态由宿主继承（浅色主题下即用户稿的 `#000000`）。
-     *   · 彩色位 `DwbMarkColor`（设置页品牌位）：**黑色 `#000000` + 浅蓝副影
-     *     `#65b3fc`**——逐字取自用户稿的 `iconColor: #000000ff` 与
-     *     `iconShadow: [[-2,3,1,0,#65b3fcff]]`（offsetX −2 / offsetY +3 /
-     *     blur 1），**不另造配色**。
-     *
-     * 两份共用同一组路径与同一个 `rotate`，只差颜色——漂移在结构上不可能。
+     *     不描影**——这些位置与官方图标并排，描影会显脏；明暗主题由宿主继承。
+     *   · 彩色位 `DwbMarkColor`（设置页品牌位）：**黑色本体 + 浅蓝副影 `#65b3fc`**
+     *     （0.19.58 用户稿原参数：offset −2,+3 / blur 1），主缆与吊索在彩色位用
+     *     品牌蓝青 `#65b3fc` 点缀——结构色不变，仅把「缆」这个桥的灵魂让给品牌色。
      *
      * @param {{size?: number}} props 宿主给的图标呈现（与官方 IconProps 同形）
      */
@@ -1131,17 +1242,17 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * dwb 品牌标记的**彩色**版（0.19.58）：用户微调稿的定稿实现。
+     * dwb 品牌标记的**彩色**版（0.22.2 重绘稿）。
      *
-     * 与线稿版的唯一差别是**颜色与副影**（形状、路径、旋转、刻度逐项相同）：
-     * 黑色本体 + 浅蓝副影。副影只在彩色位画——线稿位要跟官方图标并排，
+     * 与线稿版的差别只有**颜色与副影**（形状、路径、刻度逐项相同）：
+     * 黑色本体 + 浅蓝副影 + 蓝青主缆。副影只在彩色位画——线稿位要跟官方图标并排，
      * 带描影会显脏。`props.size` 由宿主给（设置页 20px），必须读而不是写死。
      *
      * 描影用**同一组几何内联画两遍**（副影在下、本体在上）而不是
      * `filter: drop-shadow` 或 `<use href>`：`feDropShadow` 需要独立滤镜通道，
      * 部分宿主渲染路径上不生效；`<use>` 跨节点引用同文档 id 在 React 重渲染时
      * 依赖「被引用节点已挂载」的时序。两次调用同一个纯函数是三者里唯一没有
-     * 运行时依赖的。副影坐标按用户稿的 (−2,+3) 与 24 viewBox 等比换算，取
+     * 运行时依赖的。副影坐标按用户稿 (−2,+3) 与 24 viewBox 等比换算，取
      * (−0.5, +0.75)。
      *
      * @param {{size?: number, monochrome?: boolean}} props
@@ -1149,26 +1260,26 @@ window.__ModuleLoader__.load({
     function DwbMarkColor(props) {
       const size = Number(props?.size) || 16;
       const mono = props?.monochrome === true;
-      // 官方正刻度：stroke 1.5 / round 端点 / 圆点 r=1 实心（不改）。
-      const sw = 1.5;
-      // 官方几何 × 5 条元素 + 整体旋转 90°（用户稿 iconRotation: 90）。
-      // ⚠ 旋转写在**内层 <g>** 上，外层 SVG 的 width/height 不动 —— 写在 svg
-      // 上会让整个盒子跟着转 90°，在 flex 行里把行高撑歪。
-      const art = (c) => h('g', { transform: 'rotate(90 12 12)' },
-        h('path', { d: 'M18 4L21 4', stroke: c, strokeWidth: sw, strokeLinecap: 'round', strokeLinejoin: 'round' }),
-        h('circle', { cx: 10, cy: 20, r: 1, fill: c, stroke: c, strokeLinecap: 'round', strokeLinejoin: 'round' }),
-        h('circle', { cx: 14, cy: 4, r: 1, fill: c, stroke: c, strokeLinecap: 'round', strokeLinejoin: 'round' }),
-        h('path', { d: 'M10 20C10 20 16.5 17.5 12 12C7.5 6.5 14 4 14 4', stroke: c, strokeWidth: sw, strokeLinecap: 'round', strokeLinejoin: 'round' }),
-        h('path', { d: 'M3 20H6', stroke: c, strokeWidth: sw, strokeLinecap: 'round', strokeLinejoin: 'round' }));
+      // 自绘悬索桥（0.22.2）：本体色 c + 主缆/吊索点缀色 accent（mono 时同色）。
+      // 刻度：桥面/塔 1.6、锚缆/主缆 1.4、吊索 1.3，round 端点——24 网格上与
+      // 官方 14px 线框族并排不违和；icon.svg 按 scale(34) 放大同一组路径。
+      const art = (c, accent) => h('g', null,
+        h('path', { d: 'M3.5 17.5H20.5', stroke: c, strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round' }),
+        h('path', { d: 'M7 6.5V17.5', stroke: c, strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round' }),
+        h('path', { d: 'M17 6.5V17.5', stroke: c, strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round' }),
+        h('path', { d: 'M3.5 17.5 7 6.5', stroke: c, strokeWidth: 1.4, strokeLinecap: 'round', strokeLinejoin: 'round' }),
+        h('path', { d: 'M17 6.5 20.5 17.5', stroke: c, strokeWidth: 1.4, strokeLinecap: 'round', strokeLinejoin: 'round' }),
+        h('path', { d: 'M7 6.5Q12 12.1 17 6.5', stroke: accent || c, strokeWidth: 1.4, strokeLinecap: 'round', strokeLinejoin: 'round' }),
+        h('path', { d: 'M9.5 8.6V17.5', stroke: accent || c, strokeWidth: 1.3, strokeLinecap: 'round', strokeLinejoin: 'round' }),
+        h('path', { d: 'M14.5 8.6V17.5', stroke: accent || c, strokeWidth: 1.3, strokeLinecap: 'round', strokeLinejoin: 'round' }));
       return h('svg', {
         viewBox: '0 0 24 24', width: size, height: size,
         fill: 'none', 'aria-hidden': 'true', focusable: 'false',
       },
-        // 浅蓝副影（用户稿 iconShadow #65b3fc，offset −2,+3）：只在彩色位。
-        // 线稿位与官方图标并排，描影会显脏，因此 mono 下这一层不输出。
+        // 浅蓝副影（0.19.58 用户稿参数 #65b3fc，offset −2,+3）：只在彩色位。
         !mono ? h('g', { opacity: 0.55, transform: 'translate(-0.5 0.75)' }, art('#65b3fc')) : null,
-        // 本体：线稿位 currentColor，彩色位黑色（用户稿 iconColor #000000）。
-        art(mono ? 'currentColor' : '#000000'));
+        // 本体：线稿位 currentColor；彩色位黑色本体 + 蓝青主缆/吊索（0.22.2）。
+        art(mono ? 'currentColor' : '#000000', mono ? null : '#65b3fc'));
     }
 
 
@@ -1589,6 +1700,13 @@ window.__ModuleLoader__.load({
       const [searchMode, setSearchMode] = React.useState('auto');
       const [searchModeSaved, setSearchModeSaved] = React.useState('auto');
       const [searchNotice, setSearchNotice] = React.useState('');
+      // 本地工具调用总闸（0.22.2，用户指令「常时默认桥接网页就是只单独保留网页会话」）：
+      // 默认关 = 纯网页会话。draft/saved/notice 与其它设置同一套三件套；开启路径
+      // 先过 ToolsEnableDialog 确认弹窗，关闭路径直接写（降风险方向不加闸）。
+      const [toolsEnabled, setToolsEnabled] = React.useState(false);
+      const [toolsSaved, setToolsSaved] = React.useState(false);
+      const [toolsNotice, setToolsNotice] = React.useState('');
+      const [toolsDialogOpen, setToolsDialogOpen] = React.useState(false);
       // 0.19.96（task-8/12）：**站点级**「深度思考」覆盖（thinkModeBySite）与 GLM 任务模式
       // （siteModeBySite）。与全局 thinkMode 是两条独立设置：站点档优先、未配 = 跟随全局；
       // 任务模式没有全局档（站点专属语义），默认空 = 不改网页（零位移）。
@@ -1756,6 +1874,10 @@ window.__ModuleLoader__.load({
           // promptTransportNow、web-control 的 POST settings 同一判据）。
           const pt = s.promptTransport === 'inline' ? 'inline' : 'attach';
           setPromptTransport(pt); setPromptTransportSaved(pt);
+          // 工具总闸（0.22.2）：与服务端 GET settings 同一条归一化（只认逐字 true），
+          // 前端不自己造默认值——两侧各造一份默认时，面板显示与真实行为会分叉。
+          const te = s.toolsEnabled === true;
+          setToolsEnabled(te); setToolsSaved(te);
           // 槽级间隔：原样取回（服务端已归一化过，非法值不会落盘）。
           // 这里**不**在前端补默认值——「没配」与「配了 0」是两件事，前者应当
           // 回落到站点/全局档，后者是明确的「这个槽不等待」。
@@ -1981,6 +2103,26 @@ window.__ModuleLoader__.load({
           const r = await api('settings', { [key]: value });
           applyRevision(r);
           onDone(r);
+        } catch (e) { setError(e.message); }
+        finally { setPending(false); }
+      }
+
+      /**
+       * 工具总闸写入（0.22.2）。不走 saveSetting：它要同时更新两态（draft/saved）、
+       * 关掉弹窗并落一句去向读数——这些都写进通用 saver 只会让签名越来越怪。
+       * 开启路径在卡内/药丸处先过 ToolsEnableDialog；这里只负责「已确认之后」的写入。
+       */
+      async function applyToolsEnabled(v) {
+        setPending(true); setError('');
+        try {
+          const r = await api('settings', { toolsEnabled: v });
+          applyRevision(r);
+          const nv = r && r.toolsEnabled === true;
+          setToolsEnabled(nv); setToolsSaved(nv);
+          setToolsDialogOpen(false);
+          setToolsNotice(v
+            ? '已开启。下一次发送起，网页会话将注入工具调用教学。'
+            : '已关闭。下一次发送起按纯网页会话整段重建。');
         } catch (e) { setError(e.message); }
         finally { setPending(false); }
       }
@@ -2429,6 +2571,43 @@ window.__ModuleLoader__.load({
         // 0.19.x：原先这里有一张「正在运行（子代理 / Team）」卡（渲染 AgentRoster）。
         // 用户判定它不属于设置界面（原话「为什么设置界面需要？？？」），整卡与组件
         // 一并删除；花名册数据仍由任务板面板经 useRoster 消费，不在这里画第二份。
+
+        // ---- 全局页：本地工具调用总闸（0.22.2）--------------------------------
+        //
+        // 用户指令（2026-10-24）：「直接将桥接调用本地工具的能力做成显眼的开关按钮……
+        // 常时默认桥接网页就是只单独保留网页会话……开启后才是现在这样的：提示词注入
+        // 新工具调用」。这张卡因此是**全局页第一张卡**——它回答的是「桥到底是什么」：
+        //   · 关（默认）= 纯网页会话：零注入、零重放（服务端判据见 index.js 的 toolsOn
+        //     与 agent-preset 的 serializePlainTurn/Delta）；
+        //   · 开 = 既有 agent 协议：首轮注入工具清单与调用格式，回复里的调用围栏被
+        //     重放成 DSH 原生工具调用。
+        // 开启必须过 ToolsEnableDialog 确认弹窗；关闭即时（降风险方向不加闸）。
+        // role="switch"：这颗控件是布尔开关，读屏必须读出「开/关」而不是「按钮」。
+        !settingsTab && h('div', { className: 'hwb-card' },
+          h('h3', { className: 'hwb-group first' }, '本地工具调用'),
+          h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '工具调用'),
+            h('div', { className: 'hwb-row-main' },
+              h('button', {
+                type: 'button', role: 'switch', 'aria-checked': toolsEnabled,
+                className: 'hwb-switch' + (toolsEnabled ? ' on' : ''),
+                disabled: pending,
+                title: toolsEnabled
+                  ? '已开启：点击关闭，回到纯网页会话（下一次发送起生效）'
+                  : '已关闭（默认）：点击开启本地工具调用——会先弹出确认',
+                onClick: () => { if (toolsEnabled) applyToolsEnabled(false); else setToolsDialogOpen(true); },
+              }),
+              h('span', { className: 'hwb-tools-state' + (toolsEnabled ? ' on' : '') },
+                toolsEnabled ? '已开启' : '已关闭（默认）'),
+              toolsNotice && h('span', { className: 'hwb-hint' }, toolsNotice))),
+          h('p', { className: 'hwb-hint indent' },
+            toolsEnabled
+              ? '网页会话注入了工具调用教学：网页模型可提议调用本机工具，执行与审批仍在 DSH。'
+              : '纯网页会话：网页模型只收到你的原话，与浏览器一致；不注入任何提示词，不回放任何调用。'),
+          h(ToolsEnableDialog, {
+            open: toolsDialogOpen, busy: pending,
+            onCancel: () => setToolsDialogOpen(false),
+            onConfirm: () => applyToolsEnabled(true),
+          })),
 
         // ---- 全局页：全局发送间隔（0.16.38）--------------------------------
         //
@@ -4071,6 +4250,28 @@ window.__ModuleLoader__.load({
         ".hwb-searchpill:disabled{opacity:.55;cursor:not-allowed}",
         ".hwb-searchpill.on{color:var(--dsw-alias-brand-primary,#3b82f6);border-color:var(--dsw-alias-brand-primary,#3b82f6);background:var(--dsw-alias-interactive-bg-hover,#8882)}",
         ".hwb-searchpill-label{min-width:0;overflow:hidden;text-overflow:ellipsis}",
+        // 本地工具药丸（0.22.2）：与联网搜索药丸同一座位、同一套 token——
+        // .hwb-searchpill 的全部规则都作用于它，.hwb-toolspill 只补图标与环距。
+        ".hwb-toolspill svg{flex:none}",
+        // 工具总闸开关（0.22.2）：36×20 轨道 + 14px 滑块；只做颜色/位移两类 0.12s
+        // 过渡，无其它动画。色值全部走官方 alias 变量，深浅主题自动跟随。
+        ".hwb-switch{position:relative;box-sizing:border-box;width:36px;height:20px;flex:none;padding:0;border-radius:10px;border:.5px solid var(--dsw-alias-border-l3,#8885);background:var(--dsw-alias-interactive-bg-hover,#8882);cursor:pointer;transition:background .12s ease,border-color .12s ease}",
+        ".hwb-switch::after{content:'';position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--dsw-alias-bg-base,#fff);box-shadow:0 1px 2px rgba(0,0,0,.2);transition:transform .12s ease}",
+        ".hwb-switch.on{background:var(--dsw-alias-brand-primary,#3b82f6);border-color:var(--dsw-alias-brand-primary,#3b82f6)}",
+        ".hwb-switch.on::after{transform:translateX(16px)}",
+        ".hwb-switch:disabled{opacity:.55;cursor:not-allowed}",
+        ".hwb-switch:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#3b82f6);outline-offset:1px}",
+        // 开关旁的状态词（关=弱化灰、开=品牌色）：颜色不是唯一载体，文字本身
+        // 就写着「已开启/已关闭」，读屏不依赖颜色。
+        ".hwb-tools-state{font-size:var(--dsh-content-font-size-secondary,13px);color:var(--dsw-alias-label-tertiary,#8a8f98)}",
+        ".hwb-tools-state.on{color:var(--dsw-alias-brand-primary,#3b82f6)}",
+        // 确认弹窗（复用 .hwb-modal-* 骨架，任务板删除后这族样式回归使用）：
+        // 标题图标对齐 + 正文行距；主按钮是全文件唯一一处实心按钮。
+        ".hwb-tools-dialog-title{display:inline-flex;align-items:center;gap:6px}",
+        ".hwb-tools-dialog-lead{margin:0;font-size:var(--dsh-content-font-size-secondary,13px);line-height:1.6}",
+        ".hwb-btn-primary{color:#fff;background:var(--dsw-alias-brand-primary,#3b82f6);border:.5px solid var(--dsw-alias-brand-primary,#3b82f6);border-radius:8px;padding:5px 14px;cursor:pointer;font:inherit}",
+        ".hwb-btn-primary:hover:not(:disabled){filter:brightness(.94)}",
+        ".hwb-btn-primary:disabled{opacity:.55;cursor:not-allowed}",
         ".hwb-waitpill-label{min-width:0;overflow:hidden;text-overflow:ellipsis}",
         // 点击面板：尺寸/圆角/阴影/网格逐项对齐官方 stat-dialog.module.css。
         // 向上展开（bottom:calc(100% + 8px)）而不是向下，因为药丸本身就在输入框
@@ -4650,6 +4851,18 @@ window.__ModuleLoader__.load({
             inject: (sessionId) => ({ sessionId }),
           }, SearchToggle));
         } catch (e) { warn('composer.dock search toggle', e); }
+      });
+      // ---- 输入框底下的「本地工具」总闸药丸（0.22.2） ----
+      // 用户指令「直接将桥接调用本地工具的能力做成显眼的开关按钮」。与联网搜索药丸
+      // 同一座位（order 22 排在其后）；它是全局开关，不依赖 sessionId，开启路径
+      // 先过 ToolsEnableDialog 确认弹窗（用户原话「开启要弹窗提醒」）。
+      own(() => {
+        try {
+          return ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
+            name: 'conversation.composer.dock', id: 'webcode-tools', order: 22,
+            inject: (sessionId) => ({ sessionId }),
+          }, ToolsToggle));
+        } catch (e) { warn('composer.dock tools toggle', e); }
       });
 
       // ---- 设置页（真实需求重构：登录管理前置、无历史导入） ------------

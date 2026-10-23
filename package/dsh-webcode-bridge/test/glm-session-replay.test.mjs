@@ -45,7 +45,7 @@ async function runTurn({ reply, tools, sessionId, message = '请你审查本地�
     sendTurn: async (key, prompt, opts) => { opts.onDelta?.(reply); return { text: reply }; },
     sendPrompt: async () => ({ text: '' }),
   };
-  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null, settings: { get: () => ({ toolsEnabled: true }), set: () => {} } }, { port: 0, requireConsent: false, driver });
   try {
     const chunks = [];
     for await (const c of adapter.stream({

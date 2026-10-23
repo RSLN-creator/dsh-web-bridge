@@ -111,6 +111,17 @@ function mockCtx() {
   const workspaces = [{ id: 'ws-1', title: '演示工作区', path: 'D:/ws', attachSession: async (sid) => { persisted.attached = sid; } }];
   const workspaceRegistry = { list: () => workspaces.map(({ id, title, path }) => ({ id, title, path })), get: (id) => workspaces.find((w) => w.id === id) || null };
   const webServer = { register: ({ path, handler }) => { registered.routes.set(path, handler); } };
+  // 0.22.2：工具总闸的设置桩——**可持久化**（M1 的「全局指令保存→首轮注入」链路
+  // 要真的走 POST settings → set() → get()），初始态开闸（本脚本验收工具协议）。
+  const settingsState = { toolsEnabled: true };
+  const settingsStub = {
+    get: () => ({ ...settingsState }),
+    // 签名对齐宿主 settings 服务：set(ns, value) 两参（configManager 传
+    // ('webcode', merged)）。只收一参会把 'webcode' 这个**字符串** assign 进
+    // state（数字键 0-6 = 它的字符），写进的值整个丢失——M1 的 global prompt
+    // 用例就是这样静默丢的（DBG 取证 0.22.2）。
+    set: (ns, value) => { Object.assign(settingsState, value ?? {}); return { ...settingsState }; },
+  };
   const ctx = {
     llm,
     get(name) {
@@ -118,6 +129,7 @@ function mockCtx() {
       if (name === 'sessionPersistence') return sessionPersistence;
       if (name === 'workspaceRegistry') return workspaceRegistry;
       if (name === 'webServer') return webServer;
+      if (name === 'settings') return settingsStub;
       return undefined;
     },
   };

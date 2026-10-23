@@ -10,7 +10,7 @@ const driver = {
     return { text: '我先读一下。\n<tool_call>{"mcp_action":"call","name":"read","purpose":"x","arguments":{"path":"PLAN.md"}}</tool_call>' };
   },
 };
-const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null, settings: { get: () => ({ toolsEnabled: true }), set: () => {} } }, { port: 0, requireConsent: false, driver });
 try {
   const chunks = [];
   for await (const c of adapter.stream({ model: 'deepseek', tools: [{ name: 'read', parameters: {} }], messages: [{ role: 'user', content: '读 PLAN' }] })) chunks.push(c);

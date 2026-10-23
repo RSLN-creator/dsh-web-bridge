@@ -26,7 +26,7 @@ import { findDegenerateRepeat } from './repeat-detect.js';
 import { idleWindowDecision } from './idle-window.js';
 import { createDeliveryTrace, compareStages } from './delivery-trace.js';
 import { createWebControl, buildSessionEvents, mainLineOf, thinkModeOf, siteModeOf, searchModeOf } from './web-control.js';
-import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, stripProtocolText, stripProtocolRegions, proseSafeEnd, readCallAt, partialProtocolAt, unresolvedCallFenceAt, closingFenceAfter, headlessCallTailAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeOfficialToolCalls, normCallArgs, inferToolNameFromArgs, recoverUnparsedCalls, callsLostFromParse, officialToolCallSpecimen, officialCallExampleFor, buildPreset } from './agent-preset.js';
+import { serializeFirstTurn, serializeDelta, serializePlainTurn, serializePlainDelta, parseAgentReply, findProtocolStart, stripProtocolText, stripProtocolRegions, proseSafeEnd, readCallAt, partialProtocolAt, unresolvedCallFenceAt, closingFenceAfter, headlessCallTailAt, coerceArguments, fillMissingRequired, trainNoteFor, normalizeOfficialToolCalls, normCallArgs, inferToolNameFromArgs, recoverUnparsedCalls, callsLostFromParse, officialToolCallSpecimen, officialCallExampleFor, buildPreset } from './agent-preset.js';
 // 只用 `teachFor`（1146 的续跑重申、3290 的首轮落盘）——那两处是**真调用**，
 // 即计划 Task 1.4 所说的「教学提示按 teachShape 选支」。
 // `transportShapeForSite` 曾一并 import 但全文件零调用（第三轮自审发现），已移除；
@@ -924,7 +924,8 @@ export function apply(ctx, config = {}) {
   // thinkModeBySite / siteModeBySite（task-8）：站点级覆盖字典。全局 thinkMode 保持
   // 旧默认 'on'；回落链唯一真源是 web-control.js 的 thinkModeOf（站点→全局→auto）。
   // siteModeBySite 默认空 = 不动网页（GLM 任务模式，零位移）。
-  const defaultConfig = { extraPrompt: '', extraPromptBySite: {}, defaultModel: 'deepseek', defaultModelBySite: {}, previewRefreshRate: 5000, thinkMode: 'on', thinkModeBySite: {}, subAgentMode: 'own', subAgentSite: 'follow', sendGapMs: 0, sendGapBasis: 'send-to-send', accounts: [], sendGapMsBySlot: {}, promptTransport: 'attach', promptTransportBySite: {}, maxConcurrentLanes: 2, searchMode: 'auto', searchModeBySite: {}, siteModeBySite: {} };
+  const defaultConfig = { extraPrompt: '', extraPromptBySite: {}, defaultModel: 'deepseek', defaultModelBySite: {}, previewRefreshRate: 5000, thinkMode: 'on', thinkModeBySite: {}, subAgentMode: 'own', subAgentSite: 'follow', sendGapMs: 0, sendGapBasis: 'send-to-send', accounts: [], sendGapMsBySlot: {}, promptTransport: 'attach', promptTransportBySite: {}, maxConcurrentLanes: 2, searchMode: 'auto', searchModeBySite: {}, siteModeBySite: {}, // 工具总闸（0.22.2）默认**关**：纯网页会话是桥的默认态；测试 harness 用 ctx.settings 存根显式开。
+    toolsEnabled: false };
   // 设置**修订号**（0.19.33）：单调递增的进程内计数器，每次 set() 自增。
   //
   // 为什么必须有它：设置面有多处读数（提示词模板 / 再教学 / 投递形态生效值）是从
@@ -1319,7 +1320,12 @@ export function apply(ctx, config = {}) {
         return;
       }
 
-      const tools = Array.isArray(options.tools) ? options.tools : [];
+      // 工具总闸（0.22.2）：唯一判据是 buildTurn 写进 meta 的**当轮设置快照**——
+      // 回复侧按同一布尔选路，「网页看到的教学」与「回复按哪种协议解析」结构上不可能
+      // 分叉。false ⇒ tools=[] ⇒ 走下方 pure-chat 流式路径（无协议扣留、无调用解析），
+      // 且收尾调用按工具名单过滤后恒为空：即使网页自发输出 mcp_action 形状，
+      // 也不可能重放成本地调用。零注入 + 零重放，是「纯网页会话」默认态的硬保证。
+      const tools = turn?.meta?.toolsEnabled && Array.isArray(options.tools) ? options.tools : [];
       const ch = channel();
       // 适配器侧「无进展」看门狗（0.14.0）——问题②的第二条防线。
       //
@@ -4368,7 +4374,14 @@ function imageMarkdown(images) {
     // 一次读取设置（宿主 settings 服务或文件），本轮三处消费同一份快照——
     // 旧实现每轮读三次，且三处可能读到不同版本。
     const settings = configManager.get();
-    const extraPrompt = settings.extraPrompt;
+    // 工具总闸（0.22.2，用户指令「常时默认桥接网页就是只单独保留网页会话」）：
+    // 默认关 = 纯网页会话（serializePlainTurn/Delta，零注入）；开 = 既有 agent 协议。
+    // 本轮唯一读取点：prompt 侧与 meta（stream 回复侧消费 meta.toolsEnabled）都用
+    // 这一个布尔——两条路永远同一份快照，结构上不可能分叉。
+    const toolsOn = settings.toolsEnabled === true;
+    // 关闸时指令一并不注入（用户确认的「完全纯净」）：extraPrompt/sitePrompt 归空串
+    // 之后，契约指纹与内容指纹自然不含它们——编辑指令不会触发纯会话的整段重建。
+    const extraPrompt = toolsOn ? settings.extraPrompt : '';
     // 用户未显式选模型时，设置页保存的「默认模型」生效（此前只有 extraPrompt
     // 被消费，defaultModel 是个只存不用的摆设）。
     //
@@ -4436,7 +4449,14 @@ function imageMarkdown(images) {
     }
     // 站点专属指令（0.16.38）：取值点必须在**站点最终确定之后**——子代理站点分流
     // 刚把 siteId 换成了别的站点，在它之前取会拿到主线那一段，注入到子代理轮里。
-    const sitePrompt = sitePromptFor(siteId);
+    const sitePrompt = toolsOn ? sitePromptFor(siteId) : '';
+    // 首轮/重放的**两态工厂**（0.22.2）：关闸走纯序列化，开闸走既有协议序列化。
+    // 三个返回路径（辅助轮 / 无会话键 / 主轮）的三处 rebuild 与两处 fresh 全走它，
+    // 谁也不许绕开自拼一份——否则两态迟早漂移。此刻 siteId/extraPrompt/sitePrompt
+    // 均已定稿（子代理站点分流在 4430 已结束），闭包捕获的就是本轮真实值。
+    const buildFirstTurn = (over = {}) => (toolsOn
+      ? serializeFirstTurn({ ...options, extraPrompt, sitePrompt, siteId, ...over })
+      : serializePlainTurn({ ...options, siteId, ...over }));
     const keyAgentId = subAgentMode === 'own' ? agentId : null;
     // 会话键含 **accountKey**（0.19.4，用户指令「一个网址可以多个账号，多个对话！
     // 但是必须每个对于唯一账号」）：同一条 DSH 会话切到另一个账号 ⇒ 那是**另一条网页
@@ -4468,7 +4488,10 @@ function imageMarkdown(images) {
         slot,
         accountKey,
         agentId,
-        tools: Array.isArray(options.tools) ? options.tools.map((t) => t?.name).filter(Boolean) : [],
+        // 只记**实际注入**的工具（0.22.2）：关闸时必须为空——这份读数回答的是
+        // 「这轮真的教了什么」，不是「会话里碰巧有什么」。
+        tools: toolsOn && Array.isArray(options.tools) ? options.tools.map((t) => t?.name).filter(Boolean) : [],
+        toolsEnabled: toolsOn,
         at: new Date().toISOString(),
       };
     };
@@ -4494,13 +4517,16 @@ function imageMarkdown(images) {
       const auxSt = auxKey ? sessionState.get(auxKey) : null;
       const lastMsg = messages.length ? messages[messages.length - 1] : null;
       if (auxKey && auxSt && lastMsg?.role === 'user' && messages.length >= 2) {
-        const auxToolKey = Array.isArray(options.tools)
+        const auxToolKey = toolsOn && Array.isArray(options.tools)
           ? options.tools.map((t) => String(t?.name || '')).filter(Boolean).sort().join(',')
           : '';
         const auxContract = contractFingerprintOf({ model, system: options.system, toolNameKey: auxToolKey, extraPrompt, sitePrompt });
         const re = auxSt.contract === auxContract ? reanchorSent(messages, auxSt.tailHashes) : null;
         if (re && re.sent === messages.length - 1) {
-          const delta = serializeDelta([lastMsg], 0, auxSt.toolResults || 0, undefined, trainNoteFor(siteId, '', options.tools));
+          // 关闸时辅助轮同样纯文本：压缩指令原样发进既有网页会话（0.22.2）。
+          const delta = toolsOn
+            ? serializeDelta([lastMsg], 0, auxSt.toolResults || 0, undefined, trainNoteFor(siteId, '', options.tools))
+            : serializePlainDelta([lastMsg], 0);
           const auxTokens = (auxSt.tokens || 0) + estimateTokens(delta.text);
           log(`aux purpose=${options.purpose} — 主会话游标命中，只发增量 ${delta.text.length} 字符进既有网页会话（key=${auxKey}）`);
           return {
@@ -4514,14 +4540,12 @@ function imageMarkdown(images) {
             meta: {
               sessionKey: auxKey, fresh: false,
               model: formatModelId(siteId, slot, model), siteId, slot, accountKey, thinkMode,
+              toolsEnabled: toolsOn,
               sendGapMs: clampSendGapMs(sendGapForSlot(settings, accountKey, siteId)),
               sendGapBasis,
               // 网页会话槽丢失（桥重启后槽空且页面不在原会话）时按既有语义整段
               // 重放——临时新会话同样能产出摘要，优于直接失败。
-              rebuild: (hint) => serializeFirstTurn({
-                ...options, extraPrompt, sitePrompt, siteId,
-                ...(hint && Number.isFinite(hint?.maxPromptChars) ? { maxPromptChars: hint.maxPromptChars } : {}),
-              }),
+              rebuild: (hint) => buildFirstTurn(hint && Number.isFinite(hint?.maxPromptChars) ? { maxPromptChars: hint.maxPromptChars } : {}),
             },
             async attach() {
               const imgs = imagesOfMessages([lastMsg]);
@@ -4536,7 +4560,7 @@ function imageMarkdown(images) {
           };
         }
       }
-      const prompt = serializeFirstTurn({ ...options, extraPrompt, sitePrompt, siteId });
+      const prompt = buildFirstTurn();
       recordPreset(prompt);
       return {
         prompt,
@@ -4555,15 +4579,13 @@ function imageMarkdown(images) {
             fresh: true,
           } : {}),
           model: formatModelId(siteId, slot, model), siteId, slot, accountKey, thinkMode,
+          toolsEnabled: toolsOn,
           // 发送间隔按**槽**取（不同登录态风控独立）；回落链见 accounts.sendGapForSlot。
           sendGapMs: clampSendGapMs(sendGapForSlot(settings, accountKey, siteId)),
           // 间隔口径（0.16.31）随 meta 一起下发到 executor，与 sendGapMs 同一层。
           sendGapBasis,
           // fresh=true + rebuild 让 PROMPT_TRUNCATED 的一次性压缩重试也覆盖辅助轮。
-          rebuild: (hint) => serializeFirstTurn({
-            ...options, extraPrompt, sitePrompt, siteId,
-            ...(hint && Number.isFinite(hint?.maxPromptChars) ? { maxPromptChars: hint.maxPromptChars } : {}),
-          }),
+          rebuild: (hint) => buildFirstTurn(hint && Number.isFinite(hint?.maxPromptChars) ? { maxPromptChars: hint.maxPromptChars } : {}),
         },
         async attach() {
           const imgs = imagesOfMessages(messages);
@@ -4592,15 +4614,17 @@ function imageMarkdown(images) {
     //     现在指纹失配先试锚点重定位（reanchorSent）：在尾部找已发内容的连续
     //     匹配段，命中就**续同一网页会话**发增量；只有尾部真被改写（压缩摘要
     //     替换等）才回落整段重建。
-    const toolNameKey = Array.isArray(options.tools)
+    const toolNameKey = toolsOn && Array.isArray(options.tools)
       ? options.tools.map((t) => String(t?.name || '')).filter(Boolean).sort().join(',')
       : '';
     // 站点专属指令必须进**两层**指纹（0.16.38）：契约指纹决定「整段重建还是续跑」，
     // 内容指纹决定「尾部有没有变」。站点指令改了、而它只在契约指纹里，续跑判定会
     // 走「契约没变 + 尾部没变」→ 这一轮什么也不发；只进内容指纹则会每轮判 anchor-lost。
     // 两处都要，且两处的键名必须逐字相同（都是 sitePrompt）。
-    const contract = contractFingerprintOf({ model, system: options.system, toolNameKey, extraPrompt, sitePrompt });
-    const fingerprint = count => createHash('sha256').update(JSON.stringify({ model, system: options.system, tools: toolNameKey, extraPrompt, sitePrompt, messages: messages.slice(0, count) })).digest('hex');
+    // 关闸时 system 不进指纹（它不被注入）：开关切换 ⇒ 指纹必变 ⇒ 整段重建，
+    // 绝不把增量发进一个带着旧教学的网页会话（红线 2 的开关版）。
+    const contract = contractFingerprintOf({ model, system: toolsOn ? options.system : '', toolNameKey, extraPrompt, sitePrompt });
+    const fingerprint = count => createHash('sha256').update(JSON.stringify({ model, system: toolsOn ? options.system : '', tools: toolNameKey, extraPrompt, sitePrompt, messages: messages.slice(0, count) })).digest('hex');
     let st = sessionState.get(keyPath);
     // 0.16.29：判 fresh 的**原因**必须可查（用户第 4 问「搞清楚为什么会新开 web 端
     // 对话！」）。此前只有 `fresh` 一个布尔量，于是「新开了对话」这句话在四个
@@ -4646,10 +4670,13 @@ function imageMarkdown(images) {
     }
     st ||= { sent: 0, toolResults: 0, tokens: 0 };
     // 增量轮的再教学提示按站点取（glm 只教代码块形状，与首轮同一立场）。
-    const delta = serializeDelta(messages, st.sent, st.toolResults, undefined, trainNoteFor(siteId, '', options.tools));
+    // 关闸时走纯文本增量（0.22.2）。
+    const delta = toolsOn
+      ? serializeDelta(messages, st.sent, st.toolResults, undefined, trainNoteFor(siteId, '', options.tools))
+      : serializePlainDelta(messages, st.sent);
     let prompt;
     if (fresh) {
-      prompt = serializeFirstTurn({ ...options, extraPrompt, sitePrompt, siteId });
+      prompt = buildFirstTurn();
       recordPreset(prompt);
       // 提示词落盘（0.16.28）：fresh 首轮 = 站点教学全文（稳定部分）+ 会话上下文
       // 全文（完整首轮）同时落盘。增量轮不写——上下文没变，落盘只会制造 IO 噪音。
@@ -4658,9 +4685,15 @@ function imageMarkdown(images) {
       // 正本」表供自动续跑的**完整提醒**复用（0.19.3）。两处共用同一个字符串，
       // 于是「续跑升级后重发的教学」与「首轮真实教过的教学」不可能分叉——
       // 这是机制保证，不是靠两处各自照着写对的约定。
-      const siteText = buildPreset({ ...options, extraPrompt, sitePrompt, siteId }) + teachFor(siteId, options.tools);
-      rememberSiteTeaching(keyPath, siteText);
-      writePromptFiles({ siteId, sessionKey: keyPath, siteText, sessionText: prompt });
+      if (toolsOn) {
+        const siteText = buildPreset({ ...options, extraPrompt, sitePrompt, siteId }) + teachFor(siteId, options.tools);
+        rememberSiteTeaching(keyPath, siteText);
+        writePromptFiles({ siteId, sessionKey: keyPath, siteText, sessionText: prompt });
+      } else {
+        // 关闸（0.22.2）：没有教学可落盘、也不进教学正本表（自动续跑在纯路径根本
+        // 不会触发）；会话正本照写——「投递源」纪律（0.16.29）不区分工具/纯模式。
+        writePromptFiles({ siteId, sessionKey: keyPath, sessionText: prompt });
+      }
     }
     else prompt = delta.text;
     // 上下文计数口径（问题③根因）：网页这一侧是「首轮全文 + 后续增量」，模型
@@ -4700,6 +4733,7 @@ function imageMarkdown(images) {
       },
       meta: {
         sessionKey: keyPath, fresh, model: formatModelId(siteId, slot, model), siteId, slot, accountKey, thinkMode,
+        toolsEnabled: toolsOn,
         // 思考等级（0.19.48）：宿主在用户选了「推理等级」时把它放进请求（`GenerateOptions`），
         // 我们原样透到驱动；未选（含旧会话）时是 undefined ⇒ 驱动**一个字都不动网页**。
         // 这里刻意**不做**站点校验：站点知识只在 lib/think-effort.js 一处，
@@ -4714,10 +4748,7 @@ function imageMarkdown(images) {
         // 网页会话丢失时的整段重放文本（见 executor 的 WEB_SESSION_LOST 分支）。
         // 0.16.11：接受 { maxPromptChars } —— PROMPT_TRUNCATED 压缩重试从这条路取
         // 压缩后的首轮全文；无参调用（WEB_SESSION_LOST 重放）行为逐字不变。
-        rebuild: (hint) => serializeFirstTurn({
-          ...options, extraPrompt, sitePrompt, siteId,
-          ...(hint && Number.isFinite(hint?.maxPromptChars) ? { maxPromptChars: hint.maxPromptChars } : {}),
-        }),
+        rebuild: (hint) => buildFirstTurn(hint && Number.isFinite(hint?.maxPromptChars) ? { maxPromptChars: hint.maxPromptChars } : {}),
       },
       invalidate: () => {
         // 失败的一轮同样要把节流那枚标记清掉：留着它会吃掉后面某一轮**正常**的提交，

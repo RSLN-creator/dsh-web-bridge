@@ -21,7 +21,7 @@ function driverWith(emit) {
 
 function setup(driver) {
   let adapter;
-  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null, settings: { get: () => ({ toolsEnabled: true }), set: () => {} } }, { port: 0, requireConsent: false, driver });
   const collect = async (options) => { const chunks = []; for await (const c of adapter.stream(options)) chunks.push(c); return chunks; };
   return { dispose, collect };
 }

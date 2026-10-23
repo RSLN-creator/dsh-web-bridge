@@ -824,6 +824,124 @@ export function serializeDelta(messages, sent, toolResultsSent = 0, knownNames, 
   return { text: text || '[系统] 上一次回复未成功接收，请重新回复。', consumed: msgs.length, toolResultsSent: results };
 }
 
+// ---- 纯网页会话（工具总闸 `toolsEnabled` 关闭时的全部序列化）--------------------
+//
+// 用户指令（2026-10-24）：桥接网页的**默认态**必须是「只保留网页会话」——网页模型
+// 只收到用户原话，与浏览器一字不差；工具调用教学改为显式开启的能力。这两个函数就是
+// 关闸后的全部发送文本：不发 preset、不发 [会话开始] 标记、不注入任何系统/全局/站点
+// 指令、不改写 DSH 斜杠指令（normalizeHarnessDirective 不参与，原样透传）。
+//
+// 为什么放在本文件（红线 3 的另一面）：纯模式不是「第二套协议」，而是**协议的缺席**。
+// 把它放在协议真源旁边，两条路（教协议 / 不教）永远在同一份文件里互相对照——将来
+// 任何人给 serializeFirstTurn 加包装段时，一眼能看到纯模式刻意不带哪些东西，
+// 不会「顺手补齐」把注入带回来。
+//
+// 残留的桥侧文本（如实声明，都不是行为注入，而是交付语义）：
+//   ① 会话丢失后的**整段重放**：历史 assistant 消息带 '[assistant] ' 前缀（与
+//      serializeFirstTurn 同一词形）。不加标记，新网页会话分不清哪句是谁说的，
+//      上下文等于静默丢失（红线 2）。
+//   ② 历史里若出现过本机工具调用/结果（开闸期间留下的），重放时以一行 [系统] 说明
+//      带过——纯网页会话不回放工具协议，但也不假装那些轮次不存在。
+//   ③ 增量为空时与 serializeDelta 同一句兜底文本。
+//   ④ 预算重试（PROMPT_TRUNCATED）的省略标记与 serializeFirstTurn 同一措辞。
+
+/**
+ * 纯网页会话的消息分段（serializePlainTurn / serializePlainDelta 共用的唯一实现）。
+ *
+ * 只收两类正文：用户文本（逐字）与 assistant 正文；其余一律计数进 `toolTraffic`
+ *（system 消息整条跳过——零注入是纯模式的定义）。
+ * `replay` 决定 assistant 正文的去向：**整段重放**（新网页会话）必须带上——
+ * 不加标记分不清谁说的，上下文等于静默丢失（红线 2）；**增量轮**必须跳过——
+ * assistant 内容已经在网页会话里，重发等于翻倍（与 serializeDelta 同一游标语义：
+ * 跳过但仍计数，不计数游标推不动）。
+ *
+ * @param {Array} msgs 消息数组
+ * @param {number} [sent] 已消费的消息条数（游标）
+ * @param {{replay?: boolean}} [opts] replay=true 时 assistant 正文进分段
+ * @returns {{segs: string[], toolTraffic: number}}
+ */
+function plainSegments(msgs, sent = 0, { replay = false } = {}) {
+  const segs = [];
+  let toolTraffic = 0;
+  for (const m of msgs.slice(sent)) {
+    if (!m) continue;
+    if (m.role === 'system') continue;
+    if (m.role === 'tool') { toolTraffic += 1; continue; }
+    if (m.role === 'assistant') {
+      const content = Array.isArray(m.content) ? m.content : [];
+      toolTraffic += content.filter(b => b && b.type === 'tool-call').length;
+      if (replay) {
+        const t = textOfBlocks(m.content);
+        if (t.trim()) segs.push('[assistant] ' + t);
+      }
+      continue;
+    }
+    // user：文本块逐字透传（trim 只去首尾空白，不改内容）；内容里的 tool-result
+    // 块只可能来自开闸期间的历史，计数如实带过。
+    if (Array.isArray(m.content)) {
+      for (const b of m.content) {
+        if (!b) continue;
+        if (b.type === 'tool-result') { toolTraffic += 1; continue; }
+        if (b.type === 'text' && typeof b.text === 'string' && b.text.trim()) segs.push(b.text.trim());
+      }
+    } else if (typeof m.content === 'string' && m.content.trim()) {
+      segs.push(m.content.trim());
+    }
+  }
+  return { segs, toolTraffic };
+}
+
+/**
+ * 纯网页会话的**增量**序列化（关闸时 buildTurn 增量轮的唯一路径）。
+ *
+ * 只发 `sent` 之后新增的用户文本；assistant 消息跳过但仍计数（与 serializeDelta
+ * 同一游标语义——不计数游标推不动，同一段会被反复发出去）。
+ *
+ * @param {Array} messages DSH 传来的完整消息数组
+ * @param {number} [sent] 已消费的消息条数（游标）
+ * @returns {{text: string, consumed: number}}
+ */
+export function serializePlainDelta(messages, sent = 0) {
+  const msgs = Array.isArray(messages) ? messages : [];
+  const { segs, toolTraffic } = plainSegments(msgs, sent);
+  let text = segs.join('\n\n');
+  if (toolTraffic > 0) text += (text ? '\n\n' : '') + '[系统] （历史中含 ' + toolTraffic + ' 条本地工具调用/结果记录，纯网页会话不回放其协议。）';
+  return { text: text.trim() || '[系统] 上一次回复未成功接收，请重新回复。', consumed: msgs.length };
+}
+
+/**
+ * 纯网页会话的**首轮/整段重放**序列化（关闸时 buildTurn 的唯一首轮路径）。
+ *
+ * 常规首轮（messages = [user]）输出就是用户原话，一字不差；整段重放（锚点丢失/
+ * 换账号/开关切换后的契约重建）时按「保留最新后缀」压缩，措辞与 serializeFirstTurn
+ * 的预算路径同款——绝不静默截断字符串。`maxPromptChars` 非法（<=0/NaN）视为无预算。
+ *
+ * @param {object} [options] 只消费 `messages` 与 `maxPromptChars`；
+ *   `system` / `extraPrompt` / `tools` / `sitePrompt` 一概**不读**——这是纯模式的定义。
+ * @returns {string}
+ */
+export function serializePlainTurn(options = {}) {
+  const messages = Array.isArray(options.messages) ? options.messages : [];
+  const { segs, toolTraffic } = plainSegments(messages, 0, { replay: true });
+  const tail = toolTraffic > 0
+    ? ['[系统] （历史中含 ' + toolTraffic + ' 条本地工具调用/结果记录，纯网页会话不回放其协议。）']
+    : [];
+  const budget = Number(options.maxPromptChars);
+  if (!Number.isFinite(budget) || budget <= 0) {
+    return [...segs, ...tail].join('\n\n').trim() || '[系统] 上一次回复未成功接收，请重新回复。';
+  }
+  let keep = segs.length;
+  let compacted = '';
+  for (; keep >= 1; keep--) {
+    const body = segs.slice(segs.length - keep).join('\n\n');
+    const dropped = segs.length - keep;
+    const marker = dropped > 0 ? '[系统] （早期上下文已省略 ' + dropped + ' 条消息以适配网页输入上限；最新上下文完整保留）' : '';
+    compacted = [marker, body, ...tail].filter(Boolean).join('\n\n');
+    if (compacted.length <= budget) return compacted;
+  }
+  return compacted;
+}
+
 /**
  * 参数形状纠偏：把网页模型「明显打错类型」的参数按 schema 修回来。
  *

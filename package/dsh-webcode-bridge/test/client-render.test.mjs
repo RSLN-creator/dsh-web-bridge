@@ -1095,55 +1095,58 @@ test('★ 0.19.51 反向验证：menu.item 缺 id 时桩必须拒绝（真实 Sl
 // https://github.com/iconoir-icons/iconoir）。历史教训是 0.19.39 自绘了一个与
 // 插件管理页形象对不上的形状（用户判为「绘制错误」），0.19.56 又自绘了第二次，
 // **0.19.57 我拿到用户的图却没照图改**（自选蓝青渐变，而用户的稿子是黑色 + 旋转
-// 90°）——第三次。因此这里把「品牌几何 = 官方逐字路径 + 定稿的旋转与配色」
-// 一并钉死：三条路径的 `d` 与 iconoir `icons/regular/bridge-3d.svg` 完全一致，
-// 配色与旋转必须等于用户 appicon-forge 稿子的 `iconRotation:90` /
-// `iconColor:#000000ff` / `iconShadow:#65b3fcff`，自改任一项即红。
-// 反向验证：改桥体路径一个数字、改旋转角、改配色 ⇒ 各红一次（已做）。
-test('★ 0.19.58 品牌图标：Iconoir bridge-3d 官方几何 + 用户定稿的旋转 90°/黑色/浅蓝副影', () => {
+// 90°）——第三次。
+//
+// 0.22.2（2026-10-24）：用户**明确授权**「品牌图标也重绘（旧版保留可回退）」——
+// 这是授权改稿的第二次用户指令（第一次是 0.19.57 指定 Iconoir）。新稿是自绘悬索桥
+//（24 网格，全部直线 + 一条二次贝塞尔，无第三方许可义务；Iconoir MIT 稿随 0.19.58
+// 留在 git 历史）。这条护栏照旧把「品牌几何 + 配色」一并钉死，方向反过来：
+//   · 新几何的每条路径逐字钉住（与 icon.svg 共用同一组数据，两处漂移必红）；
+//   · 配色规则沿用 0.19.58 定稿：彩色位黑色本体 + 浅蓝副影 #65b3fc；
+//   · 0.19.58 的 Iconoir 稿与 0.19.39/0.19.56 的旧拱桥**全部不得复活**。
+// 反向验证：改主缆垂度一个数字、删副影层、彩色位丢 accent ⇒ 各红一次（已做）。
+test('★ 0.22.2 品牌图标：自绘悬索桥（用户授权重绘）+ 沿用黑色本体/浅蓝副影的定稿色法', () => {
   const src = bridgeSrcFrom('client.cjs');
-  // 官方 bridge-3d regular 的三条路径（逐字；取件 2026-10-03，unpkg iconoir）。
-  assert.ok(src.includes("'M18 4L21 4'"), '右上短竖线不是官方路径（自改了坐标？）');
-  assert.ok(src.includes("'M10 20C10 20 16.5 17.5 12 12C7.5 6.5 14 4 14 4'"),
-    'S 形桥体不是官方路径（自改了坐标？）');
-  assert.ok(src.includes("'M3 20H6'"), '左下短竖线不是官方路径（自改了坐标？）');
-  // 官方刻度：24 viewBox / stroke 1.5（官方 bridge-3d 的 stroke-width）。
-  assert.ok(src.includes("viewBox: '0 0 24 24'"), '品牌图标必须用官方 24 viewBox');
-  assert.match(src, /function DwbMarkColor\(props\)[\s\S]{0,600}sw = 1\.5/,
-    '品牌图标的线宽必须用官方 1.5（官方 bridge-3d 刻度）');
-  // 两个端点圆点（官方的实心小圆）也必须在。
-  assert.ok(src.includes('cx: 10, cy: 20, r: 1') && src.includes('cx: 14, cy: 4, r: 1'),
-    'bridge-3d 的两个端点圆点丢了');
-  // 旧形象（0.19.56 的拱桥 / 0.19.39 的浅拱）不得复活。
+  // 自绘悬索桥的路径（逐字；0.22.2 重绘，client.cjs 与 icon.svg 共用这组数据）。
+  assert.ok(src.includes("'M3.5 17.5H20.5'"), '桥面路径不是 0.22.2 定稿（自改了坐标？）');
+  assert.ok(src.includes("'M7 6.5V17.5'") && src.includes("'M17 6.5V17.5'"),
+    '两塔路径不是 0.22.2 定稿（自改了坐标？）');
+  assert.ok(src.includes("'M7 6.5Q12 12.1 17 6.5'"),
+    '主缆路径不是 0.22.2 定稿（垂度 9.3 是解析值，不许手调）');
+  assert.ok(src.includes("'M9.5 8.6V17.5'") && src.includes("'M14.5 8.6V17.5'"),
+    '吊索路径不是 0.22.2 定稿（y=8.6 是解析值，不许手调）');
+  assert.ok(src.includes("viewBox: '0 0 24 24'"), '品牌图标必须用 24 viewBox');
+  // 旧形象不得复活：0.19.58 的 Iconoir 稿（已被本轮授权重绘取代）、
+  // 0.19.56 的拱桥、0.19.39 的浅拱。
+  assert.ok(!src.includes("'M18 4L21 4'") && !src.includes("'M10 20C10 20 16.5 17.5 12 12C7.5 6.5 14 4 14 4'"),
+    '0.19.58 的 Iconoir bridge-3d 路径复活了（0.22.2 已由用户授权重绘取代）');
   assert.ok(!src.includes('M5 12.33C5 7.33 19 7.33 19 12.33'), '0.19.56 的旧拱桥路径复活了');
   assert.ok(!src.includes("'M2.5 12.4c0-3.9"), '0.19.39 的旧浅拱路径复活了');
   // 彩色版与线稿必须同构：DwbMark 直接转发 DwbMarkColor（monochrome），不是第二份坐标。
   assert.match(src, /function DwbMark\(props\)\s*\{\s*return DwbMarkColor\(\{\s*\.\.\.props,\s*monochrome: true\s*\}\);\s*\}/,
     'DwbMark 必须直接转发 DwbMarkColor（两份坐标会漂移）');
-  // ---- 定稿的旋转与配色（用户 appicon-forge 稿，2026-10-03）----
-  // 旋转 90°：必须写在**内层 g** 上（写在外层 svg 会让盒子跟着转、撑歪 flex 行高）。
-  assert.ok(src.includes("transform: 'rotate(90 12 12)'"),
-    '品牌图标必须按用户稿旋转 90°（iconRotation: 90）');
-  // 彩色位本体为黑、副影为浅蓝（iconColor #000000ff / iconShadow #65b3fcff）。
-  assert.ok(src.includes("art('#65b3fc')"), '副影必须是用户稿的浅蓝 #65b3fc');
-  assert.ok(src.includes("art(mono ? 'currentColor' : '#000000')"),
-    '彩色位本体必须是用户稿的黑色 #000000（不是自选配色）');
-  // 0.19.57 那次自选的蓝青渐变不得复活（用户明确否定：稿子是黑 + 蓝副影）。
+  // ---- 配色（沿用 0.19.58 定稿的色法，几何换了色法不换）----
+  // 彩色位本体为黑、副影为浅蓝（iconColor #000000ff / iconShadow #65b3fcff）；
+  // 彩色位主缆/吊索用品牌蓝青点缀（accent 实参）。
+  assert.ok(src.includes("art('#65b3fc')"), '副影必须是定稿的浅蓝 #65b3fc');
+  assert.ok(src.includes("art(mono ? 'currentColor' : '#000000', mono ? null : '#65b3fc')"),
+    '彩色位本体必须黑色 + 蓝青 accent（0.22.2 定稿调用形状）');
+  assert.ok(!src.includes('rotate(90 12 12)'), '0.19.58 的 90° 旋转残留了（新几何本身就是横桥）');
+  // 0.19.57 那次自选的蓝青渐变不得复活（用户明确否定）。
   assert.ok(!src.includes('#7CB7FF') && !src.includes('#45D9E7'),
     '0.19.57 自选的蓝青渐变复活了——定稿是黑色本体 + 浅蓝副影');
   assert.ok(!src.includes('url(#dwb-s)'), '0.19.57 的品牌渐变引用复活了');
-  // icon.svg 必须是同一套：白底圆角 77 + #D1D1D1 描边 + 黑色 + 旋转 90°。
+  // icon.svg 必须是同一套几何：白底圆角 77 + #D1D1D1 描边 + #65b3fc。
   const icon = readFileSync(path.resolve(here, '../icon.svg'), 'utf8');
-  assert.ok(icon.includes('rotate(90 512 512)'), 'icon.svg 必须按用户稿旋转 90°');
-  assert.ok(icon.includes('rx="77"'), 'icon.svg 圆角必须是用户稿的 77');
-  assert.ok(icon.includes('stroke="#D1D1D1"'), 'icon.svg 描边必须是用户稿的 #D1D1D1');
-  assert.ok(icon.includes('fill="#ffffff"'), 'icon.svg 底色必须是用户稿的纯白');
-  assert.ok(icon.includes('#65b3fc'), 'icon.svg 副影必须是用户稿的 #65b3fc');
+  for (const d of ['M3.5 17.5H20.5', 'M7 6.5V17.5', 'M17 6.5V17.5', 'M7 6.5Q12 12.1 17 6.5', 'M9.5 8.6V17.5', 'M14.5 8.6V17.5']) {
+    assert.ok(icon.includes(d), 'icon.svg 缺路径 ' + d + '（与 client.cjs 漂移了）');
+  }
+  assert.ok(icon.includes('rx="77"'), 'icon.svg 圆角必须是 0.19.58 定稿的 77');
+  assert.ok(icon.includes('stroke="#D1D1D1"'), 'icon.svg 描边必须是定稿的 #D1D1D1');
+  assert.ok(icon.includes('fill="#ffffff"'), 'icon.svg 底色必须是定稿的纯白');
+  assert.ok(icon.includes('#65b3fc'), 'icon.svg 副影必须是定稿的 #65b3fc');
   assert.ok(!icon.includes('#7CB7FF') && !icon.includes('#45D9E7'),
     'icon.svg 里 0.19.57 的蓝青渐变复活了');
-  // 许可：MIT 要求保留作者与许可声明。
-  assert.match(icon, /Luca Burgio/, 'icon.svg 必须保留 Iconoir 作者声明（MIT）');
-  assert.match(icon, /MIT/, 'icon.svg 必须保留 MIT 许可声明');
 });
 
 // ------------------------------------------------------------------ 0.14.8

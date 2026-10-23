@@ -39,7 +39,7 @@ function harness(reply) {
   let adapter;
   const prompts = [];
   const dispose = apply(
-    { llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null },
+    { llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null, settings: { get: () => ({ toolsEnabled: true }), set: () => {} } },
     {
       port: 0, requireConsent: false,
       driver: {

@@ -1040,6 +1040,10 @@ export function createWebControl(deps = {}) {
         settingsRevision: settingsRevisionNow(),
         promptTransport: config.promptTransport === 'inline' ? 'inline' : 'attach',
         sendGapBasis: config.sendGapBasis === 'end-to-start' ? 'end-to-start' : 'send-to-send',
+        // 本地工具调用总闸（0.22.2，用户指令「常时默认桥接网页就是只单独保留网页会话」）：
+        // 只认逐字 true，缺键/非布尔一律回 false——「从未配置」与「显式关」在行为上
+        // 就是同一件事（关），不区分，前端也不必。
+        toolsEnabled: config.toolsEnabled === true,
         // 两个站点级字典（0.16.38）：与上面同一条纪律——从未保存过时设置文件里
         // 没有这两个键，回 undefined 会让前端渲染成「加载失败」。回空对象。
         defaultModelBySite: config.defaultModelBySite && typeof config.defaultModelBySite === 'object' ? config.defaultModelBySite : {},
@@ -1120,6 +1124,13 @@ export function createWebControl(deps = {}) {
       // 两个合法值，下次读的人不必再猜。
       if ('promptTransport' in updated) {
         updated.promptTransport = updated.promptTransport === 'inline' ? 'inline' : 'attach';
+      }
+      // 本地工具调用总闸（0.22.2）：布尔键只认逐字 true——设置文件可手改，写错的值
+      //（字符串 'true'、1、'on'）一律归 false。归一化放写入侧，落盘文件里永远只有
+      // true/false 两个合法值；读取侧（index.js buildTurn 的 toolsOn）只做 `=== true`，
+      // 两侧判据同源。**默认关**：桥接网页的默认态是纯网页会话，工具教学是显式开启。
+      if ('toolsEnabled' in updated) {
+        updated.toolsEnabled = updated.toolsEnabled === true;
       }
       // 站点级投递形态（0.19.32）：与上面全局档同一条纪律，只是**键多一层归一化**
       //（同 sendGapMsBySlot：未知站点的键直接丢弃，它永远不会被查表命中，留着只会让

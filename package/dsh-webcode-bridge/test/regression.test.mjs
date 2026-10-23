@@ -25,7 +25,7 @@ test('普通回复完成、模型传递、游标提交与同长度历史改写',
     sendTurn: async (key, prompt, opts) => { turns.push({ key, prompt, ...opts }); opts.onDelta?.('回答'); return { text: '回答' }; },
     sendPrompt: async (prompt, opts) => { turns.push({ prompt, ...opts }); return { text: '回答' }; },
   };
-  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null, settings: { get: () => ({ toolsEnabled: true }), set: () => {} } }, { port: 0, requireConsent: false, driver });
   const user = text => ({ role: 'user', content: [{ type: 'text', text }] });
   const collect = async options => { const chunks = []; for await (const c of adapter.stream(options)) chunks.push(c); return chunks; };
   try {
@@ -73,7 +73,7 @@ test('限定模型 id（site:model）全程不丢站点前缀，直达 executor'
     sendTurn: async (key, prompt, opts) => { turns.push({ key, prompt, ...opts }); opts.onDelta?.('好'); return { text: '好' }; },
     sendPrompt: async (prompt, opts) => { turns.push({ prompt, ...opts }); return { text: '好' }; },
   };
-  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null, settings: { get: () => ({ toolsEnabled: true }), set: () => {} } }, { port: 0, requireConsent: false, driver });
   const user = text => ({ role: 'user', content: [{ type: 'text', text }] });
   try {
     const chunks = [];
@@ -95,7 +95,7 @@ test('会话模式（sendTurn）思考链与图片经回调到达 DSH 流（回�
     },
     sendPrompt: async () => ({ text: '' }),
   };
-  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null, settings: { get: () => ({ toolsEnabled: true }), set: () => {} } }, { port: 0, requireConsent: false, driver });
   const user = text => ({ role: 'user', content: [{ type: 'text', text }] });
   try {
     const chunks = [];
@@ -117,7 +117,7 @@ test('设置保存的默认模型在未显式选模型时生效', async () => {
     sendTurn: async (key, prompt, opts) => { turns.push({ key, prompt, ...opts }); opts.onDelta?.('答'); return { text: '答' }; },
     sendPrompt: async (prompt, opts) => { turns.push({ prompt, ...opts }); return { text: '答' }; },
   };
-  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null, settings: { get: () => ({ toolsEnabled: true }), set: () => {} } }, { port: 0, requireConsent: false, driver });
   const user = text => ({ role: 'user', content: [{ type: 'text', text }] });
   try {
     // 直接调用 buildTurn 消费的同一 settings 路径：走 openai.js 风格限定 id
@@ -142,6 +142,9 @@ test('0.16.38 站点级设置：defaultModelBySite 覆盖本站点模型，extra
   // 设置面：主线落点 deepseek + 它的站点级覆盖 + 两条站点指令。
   const state = {
     extraPrompt: '',
+    // 0.22.2：本用例钉的是「指令注入」语义——那是工具总闸**开**时的行为；
+    // 默认关（纯网页会话）不注入任何指令，因此这里显式开。
+    toolsEnabled: true,
     defaultModel: 'deepseek',
     defaultModelBySite: { deepseek: 'deepseek:deepseek' },
     extraPromptBySite: { deepseek: 'DEEPSEEK-ONLY', glm: 'GLM-ONLY' },
@@ -187,7 +190,7 @@ test('网页会话丢失时用整段首轮提示词重放，而不是把增量�
     },
     sendPrompt: async (prompt, opts) => { turns.push({ prompt }); return { text: '答' }; },
   };
-  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null, settings: { get: () => ({ toolsEnabled: true }), set: () => {} } }, { port: 0, requireConsent: false, driver });
   const user = text => ({ role: 'user', content: [{ type: 'text', text }] });
   try {
     const collect = async options => { const out = []; for await (const c of adapter.stream(options)) out.push(c); return out; };
@@ -213,7 +216,7 @@ test('会话标题辅助调用只认 purpose=session-title，不误伤真实轮�
     sendTurn: async () => ({ text: '' }),
     sendPrompt: async (prompt) => { calls.push(prompt); return { text: '真实回答' }; },
   };
-  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null, settings: { get: () => ({ toolsEnabled: true }), set: () => {} } }, { port: 0, requireConsent: false, driver });
   const user = text => ({ role: 'user', content: [{ type: 'text', text }] });
   const collect = async options => { const out = []; for await (const c of adapter.stream(options)) out.push(c); return out; };
   try {
@@ -346,7 +349,7 @@ test('调用名先到、参数后到：配平前不开块也不泄漏协议文�
     status: () => ({}), close: async () => {},
     sendPrompt: async (_, opts) => { opts.onDelta('**Calling:** `read`\n'); return result; },
   };
-  const dispose = apply({ llm: { registerAdapter: (_, value) => { adapter = value; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  const dispose = apply({ llm: { registerAdapter: (_, value) => { adapter = value; } }, get: () => null, settings: { get: () => ({ toolsEnabled: true }), set: () => {} } }, { port: 0, requireConsent: false, driver });
   try {
     const stream = adapter.stream({ model: 'flash', tools: [{ name: 'read', parameters: {} }], messages: [{ role: 'user', content: '读取文件' }] });
     // 0.12.4 契约修订：流式开块只认「调用对象已配平」。早期开块（0.7.1：名字先到
@@ -383,7 +386,7 @@ test('流式多调用：每个调用恰好一块、不重发、参数不丢', as
       return result;
     },
   };
-  const dispose = apply({ llm: { registerAdapter: (_, value) => { adapter = value; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  const dispose = apply({ llm: { registerAdapter: (_, value) => { adapter = value; } }, get: () => null, settings: { get: () => ({ toolsEnabled: true }), set: () => {} } }, { port: 0, requireConsent: false, driver });
   try {
     const stream = adapter.stream({ model: 'flash', tools: [{ name: 'read', parameters: {} }, { name: 'grep', parameters: {} }], messages: [{ role: 'user', content: '读两个目标' }] });
     const chunks = [];
@@ -422,7 +425,7 @@ test('权威全文与增量分叉（canonical 多出调用）：流式块按自�
   };
   // profileDir 指向临时目录：0.14 起发送间隔持久化在真实 profile 里，前面的测试
   // 发送过会让本测试读回 lastSendAt 并等待 sendGapMs（真机设置 10s），测试必须隔离。
-  const dispose = apply({ llm: { registerAdapter: (_, value) => { adapter = value; } }, get: () => null }, { port: 0, requireConsent: false, driver, profileDir: mkdtempSync(path.join(os.tmpdir(), 'webcode-test-')) });
+  const dispose = apply({ llm: { registerAdapter: (_, value) => { adapter = value; } }, get: () => null, settings: { get: () => ({ toolsEnabled: true }), set: () => {} } }, { port: 0, requireConsent: false, driver, profileDir: mkdtempSync(path.join(os.tmpdir(), 'webcode-test-')) });
   try {
     const stream = adapter.stream({ model: 'flash', tools: [{ name: 'read', parameters: {} }, { name: 'grep', parameters: {} }], messages: [{ role: 'user', content: '查配置' }] });
     const chunks = [];
@@ -456,7 +459,7 @@ test('权威全文与增量分叉（canonical 丢失调用）：流式块按自�
       return result;
     },
   };
-  const dispose = apply({ llm: { registerAdapter: (_, value) => { adapter = value; } }, get: () => null }, { port: 0, requireConsent: false, driver, profileDir: mkdtempSync(path.join(os.tmpdir(), 'webcode-test-')) });
+  const dispose = apply({ llm: { registerAdapter: (_, value) => { adapter = value; } }, get: () => null, settings: { get: () => ({ toolsEnabled: true }), set: () => {} } }, { port: 0, requireConsent: false, driver, profileDir: mkdtempSync(path.join(os.tmpdir(), 'webcode-test-')) });
   try {
     const stream = adapter.stream({ model: 'flash', tools: [{ name: 'edit', parameters: {} }], messages: [{ role: 'user', content: '改文件' }] });
     const chunks = [];
@@ -486,7 +489,7 @@ test('调用之间的纯标签残片（</</）不再当正文外发', async () =
       return result;
     },
   };
-  const dispose = apply({ llm: { registerAdapter: (_, value) => { adapter = value; } }, get: () => null }, { port: 0, requireConsent: false, driver, profileDir: mkdtempSync(path.join(os.tmpdir(), 'webcode-test-')) });
+  const dispose = apply({ llm: { registerAdapter: (_, value) => { adapter = value; } }, get: () => null, settings: { get: () => ({ toolsEnabled: true }), set: () => {} } }, { port: 0, requireConsent: false, driver, profileDir: mkdtempSync(path.join(os.tmpdir(), 'webcode-test-')) });
   try {
     const stream = adapter.stream({ model: 'flash', tools: [{ name: 'read', parameters: {} }], messages: [{ role: 'user', content: '读两个' }] });
     const chunks = [];
@@ -639,7 +642,7 @@ test('一轮回复里连发多个工具调用：每个各自一块、id 唯一�
     },
     sendPrompt: async () => ({ text: '' }),
   };
-  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null, settings: { get: () => ({ toolsEnabled: true }), set: () => {} } }, { port: 0, requireConsent: false, driver });
   const user = text => ({ role: 'user', content: [{ type: 'text', text }] });
   const tools = [{ name: 'read', description: 'r', parameters: {} }];
   try {
@@ -675,7 +678,7 @@ test('网页调用了本会话不存在的工具 → 回报可用工具清单，
     },
     sendPrompt: async () => ({ text: '' }),
   };
-  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null, settings: { get: () => ({ toolsEnabled: true }), set: () => {} } }, { port: 0, requireConsent: false, driver });
   const user = text => ({ role: 'user', content: [{ type: 'text', text }] });
   // 只登记 pwsh：模型却调 subagent。抛错会让整轮作废、用户得手动再催；
   // 正确行为是把「可用工具清单 + 请重试」作为这一轮回复交回会话。
@@ -699,7 +702,7 @@ test('工具描述措辞变化不得顶掉会话游标（否则每轮都在重�
     sendTurn: async (key, prompt, opts) => { turns.push({ fresh: opts.fresh === true, prompt }); opts.onDelta?.('答'); return { text: '答' }; },
     sendPrompt: async (prompt, opts) => { turns.push({ fresh: true, prompt }); return { text: '答' }; },
   };
-  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null, settings: { get: () => ({ toolsEnabled: true }), set: () => {} } }, { port: 0, requireConsent: false, driver });
   const user = text => ({ role: 'user', content: [{ type: 'text', text }] });
   const tools1 = [{ name: 'pwsh', description: '第一版描述', parameters: { type: 'object', properties: { command: { type: 'string' } } } }];
   const tools2 = [{ name: 'pwsh', description: '第二版措辞完全不同的描述', parameters: { type: 'object', properties: { command: { type: 'string', description: '新加的字段说明' } } } }];
@@ -877,7 +880,7 @@ test('上下文计数按累计口径上报：增量轮不得让 inputTokens 掉�
     sendTurn: async (key, prompt, opts) => { turns.push({ key, prompt, ...opts }); opts.onDelta?.(REPLY); return { text: REPLY }; },
     sendPrompt: async (prompt, opts) => { turns.push({ prompt, ...opts }); return { text: REPLY }; },
   };
-  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null, settings: { get: () => ({ toolsEnabled: true }), set: () => {} } }, { port: 0, requireConsent: false, driver });
   const user = text => ({ role: 'user', content: [{ type: 'text', text }] });
   const usageOf = async options => {
     const out = [];
@@ -913,7 +916,7 @@ test('会话命名优先取网页端真实标题，取不到才回落本地启�
     conversationFor: key => (key === 'title-web' ? { webSessionId: 'web-sess-1' } : null),
     listSessions: async () => ({ ok: true, sessions: [{ id: 'web-sess-1', title: '网页端起的真实标题' }] }),
   };
-  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null }, { port: 0, requireConsent: false, driver });
+  const dispose = apply({ llm: { registerAdapter: (_, a) => { adapter = a; } }, get: () => null, settings: { get: () => ({ toolsEnabled: true }), set: () => {} } }, { port: 0, requireConsent: false, driver });
   const collect = async options => { const out = []; for await (const c of adapter.stream(options)) out.push(c); return out; };
   const textOf = chunks => chunks.filter(c => c.type === 'text-delta').map(c => c.text).join('');
   const titleCall = (sessionId, text) => ({
