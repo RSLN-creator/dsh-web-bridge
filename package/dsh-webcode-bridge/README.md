@@ -14,6 +14,27 @@ dsh plugin --profile web add dsh-webcode-bridge
 > **Restart `dsh web` after installing.** Installing only swaps files on disk; the running process
 > still has the old code loaded. This is the single most common "it does not work" report.
 
+## Status & risks (read this first)
+
+**Status**: this is a **work-in-progress project** — behavior and interfaces can change, and a site
+redesign can break any site's channel at any time. **Forks and PRs are welcome** (see the repository
+root's CONTRIBUTING.md for the commit-message shape and the local gates).
+
+**Risks — evaluate for yourself before using**:
+
+| Risk | What it means |
+| --- | --- |
+| **Site ToS / account restriction** | The plugin drives your **logged-in web sessions** with automation, which may violate a site's terms of service; accounts can be rate-limited or restricted — **one of the author's own DeepSeek web accounts has been restricted**. |
+| **Tool mode = prompt injection** | With "local tool calling" enabled, the bridge injects tool-protocol teaching into the web conversation; that content is **visible to the site**. |
+| **Page redesigns break things** | Every site is "the web page as a backend"; when a site ships a redesign its channel can break. |
+| **Data locality** | Login state lives only in the plugin's **local** browser profile; no API keys, no telemetry, no cloud component. |
+
+**Default mode**: tool calling is **off by default** — the bridge is then a pure web session: the
+web model receives exactly your words, identical to the browser (no prompt injection, no call
+replay). Enable it via **Settings → Web Bridge → Local tool calling** or the "local tools" pill
+under the composer; enabling asks for a confirmation first. Tool calls always execute under DSH's
+native permission system.
+
 ## What it does
 
 - **Real sites in the DSH right sidebar** — not a screenshot, not a mock. The actual site is loaded

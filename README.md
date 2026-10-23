@@ -15,6 +15,28 @@ dsh plugin --profile web add dsh-webcode-bridge
 
 ---
 
+## Status & risks (read this first)
+
+**Status**: this is a **work-in-progress project** — behavior and interfaces can change, and a site
+redesign can break any site's channel at any time (keeping selectors and protocol teaching aligned
+with live pages is the daily work here). **Forks and PRs are welcome** — see
+[CONTRIBUTING.md](CONTRIBUTING.md) for the commit-message shape and the local gates.
+
+**Risks — evaluate for yourself before using**:
+
+| Risk | What it means |
+| --- | --- |
+| **Site ToS / account restriction** | The plugin drives your **logged-in web sessions** with automation, which may violate a site's terms of service; accounts can be rate-limited or restricted — **one of the author's own DeepSeek web accounts has been restricted**. Pace your usage (the plugin ships send gaps and backoff, but guarantees nothing). |
+| **Tool mode = prompt injection** | With "local tool calling" enabled, the bridge injects tool-protocol teaching into the web conversation; that content is **visible to the site**, and compared with plain browser use it widens the surface for being flagged as automation. |
+| **Page redesigns break things** | Every site is "the web page as a backend"; when a site ships a redesign its channel can break. |
+| **Data locality** | Login state lives only in the plugin's **local** browser profile; no API keys, no telemetry, no cloud component. |
+
+**Default mode (important)**: tool calling is **off by default** — the bridge is then a pure web
+session: the web model receives exactly your words, identical to the browser (no prompt injection,
+no call replay). To let the web model call local tools, enable **Settings → Web Bridge → Local tool
+calling** (the first card) or the "local tools" pill under the composer — enabling asks for a
+confirmation first. Tool calls, once produced, always execute under DSH's native permission system.
+
 ## Why
 
 Most "web model" integrations are fragile in the same three ways: they scrape HTML, they lose the
@@ -30,11 +52,12 @@ built the other way around:
 
 ## Features
 
+- **Tool calling is an explicit switch (off by default).** By default the bridge is a pure web
+  session (zero injection, zero replay). When enabled, each site is taught the tool-call shape it
+  actually accepts (DeepSeek's native token format, GLM's ```json code block, `<tool_call>` tags
+  elsewhere); the protocol is recomputed from the live tool list every turn, so it never drifts.
 - **Real site rendering in the DSH right sidebar.** Not a screenshot, not a mock — the actual site,
   loaded through a same-origin mirror so you can type, scroll and click in it. Login state persists.
-- **Per-site protocol teaching.** Each site is taught the tool-call shape it actually accepts
-  (DeepSeek's native token format, GLM's ```json code block, `<tool_call>` tags elsewhere). The
-  protocol is recomputed from the live tool list every time, so it never drifts.
 - **Per-site and global settings.** Model, instruction, send gap and prompt-delivery mode can each
   be set globally *and* overridden for a single site — changing one site never disturbs the others.
 - **Multi-account.** One site can hold several independent logins; each gets its own browser profile
@@ -117,8 +140,10 @@ Nothing needs to be added to the repository root to fix this.
 3. **Pick a model** — the model picker gains a **Harness Web Bridge** group listing every model from
    every signed-in site. Choose the default for new sessions in Settings.
 4. **Use it** — the site appears in the DSH right sidebar (the official
-   `@deepseek-ai/dsh-client-ui-sidebar-right` tabs; no third-party sidebar plugin involved). Ask a
-   question there and the web model runs with local tools.
+   `@deepseek-ai/dsh-client-ui-sidebar-right` tabs; no third-party sidebar plugin involved). The
+   default is a **pure web session** — the web model receives exactly your words, like the browser;
+   to let it call local tools, enable **Settings → Web Bridge → Local tool calling** or the "local
+   tools" pill under the composer (a confirmation dialog appears).
 
 Tool calls produced by the web model run on your machine under DSH's normal permission prompts, and
 the results are returned to the same web conversation.
@@ -132,8 +157,9 @@ page. Settings are stored per profile.
 
 | Setting | What it does |
 | --- | --- |
+| **Local tool calling** | **The master switch (off by default)**: off = pure web session (zero injection); on = tool-protocol teaching is injected into the web conversation and the web model may propose local tool calls (still executed under DSH's permission system). Enabling requires a confirmation. |
 | **Default model** | Which model a new session starts on. |
-| **Global instruction** | A paragraph appended to the first message of every new web session. |
+| **Global instruction** | A paragraph appended to the first message of every new web session (only injected while tool calling is enabled). |
 | **Send gap** | Minimum wait between two sends to the same site. Default basis is *since last send* (protects against send-rate limiting); *since last reply finished* protects against talking too fast. |
 | **Prompt delivery** | `Attachment` (default): over-threshold bodies are uploaded as a file. `Plain text`: always write into the composer (the pre-0.16 behaviour). |
 
