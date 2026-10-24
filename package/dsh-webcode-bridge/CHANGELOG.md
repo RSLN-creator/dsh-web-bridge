@@ -5,6 +5,28 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.22.2（2026-10-24：设置页中英双语（GitHub Issue #2）+「本地工具调用」总闸收口升号）
+
+### 新增：独立设置页中英双语（GitHub Issue #2「No english translation」）
+
+`/__webcode/settings-page` 全量双语：标签、提示、按钮、下拉项、脚本状态与报错文案。结构是
+**zh 正本 + en 覆盖层**——静态文本中英成对 `<span>` 就地相邻写在同一模板行（翻译与原文
+永不分离，没有第二份字典可漂移）；`<option>` / placeholder / title 三个解析规则不允许
+成对 span 的位置走 `data-en` 属性覆盖；脚本动态文案收进唯一 `MSG` 字典（护栏钉住 zh/en
+条目数相等）。语言按 `localStorage('webcode-settings-lang')` → `navigator.language` 判定，
+标题行「English/中文」按钮切换（重载式，无半个翻译态）；无 JS 默认中文，与旧版行为一致。
+**边界**：服务端现算读数与教学文本（协议真源）不翻译；原生面板 client.cjs 未双语化。
+
+### 收编：「本地工具调用」总闸（0.22.1 续，2026-10-24 当轮未升号，本版一并发布）
+
+- **默认纯网页会话**（`toolsEnabled: false`）：关闸时系统提示 / 全局指令 / 站点指令
+  **一并不注入**、自发 `mcp_action` 围栏**零重放**；开闸才恢复工具教学，且开启路径必过
+  确认弹窗（如实写明「注入对站点可见、自动化面变宽」）。
+- 两处入口：原生面板 dock 药丸「本地工具 · 开/关」+ 设置首卡开关；全局一枚，无站点级覆盖。
+- 品牌图标重绘为自绘悬索桥（24 网格全直线 + 一条二次贝塞尔主缆；与 client.cjs 共用路径数据）。
+- 护栏：`tools-switch.test.mjs` 10 条 + 变异体 M1/M2/M3+M3b 反向验证全红；
+  `settings-page-i18n.test.mjs` 8 条；品牌图标判据改钉新路径。
+
 ## 0.22.1（2026-10-21：webcode 模式与官方 `standard` 的漂移闸门 —— 一条漏项 + 一条假红）
 
 ### 修复 ①：`tool-plugin-market` 未被交代 —— 与官方 `standard` 静默漂移
