@@ -1,5 +1,5 @@
 {
-  "generatedAt": 1792827384247,
+  "generatedAt": 1792845584338,
   "scope": "`dsh-webcode-bridge`",
   "command": "node scripts/user-voice-log.mjs",
   "rows": [
@@ -592,6 +592,16 @@
           "sessionId": "sess_6cff18b8-b2b1-41da-b90e-62e547538623",
           "at": 1790276993224,
           "origin": "zcode-sidechat"
+        },
+        {
+          "sessionId": "session_91cba02b127351e8b5a561a6c9c5c410",
+          "at": 1792841961468,
+          "origin": "zcode-user"
+        },
+        {
+          "sessionId": "session_91cba02b127351e8b5a561a6c9c5c410",
+          "at": 1792844962902,
+          "origin": "zcode-user"
         }
       ]
     },
@@ -15067,6 +15077,24 @@
       "round": null,
       "text": "\"D:\\9_Code_Workspace\\dsh-web-bridge-security-audit\"\n\"D:\\9_Code_Workspace\\dsh-webcode-bridge-git-backup\"\n\"D:\\9_Code_Workspace\\dsh-web-bridge-sec-audit\"\n请你阅读和查看分支，全部删除，合理内容/逻辑保留代码写入文档，然后清理云端和本地 这俩个",
       "hash": "ce146e6d",
+      "also": [
+        {
+          "sessionId": "sess_5b4b00c3-f78b-4d89-bc19-8777a8f143af",
+          "at": 1792826531273,
+          "origin": "zcode-sidechat"
+        }
+      ]
+    },
+    {
+      "sessionId": "session_91cba02b127351e8b5a561a6c9c5c410",
+      "workspace": "D:\\9_Code_Workspace\\dsh-webcode-bridge",
+      "at": 1792840007197,
+      "seq": 0,
+      "origin": "zcode-user",
+      "goalId": null,
+      "round": null,
+      "text": "1.更新dsh desktop,注意官方来源\n2.确保你的插件提交github，然后解决所有报告的bug--github上的",
+      "hash": "072059e5",
       "also": []
     }
   ]
