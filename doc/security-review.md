@@ -537,6 +537,45 @@ SITE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
 **本节不声称「已清零」。** 判据是「运行时可到达 + 跨信任边界」，不满足这条的告警留在 CodeQL 里
 是**正确的**——把测试文件里的字符串改成让扫描器满意，只会让下次扫描失去信噪比。
 
+### 7.3 独立审计工作区（12 项 Critical/High 摘要）的归档结论（2026-10-24 补）
+
+2026-09-26 一次独立审计对当时的 `dsh-web-bridge` @ `626a3ac`（0.19.25）把 GitHub Security
+概览的 **12 项 Critical/High 告警**逐条与源码核对，报告与修复方案落盘于本地工作目录
+`dsh-web-bridge-security-audit`（AUDIT-REPORT.md + FIX-PLAN.md）。该目录已于 2026-10-24
+清理，其结论中仍有长期价值、且不与本节上文重复的部分收编在此：
+
+- 12 项里唯一的真缺陷是 **A-01 重定向 SSRF**（`httpFetch` redirect follow 不复查目标），
+  即 §7.1 第 1 条，已修复并配护栏 `test/ssrf-redirect-guard.test.mjs`。审计 FIX-PLAN
+  给的方案（把 PRIVATE_HOST 正则复制进 `upstream.js`）已被更好的实现取代：
+  `isPrivateHost` 单点定义 + `startedPrivate` 在链首判定一次——不复制正则避免漂移，
+  也不误伤以回环起步的本地测试桩。
+- 仅有的另两个「非误报但不需仓内改」项：A-02 会话 ID 用 `Math.random()`、
+  A-07 test-mock 工具 schema 里的 pwsh 命令（真实执行面在 DSH 主程序，仓外）。
+  其余 9 项判 FP / Not a Vulnerability，判据与 §7.2 的类别表一致，不另列清单。
+  审计建议的「逐条 dismiss」**不采纳**——§7.2 的立场是判据不满足的告警留在面板里是对的。
+
+**审计提出、截至 2026-10-24 仍未做的三件遗留（逐条实测核实）**：
+
+1. **仓库安全配置 4 项 Disabled**：SECURITY.md 不存在；Private vulnerability reporting /
+   Dependabot alerts / Secret scanning 未在 GitHub 设置页开启（`.github/dependabot.yml`
+   也不存在）。云端仓库 `RSLN-creator/dsh-web-bridge` 就是本仓库的 origin，随时可补做，
+   FIX-PLAN 的 P2 节（SECURITY.md 要点、`dependabot.yml` 样例、实施顺序）仍是有效清单。
+2. **会话 ID 仍是 `Math.random()`**（`lib/index.js:3327`，0.22.1 实测）。审计定性
+   Info / 非漏洞（loopback 环境下的本地文件名与索引键）；若要顺带消掉 CodeQL
+   weak-crypto 告警，改 `crypto.randomUUID()` 即可（FIX-PLAN P4 有现成代码）。
+3. **A-07 仓外转交**：test-mock 工具 schema 声明的命令，真实执行面在 DSH 主程序，
+   其沙箱 / 白名单约束未在仓内确认。
+
+**清理记录（2026-10-24，删前逐项核实）**：上述审计目录、另一份同源干净克隆
+（`dsh-web-bridge-sec-audit` @ `626a3ac`，工作树零改动）、旧 .git 备份
+（`dsh-webcode-bridge-git-backup`，裸仓库，0.5.1→0.7.3 共 20 提交，无 remote）三个本地
+目录，以及云端两个旧分支已删除。依据：`backup/dsml-protocol` 顶端 `2f3e2b9`（0.16.22）
+无任何独立于 main 的提交；`wip/web-session-site-picker` 唯一独有提交 `d0145bb`（站点图标
+半成品，client-render 当时 6 条红）已由 0.16.23 接手实现（progress.md「站点图标 + 一级
+选择框」节，`client.cjs` 的 SitePicker / SiteGlyph 即其正式版）；裸备份 20 提交在当前
+仓库历史中有逐字重演（同信息不同 hash，叙述见 HISTORY.md）。删除的是 git 对象与目录，
+不是知识。
+
 ---
 
 *本文只描述 `D:\9_Code_Workspace\dsh-webcode-bridge` 当前工作区里能读到的代码事实；
