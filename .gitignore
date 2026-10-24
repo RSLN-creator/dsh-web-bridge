@@ -136,3 +136,9 @@ REPORT.md
 # 注意规则只覆盖 `wiki/` 这一层；将来若要把索引真正入库（例如公开仓库想让协作者也用），
 # 直接删掉这一行即可，但那时应把 `gen-index --check` 接进 CI 闸门。
 wiki/
+
+# mimosa 安全扫描的运行时目录（2026-10-24）：hook-state/hook-status/finding-ledger/
+# history/reports 都是扫描器现写现读的产物，且 finding-ledger 引用本机绝对路径
+# 与会话上下文——与 `.agent-teams/`、`.webcode-tasks/` 同一条口径：本地私有留痕，
+# 不入库。通配 `**/` 同时覆盖仓库根与 `package/dsh-webcode-bridge/` 两处。
+**/.mimosa/
