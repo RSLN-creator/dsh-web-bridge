@@ -16,12 +16,19 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   parseVersion, compareVersions, pickLatest, assetForVersion, updateDecision,
-  isSafeDownloadUrl, isSafeProfileName, installLocalTarball, PACKAGE_NAME, GITHUB_REPO,
+  isSafeDownloadUrl, isSafeProfileName, installLocalTarball, ensureReleasesForInstall,
+  PACKAGE_NAME, GITHUB_REPO,
 } from '../lib/update.js';
 
 /** 造一条 Releases API 形状的记录（只带本模块消费的字段）。 */
 function rel(tag, { draft = false, prerelease = false, assets = [] } = {}) {
   return { tag_name: tag, draft, prerelease, assets };
+}
+
+/** 造一个命名与下载域都合法的资产对象（assetForVersion 的命中形状）。 */
+function assetFor(tag) {
+  const v = tag.replace(/^v/, '');
+  return { name: 'dsh-webcode-bridge-' + v + '.tgz', browser_download_url: 'https://github.com/r/r/releases/download/' + tag + '/dsh-webcode-bridge-' + v + '.tgz' };
 }
 
 // ---- parseVersion ---------------------------------------------------------
@@ -216,4 +223,68 @@ test('installLocalTarball：非法 profile 在 spawn 之前被拒，不进入命
   } finally {
     fs.rmSync(tmp, { force: true });
   }
+});
+
+// ---- ensureReleasesForInstall（0.22.3：修「更新按钮从未成功过」的真缺陷） ----
+//
+// 用户原话（2026-10-24）：「从头到位我自己点击这个按钮都没有成功更新过一次」。
+// 根因：POST update 把缓存清单传进来（缓存为空传 null），旧实现把 null 当**空
+// 数组**直接定位资产 ⇒ 必报「Releases 上找不到 X 的 tarball」；而路由在点击后
+// 立刻清空缓存 ⇒ 第二次点击起**每一次**都必败。以下判据全部离线（注入假 fetcher）。
+
+test('ensureReleasesForInstall：清单缺席（null）⇒ 现拉一次并用它定位（主判据）', async () => {
+  let calls = 0;
+  const fake = async () => { calls++; return { ok: true, releases: [rel('v0.22.2', { assets: [assetFor('v0.22.2')] })] }; };
+  const r = await ensureReleasesForInstall({ releases: null, version: '0.22.2', fetchReleases: fake });
+  assert.equal(r.ok, true, '缓存缺席不得失败——那是「按钮从未成功」的直接根因');
+  assert.equal(calls, 1, '缺席时恰好现拉一次');
+  assert.equal(assetForVersion(r.releases, '0.22.2')?.name, 'dsh-webcode-bridge-0.22.2.tgz');
+});
+
+test('ensureReleasesForInstall：现拉失败 ⇒ 如实报「安装前拉取失败」，不冒充「Releases 上没有」', async () => {
+  const fake = async () => ({ ok: false, error: 'HTTP 403' });
+  const r = await ensureReleasesForInstall({ releases: null, version: '0.22.2', fetchReleases: fake });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /安装前拉取 Releases 失败/);
+  assert.match(r.error, /403/);
+  assert.doesNotMatch(r.error, /找不到 .* 的 tarball/, '网络失败不得伪装成「版本不存在」');
+});
+
+test('ensureReleasesForInstall：传入过期缓存（缺点名版本）⇒ 再现拉一次补上', async () => {
+  let calls = 0;
+  const stale = [rel('v0.22.1', { assets: [assetFor('v0.22.1')] })];
+  const fresh = [rel('v0.22.2', { assets: [assetFor('v0.22.2')] }), ...stale];
+  const fake = async () => { calls++; return { ok: true, releases: fresh }; };
+  const r = await ensureReleasesForInstall({ releases: stale, version: '0.22.2', fetchReleases: fake });
+  assert.equal(r.ok, true);
+  assert.equal(calls, 1, '传入清单缺版本时恰好补拉一次');
+  assert.equal(assetForVersion(r.releases, '0.22.2')?.name, 'dsh-webcode-bridge-0.22.2.tgz');
+});
+
+test('ensureReleasesForInstall：传入清单已含点名版本 ⇒ 一次网络都不打', async () => {
+  let calls = 0;
+  const fake = async () => { calls++; return { ok: true, releases: [] }; };
+  const good = [rel('v0.22.2', { assets: [assetFor('v0.22.2')] })];
+  const r = await ensureReleasesForInstall({ releases: good, version: '0.22.2', fetchReleases: fake });
+  assert.equal(r.ok, true);
+  assert.equal(calls, 0, '缓存命中时零网络往返（省 API 配额的既有设计）');
+  assert.equal(r.releases, good, '原样使用传入清单，不悄悄替换');
+});
+
+test('ensureReleasesForInstall：现拉后仍无该版本 ⇒ ok:true 交回清单，由调用方如实报「找不到」', async () => {
+  const fake = async () => ({ ok: true, releases: [rel('v0.22.1', { assets: [assetFor('v0.22.1')] })] });
+  const r = await ensureReleasesForInstall({ releases: null, version: '9.9.9', fetchReleases: fake });
+  assert.equal(r.ok, true, '清单保障本身不判版本的死活');
+  assert.equal(assetForVersion(r.releases, '9.9.9'), null, '真没有时调用方（installFromReleases）报「找不到」');
+});
+
+test('接线：installFromReleases 必须经 ensureReleasesForInstall 取清单（源码级，防回退）', () => {
+  const src = fs.readFileSync(path.join(import.meta.dirname, '..', 'lib', 'update.js'), 'utf8');
+  assert.match(src, /await ensureReleasesForInstall\(\{ releases, version \}\)/,
+    'installFromReleases 不得再把 null 当空数组直接定位资产');
+  // 旧缺陷的形状：list 在未保障前就从 releases 直取。这里钉住顺序——
+  // ensureReleasesForInstall 的调用必须出现在第一处 `const list` 之前。
+  const at = src.indexOf('await ensureReleasesForInstall');
+  const listAt = src.indexOf('const list = ensured.releases');
+  assert.ok(at > -1 && listAt > at, '清单必须来自 ensureReleasesForInstall 的返回值');
 });

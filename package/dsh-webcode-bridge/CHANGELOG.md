@@ -5,6 +5,26 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.22.3（2026-10-24：修「更新按钮从未成功过」—— 缓存缺席时真的去拉 Releases 清单）
+
+### 修复：`POST update` 在缓存未命中时必败，且报错误导（真缺陷，用户原话「从头到尾我自己点击这个按钮都没有成功更新过一次」）
+
+- **根因**：控制面 `POST update` 把缓存清单传给 `installFromReleases`（缓存为空传
+  `null`），路由注释承诺「缓存没有清单就传 null，installFromReleases 会自己拉」——
+  但实现把 `null` 当**空数组**直接定位资产：`assetForVersion([])` 恒为 null ⇒ 报
+  「Releases 上找不到 X 的 tarball」。而路由在每次点击后**立刻清空缓存** ⇒ 第一次
+  失败之后，**之后每一次点击都必然走这条必败路径**——报错把「我们没去查」伪装成了
+  「Releases 上没有」。
+- **修法**：新增 `ensureReleasesForInstall()`，把「清单从哪来」收进一处：传入清单为空
+  ⇒ 现拉一次；传入清单非空但点名版本不在其中（过期缓存，例如开屏检查早于新版本发布）
+  ⇒ 再现拉一次；现拉仍无才如实报「找不到」。`fetchReleases` 可注入，护栏全部离线。
+- **护栏**：`test/update.test.mjs` 新增 6 项（缺席现拉 / 拉取失败如实报错**不伪装成
+  版本不存在** / 过期缓存补拉 / 缓存命中零网络 / 真缺版本由调用方如实报 / 源码级接线
+  防回退），文件 25/25。
+- **本机真机链路验证**：修复后以 `releases:null, version:'0.22.2'` 实跑（用户失败的那
+  条路径）⇒ 自拉清单 → 定位资产 → 下载 958,806 B → `dsh plugin --profile web add`
+  安装成功，profile 内版本核为 0.22.2。
+
 ## 0.22.2（2026-10-24：设置页中英双语（GitHub Issue #2）+「本地工具调用」总闸收口升号）
 
 ### 新增：独立设置页中英双语（GitHub Issue #2「No english translation」）

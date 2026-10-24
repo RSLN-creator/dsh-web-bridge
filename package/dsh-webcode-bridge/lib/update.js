@@ -346,6 +346,46 @@ export function installLocalTarball({ profile = 'web', file = '', timeoutMs = 30
 }
 
 /**
+ * 安装前的**清单保障**（0.22.3，修一个真缺陷）。
+ *
+ * 控制面 `POST update`（web-control.js）把缓存里的清单传进来；缓存为空传 `null`，
+ * 路由注释一直承诺「installFromReleases 会自己拉」——但旧实现把 `null` 当**空数组**
+ * 直接用：`assetForVersion([])` 恒为 null ⇒ 每一次「缓存未命中」的点击都报
+ * 「Releases 上找不到 X 的 tarball」。更糟的是路由在点击后**立刻清空缓存**
+ * ⇒ 从第二次点击起**每一次**都走这条必败路径（用户实测：更新按钮从未成功过，
+ * 且报错把「我们没去查」伪装成了「Releases 上没有」）。
+ *
+ * 修法：把「清单从哪来」收进这一个函数，让那句承诺第一次为真——
+ *   · 传入清单为空 ⇒ **现拉一次**；
+ *   · 传入清单非空但**点名版本不在其中** ⇒ 再现拉一次（传入的可能是过期缓存，
+ *     例如开屏检查早于新版本发布；成本是一次 GET，换的是不冤枉一个真实存在的版本）；
+ *   · 现拉仍无 ⇒ 返回清单由调用方如实报「版本不存在」（那时才是真的没有）。
+ *
+ * `fetchReleases` 可注入：护栏测试用它离线验证这三条路径，不打真网络
+ * （doc/comment-style.md §9.1「测试默认离线」）。
+ *
+ * @param {{releases?:unknown, version?:string, fetchReleases?:typeof fetchReleases}} o
+ * @returns {Promise<{ok:boolean, releases?:Array<object>, error?:string}>}
+ */
+export async function ensureReleasesForInstall({ releases = null, version = '', fetchReleases: fetcher = null } = {}) {
+  const get = fetcher || fetchReleases;
+  let list = Array.isArray(releases) ? releases : [];
+  let fetchedHere = false;
+  if (!list.length) {
+    const r = await get({});
+    if (!r.ok) return { ok: false, error: '安装前拉取 Releases 失败：' + r.error };
+    list = Array.isArray(r.releases) ? r.releases : [];
+    fetchedHere = true;
+  }
+  if (version && !fetchedHere && !assetForVersion(list, version)) {
+    // 传入清单里没有点名版本 → 传入的可能是过期缓存，现拉一次再定位。
+    const r = await get({});
+    if (r.ok && Array.isArray(r.releases) && r.releases.length) list = r.releases;
+  }
+  return { ok: true, releases: list };
+}
+
+/**
  * 一条龙：定位资产 → 下载 → 安装。控制面 `POST update` 的实现体。
  *
  * 每一步失败都如实带原因返回；临时目录在 finally 里清理（best-effort，
@@ -355,12 +395,18 @@ export function installLocalTarball({ profile = 'web', file = '', timeoutMs = 30
  * @returns {Promise<{ok:boolean, error?:string, output?:string, needsRestart:boolean, command:string, spec?:string, bytes?:number}>}
  */
 export async function installFromReleases({ releases = null, version = '', profile = 'web', current = '' } = {}) {
-  const list = Array.isArray(releases) ? releases : [];
+  // 0.22.3：清单保障收进 ensureReleasesForInstall——路由注释承诺的「缓存缺席
+  // 会自己拉」从这里开始为真；本函数不再把 null 当空数组用。
+  const ensured = await ensureReleasesForInstall({ releases, version });
+  const spec0 = version ? PACKAGE_NAME + '@' + version : PACKAGE_NAME + '@latest';
+  if (!ensured.ok) {
+    return { ok: false, error: ensured.error, needsRestart: false, command: '', spec: spec0 };
+  }
+  const list = ensured.releases;
   let asset = null;
-  let spec = '';
+  let spec = spec0;
   if (version) {
     asset = assetForVersion(list, version);
-    spec = PACKAGE_NAME + '@' + version;
     if (!asset) return { ok: false, error: 'Releases 上找不到 ' + version + ' 的 tarball', needsRestart: false, command: '', spec };
   } else {
     const decision = updateDecision({ current, releases: list });
