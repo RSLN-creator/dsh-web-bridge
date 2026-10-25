@@ -1,5 +1,5 @@
 {
-  "generatedAt": 1792845584338,
+  "generatedAt": 1792908741564,
   "scope": "`dsh-webcode-bridge`",
   "command": "node scripts/user-voice-log.mjs",
   "rows": [
@@ -15095,6 +15095,66 @@
       "round": null,
       "text": "1.更新dsh desktop,注意官方来源\n2.确保你的插件提交github，然后解决所有报告的bug--github上的",
       "hash": "072059e5",
+      "also": []
+    },
+    {
+      "sessionId": "session_91cba02b127351e8b5a561a6c9c5c410",
+      "workspace": "D:\\9_Code_Workspace\\dsh-webcode-bridge",
+      "at": 1792867651224,
+      "seq": 140,
+      "origin": "zcode-user",
+      "goalId": null,
+      "round": null,
+      "text": "desktop update: task inspection timed out？？？？？？你更新了吗？？？？？？快点！！！",
+      "hash": "2ac90565",
+      "also": []
+    },
+    {
+      "sessionId": "session_91cba02b127351e8b5a561a6c9c5c410",
+      "workspace": "D:\\9_Code_Workspace\\dsh-webcode-bridge",
+      "at": 1792869007845,
+      "seq": 158,
+      "origin": "zcode-user",
+      "goalId": null,
+      "round": null,
+      "text": "rc.3新增了什么功能？",
+      "hash": "c7348d55",
+      "also": []
+    },
+    {
+      "sessionId": "session_91cba02b127351e8b5a561a6c9c5c410",
+      "workspace": "D:\\9_Code_Workspace\\dsh-webcode-bridge",
+      "at": 1792869311942,
+      "seq": 167,
+      "origin": "zcode-user",
+      "goalId": null,
+      "round": null,
+      "text": "Harness Web Bridge\nv0.22.1 → v0.22.2\n更新到 v0.22.2\nGitHub\n更新失败：HTTP 200 OK：Releases 上找不到 0.22.2 的 tarball？？？为什么一直更新失败：\n我要真实解决问题！！从头到位我自己点击这个按钮都没有成功更新过一次！！！！！！！你一直说你可以是什么问题？？？",
+      "hash": "ce6b8d00",
+      "also": []
+    },
+    {
+      "sessionId": "session_91cba02b127351e8b5a561a6c9c5c410",
+      "workspace": "D:\\9_Code_Workspace\\dsh-webcode-bridge",
+      "at": 1792907890163,
+      "seq": 229,
+      "origin": "zcode-user",
+      "goalId": null,
+      "round": null,
+      "text": "快速继续解决，然后打包安装桌面端和npm cli",
+      "hash": "04042fcc",
+      "also": []
+    },
+    {
+      "sessionId": "session_91cba02b127351e8b5a561a6c9c5c410",
+      "workspace": "D:\\9_Code_Workspace\\dsh-webcode-bridge",
+      "at": 1792908628064,
+      "seq": 243,
+      "origin": "zcode-user",
+      "goalId": null,
+      "round": null,
+      "text": "cd ~/.dsh/profiles/desktop && pnpm install --no-frozen-lockfile 2>&1 | tail -8？？？你这个太久了吧",
+      "hash": "f98b7477",
       "also": []
     }
   ]
