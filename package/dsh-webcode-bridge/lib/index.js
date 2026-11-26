@@ -4117,6 +4117,12 @@ function imageMarkdown(images) {
       }
     },
     loginTrigger: (accountKey) => driverFor(accountKey || 'deepseek').openLogin(),
+    loginQrReader: (accountKey) => {
+      const target = driverFor(accountKey || 'deepseek');
+      return typeof target.readLoginQr === 'function'
+        ? target.readLoginQr()
+        : { ok: true, available: false };
+    },
     // 设置页「登录网站」用：等这次登录真正结束（成功/失败/超时）再把结果带回
     // 控制面。旧动作是 fire-and-forget，失败只能进控制台，界面永远显示未登录。
     loginAndReport: async (siteId, { timeoutMs } = {}) => {
