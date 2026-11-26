@@ -88,6 +88,11 @@ conversation. The plugin's local browser profile and session cursor bridge those
 When a site cannot provide a verified conversation URL, stream ID or safe resume path, the adapter
 must report that limitation rather than silently pretending it resumed.
 
+For terminal profiles, the current DSH CLI documents `dsh --profile tui --resume <id>` when a TUI
+profile is installed. This restores the DSH Agent Session; it does not by itself restore the browser
+profile or the remote website chat. Those remain the bridge's responsibilities.
+
+
 ## Requirements
 
 | | |
