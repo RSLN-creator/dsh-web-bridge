@@ -274,7 +274,7 @@ test('⑨ doubao loginProbe.ok 与 accountProbe.avatar 同源（#59）', async (
   const { join, dirname } = await import('node:path');
   const { fileURLToPath } = await import('node:url');
   const here = dirname(fileURLToPath(import.meta.url));
-  const providersSrc = readFileSync(join(here, '..', 'lib', 'providers.js'), 'utf8');
+  const providersSrc = readFileSync(join(here, '..', 'lib', 'sites', 'doubao.js'), 'utf8');
   assert.ok(DOUBAO.loginProbe?.ok, 'doubao 必须声明 loginProbe.ok（否则已登录也判不确定）');
   assert.equal(DOUBAO.loginProbe.ok, DOUBAO.accountProbe.avatar.join(', '),
     'doubao loginProbe.ok 必须与 accountProbe.avatar 逐字同源（同一组真机选择器）');
@@ -308,23 +308,22 @@ test('⑨b kimi loginProbe.ok 取 accountProbe 证据的**精确子集**（#65 l
   }
 });
 
-test('⑨c 同源选择器在 providers.js 源码里只允许有一份字面量（禁止第二份手写）', async () => {
+test('⑨c 同源选择器在各自站点模块里只允许有一份字面量', async () => {
   const { readFileSync } = await import('node:fs');
   const { join, dirname } = await import('node:path');
   const { fileURLToPath } = await import('node:url');
   const here = dirname(fileURLToPath(import.meta.url));
-  const providersSrc = readFileSync(join(here, '..', 'lib', 'providers.js'), 'utf8');
-  // 带引号的**代码字面量**计数（注释里用反引号，不算）。
-  for (const literal of [
-    "'img[src*=\"passport.byteacctimg.com/img/user-avatar\"]'",
-    "'img.rounded-full.object-cover.select-none'",
-    "'span.user-name'",
-    "'img.user-avatar'",
-    "'img[src*=\"avatar.moonshot.cn\"]'",
-  ]) {
-    const count = providersSrc.split(literal).length - 1;
-    assert.equal(count, 1,
-      `选择器字面量 ${literal} 在 providers.js 里出现了 ${count} 次——`
-      + 'loginProbe 与 accountProbe 必须引用同一份常量，禁止各写一份（会漂移）');
+  const doubaoSrc = readFileSync(join(here, '..', 'lib', 'sites', 'doubao.js'), 'utf8');
+  const kimiSrc = readFileSync(join(here, '..', 'lib', 'sites', 'kimi.js'), 'utf8');
+  const declarations = [
+    [doubaoSrc, "'img[src*=\"passport.byteacctimg.com/img/user-avatar\"]'"],
+    [doubaoSrc, "'img.rounded-full.object-cover.select-none'"],
+    [kimiSrc, "'span.user-name'"],
+    [kimiSrc, "'img.user-avatar'"],
+    [kimiSrc, "'img[src*=\"avatar.moonshot.cn\"]'"],
+  ];
+  for (const [source, literal] of declarations) {
+    const count = source.split(literal).length - 1;
+    assert.equal(count, 1, '选择器字面量 ' + literal + ' 在对应站点模块里出现了 ' + count + ' 次——loginProbe 与 accountProbe 必须引用同一份常量');
   }
 });
