@@ -122,9 +122,12 @@ export const kimiSite = {
     // `modelPicker` 已声明，网页真实档位是 快速 / K3 / K3 集群 三条，auto 是桥自己
     // 发明的「不切换」档。历史 id `kimi:auto` 仍由 ALIASES 解析（见那里）。
   ],
-,
   navigation: {
-    fromUrl: (url) => url.pathname.match(/^\\/chat\\/([0-9a-fA-F-]{8,64})/)?.[1] || null,
+    fromUrl: (url) => {
+      const parts = url.pathname.split('/');
+      const id = parts[1] === 'chat' ? parts[2] : null;
+      return id && /^[0-9a-fA-F-]{8,64}$/.test(id) ? id : null;
+    }
     toUrl: (origin, id) => origin + '/chat/' + encodeURIComponent(id),
   },
 };
