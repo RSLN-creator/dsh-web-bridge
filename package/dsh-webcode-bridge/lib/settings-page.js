@@ -1051,15 +1051,40 @@ pre.preset {
     try {
       if (kind === 'login') {
         subAccountStatus.textContent = M('waitLogin');
-        const r = await apiSoftPost('login', { siteId: site, wait: true, timeoutMs: 300000 });
-        if (!r.ok) {
-          subAccountStatus.textContent = '✗ ' + r.error;
-          subAccountStatus.className = 'error';
-        } else {
-          const d = r.data;
-          subAccountStatus.textContent = (d.alreadyLoggedIn ? M('stillValid') : (d.message || M('loginDone')))
-            + (d.ms ? M('msSuffix', Math.round(d.ms / 1000)) : '');
-          subAccountStatus.className = d.loggedIn === true ? 'success' : 'error';
+        let qrPolling = true;
+        const qrTask = (async () => {
+          while (qrPolling) {
+            const qr = await apiSoftPost('login-qr', { siteId: site });
+            const image = qr.ok && qr.data?.available === true ? qr.data.image : null;
+            let img = document.getElementById('subLoginQr');
+            if (image) {
+              if (!img) {
+                img = document.createElement('img');
+                img.id = 'subLoginQr';
+                img.alt = '登录二维码';
+                img.style.cssText = 'display:block;width:220px;max-width:100%;height:auto;padding:8px;margin-top:10px;background:#fff;border:1px solid #ddd;border-radius:8px';
+                subAccountStatus.appendChild(img);
+              }
+              if (img.src !== image) img.src = image;
+            } else if (img) img.remove();
+            await new Promise((resolve) => setTimeout(resolve, 1200));
+          }
+        })();
+        try {
+          const r = await apiSoftPost('login', { siteId: site, wait: true, timeoutMs: 300000 });
+          if (!r.ok) {
+            subAccountStatus.textContent = '✗ ' + r.error;
+            subAccountStatus.className = 'error';
+          } else {
+            const d = r.data;
+            subAccountStatus.textContent = (d.alreadyLoggedIn ? M('stillValid') : (d.message || M('loginDone')))
+              + (d.ms ? M('msSuffix', Math.round(d.ms / 1000)) : '');
+            subAccountStatus.className = d.loggedIn === true ? 'success' : 'error';
+          }
+        } finally {
+          qrPolling = false;
+          await qrTask;
+          document.getElementById('subLoginQr')?.remove();
         }
       } else if (kind === 'verify') {
         const r = await apiSoftPost('verify-login', { siteId: site });
