@@ -49,6 +49,25 @@ The plugin's session cursor links the DSH session to the website conversation, a
 browser profile keeps the login cookies. If the remote conversation cannot be safely resumed, the
 bridge must report it; it must not silently claim continuity.
 
+### How terminal session resume works in DSH
+
+The current DSH CLI documents `dsh --profile tui --resume <id>` as an example for a terminal
+application profile, with the qualification that the TUI profile must be installed. The launcher
+forwards `--resume` to that app; it is not a global launcher flag. At the API layer, the documented
+restoration path is `ctx.agents.resume({ resumeSessionId })`.
+
+The shipped JSONL persistence backend stores append-only Session events on disk (Zstandard-compressed
+by default). A resumed Agent restores that history and adds recovery markers for interrupted turns.
+A terminal can continue after process restart because a stable Session ID selects durable history.
+A tmux pane that never exited is different: it is still the same live process. The optional DSH
+tmux-context package only adds the current tmux session/window/pane location to the model context;
+it does not restore a browser or remote web chat.
+
+For this bridge, terminal resume therefore needs all three links to remain valid: the DSH Session ID,
+the plugin's persistent browser profile, and the remote site's conversation ID/session cursor. The
+DSH Session ID alone does not recreate the other two.
+
+
 ## Evaluation cycles
 
 ### Cycle 1 — DSH Web framework
@@ -85,8 +104,6 @@ adapter update. No client-side bridge can guarantee zero maintenance against tho
 
 ## Pending work
 
-- Complete remote QR capture and display with a real browser/Web-client acceptance run.
-- Move remaining evidenced site-only behavior branches into adapter capabilities where doing so
-  preserves the existing public behavior.
-- Keep DSH session resume, browser profile persistence and website conversation continuity explicitly
-  separate in tests and diagnostics.
+- Run a real DSH Web QR scan acceptance check on each reachable QR-login site; verify login completion and cookie persistence after driver restart.
+- Move remaining evidenced site-only behavior branches into adapter capabilities where doing so preserves existing behavior.
+- Add a fixture-backed browser restart/resume test that proves the DSH Session ID, browser profile and remote conversation ID reconnect to the same website chat.
