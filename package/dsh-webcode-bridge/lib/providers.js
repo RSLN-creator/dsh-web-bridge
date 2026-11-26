@@ -78,6 +78,13 @@ export function conversationIdFromUrl(siteId, url) {
   return value ? String(value) : null;
 }
 
+/**
+ * Build a remote conversation URL only when the site adapter declares a verified URL shape.
+ * @param {string} siteId - Registered site identifier.
+ * @param {string} origin - Website origin.
+ * @param {string} sessionId - Remote conversation identifier.
+ * @returns {string|null} The verified URL, or null when the site cannot build one.
+ */
 export function conversationUrlFor(siteId, origin, sessionId) {
   const build = getSite(siteId)?.navigation?.toUrl;
   if (typeof build !== 'function' || !sessionId) return null;
