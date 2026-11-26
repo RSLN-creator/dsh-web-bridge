@@ -353,3 +353,10 @@ test('QR selector does not guess when only unrelated elements are visible', asyn
     { index: 1, tag: 'div', width: 240, height: 240, visible: true, meta: 'login form' },
   ]), null);
 });
+
+test('login QR capture is bounded to the pending login page and returns an element screenshot', () => {
+  assert.match(SRC, /async function readLoginQr\(\)/);
+  assert.match(SRC, /loginPhase !== 'waiting-for-login'/);
+  assert.match(SRC, /page\.frames\(\)\.slice\(0, 12\)/);
+  assert.match(SRC, /\.screenshot\(\{ type: 'png', timeout: 3000 \}\)/);
+});
