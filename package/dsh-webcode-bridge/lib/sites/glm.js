@@ -189,6 +189,10 @@ export const glmSite = {
     // 它——从**模型表**里删掉（下拉不再出现）与「旧值仍解析得开」必须同时成立，
     // 与兼容空壳 `webcode` 是同一条纪律。
   ],
+  teaching: {
+    toolCallFormat: 'json-fence',
+    skillCatalogMode: 'full',
+  },
   navigation: {
     fromUrl: (url) => url.searchParams.get('cid') || null,
     toUrl: (origin, id) => origin + '/main/alltoolsdetail?cid=' + encodeURIComponent(id),
