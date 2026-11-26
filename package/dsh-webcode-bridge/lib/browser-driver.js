@@ -388,6 +388,37 @@ const DOM_CAPTURE = `
  * 判错的代价：fill() 写不进去或 inputValue() 抛错 → 这两个站点要么发不出
  * 消息、要么被判成「提示词被截断」。因此这里只按元素事实分派，不看站点名。
  */
+
+const COMPOSER_FALLBACK_SELECTOR = 'textarea:not([disabled]):not([readonly]), [contenteditable="true"], [role="textbox"]';
+const LOGIN_QR_HINT = /qr|qrcode|qr[\\s_-]*code|scan[\\s_-]*code|wechat|weixin|扫码|二维码/i;
+const LOGIN_QR_EXCLUDE = /avatar|profile|logo|brand|icon|user|头像|品牌|图标/i;
+const LOGIN_QR_SELECTOR = 'img,canvas,svg,[role="img"],[aria-label],[title],[class*="qr" i],[id*="qr" i],[data-testid*="qr" i],[class*="code" i],[id*="code" i]';
+
+export function selectLoginQrCandidate(candidates = []) {
+  let best = null;
+  for (const item of candidates) {
+    const width = Number(item?.width) || 0;
+    const height = Number(item?.height) || 0;
+    if (item?.visible !== true || width < 96 || height < 96) continue;
+    const ratio = width / height;
+    if (ratio < 0.75 || ratio > 1.33) continue;
+    const meta = String(item?.meta || '');
+    const hinted = LOGIN_QR_HINT.test(meta);
+    const media = ['img', 'canvas', 'svg'].includes(String(item?.tag || '').toLowerCase())
+      || item?.backgroundImage === true;
+    if (!hinted && LOGIN_QR_EXCLUDE.test(meta)) continue;
+    if (!hinted && !(media && width >= 150 && height >= 150)) continue;
+    const score = (hinted ? 100 : 0)
+      + (item.tag === 'canvas' ? 40 : item.tag === 'img' ? 35 : item.tag === 'svg' ? 25 : 0)
+      + (width >= 160 ? 10 : 0)
+      + (width >= 240 ? 5 : 0);
+    if (!best || score > best.score || (score === best.score && width * height > best.width * best.height)) {
+      best = { index: item.index, width, height, score };
+    }
+  }
+  return best ? { index: best.index, width: best.width, height: best.height } : null;
+}
+
 export function composerStrategy(info) {
   if (!info) return 'unknown';
   const tag = String(info.tag || '').toLowerCase();
@@ -1126,6 +1157,8 @@ export function createBrowserDriver(options = {}) {
     profileDir: options.profileDir,
     executablePath: options.executablePath ?? defaultEdgePath(),
     headless: options.headless !== false,
+    loginHeadless: options.loginHeadless === true
+      || (process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY),
     loginTimeoutMs: options.loginTimeoutMs ?? 300_000,
     requestTimeoutMs: options.requestTimeoutMs ?? 240_000,
     // 单块写入字符数上限（0.14.5）。超过它就把 composer 分块写入并在块间回读
@@ -5499,6 +5532,51 @@ export function createBrowserDriver(options = {}) {
     return finalUrl;
   }
 
+  async function readLoginQr() {
+    if (loginPhase !== 'waiting-for-login' || !page || page.isClosed?.()) {
+      return { ok: true, available: false, phase: loginPhase };
+    }
+    const frames = typeof page.frames === 'function' ? page.frames().slice(0, 12) : [];
+    for (const frame of frames) {
+      let candidates = [];
+      try {
+        candidates = await frame.evaluate((selector) => [...document.querySelectorAll(selector)].map((el, index) => {
+          const rect = el.getBoundingClientRect();
+          const style = getComputedStyle(el);
+          return {
+            index,
+            tag: el.tagName.toLowerCase(),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+            visible: rect.width > 0 && rect.height > 0
+              && style.display !== 'none' && style.visibility !== 'hidden'
+              && Number(style.opacity || 1) > 0,
+            meta: [
+              el.getAttribute('alt'), el.getAttribute('aria-label'), el.getAttribute('title'),
+              el.getAttribute('data-testid'), el.getAttribute('src'), el.id, String(el.className || ''),
+            ].filter(Boolean).join(' ').slice(0, 500),
+            backgroundImage: style.backgroundImage !== 'none',
+          };
+        }), LOGIN_QR_SELECTOR);
+      } catch { continue; }
+      const candidate = selectLoginQrCandidate(candidates);
+      if (!candidate) continue;
+      try {
+        const image = await frame.locator(LOGIN_QR_SELECTOR).nth(candidate.index)
+          .screenshot({ type: 'png', timeout: 3000 });
+        return {
+          ok: true,
+          available: true,
+          image: 'data:image/png;base64,' + image.toString('base64'),
+          width: candidate.width,
+          height: candidate.height,
+          capturedAt: Date.now(),
+        };
+      } catch { /* the QR may refresh or disappear between inspection and capture */ }
+    }
+    return { ok: true, available: false, phase: loginPhase };
+  }
+
   async function openLogin({ onState } = {}) {
     if (busy || transitioning) throw new Error('driver busy with a web turn — login refused');
     transitioning = true;
@@ -5544,15 +5622,14 @@ export function createBrowserDriver(options = {}) {
       }
       try { if (ctx) await ctx.close(); } catch {}
       ctx = null; page = null;
-      log('opening headed window for login');
+      const loginHeadless = cfg.loginHeadless === true;
+      log(loginHeadless ? 'opening headless login page for Web QR relay' : 'opening headed window for login');
       report('launching');
-      await launch({ headless: false }).catch(async (err) => {
-        // 上一次浏览器被强杀留下的单实例锁：清掉再试一次（clearStaleProfileLocks
-        // 在 ctx 为空时才动手，这里 ctx 已置空，是安全的）。
-        warn('headed launch failed, retrying after lock cleanup:', err?.message);
+      await launch({ headless: loginHeadless }).catch(async (err) => {
+        warn('login browser launch failed, retrying after lock cleanup:', err?.message);
         await new Promise((r) => setTimeout(r, 800));
         ctx = null; page = null;
-        await launch({ headless: false });
+        await launch({ headless: loginHeadless });
       });
       try { await navigateForDisplay(cfg.site); } catch {}
       report('waiting-for-login');
@@ -6055,7 +6132,7 @@ export function createBrowserDriver(options = {}) {
   // sessionSlot 与 status().sessionSlot 同源（sessionSlotFor）：控制面
   //（`GET/POST /__webcode/session-slot`）与面板都要能按 key 直接问一次，
   // 而不是只能读「最近一个 key」的 status 投影。省略 key = 最近一次 sendTurn 的 key。
-  return { sendPrompt, conversationForSession, sendTurn, resetConversation, conversationFor, sessionSlot: sessionSlotFor, connect, interact, openLogin, openWindow, closeWindow, importStorageFromProfile, status, close, diagnostics, getToken, profileCookies, writeProfileCookies, userAgent, probeAttachment, readAccountIdentity, get page() { return page; }, webApi, listSessions, fetchHistory, screenshotBase64, setImageLimitsProvider };
+  return { sendPrompt, conversationForSession, sendTurn, resetConversation, conversationFor, sessionSlot: sessionSlotFor, connect, interact, openLogin, readLoginQr, openWindow, closeWindow, importStorageFromProfile, status, close, diagnostics, getToken, profileCookies, writeProfileCookies, userAgent, probeAttachment, readAccountIdentity, get page() { return page; }, webApi, listSessions, fetchHistory, screenshotBase64, setImageLimitsProvider };
 }
 
 function abortError() {
