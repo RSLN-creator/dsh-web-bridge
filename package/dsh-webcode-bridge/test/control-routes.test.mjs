@@ -62,6 +62,9 @@ function stubControl() {
       driverStatus: () => ({ siteId: 'deepseek', sites: [], window: null }),
       siteConnect: () => ({ connect: async () => ({ ok: true, loggedIn: true }) }),
       loginAndReport: async (siteId) => ({ ok: true, siteId, loggedIn: true, ms: 1 }),
+      loginQrReader: async (accountKey) => ({
+        ok: true, available: true, accountKey, image: 'data:image/png;base64,AA==', width: 220, height: 220,
+      }),
       windowOpener: async () => ({ ok: true }),
       sessionImport: async () => ({ ok: true, loggedIn: false }),
     },
@@ -114,7 +117,7 @@ test('routeIndex / controlRoutes：表里的每个 suffix 都进挂载清单', (
   const routes = controlRoutes(control.actions);
   assert.deepEqual(routes, [...index.keys()], 'routes 必须就是 routeIndex 的键序');
   // 这就是当初漏掉的那三个 —— 它们必须在清单里，否则设置面板的按钮全废。
-  for (const suffix of ['verify-login', 'site-probe', 'session-import']) {
+  for (const suffix of ['verify-login', 'site-probe', 'session-import', 'login-qr']) {
     assert.ok(index.has(suffix), `挂载清单必须包含 ${suffix}`);
   }
   assert.equal(index.get('verify-login').has('POST'), true);
@@ -616,3 +619,15 @@ test('未知方法回 405 JSON（带 Allow），未知路径回 false 由调用�
 //     对象是**当前**的整张动作表（它对新加动作自动生效）；
 //   · 「写路径的根必须单一取法、且 GET 如实回显」—— 任务台账是唯一需要它的族。
 //     **若将来再加任何落盘族，这条判据要原样重建，不要另立第二套取法。**
+
+
+test('POST login-qr relays only the requested account QR payload', async () => {
+  const control = stubControl();
+  const response = await call(control, 'POST', '/__webcode/login-qr', { siteId: 'kimi', slot: '2' });
+  assert.equal(response.status, 200);
+  const body = JSON.parse(response.text);
+  assert.equal(body.ok, true);
+  assert.equal(body.available, true);
+  assert.equal(body.accountKey, 'kimi#2');
+  assert.match(body.image, /^data:image\\/png;base64,/);
+});
