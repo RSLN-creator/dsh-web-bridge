@@ -46,7 +46,7 @@ shapes, login markers, model IDs or transport capabilities for sites that have n
 | Conversation continuity | URL parse/build round-trip tests for DeepSeek, GLM and Kimi; unsupported sites remain explicitly unsupported | Three turns in one site conversation; no unintended new chat |
 | Prompt/protocol | Existing prompt zero-drift tests; format comes from adapter metadata | One tool call and one tool result round-trip per validated site |
 | Web client | Manifest and lazy client-loader contract test | Plugin appears and each contributed UI surface mounts in DSH Web |
-| QR login | QR capture, route and client polling tests (pending implementation) | QR is visible on a remote Web client and can be scanned successfully |
+| QR login | QR selector, account-scoped route, no-store response, client polling and settings UI tests | Still requires live remote Web QR scan per site |
 
 ### Two-cycle optimization record
 
