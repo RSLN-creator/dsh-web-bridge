@@ -1155,7 +1155,8 @@ export function createBrowserDriver(options = {}) {
     site: siteUrl,
     profileDir: options.profileDir,
     executablePath: options.executablePath ?? defaultEdgePath(),
-    headless: options.headless !== false,\n    loginHeadless: options.loginHeadless === true\n      || (process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY),
+    headless: options.headless !== false,
+    loginHeadless: options.loginHeadless === true\n      || (process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY),
     loginTimeoutMs: options.loginTimeoutMs ?? 300_000,
     requestTimeoutMs: options.requestTimeoutMs ?? 240_000,
     // 单块写入字符数上限（0.14.5）。超过它就把 composer 分块写入并在块间回读
