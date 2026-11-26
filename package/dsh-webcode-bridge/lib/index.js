@@ -4119,6 +4119,7 @@ function imageMarkdown(images) {
     loginTrigger: (accountKey) => driverFor(accountKey || 'deepseek').openLogin(),
     // 设置页「登录网站」用：等这次登录真正结束（成功/失败/超时）再把结果带回
     // 控制面。旧动作是 fire-and-forget，失败只能进控制台，界面永远显示未登录。
+    loginQrReader: (accountKey) => driverFor(accountKey || 'deepseek').readLoginQr(),
     loginAndReport: async (siteId, { timeoutMs } = {}) => {
       // accountKey（0.14.7）：`glm#2` 登录的是账户2 那份 profile。
       // 未知站点回落到默认站点的**默认槽**（与 0.14.6 行为一致）。
