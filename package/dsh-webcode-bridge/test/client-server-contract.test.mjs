@@ -30,9 +30,11 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const CLIENT = path.resolve(here, '../lib/client.cjs');
 const SERVER = path.resolve(here, '../lib/web-control.js');
+const MANIFEST = path.resolve(here, '../package.json');
 
 const clientSrc = readFileSync(CLIENT, 'utf8');
 const serverSrc = readFileSync(SERVER, 'utf8');
+const manifest = JSON.parse(readFileSync(MANIFEST, 'utf8'));
 
 /**
  * 服务端动作表里注册的 `METHOD action` 组合。
@@ -101,4 +103,14 @@ test('契约：服务端每个动作至少能被一种方法触达（没有写�
   const dead = [...actions].filter((k) => names.has(k.split(' ')[1]) && !used.has(k));
   assert.deepEqual(dead, [],
     '同名动作存在但方法对不上（客户端发的方法服务端没注册）：\n  ' + dead.join('\n  '));
+});
+test('Web client manifest declares the platform entry and its slot-owner dependencies', () => {
+  assert.equal(manifest.dsh?.client?.platform, 'web');
+  assert.equal(manifest.exports?.['./client'], './lib/client.cjs');
+  assert.deepEqual(manifest.dsh.client.inject, [
+    '@deepseek-ai/dsh-client-ui-chat',
+    '@deepseek-ai/dsh-client-ui-settings-general',
+    '@deepseek-ai/dsh-client-ui-sidebar-right',
+  ]);
+  assert.match(clientSrc.slice(0, 500), /window\.__ModuleLoader__\.load\(/);
 });
