@@ -10,7 +10,7 @@
 //   · listSessions / fetchHistory 是不是支持。
 //
 // 它们表达的是同一件事——**DeepSeek 是唯一拥有完整网页 API 能力的站点**，
-// 其余 9 站全靠 DOM 抓取——但写成了 6 段散落的 if。代价是可预期的：
+// 其余 10 站全靠 DOM 抓取——但写成了 6 段散落的 if。代价是可预期的：
 // 新增一个「也带会话 API」的站点时，得在 6000 行的驱动里找齐这 6 处逐处判断。
 //
 // 0.22.0 续把它们降为 `lib/sites/<id>.js` 的 `capabilities` 声明，
@@ -70,7 +70,7 @@ test('③ deepseek 的五项能力逐项在场（少一项就是静默降级）'
   assert.equal(c.historyApi, true, '历史消息 API：有');
 });
 
-test('④ 其余 9 站一个都不声明能力 —— 「只动 DeepSeek」的可核形状', () => {
+test('④ 其余 10 站一个都不声明能力 —— 「只动 DeepSeek」的可核形状', () => {
   const others = SITES.filter((s) => s.id !== 'deepseek');
   assert.equal(others.length, 10, `预期 10 个非 deepseek 站点，实得 ${others.length}`);
   for (const s of others) {
