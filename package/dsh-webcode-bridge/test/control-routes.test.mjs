@@ -62,6 +62,10 @@ function stubControl() {
       driverStatus: () => ({ siteId: 'deepseek', sites: [], window: null }),
       siteConnect: () => ({ connect: async () => ({ ok: true, loggedIn: true }) }),
       loginAndReport: async (siteId) => ({ ok: true, siteId, loggedIn: true, ms: 1 }),
+      loginQrReader: async (accountKey) => ({
+        ok: true, available: true, accountKey,
+        image: 'data:image/png;base64,AA==', width: 220, height: 220,
+      }),
       windowOpener: async () => ({ ok: true }),
       sessionImport: async () => ({ ok: true, loggedIn: false }),
     },
@@ -102,7 +106,12 @@ async function call(control, method, pathname, body) {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const text = await r.text();
-    return { status: r.status, ctype: r.headers.get('content-type') || '', text };
+    return {
+      status: r.status,
+      ctype: r.headers.get('content-type') || '',
+      cacheControl: r.headers.get('cache-control') || '',
+      text,
+    };
   } finally {
     await new Promise((r) => server.close(r));
   }
@@ -616,3 +625,15 @@ test('未知方法回 405 JSON（带 Allow），未知路径回 false 由调用�
 //     对象是**当前**的整张动作表（它对新加动作自动生效）；
 //   · 「写路径的根必须单一取法、且 GET 如实回显」—— 任务台账是唯一需要它的族。
 //     **若将来再加任何落盘族，这条判据要原样重建，不要另立第二套取法。**
+
+test('POST login-qr relays the requested account QR as a no-store image payload', async () => {
+  const control = stubControl();
+  const response = await call(control, 'POST', '/__webcode/login-qr', { siteId: 'kimi', slot: '2' });
+  assert.equal(response.status, 200);
+  assert.match(response.cacheControl, /no-store/i);
+  const body = JSON.parse(response.text);
+  assert.equal(body.ok, true);
+  assert.equal(body.available, true);
+  assert.equal(body.accountKey, 'kimi#2');
+  assert.match(body.image, /^data:image\/png;base64,/);
+});
