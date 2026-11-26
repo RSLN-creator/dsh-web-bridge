@@ -1428,6 +1428,11 @@ export function createWebControl(deps = {}) {
       if (r && r.ok) return { ok: true, file, storeDir };
       return { ok: false, code: 'OPEN_FAILED', file, storeDir, error: String(r?.error || 'open failed').slice(0, 200) };
     },
+    'POST login-qr': async (body) => {
+      const reader = relay?.config?.loginQrReader;
+      if (typeof reader !== 'function') return { ok: false, available: false, error: 'QR relay unavailable' };
+      return reader(accountKeyOf(body));
+    },
     'POST login': async (body) => {
       const accountKey = accountKeyOf(body, { fallback: '' });
       const wait = body?.wait !== false;     // 默认等待；显式 {wait:false} 才是旧的即开即回
@@ -1803,6 +1808,10 @@ export function createWebControl(deps = {}) {
         } catch { /* 畸形 query 按无参数处理 */ }
       }
       const result = await actions[key](body);
+      if (key === 'POST login-qr') {
+        res.setHeader('cache-control', 'no-store');
+        res.setHeader('pragma', 'no-cache');
+      }
       sendJson(req, res, result, 200);
     } catch (err) {
       // 错误文本透传（截断到 200 字符）：设置面板是本机用户的唯一操作入口，
