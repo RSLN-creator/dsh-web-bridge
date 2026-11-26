@@ -30,7 +30,9 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const CLIENT = path.resolve(here, '../lib/client.cjs');
 const SERVER = path.resolve(here, '../lib/web-control.js');
+const MANIFEST = path.resolve(here, '../package.json');
 
+const manifest = JSON.parse(readFileSync(MANIFEST, 'utf8'));
 const clientSrc = readFileSync(CLIENT, 'utf8');
 const serverSrc = readFileSync(SERVER, 'utf8');
 
@@ -101,4 +103,15 @@ test('契约：服务端每个动作至少能被一种方法触达（没有写�
   const dead = [...actions].filter((k) => names.has(k.split(' ')[1]) && !used.has(k));
   assert.deepEqual(dead, [],
     '同名动作存在但方法对不上（客户端发的方法服务端没注册）：\n  ' + dead.join('\n  '));
+});
+test('Web client manifest declares the real module dependencies and lazy browser entry', () => {
+  assert.equal(manifest.dsh?.client?.platform, 'web');
+  assert.deepEqual(manifest.dsh.client.inject, [
+    '@deepseek-ai/dsh-client-ui-chat',
+    '@deepseek-ai/dsh-client-ui-settings-general',
+    '@deepseek-ai/dsh-client-ui-sidebar-right',
+  ]);
+  assert.equal(manifest.exports?.['./client'], './lib/client.cjs');
+  assert.match(clientSrc.slice(0, 500), /window\.__ModuleLoader__\.load\(/);
+  assert.match(clientSrc.slice(0, 500), /id:\s*'dsh-webcode-bridge'/);
 });
