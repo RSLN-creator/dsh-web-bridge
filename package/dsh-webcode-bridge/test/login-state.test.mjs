@@ -327,3 +327,29 @@ test('⑨c 同源选择器在各自站点模块里只允许有一份字面量', 
     assert.equal(count, 1, '选择器字面量 ' + literal + ' 在对应站点模块里出现了 ' + count + ' 次——loginProbe 与 accountProbe 必须引用同一份常量');
   }
 });
+
+test('QR selector prefers a visible QR canvas and ignores avatars, logos and non-square images', async () => {
+  const { selectLoginQrCandidate } = await import('../lib/browser-driver.js');
+  assert.deepEqual(selectLoginQrCandidate([
+    { index: 0, tag: 'img', width: 220, height: 220, visible: true, meta: 'account avatar profile' },
+    { index: 1, tag: 'img', width: 220, height: 220, visible: true, meta: 'site logo' },
+    { index: 2, tag: 'canvas', width: 256, height: 256, visible: false, meta: 'qrcode' },
+    { index: 3, tag: 'img', width: 320, height: 120, visible: true, meta: 'qr banner' },
+    { index: 4, tag: 'canvas', width: 220, height: 220, visible: true, meta: 'login qrcode' },
+  ]), { index: 4, width: 220, height: 220 });
+});
+
+test('QR selector can fall back to a large unlabelled square media element', async () => {
+  const { selectLoginQrCandidate } = await import('../lib/browser-driver.js');
+  assert.deepEqual(selectLoginQrCandidate([
+    { index: 0, tag: 'canvas', width: 180, height: 180, visible: true, meta: '' },
+  ]), { index: 0, width: 180, height: 180 });
+});
+
+test('QR selector does not guess when only unrelated elements are visible', async () => {
+  const { selectLoginQrCandidate } = await import('../lib/browser-driver.js');
+  assert.equal(selectLoginQrCandidate([
+    { index: 0, tag: 'img', width: 100, height: 100, visible: true, meta: 'user avatar' },
+    { index: 1, tag: 'div', width: 240, height: 240, visible: true, meta: 'login form' },
+  ]), null);
+});
