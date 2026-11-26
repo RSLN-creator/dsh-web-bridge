@@ -114,3 +114,43 @@ engines 版本相容）、提交信息自检、reference 索引（`gen-reference
 - 协议解析（`normalizeOfficialToolCalls` 与锚点扣留）；
 - 右栏 iframe 镜像、独立窗口、站点探活；
 - 任务板与 Team 面板的全部注册与数据面。
+
+---
+
+## 9. 2026-11-26 re-check: current DSH Web client-module contract
+
+This addendum supersedes the interpretation of `dsh.client.inject` in §1 above. The
+reference baseline for this re-check is the current
+[DeepSeek Harness source](https://github.com/deepseek-ai/deepseek-harness), whose Web packages
+currently publish the 0.2.3-alpha.2 generation.
+
+| Contract | Current official meaning | Bridge implementation |
+| --- | --- | --- |
+| `dsh.client.platform` | The client bundle platform; this plugin targets `web` | `"web"` |
+| `dsh.client.inject` | **Package-name dependencies in the browser module graph**, not Cordis service injection | `@deepseek-ai/dsh-client-ui-chat`, `@deepseek-ai/dsh-client-ui-settings-general`, `@deepseek-ai/dsh-client-ui-sidebar-right` |
+| `exports["./client"]` | The browser bundle entry resolved from the package manifest | `./lib/client.cjs` |
+| Bundle factory | Lazy CommonJS factory registered through `window.__ModuleLoader__.load({ id, factory })` | Single-file CJS client bundle |
+| Browser platform modules | React, React DOM, Cordis, client slots, primitives and dockkit are provided by the Web platform module table | Client consumes host-provided `react`, `react-dom/client` and UI primitives |
+
+### Why the declared client dependencies are these three
+
+- The plugin registers `conversation.composer.dock`, owned by
+  `@deepseek-ai/dsh-client-ui-chat`.
+- The plugin registers `settings.section`, owned by
+  `@deepseek-ai/dsh-client-ui-settings-general`.
+- The plugin registers `sidebar.right.pane.tab`, `sidebar.right.pane.tab.title` and
+  `sidebar.right.tab.menu.item`, owned by
+  `@deepseek-ai/dsh-client-ui-sidebar-right`.
+
+The right-sidebar package itself composes the context-menu child seat. The plugin's direct
+registration into the declared `sidebar.right.tab.menu.item` child seat is valid; it should not
+be “fixed” by creating a root-level menu entry.
+
+The following official sources were checked:
+
+- [Client modules package reference](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/modules/README.md)
+- [Web platform module table](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/web/src/platform.ts)
+- [Official live-client fixture manifest](https://github.com/deepseek-ai/deepseek-harness/blob/master/apps/web/tests/fixtures/plugins/fixture-live-client/package.json)
+- [Right-sidebar package reference](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/ui-sidebar-right/README.md)
+- [Official plugin template](https://github.com/kun2-5code/dsh-plugin-template)
+
