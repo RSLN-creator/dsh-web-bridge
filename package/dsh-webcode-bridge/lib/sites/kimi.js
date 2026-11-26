@@ -127,7 +127,7 @@ export const kimiSite = {
       const parts = url.pathname.split('/');
       const id = parts[1] === 'chat' ? parts[2] : null;
       return id && /^[0-9a-fA-F-]{8,64}$/.test(id) ? id : null;
-    }
+    },
     toUrl: (origin, id) => origin + '/chat/' + encodeURIComponent(id),
   },
 };
