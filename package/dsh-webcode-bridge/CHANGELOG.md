@@ -5,6 +5,29 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## Unreleased（2026-11-26：全站点适配层重构、Web 合约补齐与 QR 登录桥接）
+
+### 框架 / 网站适配
+
+- 将 11 个公开站点声明分别收进 `lib/sites/<siteId>.js`，由 `lib/sites/index.js` 单点注册；
+  `providers.js` 只投影既有 provider/model 公共面。
+- 将已验证的 DeepSeek、GLM、Kimi 会话 URL 规则移入各自 adapter；DeepSeek / GLM 的工具调用教学格式
+  与技能目录策略改为 adapter capability，避免共享提示词引擎按站点名称分支。
+- Composer 选择先采用站点已验证 selector，再回退到可见、启用且可编辑的 textarea、text input 或
+  contenteditable；隐藏模板字段、只读字段、禁用字段和不可编辑 role 不再被视为 composer。
+- 添加 adapter 注册表与公共模型面回归护栏，目标是改站点事实只改站点模块，不复制公共算法。
+
+### DSH Web 与登录
+
+- 为 Web client manifest 声明实际拥有 composer、settings、right-sidebar slots 的三个官方 DSH 包。
+- 登录期间扫描主页面和有限数量的 frames，仅截取可见 QR 候选元素；通过 account-scoped、
+  same-origin loopback 的 `POST /__webcode/login-qr` 路由返回 PNG data URI。
+- Web account panel 与独立设置页轮询并显示 QR；响应禁用缓存，二维码只保存在运行内存。
+- Linux 无显示环境默认使用 headless 登录浏览器，让远程 Web UI 能接收二维码。
+
+**验证边界**：本版补有离线选择器、路由、manifest、client/server 与 adapter regression tests。
+尚未用真实 DSH Web 页面逐站完成二维码扫描和长会话验收；在该真机矩阵通过前，不宣称 QR 或 11 个网站均已完整实测。
+
 ## 0.22.3（2026-10-24：修「更新按钮从未成功过」—— 缓存缺席时真的去拉 Releases 清单）
 
 ### 修复：`POST update` 在缓存未命中时必败，且报错误导（真缺陷，用户原话「从头到尾我自己点击这个按钮都没有成功更新过一次」）
