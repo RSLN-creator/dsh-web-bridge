@@ -17,6 +17,7 @@
 
 | 文档 | 用途 | 什么时候读 |
 | --- | --- | --- |
+| [site-adapter-architecture.md](site-adapter-architecture.md) | 11-site adapter boundary, shared-engine rules, session lifetimes and the two-cycle acceptance scorecard | Before changing a site descriptor or moving behavior across the adapter boundary |
 | [PROJECT-INTENT.md](PROJECT-INTENT.md) | **项目意图**：要做什么、不要做什么，每条附用户原话与出处 | 判断「这算不算这个项目该做的事」时 |
 | [HISTORY.md](HISTORY.md) | **制作与发展时间线**：两个起点口径（起意 09-06 / 入库 09-07）、九个阶段、长期未闭环的四件事；每条读数附取法 | 接手项目、回答「这东西是怎么长出来的」时 |
 | [CODE-STRUCTURE.md](CODE-STRUCTURE.md) | **代码结构归类**：`lib/` 53 个模块（52 个 ESM + `client.cjs`）的分层、依赖方向、God file 清单、测试分布；规模读数以 `gen-index.mjs` 为准 | 改动跨模块、决定新模块放哪一层时 |
