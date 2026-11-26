@@ -7,9 +7,8 @@
 
 import { DEFAULT_SLOT, normalizeSlot, parseModelId, formatModelId, accountLabel } from './accounts.js';
 import { thinkEffortFor } from './think-effort.js';
-// 已迁移站点的声明表（0.19.50 起）：`lib/sites/<siteId>.js` 是站点知识的落点，
-// 本模块保留**组装职责**（withEffort 摊平 + 冻结）。迁移是渐进的——
-// 未迁移的站点仍内联在本文件里，见 lib/sites/index.js 的文件头。
+// All eleven site declarations live in `lib/sites/<siteId>.js`.
+// This module applies the shared model metadata and freezes the public projection.
 import { SITE_MODULES } from './sites/index.js';
 
 const site = (s) => Object.freeze(s);
@@ -38,9 +37,9 @@ const withEffort = (s) => {
 /**
  * 网页会话 URL 契约的三态（C-2）。
  *
- * 背景（真机 2026-09-14 取证）：驱动旧实现把「会话 id ↔ 地址」的知识硬编码成
+ * 历史缺陷（已由 adapter 导航能力修复）：驱动早期把「会话 id ↔ 地址」的知识硬编码成
  * DeepSeek 的两种形状（`?chat_session_id=<id>` 与 `/a/chat/s/<id>`），于是
- * **GLM 永远拿不到会话 id**：探针实录
+ * **GLM 无法拿到会话 id**：当时探针实录
  *   page.url() = https://chatglm.cn/main/alltoolsdetail?lang=zh&cid=6aa6f08454b3a5a4e4f64a77
  *   result.sessionId = null → rememberConversation 从不执行 →
  *   webcode-sessions-glm.json 恒为 "{}"（deepseek 那份 6058 字节）
@@ -59,12 +58,10 @@ const withEffort = (s) => {
 export const NAVIGATION_STATES = Object.freeze(['fresh', 'resume', 'unsupported']);
 
 /**
- * 从**地址**解析既有网页会话（'resume' 那一态的地址形状），解析不到返回 null。
+ * 从站点 adapter 的 `navigation.fromUrl` 解析既有网页会话。
  *
- * 每个站点只声明**自己的**形状，驱动不再写死 DeepSeek 的两种。新增站点若地址栏
- * 里带会话 id，就在这里加一条；不带（例如只把 id 放在 SSE 帧里）就声明
- * `conversationIdFromStream: true` 并**不**在这里编一个形状出来——
- * 编形状的代价是导航到一个不存在的地址，比不支持更糟。
+ * 解析规则归具体站点所有；此公共入口只做 URL 归一与错误收敛。未声明能力或解析失败
+ * 都返回 null，调用方据此保留 unsupported 状态，不会猜测一个远端地址。
  */
 /**
  * Read or rebuild a website conversation URL from that site's own adapter.
