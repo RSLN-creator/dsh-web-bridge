@@ -115,3 +115,9 @@ test('Web client manifest declares the real module dependencies and lazy browser
   assert.match(clientSrc.slice(0, 500), /window\.__ModuleLoader__\.load\(/);
   assert.match(clientSrc.slice(0, 500), /id:\s*'dsh-webcode-bridge'/);
 });
+
+test('Web account login polls the login-qr action while login is pending', () => {
+  assert.match(clientSrc, /apiSoft\('login-qr',\s*\{\s*\.\.\.siteSlot\(sid\)\s*\}/);
+  assert.match(clientSrc, /loginQrByAccount\[s\.accountKey\]/);
+  assert.match(serverSrc, /'POST login-qr'/);
+});
