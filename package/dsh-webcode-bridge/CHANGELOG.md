@@ -5,6 +5,15 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## Unreleased
+
+### Web client, universal composer and QR login
+
+- Declare the three DSH Web UI packages that own the contributed composer, settings and right-sidebar slots, so client module arrival order is explicit.
+- Prefer each site's composer selector, with a visible/editable semantic DOM fallback for standard text areas and contenteditable editors.
+- Capture only the visible login QR element and relay it to both Web UI login surfaces through a same-origin, CSRF-guarded, no-store endpoint.
+- Use a headless login browser by default on Linux hosts without a display, allowing remote Web clients to scan the QR.
+
 ## 0.22.3（2026-10-24：修「更新按钮从未成功过」—— 缓存缺席时真的去拉 Releases 清单）
 
 ### 修复：`POST update` 在缓存未命中时必败，且报错误导（真缺陷，用户原话「从头到尾我自己点击这个按钮都没有成功更新过一次」）
