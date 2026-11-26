@@ -140,3 +140,22 @@ test('④b 并行教学全站生效：default/glm 等全部站点收到新句、
   }
 });
 
+
+test('site-specific prompt teaching is declared by adapters, not site-name branches', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { dirname, join } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const { getSite } = await import('../lib/providers.js');
+  const here = dirname(fileURLToPath(import.meta.url));
+  const source = readFileSync(join(here, '..', 'lib', 'agent-preset.js'), 'utf8');
+  assert.deepEqual(getSite('deepseek').teaching, {
+    toolCallFormat: 'deepseek-native',
+    skillCatalogMode: 'slim',
+  });
+  assert.deepEqual(getSite('glm').teaching, {
+    toolCallFormat: 'json-fence',
+    skillCatalogMode: 'full',
+  });
+  assert.doesNotMatch(source, /siteId\s*===\s*['"](?:deepseek|glm)['"]/);
+  assert.doesNotMatch(source, /options\.siteId\s*===\s*['"]deepseek['"]/);
+});
