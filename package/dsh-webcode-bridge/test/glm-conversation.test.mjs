@@ -102,6 +102,13 @@ test('glm：无 cid 的落地页不能被当成「会话地址」', () => {
   assert.equal(conversationIdFromUrl('glm', 'https://chatglm.cn/main/alltoolsdetail?lang=zh'), null);
 });
 
+test('kimi：URL 会话 id 可解析并能拼回原会话路径', () => {
+  const id = '1a0e26b2-8e72-8a5a-8000-09c279d31e8d';
+  const url = 'https://www.kimi.com/chat/' + id + '?chat_enter_method=home';
+  assert.equal(conversationIdFromUrl('kimi', url), id);
+  assert.equal(conversationUrlFor('kimi', 'https://www.kimi.com/', id), 'https://www.kimi.com/chat/' + id);
+});
+
 test('zai：未取证到地址形状 → 如实返回 null，不照抄 GLM 的形状', () => {
   // 探针 real-probe-25-zai-url.mjs 在 chat.z.ai 上只拿到裸根地址（query 键为空、
   // 页面无会话链接），real-probe-23 在 zai 上整轮 120s 超时。**没有证据就不声明**：
