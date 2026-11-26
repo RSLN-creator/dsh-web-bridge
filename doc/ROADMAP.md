@@ -11,59 +11,60 @@
 
 ---
 
-## 〇、站点差异外移：`lib/sites/<siteId>.js`（P2）
+## 〇、站点差异外移：`lib/sites/<siteId>.js`（结构迁移完成，能力化持续推进）
 
-> **本节是 [`CODE-STRUCTURE.md`](CODE-STRUCTURE.md) 与 [`diagnosis-2026-09-16.md`](diagnosis-2026-09-16.md) §6.1
-> 所引用的「站点差异外移」的落点。**
-> 2026-09-30 补写：此前那两处引用写的是「`ROADMAP.md` 第 2 节」，
-> 而本文件的分节里**没有**对应内容——那是死引用。补节而不是删引用，因为要做的事是真的。
+> 2026-11-26 implementation update: the 11 public site IDs now have one adapter module each.
+> `providers.js` is again the public provider/model projection, not the home of website facts.
 
-**要解决的问题**：站点知识散落在 **4 个文件**（`providers.js` / `contract.js` / `decoder.js` /
-`browser-driver.js`），于是「新增一个站点要改 4 处」、「网页改版要跨文件找」、
-以及最贵的一种——「改一个站点，影响到所有人」。后者**已经真实发生过**：
-`git log -S` 取证显示 `e828f20`（GLM/z.ai 会话身份）同时改了上下文预算闸与限流截断帧识别。
+### Completed in this cycle
 
-**目标形态**（每站点一个文件，导出**同一形状**的对象）：
+- Created modules for DeepSeek, GLM, ChatGPT, Kimi, Qwen, Doubao, Grok, Claude, Gemini, Z.ai and Z.ai China.
+- Centralized the adapter registry in `lib/sites/index.js`.
+- Moved verified DeepSeek, GLM and Kimi conversation URL parsing/building into each adapter's
+  `navigation` capability.
+- Moved DeepSeek and GLM tool-call teaching/transport choices into each adapter's `teaching`
+  capability; `agent-preset.js` reads capabilities rather than checking site names.
+- Kept shared browser, decoder and protocol engines shared. Site-specific facts are data, not copied
+  algorithms.
+- Added guards for registry completeness, provider/model surface compatibility, conversation URL
+  round-trips and prompt wording.
 
-```
-lib/sites/<siteId>.js
-  { meta,          // origin / 选择器 / 模型目录（现 providers.js 的 site() 载荷）
-    decoder,       // 解码器族选择（现 decoder.js 的按站点注册项）
-    modelSelect,   // 选模型（现 model-picker.js 的站点分支）
-    teaching,      // 教学立场与传输形状（现 agent-preset.js 的 2 个特例）
-    nav,           // 会话地址三态（现 contract.js 的 navContractFor）
-    capabilities } // antiBot / rootPathForSpa / staticOrigins / experimental
-```
+### Remaining adapter work
 
-**为什么是这个形态，而不是按站点复制隔离**——三条实测理由
-（完整论证见 [`research/2026-09-26-dwb-site-modularity-audit.md`](research/2026-09-26-dwb-site-modularity-audit.md) §五）：
+The migration is not a claim that every site has equal live support. Some sites are reachable only
+through DOM flows, some have verified conversation IDs, and some are blocked or not validated over
+long runs. The next migration steps should move remaining site-only branches into declared adapter
+capabilities only when there is an existing behavior and evidence to preserve. Do not fabricate URL
+shapes, login markers, model IDs or transport capabilities for sites that have not been verified.
 
-1. **复制在本仓库产生过漂移，而不是隔离。** `lib/browser-driver.js` 里曾有三份**逐字相同**的
-   `ANSWER_SELECTOR` 字面量，代价是「修一处、忘两处」：判据用的节点与兜底交出去的节点
-   不是同一个，读数自相矛盾且看不出来。
-2. **复制会让公共缺陷的修复成本乘以站点数。** 0.19.16 的 `finish()`「失败分支丢弃已解内容」
-   缺陷**一次修了 4 个解码器族**（`JsonLinesDecoder` / `OpenAiSseDecoder` / `ChatGptDecoder` /
-   `ClaudeSseDecoder`）；若按站点复制，那一次要改 4 份且必然漏修。
-3. **真正提供隔离的是「文件边界」，不是代码副本。** 前者改一个站点只动一个文件；
-   后者改一个公共判据要动 N 个文件。
+### Acceptance scorecard
 
-**风险与做法**：**风险中**。迁移期两套路径并存，必须靠护栏钉住行为不变。
-**逐站点迁移，DeepSeek 先行**（它特例最多、收益最大）；其余 9 站继续走 `genericContract`
-兜底，**一行不动**；每迁一个站点跑一次全量单测。
+| Dimension | Automated gate | Live acceptance |
+| --- | --- | --- |
+| Public compatibility | `test/provider-surface.test.mjs`: all 11 IDs/order, provider IDs, group names, model IDs and image capability mapping unchanged | Existing saved model IDs still resolve after install |
+| Adapter completeness | `migratedSiteIds() === SITES.map(site => site.id)`; one module per site | Each supported site's origin and login page can be opened |
+| Conversation continuity | URL parse/build round-trip tests for DeepSeek, GLM and Kimi; unsupported sites remain explicitly unsupported | Three turns in one site conversation; no unintended new chat |
+| Prompt/protocol | Existing prompt zero-drift tests; format comes from adapter metadata | One tool call and one tool result round-trip per validated site |
+| Web client | Manifest and lazy client-loader contract test | Plugin appears and each contributed UI surface mounts in DSH Web |
+| QR login | QR capture, route and client polling tests (pending implementation) | QR is visible on a remote Web client and can be scanned successfully |
 
-**判据（每步都要满足）**：迁移前后 `providers.js` 的 `SITES`、`providerIdsForRegistration()`、
-`listAllModels()` 的输出**逐字相同**——写成护栏断言，不是肉眼比对。
+### Two-cycle optimization record
 
-**明确不动的三处**（本轮与以后都不要顺手改）：
+**Cycle 1 — official DSH Web contract and framework review.** Compared the client-module manifest,
+platform module table, official live-client fixture and the official right-sidebar slot contract.
+Outcome: keep the lazy CJS loader; declare actual slot-owner package dependencies; do not confuse
+package-graph `dsh.client.inject` with Cordis service injection.
 
-| 位置 | 为什么不动 |
-| --- | --- |
-| `agent-preset.js` 的站点 if 链 | [`CODE-STRUCTURE.md`](CODE-STRUCTURE.md) §四明确：它**不该拆**——5 代分支服务同一个协议，拆开会制造两套协议漂移（本仓库三次泄漏事故的老路） |
-| `index.js` 的 `siteId === 'deepseek'` ×5 | 它是**测试注入契约**而非站点特例（`driverFor('deepseek')` 必须仍返回注入的 driver）。只抽具名谓词，不改行为 |
-| `decoder.js` 的族内继承 | 这是**正向**耦合（共用基类 + 按站点子类），正是「既不复制、又隔离」的形态。保持并推广 |
+**Cycle 2 — multi-site architecture and persistence review.** Compared all 11 site declarations,
+the shared browser driver, protocol teaching, decoder selection and conversation state. Outcome:
+move every site descriptor into the registry, move verified navigation and prompt-format choices into
+the adapter, and keep external protocols in shared engines with per-site configuration. A framework
+change alone is not a meaningful adapter boundary; login, DOM semantics, transport, decoding and
+conversation identity are.
 
-**工作量未知（如实）**：`diagnosis-2026-09-16.md` 说「不是大重构」，但**没给行数/文件数读数**，
-本文件也没有。**以 DeepSeek 的实际改动量作为估算基线**，再决定其余 9 站的排期。
+The cycles use the gates above. A code change is accepted only when the public surface is unchanged
+or an intentional user-facing change is separately documented, and the corresponding automated
+checks pass. Live website checks remain manual and must obey the repository's anti-bot pacing rules.
 
 ---
 
