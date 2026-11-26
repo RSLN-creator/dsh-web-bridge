@@ -1191,6 +1191,7 @@ export function createBrowserDriver(options = {}) {
     sendButton: contract.sendButtonSelector,
     stopButton: contract.stopButtonSelector,
   };
+  const COMPOSER_SELECTOR = [SEL.input, COMPOSER_FALLBACK_SELECTOR].filter(Boolean).join(', ');
   // 日志前缀带槽：两个槽同时跑时，`[webcode-driver:glm#2]` 与 `[webcode-driver:glm]`
   // 能一眼分开，否则排障时要靠时间戳猜哪条属于哪个账户。
   const tag = slot === DEFAULT_SLOT ? siteId : siteId + '#' + slot;
@@ -1428,21 +1429,61 @@ export function createBrowserDriver(options = {}) {
   async function visibleComposerCount(p) {
     try {
       return await p.evaluate((sel) => {
-        const cands = sel.split(',').map((s) => s.trim()).filter(Boolean);
         const seen = new Set();
         let n = 0;
-        for (const c of cands) {
+        for (const selector of sel.split(',').map((s) => s.trim()).filter(Boolean)) {
           let nodes = [];
-          try { nodes = [...document.querySelectorAll(c)]; } catch { continue; }
-          for (const e of nodes) {
-            if (seen.has(e)) continue;
-            seen.add(e);
-            if (e.offsetWidth || e.offsetHeight || e.getClientRects().length) n += 1;
+          try { nodes = document.querySelectorAll(selector); } catch { continue; }
+          for (const el of nodes) {
+            if (seen.has(el)) continue;
+            seen.add(el);
+            const rect = el.getBoundingClientRect();
+            const style = getComputedStyle(el);
+            const tag = el.tagName;
+            const type = String(el.type || 'text').toLowerCase();
+            const field = (tag === 'TEXTAREA' || tag === 'INPUT')
+              && !['hidden', 'button', 'submit', 'reset', 'checkbox', 'radio', 'file', 'image'].includes(type)
+              && !el.disabled && !el.readOnly;
+            const editable = el.isContentEditable === true;
+            if (rect.width > 0 && rect.height > 0
+              && style.display !== 'none' && style.visibility !== 'hidden'
+              && Number(style.opacity || 1) > 0
+              && el.getAttribute('aria-disabled') !== 'true'
+              && (field || editable)) n += 1;
           }
         }
         return n;
-      }, SEL.input);
+      }, COMPOSER_SELECTOR);
     } catch { return 0; }
+  }
+
+  async function findComposerLocator(p) {
+    for (const selector of [SEL.input, COMPOSER_FALLBACK_SELECTOR]) {
+      if (!selector) continue;
+      let matches;
+      try { matches = p.locator(selector); } catch { continue; }
+      let count = 0;
+      try { count = await matches.count(); } catch { continue; }
+      for (let i = 0; i < count; i += 1) {
+        const candidate = matches.nth(i);
+        const usable = await candidate.evaluate((el) => {
+          const rect = el.getBoundingClientRect();
+          const style = getComputedStyle(el);
+          const tag = el.tagName;
+          const type = String(el.type || 'text').toLowerCase();
+          const field = (tag === 'TEXTAREA' || tag === 'INPUT')
+            && !['hidden', 'button', 'submit', 'reset', 'checkbox', 'radio', 'file', 'image'].includes(type)
+            && !el.disabled && !el.readOnly;
+          return rect.width > 0 && rect.height > 0
+            && style.display !== 'none' && style.visibility !== 'hidden'
+            && Number(style.opacity || 1) > 0
+            && el.getAttribute('aria-disabled') !== 'true'
+            && (field || el.isContentEditable === true);
+        }).catch(() => false);
+        if (usable) return candidate;
+      }
+    }
+    throw new Error('No visible editable composer matched the site contract or semantic fallback');
   }
 
   /**
@@ -2778,7 +2819,7 @@ export function createBrowserDriver(options = {}) {
       await page.goto(cfg.site, { waitUntil: 'domcontentloaded', timeout: 45_000 });
     }
     // 输入框在≠已登录（z.ai 游客页有完整输入框），统一走登录判定。
-    await page.waitForSelector(SEL.input, { timeout: 20_000 }).catch(() => {});
+    await page.waitForSelector(COMPOSER_SELECTOR, { timeout: 20_000 }).catch(() => {});
     const ok = await judgeLoggedIn(page);
     rememberLogin(ok);
     return ok;
@@ -3690,7 +3731,7 @@ export function createBrowserDriver(options = {}) {
             if (!alreadyThere) {
               await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 45_000 });
             }
-            await page.waitForSelector(SEL.input, { timeout: 20_000 }).catch(() => {});
+            await page.waitForSelector(COMPOSER_SELECTOR, { timeout: 20_000 }).catch(() => {});
             // 风控/验证页要在判定登录态**之前**识别：那种页面上的 textarea 全是隐藏的
             // 脚本模板，judgeLoggedIn 会把它们当成「输入框在 = 已登录」，随后 fill
             // 必然超时（这正是 GLM 深链第二轮的失败形态）。
@@ -4409,7 +4450,7 @@ export function createBrowserDriver(options = {}) {
           log('prompt transport forced inline by site policy (ATTACH_FORBIDDEN_SITES), site=' + siteId
             + ' chars=' + plan.total);
         }
-      const input = page.locator(SEL.input).first();
+      const input = await findComposerLocator(page);
       // 2026-09-13：doubao（tiptap/ProseMirror）与 kimi（div.chat-input-editor）
       // 的输入框是 contenteditable，**不是**表单控件。Playwright 的 fill() 只认
       // input/textarea/[contenteditable]（后者要走 locator.fill 的 contenteditable
@@ -5782,7 +5823,7 @@ export function createBrowserDriver(options = {}) {
     try { await navigateForDisplay(target); } catch { /* navigateForDisplay 内部已 warn */ }
     // 与登录同一套判定（z.ai 游客页有输入框，旧「URL 不含 login 即已登录」
     // 会把未登录记成已登录）；先等输入框渲染完再判，避免瞬时误判未登录。
-    await page.waitForSelector(SEL.input, { timeout: 15_000 }).catch(() => {});
+    await page.waitForSelector(COMPOSER_SELECTOR, { timeout: 15_000 }).catch(() => {});
     loggedIn = await judgeLoggedIn(page);
     if (loggedIn) persistLoginState({ loggedIn: true, at: Date.now(), message: '独立窗口核验' });
     log(`headed window open ${w}x${h} → ${target}`);
