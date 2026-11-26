@@ -81,10 +81,9 @@ export function conversationIdFromUrl(siteId, url) {
 export function conversationUrlFor(siteId, origin, sessionId) {
   const build = getSite(siteId)?.navigation?.toUrl;
   if (typeof build !== 'function' || !sessionId) return null;
-  try { return build(String(origin).replace(/\\/$/, ''), String(sessionId)); } catch { return null; }
+  try { return build(String(origin).replace(/\/$/, ''), String(sessionId)); } catch { return null; }
 }
 
-/** Navigation state understood by the common session driver. */
 export const DEEPSEEK = withEffort(SITE_MODULES.deepseek);
 export const GLM = withEffort(SITE_MODULES.glm);
 export const CHATGPT = withEffort(SITE_MODULES.chatgpt);
