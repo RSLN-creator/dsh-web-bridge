@@ -49,6 +49,63 @@ native permission system.
 - **Observable** — every delivery, fallback and rate-limit event is projected into
   `GET /__webcode/status`.
 
+## Web compatibility and login
+
+The package has two separate halves: the Node host plugin and the DSH browser client. The browser
+half follows the official client-module contract: `dsh.client.platform: "web"`, an exported
+`./client` entry, and the lazy `window.__ModuleLoader__.load(...)` factory. Its
+`dsh.client.inject` list names the DSH UI packages that own the slots this client contributes to;
+these are **package dependencies**, not Cordis service names.
+
+The current slot owners are declared explicitly:
+
+- `@deepseek-ai/dsh-client-ui-chat` — composer dock.
+- `@deepseek-ai/dsh-client-ui-settings-general` — settings sections.
+- `@deepseek-ai/dsh-client-ui-sidebar-right` — right-sidebar tabs and tab actions.
+
+This makes module arrival order explicit instead of relying on whichever UI package happened to
+materialize first. React, React DOM and DSH UI primitives are supplied by the Web platform module
+table; they are not duplicated as plugin externals.
+
+### Site adapter boundary
+
+The driver prefers each site's declared selector, then falls back to standard DOM semantics:
+editable `textarea`, `[contenteditable="true"]`, and `[role="textbox"]`. It filters for visible,
+editable controls and keeps the selected element—not a page-wide HTML dump—as the input target.
+A site's authentication checks, request/stream protocol and response decoder remain site capabilities:
+those are genuine external contracts and cannot safely be inferred from the frontend framework alone.
+
+This means a site moving between React, Vue, Svelte or another framework does not by itself require a
+plugin change when its user-facing DOM and network protocol stay the same. It does **not** promise
+zero maintenance when a site changes its login flow, DOM semantics, anti-bot checks or transport API.
+Those differences belong in the site adapter layer, not in the shared driver.
+
+### QR login in the Web UI
+
+While login is pending, the host looks for a visible QR-like image in the login page and its frames,
+then captures only that element. The account panel and standalone settings page poll the
+same-origin `/__webcode/login-qr` endpoint and render the image. Responses are marked
+`no-store`; the relay does not return page HTML, cookies or browser storage. On a Linux server with
+no display, login uses a headless browser so the QR can be relayed to the Web UI. Sites that do not
+expose a QR in visible DOM (or use an unusual canvas/background implementation) may still require
+their normal browser login flow.
+
+### DSH session resume is not browser resume
+
+DSH can resume a persisted agent session and restore its conversation history. That does not
+recreate an external browser process. This plugin separately persists its browser profile and
+web-session cursor locally; those pieces preserve login state and the target site's conversation
+continuity. Treat these as three distinct lifetimes: the DSH agent session, the plugin's browser
+profile, and the website's own conversation.
+
+## Official implementation references
+
+- [DSH client-module contract](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/modules/README.md)
+- [Official Web platform module table](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/web/src/platform.ts)
+- [Official live-client fixture manifest](https://github.com/deepseek-ai/deepseek-harness/blob/master/apps/web/tests/fixtures/plugins/fixture-live-client/package.json)
+- [Official right-sidebar slot contract](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/ui-sidebar-right/README.md)
+- [Community plugin template using the same client bundle model](https://github.com/kun2-5code/dsh-plugin-template)
+
 ## Requirements
 
 | | |
