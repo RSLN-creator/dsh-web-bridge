@@ -1187,3 +1187,18 @@ test('被文档引用的章节号必须真实存在（§N 不得指向未写的�
 
 
 
+
+test('framework-neutral composer fallback only accepts visible editable DOM controls', () => {
+  const src = bridgeSrc('browser-driver.js');
+  assert.match(src, /const COMPOSER_FALLBACK_SELECTOR = 'textarea[^']*input[^']*contenteditable/);
+  assert.match(src, /const COMPOSER_SELECTOR = \[SEL\.input, COMPOSER_FALLBACK_SELECTOR\]/);
+  assert.match(src, /async function findComposerLocator\(p\)/);
+  assert.match(src, /const input = await findComposerLocator\(page\)/);
+  assert.equal((src.match(/waitForSelector\(COMPOSER_SELECTOR,/g) || []).length, 3,
+    'connect, fresh-chat navigation and the browser window must share the combined selector');
+  const visible = regionFrom(src, 'async function visibleComposerCount(', ['\nasync function ', '\nfunction ']);
+  assert.match(visible, /getBoundingClientRect\(\)/);
+  assert.match(visible, /el\.isContentEditable === true/);
+  assert.match(visible, /!el\.disabled && !el\.readOnly/);
+  assert.match(visible, /aria-disabled/);
+});
