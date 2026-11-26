@@ -1286,6 +1286,7 @@ window.__ModuleLoader__.load({
     function SiteAccounts({ sites, onRefresh, onlySiteId, subHint }) {
       const [busySite, setBusySite] = React.useState(null);
       const [results, setResults] = React.useState({});
+      const [loginQrByAccount, setLoginQrByAccount] = React.useState({});
       const list = (sites && sites.length ? sites : [])
         // 保留判定依据字段：旧实现只挑 4 个字段进列表，把后端已经算好的
         // loginBasis/loginCheckedAt 丢掉了——「未登录」于是看起来像凭空断言。
@@ -1375,19 +1376,47 @@ window.__ModuleLoader__.load({
       // JSON 解析错误而不是「HTTP 405」——原因见 lib/web-control.js 注释。）
       async function doLogin(sid) {
         setBusySite(sid); setResult(sid, null);
-        // 后端要打开有头 Edge 等人工登录，超时必须放宽（等待上限 300s）。
-        const r = await apiSoft('login', { ...siteSlot(sid), wait: true, timeoutMs: 300000 }, 330000);
-        if (!r.ok) setResult(sid, { ok: false, text: r.error });
-        else {
-          const d = r.data;
-          setResult(sid, {
-            ok: d.loggedIn === true,
-            text: (d.alreadyLoggedIn ? '登录态仍有效，无需重复登录' : (d.message || '登录完成'))
-              + (d.ms ? '（' + Math.round(d.ms / 1000) + 's）' : ''),
+        setLoginQrByAccount((current) => {
+          if (!current[sid]) return current;
+          const next = { ...current }; delete next[sid]; return next;
+        });
+        let polling = true;
+        const pollQr = (async () => {
+          while (polling) {
+            const response = await apiSoft('login-qr', { ...siteSlot(sid) }, 8000);
+            if (response.ok) {
+              const image = response.data?.available === true ? response.data.image : null;
+              setLoginQrByAccount((current) => {
+                if ((current[sid] || null) === (image || null)) return current;
+                const next = { ...current };
+                if (image) next[sid] = image; else delete next[sid];
+                return next;
+              });
+            }
+            await new Promise((resolve) => setTimeout(resolve, 1200));
+          }
+        })();
+        try {
+          const r = await apiSoft('login', { ...siteSlot(sid), wait: true, timeoutMs: 300000 }, 330000);
+          if (!r.ok) setResult(sid, { ok: false, text: r.error });
+          else {
+            const d = r.data;
+            setResult(sid, {
+              ok: d.loggedIn === true,
+              text: (d.alreadyLoggedIn ? '登录态仍有效，无需重复登录' : (d.message || '登录完成'))
+                + (d.ms ? '（' + Math.round(d.ms / 1000) + 's）' : ''),
+            });
+          }
+        } finally {
+          polling = false;
+          await pollQr;
+          setLoginQrByAccount((current) => {
+            if (!current[sid]) return current;
+            const next = { ...current }; delete next[sid]; return next;
           });
+          setBusySite(null);
+          await onRefresh?.();
         }
-        setBusySite(null);
-        await onRefresh?.();
       }
       async function checkLogin(sid) {
         // 在独立窗口里登录完后点这里立即确认结果（connect 幂等且轻量）。
@@ -1610,12 +1639,24 @@ window.__ModuleLoader__.load({
                   title: '删除该账户在本机的登录态、网页会话记录与身份缓存（不可撤销）',
                   onClick: () => setConfirming(s.accountKey),
                 }, '删除'))),
+          loginQrByAccount[s.accountKey] && h('div', {
+            className: 'hwb-login-qr',
+            role: 'status',
+            'aria-live': 'polite',
+            style: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 12, padding: 10 },
+          },
+            h('img', {
+              src: loginQrByAccount[s.accountKey],
+              alt: '登录二维码',
+              style: { display: 'block', width: 220, maxWidth: '100%', height: 'auto', padding: 8, background: '#fff', border: '1px solid #ddd', borderRadius: 8 },
+            }),
+            h('span', { className: 'hwb-hint' }, '请使用手机扫描二维码；二维码更新时会自动刷新。')),
           results[s.accountKey] && h('p', {
             className: 'hwb-hint indent ' + (results[s.accountKey].ok ? 'ok' : results[s.accountKey].tone === 'idle' ? '' : 'bad'),
             role: 'status',
           }, (results[s.accountKey].ok ? '✓ ' : '✗ ') + s.displayName + '：' + results[s.accountKey].text))),
         subHint ? null : h('p', { className: 'hwb-hint indent' },
-          '登录会打开浏览器窗口，请在窗口内完成一次性登录，成功后自动切回无头运行。'));
+          '登录二维码会显示在本行；没有二维码的站点仍可在浏览器窗口完成登录。'));
     }
 
     // 0.15.10：设置页的「累计等待发送」区块（WaitStats）已删除。
