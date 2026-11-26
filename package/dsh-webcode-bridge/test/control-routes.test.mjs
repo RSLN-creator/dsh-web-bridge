@@ -629,5 +629,5 @@ test('POST login-qr relays only the requested account QR payload', async () => {
   assert.equal(body.ok, true);
   assert.equal(body.available, true);
   assert.equal(body.accountKey, 'kimi#2');
-  assert.match(body.image, /^data:image\\/png;base64,/);
+  assert.match(body.image, /^data:image\/png;base64,/);
 });
