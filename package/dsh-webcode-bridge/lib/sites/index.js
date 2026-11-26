@@ -28,10 +28,12 @@ export const SITE_MODULES = Object.freeze({
   'zai-cn': zaiCnSite,
 });
 
+/** Return the registered site IDs for a provider-surface completeness check. */
 export function migratedSiteIds() {
   return Object.keys(SITE_MODULES);
 }
 
+/** Resolve one site adapter without falling back to a different website. */
 export function siteModuleFor(siteId) {
   return SITE_MODULES[siteId] || null;
 }
