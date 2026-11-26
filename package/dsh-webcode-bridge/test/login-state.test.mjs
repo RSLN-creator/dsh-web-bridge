@@ -24,6 +24,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { selectLoginQrCandidate } from '../lib/browser-driver.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SRC = readFileSync(join(here, '..', 'lib', 'browser-driver.js'), 'utf8');
@@ -327,4 +328,27 @@ test('⑨c 同源选择器在 providers.js 源码里只允许有一份字面量�
       `选择器字面量 ${literal} 在 providers.js 里出现了 ${count} 次——`
       + 'loginProbe 与 accountProbe 必须引用同一份常量，禁止各写一份（会漂移）');
   }
+});
+
+test('login QR candidate selection prefers a visible semantic QR over an avatar', () => {
+  const selected = selectLoginQrCandidate([
+    { index: 0, tag: 'img', width: 48, height: 48, visible: true, meta: 'account avatar' },
+    { index: 1, tag: 'img', width: 220, height: 220, visible: true, meta: 'login qrcode' },
+    { index: 2, tag: 'canvas', width: 256, height: 128, visible: true, meta: 'qr' },
+    { index: 3, tag: 'canvas', width: 220, height: 220, visible: false, meta: 'qr code' },
+  ]);
+  assert.deepEqual(selected, { index: 1, width: 220, height: 220 });
+});
+
+test('login QR candidate selection ignores unrelated square page elements', () => {
+  assert.equal(selectLoginQrCandidate([
+    { index: 0, tag: 'div', width: 240, height: 240, visible: true, meta: 'login panel' },
+    { index: 1, tag: 'img', width: 80, height: 80, visible: true, meta: 'avatar' },
+  ]), null);
+});
+
+test('semantic composer fallback and QR capture stay in the browser driver', () => {
+  assert.match(SRC, /COMPOSER_FALLBACK_SELECTOR/);
+  assert.match(SRC, /async function findComposerLocator/);
+  assert.match(SRC, /async function readLoginQr/);
 });
