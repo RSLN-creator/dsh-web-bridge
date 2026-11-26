@@ -3,7 +3,7 @@
 // ## 这个文件在防什么
 //
 // 0.19.50 起本项目要把散落的「站点知识」收成 `lib/sites/<siteId>.js`（每站点一个文件、
-// 导出同一形状的对象），**逐站点迁移、DeepSeek 先行**。这类重构最危险的不是写错新代码，
+// 导出同一形状的对象），**全部 11 个站点已迁移到独立模块**。这类重构最危险的不是写错新代码，
 // 而是**在搬家的过程中悄悄改变了对外可观测的形状**——比如少了一个 provider、
 // 模型 id 变了一个字符、分组名多了一个前缀。它们都不会让任何现有单测变红，
 // 却会让**历史设置值、旧会话、OpenAI 前端**同时失配。
@@ -32,6 +32,7 @@ import {
   SITES, providerIdsForRegistration, providerIdForSite, siteIdForProvider,
   providerGroupName, listAllModels, resolveWebModel,
 } from '../lib/providers.js';
+import { migratedSiteIds } from '../lib/sites/index.js';
 
 /** 站点 id 与顺序（顺序即 OpenAI /models 的列表顺序）。 */
 const EXPECTED_SITE_IDS = [
@@ -222,4 +223,10 @@ test('判据 8：每个目录条目的 acceptsImages 必须等于 resolveWebMode
   assert.equal(alias.acceptsImages, resolveWebModel('deepseek-web').acceptsImages === true,
     'deepseek-web 是 DEFAULT_MODEL_ID，它的目录条目必须与解析值同源'
     + '（修前这个字段整个漏掉 ⇒ 目录说 false、解析说 true）');
+});
+
+
+test('判据 0：每个公开站点都由 lib/sites/<siteId>.js 唯一声明', () => {
+  assert.deepEqual(migratedSiteIds(), EXPECTED_SITE_IDS,
+    '站点注册表必须与对外站点表一一对应；不允许再把站点声明内联进 providers.js');
 });
