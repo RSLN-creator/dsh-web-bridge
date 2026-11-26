@@ -389,7 +389,7 @@ const DOM_CAPTURE = `
  * 消息、要么被判成「提示词被截断」。因此这里只按元素事实分派，不看站点名。
  */
 
-const COMPOSER_FALLBACK_SELECTOR = 'textarea:not([disabled]):not([readonly]), [contenteditable="true"], [role="textbox"]';
+const COMPOSER_FALLBACK_SELECTOR = 'textarea:not([disabled]):not([readonly]), input:not([type="hidden"]):not([disabled]):not([readonly]), [contenteditable="true"]';
 const LOGIN_QR_HINT = /qr|qrcode|qr[\s_-]*code|scan[\s_-]*code|wechat|weixin|扫码|二维码/i;
 const LOGIN_QR_EXCLUDE = /avatar|profile|logo|brand|icon|user|头像|品牌|图标/i;
 const LOGIN_QR_SELECTOR = 'img,canvas,svg,[role="img"],[aria-label],[title],[class*="qr" i],[id*="qr" i],[data-testid*="qr" i],[class*="code" i],[id*="code" i]';
