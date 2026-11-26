@@ -119,8 +119,12 @@ export const deepseekSite = {
     fallbackContext: 1_000_000,
   },
   navigation: {
-    fromUrl: (url) => url.searchParams.get('chat_session_id')
-      || url.pathname.match(/\\/a\\/chat\\/s\\/([0-9a-zA-Z-]{8,64})/)?.[1] || null,
+    fromUrl: (url) => {
+      const parts = url.pathname.split('/');
+      const id = url.searchParams.get('chat_session_id')
+        || (parts[1] === 'a' && parts[2] === 'chat' && parts[3] === 's' && /^[0-9a-zA-Z-]{8,64}$/.test(parts[4] || '') ? parts[4] : null);
+      return id || null;
+    }
     toUrl: (origin, id) => origin + '/a/chat/s/' + encodeURIComponent(id),
   },
 };
