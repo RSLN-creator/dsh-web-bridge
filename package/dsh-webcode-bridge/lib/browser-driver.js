@@ -390,7 +390,7 @@ const DOM_CAPTURE = `
  */
 
 const COMPOSER_FALLBACK_SELECTOR = 'textarea:not([disabled]):not([readonly]), [contenteditable="true"], [role="textbox"]';
-const LOGIN_QR_HINT = /qr|qrcode|qr[\\s_-]*code|scan[\\s_-]*code|wechat|weixin|扫码|二维码/i;
+const LOGIN_QR_HINT = /qr|qrcode|qr[\s_-]*code|scan[\s_-]*code|wechat|weixin|扫码|二维码/i;
 const LOGIN_QR_EXCLUDE = /avatar|profile|logo|brand|icon|user|头像|品牌|图标/i;
 const LOGIN_QR_SELECTOR = 'img,canvas,svg,[role="img"],[aria-label],[title],[class*="qr" i],[id*="qr" i],[data-testid*="qr" i],[class*="code" i],[id*="code" i]';
 
