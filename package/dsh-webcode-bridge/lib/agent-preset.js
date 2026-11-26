@@ -12,6 +12,7 @@
 //     them locally and loops results back — exactly like a real API.
 
 import { textOfBlocks } from './flatten.js';
+import { getSite } from './providers.js';
 
 /** Cap one tool output inside a result block (web-side input sanity). */
 const MAX_OUTPUT_CHARS = 16_000;
@@ -305,14 +306,16 @@ function trainNoteOfficialFor(tools) {
   return TRAIN_NOTE_OFFICIAL_HEAD + officialToolCallSpecimen(sample.name, sample.args) + TRAIN_NOTE_OFFICIAL_TAIL;
 }
 /** 站点 → 再教学提示。未列出的站点保持 0.14.7 措辞逐字不变。 */
-const TRAIN_NOTES = Object.freeze({ glm: TRAIN_NOTE_GLM });
+
 /** 按站点取再教学提示——增量轮的 resultBlock 与首轮教学必须同一立场，否则
  *  模型刚被纠回一种形状，第 5 个工具结果又把它教回另一种。 */
 export function trainNoteFor(siteId, extra = '', tools = null) {
   const key = String(siteId || '').trim();
   // deepseek（0.16.19）：示例用会话真实工具名（有工具表时）；glm 与未列出站点
   // 保持既有措辞逐字不变。extra 只在实验变体里非空。
-  const base = key === 'deepseek' ? trainNoteOfficialFor(tools) : (TRAIN_NOTES[key] || TRAIN_NOTE);
+  const format = getSite(key)?.teaching?.toolCallFormat;
+  const base = format === 'deepseek-native' ? trainNoteOfficialFor(tools)
+    : format === 'json-fence' ? TRAIN_NOTE_GLM : TRAIN_NOTE;
   return extra ? base + extra : base;
 }
 
@@ -418,9 +421,10 @@ function deepseekTransport(tools) {
  */
 export function transportNoteFor(siteId, tools) {
   if (!Array.isArray(tools) || !tools.length) return '';
-  if (siteId === 'glm') return GLM_TRANSPORT + presentTransportNote(tools);
-  if (siteId === 'deepseek') return deepseekTransport(tools) + presentTransportNote(tools);
-  return LABEL_TRANSPORT + presentTransportNote(tools);
+  const format = getSite(siteId)?.teaching?.toolCallFormat;
+  const note = format === 'glm-json' ? GLM_TRANSPORT
+    : format === 'deepseek-native' ? deepseekTransport(tools) : LABEL_TRANSPORT;
+  return note + presentTransportNote(tools);
 }
 
 /** The agent preset: who the model is, which local tools exist, and the exact
@@ -437,6 +441,7 @@ export function buildPreset(options = {}) {
   const sitePrompt = typeof options.sitePrompt === 'string' && options.sitePrompt.trim() ? options.sitePrompt.trim() : '';
   if (sitePrompt) parts.push('[本网站指令]' + (options.siteId ? '（' + options.siteId + '）' : '') + '\n' + sitePrompt);
   const tools = Array.isArray(options.tools) ? options.tools : [];
+  const toolCallFormat = getSite(options.siteId)?.teaching?.toolCallFormat;
   // 实验变体 slim（**默认关闭**）：首轮更短。依据 arXiv 2510.05381「长上下文
   // 本身有害，即使检索完美」。取值刻意用「显式传入」而不是全局开关——
   // 默认路径必须与 0.14.7 逐字相同，任何收敛都要先有配对数据。
@@ -467,14 +472,14 @@ export function buildPreset(options = {}) {
       // search/open/click/find），标签形状会被抢走执行并回灌 unknown tool call
       // （2026-09-13 真机会话 cacaba8c/ab4c6dc8：模型反复重试标签形状全部阵亡，
       // 唯一存活的调用是代码块裸 JSON）。其它站点维持既有双形状不动。
-      ...(options.siteId === 'glm' ? [
+      ...(toolCallFormat === 'json-fence' ? [
         '需要调用工具时，只用下面这一种格式输出：',
         '格式（```json 代码块，唯一可用）：',
         '```json',
         '{"mcp_action": "call", "name": "工具名", "purpose": "执行此操作的简要原因", "arguments": {"参数名": "值"}}',
         '```',
         '警告：不要使用 <tool_call>…</tool_call> 或任何 XML/标签包裹调用——本网页会把这类标签当成它自己的内置工具抢走执行并报 unknown tool call，调用会静默丢失；只有 ```json 代码块能到达本地工具网关。',
-      ] : options.siteId === 'deepseek' ? [
+      ] : toolCallFormat === 'deepseek-native' ? [
         // 0.16.18：教**官方训练模板**（`<｜tool▁calls▁begin｜>` 家族，逐字依据见
         // 常量区 OFFICIAL_BAR 注释）。0.16.2 教的 DSML 是网页端自带格式、官方仓库
         // 零命中，模型对它无训练先验 → 长跑必然持续漂移（夹具 15–20 + run-8 四形状
@@ -510,7 +515,7 @@ export function buildPreset(options = {}) {
       // **默认路径零位移**：这一句在 ZERO_DRIFT_BASELINE 里逐字存在
       //（test/prompt-variants.test.mjs），因此只对 deepseek 换词，其余站点
       //（含 default/glm）**逐字不动**。
-      options.siteId === 'deepseek'
+      toolCallFormat === 'deepseek-native'
         ? '一次回复可以包含多个工具调用，会按顺序执行；有依赖的调用请分多轮等待结果。'
         : '一次回复可以包含多个工具调用代码块，会按顺序执行；有依赖的调用请分多轮等待结果。',
       // 多调用并行教学（0.19.95 起**全站生效**）：真机症状是「一条回复只发一个调用」——
@@ -611,7 +616,7 @@ export function skillCatalogPlan(options = {}) {
   const obj = raw && typeof raw === 'object' ? raw : {};
   const literal = typeof raw === 'string' ? raw : obj.mode;
   const mode = literal === 'off' || literal === 'slim' || literal === 'full' ? literal : 'auto';
-  const resolved = mode === 'auto' ? (options.siteId === 'deepseek' ? 'slim' : 'full') : mode;
+  const resolved = mode === 'auto' ? (getSite(options.siteId)?.teaching?.skillCatalogMode || 'full') : mode;
   const dropPrefixes = Array.isArray(obj.dropPrefixes) ? obj.dropPrefixes.map(String) : DEFAULT_SKILL_DROP_PREFIXES;
   const keep = new Set(Array.isArray(obj.keep) ? obj.keep.map(String) : DEFAULT_SKILL_KEEP);
   const maxDescChars = Number.isFinite(obj.maxDescChars) && obj.maxDescChars > 0
