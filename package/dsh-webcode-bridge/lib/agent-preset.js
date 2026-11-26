@@ -422,7 +422,7 @@ function deepseekTransport(tools) {
 export function transportNoteFor(siteId, tools) {
   if (!Array.isArray(tools) || !tools.length) return '';
   const format = getSite(siteId)?.teaching?.toolCallFormat;
-  const note = format === 'glm-json' ? GLM_TRANSPORT
+  const note = format === 'json-fence' ? GLM_TRANSPORT
     : format === 'deepseek-native' ? deepseekTransport(tools) : LABEL_TRANSPORT;
   return note + presentTransportNote(tools);
 }
