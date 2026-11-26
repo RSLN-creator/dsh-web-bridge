@@ -49,6 +49,45 @@ native permission system.
 - **Observable** — every delivery, fallback and rate-limit event is projected into
   `GET /__webcode/status`.
 
+## Web compatibility and site adapters
+
+The plugin's browser half follows DSH's Web client contract: `dsh.client.platform: "web"`,
+an exported `./client` entry and the lazy `window.__ModuleLoader__.load(...)` bundle factory.
+Its `dsh.client.inject` field lists the DSH packages that own the UI slots this client contributes
+to. These are **client package dependencies**, not Cordis service names.
+
+The current owners are explicit:
+
+- `@deepseek-ai/dsh-client-ui-chat` — composer dock.
+- `@deepseek-ai/dsh-client-ui-settings-general` — settings sections.
+- `@deepseek-ai/dsh-client-ui-sidebar-right` — right-sidebar tabs and tab actions.
+
+Website facts are kept in `lib/sites/<siteId>.js`. The registry in `lib/sites/index.js` contains
+all 11 supported site IDs. Each site module owns its origin, DOM selectors, login evidence, model
+catalogue, decoder family and any verified navigation or prompt-format capabilities. Shared browser
+automation, transport plumbing, decoders and protocol parsing remain shared; they are not copied once
+per site.
+
+This is frontend-framework independent: switching a page from React to Vue or Svelte does not, by
+itself, require a plugin update when the exposed DOM semantics and network protocol remain compatible.
+It is **not** a promise of zero maintenance. A changed login flow, semantic DOM, anti-bot check, API
+request, streaming protocol or conversation identity is a real external contract change and may
+require updating that site's adapter or shared engine. See
+[the site-adapter architecture and acceptance matrix](../../doc/site-adapter-architecture.md).
+
+## Session continuity
+
+There are three separate lifetimes:
+
+1. The DSH agent session stores the agent's messages and tool history.
+2. The plugin browser profile stores the website's login state.
+3. The website conversation ID identifies the remote chat to continue.
+
+A restored DSH session does not, on its own, restart a browser process or recreate a deleted website
+conversation. The plugin's local browser profile and session cursor bridge those separate lifetimes.
+When a site cannot provide a verified conversation URL, stream ID or safe resume path, the adapter
+must report that limitation rather than silently pretending it resumed.
+
 ## Requirements
 
 | | |
