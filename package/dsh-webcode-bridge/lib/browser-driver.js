@@ -394,6 +394,12 @@ const LOGIN_QR_HINT = /qr|qrcode|qr[\s_-]*code|scan[\s_-]*code|wechat|weixin|扫
 const LOGIN_QR_EXCLUDE = /avatar|profile|logo|brand|icon|user|头像|品牌|图标/i;
 const LOGIN_QR_SELECTOR = 'img,canvas,svg,[role="img"],[aria-label],[title],[class*="qr" i],[id*="qr" i],[data-testid*="qr" i],[class*="code" i],[id*="code" i]';
 
+/**
+ * Choose the best visible QR-like media node for remote login display.
+ * The selector is deliberately conservative so avatars and logos are not sent as login codes.
+ * @param {Array<object>} candidates - Visible media metadata collected from the login page.
+ * @returns {{index:number,width:number,height:number}|null} The selected candidate or null.
+ */
 export function selectLoginQrCandidate(candidates = []) {
   let best = null;
   for (const item of candidates) {
@@ -419,6 +425,11 @@ export function selectLoginQrCandidate(candidates = []) {
   return best ? { index: best.index, width: best.width, height: best.height } : null;
 }
 
+/**
+ * Classify an observed composer element without assuming the site's frontend framework.
+ * @param {object|null} info - DOM metadata for the candidate composer.
+ * @returns {string} The shared composer strategy for the observed element.
+ */
 export function composerStrategy(info) {
   if (!info) return 'unknown';
   const tag = String(info.tag || '').toLowerCase();
