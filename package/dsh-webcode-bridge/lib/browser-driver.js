@@ -389,7 +389,8 @@ const DOM_CAPTURE = `
  * 消息、要么被判成「提示词被截断」。因此这里只按元素事实分派，不看站点名。
  */
 const COMPOSER_FALLBACK_SELECTOR = 'textarea:not([disabled]):not([readonly]), [contenteditable="true"], [role="textbox"]';
-const COMPOSER_QR_HINT = /qr|qrcode|qr[\\s_-]*code|scan[\\s_-]*code|wechat|weixin|扫码|二维码/i;
+const LOGIN_QR_HINT = /qr|qrcode|qr[\s_-]*code|scan[\s_-]*code|wechat|weixin|扫码|二维码/i;
+const LOGIN_QR_EXCLUDE = /avatar|profile|logo|icon|user|头像|品牌|图标/i;
 const LOGIN_QR_SELECTOR = 'img,canvas,svg,[role="img"],[aria-label],[title],[class*="qr" i],[id*="qr" i],[data-testid*="qr" i],[class*="code" i],[id*="code" i]';
 
 export function selectLoginQrCandidate(candidates = []) {
@@ -401,8 +402,10 @@ export function selectLoginQrCandidate(candidates = []) {
     if (item?.visible !== true || width < 96 || height < 96) continue;
     const ratio = width / height;
     if (ratio < 0.75 || ratio > 1.33) continue;
-    const hinted = COMPOSER_QR_HINT.test(String(item?.meta || ''));
+    const meta = String(item?.meta || '');
+    const hinted = LOGIN_QR_HINT.test(meta);
     const media = ['img', 'canvas', 'svg'].includes(tag) || item?.backgroundImage === true;
+    if (!hinted && LOGIN_QR_EXCLUDE.test(meta)) continue;
     if (!hinted && !(media && width >= 150 && height >= 150)) continue;
     const score = (hinted ? 100 : 0)
       + (tag === 'canvas' ? 40 : tag === 'img' ? 35 : tag === 'svg' ? 25 : 0)
