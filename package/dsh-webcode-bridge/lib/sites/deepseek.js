@@ -118,4 +118,9 @@ export const deepseekSite = {
     // 从不执行——它是防御性声明，不是活路径。
     fallbackContext: 1_000_000,
   },
+  navigation: {
+    fromUrl: (url) => url.searchParams.get('chat_session_id')
+      || url.pathname.match(/\\/a\\/chat\\/s\\/([0-9a-zA-Z-]{8,64})/)?.[1] || null,
+    toUrl: (origin, id) => origin + '/a/chat/s/' + encodeURIComponent(id),
+  },
 };
