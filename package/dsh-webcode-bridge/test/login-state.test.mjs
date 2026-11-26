@@ -358,3 +358,8 @@ test('login QR candidate selection rejects an account avatar without QR evidence
     { index: 0, tag: 'img', width: 220, height: 220, visible: true, meta: 'user avatar profile' },
   ]), null);
 });
+
+test('login browser selects headless mode when a Linux host has no display', () => {
+  assert.match(SRC, /headless: options\\.headless !== false,\\n\\s*loginHeadless:/);
+  assert.match(SRC, /process\\.platform === 'linux' && !process\\.env\\.DISPLAY && !process\\.env\\.WAYLAND_DISPLAY/);
+});
