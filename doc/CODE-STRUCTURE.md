@@ -23,10 +23,10 @@
 
 | 项 | 值 | 取法 |
 | --- | --- | --- |
-| `lib/` 模块数 / 总行数 | **46 / 34,454**（44 个根模块 + `sites/` 2 个） | `node wiki/tools/gen-index.mjs --check` |
-| 最大模块 | `browser-driver.js` **6,016 行** | 同上 |
-| 次大 | `client.cjs` **5,011**、`index.js` **4,875**、`agent-preset.js` **3,089** | 同上 |
-| 再次 | `web-control.js` 1,929、`think-effort.js` 1,373、`providers.js` 1,300、`decoder.js` 1,164 | 同上 |
+| `lib/` 模块数 / 总行数 | **过期快照**：本表早于 2026-11-26 的 adapter 迁移；请以 `node wiki/tools/gen-index.mjs --check` 现扫 |
+| 最大模块 | 以生成索引现扫为准（本表数值早于 2026-11-26） |
+| 次大 | 以生成索引现扫为准（本表数值早于 2026-11-26） |
+| 再次 | 以生成索引现扫为准；`providers.js` 已显著缩小为 provider projection |
 | 测试文件 | **124 个** `*.test.mjs` | `node scripts/check-ledger.mjs` |
 | 真机夹具 | `test/fixtures/` 下的 `dsml-real-*.txt` 与具名形态 | `test/fixtures/` |
 | 入口 | `main: ./lib/index.js`；`exports` 另含 `./client`、`./cordis.patch.yml` | `package.json` |
@@ -292,7 +292,7 @@ tool-parser.js      -> agent-preset, tool-transport   （未接线，仅单测�
 > 当成一手事实写进了这里。**研究文档是快照，改代码前必须 `grep` 现网。**
 
 第 1 笔是**结构性**的，也是 [`diagnosis-2026-09-16.md`](diagnosis-2026-09-16.md) 第 6.1 节给出的唯一框架级建议：
-**收成 `lib/sites/<siteId>.js`**（每站点一个文件、导出同一形状对象），逐站点迁移、DeepSeek 先行。
+**已收成 `lib/sites/<siteId>.js`**（11 个站点一站一个模块）；`providers.js` 只组装公开目录，公共算法仍共用。下一步是把剩余有证据的站点分支继续移入 adapter capabilities。
 
 > **关于「要不要按站点复制隔离」的正面回答**：**不要复制**。
 > 复制在本仓库**已经产生过漂移而不是隔离**（三份 `ANSWER_SELECTOR` 字面量「修一处、忘两处」）；
