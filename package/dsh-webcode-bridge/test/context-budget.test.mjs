@@ -2,7 +2,7 @@
 //
 // 为什么需要这道闸（用户报的「越跑越傻 / 网页端截半截」这一类）：
 // 桥向 DSH 声明的 `contextWindow` 是乐观值（glm/zai 现在是真机实测的 1M，见
-// providers.js 的 GLM_CONTEXT_WINDOW），而「声明偏大」的旧代价是**静默的**——
+// sites/glm.js 的 GLM_CONTEXT_WINDOW），而「声明偏大」的旧代价是**静默的**——
 // DSH 的自动压缩永不触发、transcript 只增不减，最后要么被网页端截半截，要么撞
 // 240s 超时。已有的 PROMPT_TRUNCATED 回读校验发生在**填写之后**，报错只有长度差，
 // 看不出超了多少、也不知道下一步做什么。
@@ -144,7 +144,7 @@ test('接线：窗口取值只有一个来源（contextWindowFor），声明与�
 });
 
 test('GLM/Z.ai 的窗口声明有真机依据：常量被引用且注释记录了探针', () => {
-  const src = readLib('providers.js');
+  const src = readLib('sites/glm.js');
   assert.ok(/const GLM_CONTEXT_WINDOW = 1_000_000;/.test(src), '应有实测下界常量');
   const refs = (src.match(/GLM_CONTEXT_WINDOW/g) || []).length;
   assert.ok(refs >= 7, `glm(3)+zai(4) 条目都该引用它（含定义至少 8 处，实际 ${refs}）`);
