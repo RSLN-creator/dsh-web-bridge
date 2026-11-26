@@ -388,6 +388,33 @@ const DOM_CAPTURE = `
  * 判错的代价：fill() 写不进去或 inputValue() 抛错 → 这两个站点要么发不出
  * 消息、要么被判成「提示词被截断」。因此这里只按元素事实分派，不看站点名。
  */
+const COMPOSER_FALLBACK_SELECTOR = 'textarea:not([disabled]):not([readonly]), [contenteditable="true"], [role="textbox"]';
+const COMPOSER_QR_HINT = /qr|qrcode|qr[\\s_-]*code|scan[\\s_-]*code|wechat|weixin|扫码|二维码/i;
+const LOGIN_QR_SELECTOR = 'img,canvas,svg,[role="img"],[aria-label],[title],[class*="qr" i],[id*="qr" i],[data-testid*="qr" i],[class*="code" i],[id*="code" i]';
+
+export function selectLoginQrCandidate(candidates = []) {
+  let best = null;
+  for (const item of candidates) {
+    const width = Number(item?.width) || 0;
+    const height = Number(item?.height) || 0;
+    const tag = String(item?.tag || '').toLowerCase();
+    if (item?.visible !== true || width < 96 || height < 96) continue;
+    const ratio = width / height;
+    if (ratio < 0.75 || ratio > 1.33) continue;
+    const hinted = COMPOSER_QR_HINT.test(String(item?.meta || ''));
+    const media = ['img', 'canvas', 'svg'].includes(tag) || item?.backgroundImage === true;
+    if (!hinted && !(media && width >= 150 && height >= 150)) continue;
+    const score = (hinted ? 100 : 0)
+      + (tag === 'canvas' ? 40 : tag === 'img' ? 35 : tag === 'svg' ? 25 : 0)
+      + (width >= 160 ? 10 : 0)
+      + (width >= 240 ? 5 : 0);
+    if (!best || score > best.score || (score === best.score && width * height > best.width * best.height)) {
+      best = { index: item.index, width, height, score };
+    }
+  }
+  return best ? { index: best.index, width: best.width, height: best.height } : null;
+}
+
 export function composerStrategy(info) {
   if (!info) return 'unknown';
   const tag = String(info.tag || '').toLowerCase();
@@ -1125,7 +1152,7 @@ export function createBrowserDriver(options = {}) {
     site: siteUrl,
     profileDir: options.profileDir,
     executablePath: options.executablePath ?? defaultEdgePath(),
-    headless: options.headless !== false,
+    headless: options.headless !== false,\n    loginHeadless: options.loginHeadless === true\n      || (process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY),
     loginTimeoutMs: options.loginTimeoutMs ?? 300_000,
     requestTimeoutMs: options.requestTimeoutMs ?? 240_000,
     // 单块写入字符数上限（0.14.5）。超过它就把 composer 分块写入并在块间回读
@@ -1158,6 +1185,7 @@ export function createBrowserDriver(options = {}) {
     sendButton: contract.sendButtonSelector,
     stopButton: contract.stopButtonSelector,
   };
+  const COMPOSER_SELECTOR = [SEL.input, COMPOSER_FALLBACK_SELECTOR].filter(Boolean).join(', ');
   // 日志前缀带槽：两个槽同时跑时，`[webcode-driver:glm#2]` 与 `[webcode-driver:glm]`
   // 能一眼分开，否则排障时要靠时间戳猜哪条属于哪个账户。
   const tag = slot === DEFAULT_SLOT ? siteId : siteId + '#' + slot;
@@ -1408,8 +1436,31 @@ export function createBrowserDriver(options = {}) {
           }
         }
         return n;
-      }, SEL.input);
+      }, COMPOSER_SELECTOR);
     } catch { return 0; }
+  }
+
+  async function findComposerLocator(p) {
+    for (const selector of [SEL.input, COMPOSER_FALLBACK_SELECTOR]) {
+      let matches;
+      try { matches = p.locator(selector); } catch { continue; }
+      let count = 0;
+      try { count = await matches.count(); } catch { continue; }
+      for (let i = 0; i < count; i += 1) {
+        const candidate = matches.nth(i);
+        const usable = await candidate.evaluate((el) => {
+          const rect = el.getBoundingClientRect();
+          const style = getComputedStyle(el);
+          return rect.width > 0 && rect.height > 0
+            && style.display !== 'none' && style.visibility !== 'hidden'
+            && Number(style.opacity || 1) > 0
+            && !el.disabled && !el.readOnly && el.getAttribute('aria-disabled') !== 'true'
+            && (el.isContentEditable || ['INPUT', 'TEXTAREA'].includes(el.tagName) || el.getAttribute('role') === 'textbox');
+        }).catch(() => false);
+        if (usable) return candidate;
+      }
+    }
+    throw new Error('No visible editable composer matched the site contract or semantic fallback');
   }
 
   /**
@@ -2745,7 +2796,7 @@ export function createBrowserDriver(options = {}) {
       await page.goto(cfg.site, { waitUntil: 'domcontentloaded', timeout: 45_000 });
     }
     // 输入框在≠已登录（z.ai 游客页有完整输入框），统一走登录判定。
-    await page.waitForSelector(SEL.input, { timeout: 20_000 }).catch(() => {});
+    await page.waitForSelector(COMPOSER_SELECTOR, { timeout: 20_000 }).catch(() => {});
     const ok = await judgeLoggedIn(page);
     rememberLogin(ok);
     return ok;
@@ -3657,7 +3708,7 @@ export function createBrowserDriver(options = {}) {
             if (!alreadyThere) {
               await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 45_000 });
             }
-            await page.waitForSelector(SEL.input, { timeout: 20_000 }).catch(() => {});
+            await page.waitForSelector(COMPOSER_SELECTOR, { timeout: 20_000 }).catch(() => {});
             // 风控/验证页要在判定登录态**之前**识别：那种页面上的 textarea 全是隐藏的
             // 脚本模板，judgeLoggedIn 会把它们当成「输入框在 = 已登录」，随后 fill
             // 必然超时（这正是 GLM 深链第二轮的失败形态）。
@@ -4376,7 +4427,7 @@ export function createBrowserDriver(options = {}) {
           log('prompt transport forced inline by site policy (ATTACH_FORBIDDEN_SITES), site=' + siteId
             + ' chars=' + plan.total);
         }
-      const input = page.locator(SEL.input).first();
+      const input = await findComposerLocator(page);
       // 2026-09-13：doubao（tiptap/ProseMirror）与 kimi（div.chat-input-editor）
       // 的输入框是 contenteditable，**不是**表单控件。Playwright 的 fill() 只认
       // input/textarea/[contenteditable]（后者要走 locator.fill 的 contenteditable
@@ -5499,6 +5550,50 @@ export function createBrowserDriver(options = {}) {
     return finalUrl;
   }
 
+  async function readLoginQr() {
+    if (loginPhase !== 'waiting-for-login' || !page || page.isClosed?.()) {
+      return { ok: true, available: false, phase: loginPhase };
+    }
+    const frames = typeof page.frames === 'function' ? page.frames().slice(0, 12) : [];
+    for (const frame of frames) {
+      let candidates = [];
+      try {
+        candidates = await frame.evaluate((selector) => [...document.querySelectorAll(selector)].map((el, index) => {
+          const rect = el.getBoundingClientRect();
+          const style = getComputedStyle(el);
+          return {
+            index,
+            tag: el.tagName.toLowerCase(),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+            visible: rect.width > 0 && rect.height > 0
+              && style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) > 0,
+            meta: [
+              el.getAttribute('alt'), el.getAttribute('aria-label'), el.getAttribute('title'),
+              el.getAttribute('data-testid'), el.id, String(el.className || ''),
+            ].filter(Boolean).join(' ').slice(0, 400),
+            backgroundImage: style.backgroundImage !== 'none',
+          };
+        }), LOGIN_QR_SELECTOR);
+      } catch { continue; }
+      const candidate = selectLoginQrCandidate(candidates);
+      if (!candidate) continue;
+      try {
+        const image = await frame.locator(LOGIN_QR_SELECTOR).nth(candidate.index)
+          .screenshot({ type: 'png', timeout: 3000 });
+        return {
+          ok: true,
+          available: true,
+          image: 'data:image/png;base64,' + image.toString('base64'),
+          width: candidate.width,
+          height: candidate.height,
+          capturedAt: Date.now(),
+        };
+      } catch { /* a QR can disappear while the page is refreshing it */ }
+    }
+    return { ok: true, available: false, phase: loginPhase };
+  }
+
   async function openLogin({ onState } = {}) {
     if (busy || transitioning) throw new Error('driver busy with a web turn — login refused');
     transitioning = true;
@@ -5544,15 +5639,14 @@ export function createBrowserDriver(options = {}) {
       }
       try { if (ctx) await ctx.close(); } catch {}
       ctx = null; page = null;
-      log('opening headed window for login');
+      const loginHeadless = cfg.loginHeadless === true;
+      log(loginHeadless ? 'opening headless login page for web QR relay' : 'opening headed window for login');
       report('launching');
-      await launch({ headless: false }).catch(async (err) => {
-        // 上一次浏览器被强杀留下的单实例锁：清掉再试一次（clearStaleProfileLocks
-        // 在 ctx 为空时才动手，这里 ctx 已置空，是安全的）。
-        warn('headed launch failed, retrying after lock cleanup:', err?.message);
+      await launch({ headless: loginHeadless }).catch(async (err) => {
+        warn('login browser launch failed, retrying after lock cleanup:', err?.message);
         await new Promise((r) => setTimeout(r, 800));
         ctx = null; page = null;
-        await launch({ headless: false });
+        await launch({ headless: loginHeadless });
       });
       try { await navigateForDisplay(cfg.site); } catch {}
       report('waiting-for-login');
@@ -5705,7 +5799,7 @@ export function createBrowserDriver(options = {}) {
     try { await navigateForDisplay(target); } catch { /* navigateForDisplay 内部已 warn */ }
     // 与登录同一套判定（z.ai 游客页有输入框，旧「URL 不含 login 即已登录」
     // 会把未登录记成已登录）；先等输入框渲染完再判，避免瞬时误判未登录。
-    await page.waitForSelector(SEL.input, { timeout: 15_000 }).catch(() => {});
+    await page.waitForSelector(COMPOSER_SELECTOR, { timeout: 15_000 }).catch(() => {});
     loggedIn = await judgeLoggedIn(page);
     if (loggedIn) persistLoginState({ loggedIn: true, at: Date.now(), message: '独立窗口核验' });
     log(`headed window open ${w}x${h} → ${target}`);
@@ -6055,7 +6149,7 @@ export function createBrowserDriver(options = {}) {
   // sessionSlot 与 status().sessionSlot 同源（sessionSlotFor）：控制面
   //（`GET/POST /__webcode/session-slot`）与面板都要能按 key 直接问一次，
   // 而不是只能读「最近一个 key」的 status 投影。省略 key = 最近一次 sendTurn 的 key。
-  return { sendPrompt, conversationForSession, sendTurn, resetConversation, conversationFor, sessionSlot: sessionSlotFor, connect, interact, openLogin, openWindow, closeWindow, importStorageFromProfile, status, close, diagnostics, getToken, profileCookies, writeProfileCookies, userAgent, probeAttachment, readAccountIdentity, get page() { return page; }, webApi, listSessions, fetchHistory, screenshotBase64, setImageLimitsProvider };
+  return { sendPrompt, conversationForSession, sendTurn, resetConversation, conversationFor, sessionSlot: sessionSlotFor, connect, interact, openLogin, readLoginQr, openWindow, closeWindow, importStorageFromProfile, status, close, diagnostics, getToken, profileCookies, writeProfileCookies, userAgent, probeAttachment, readAccountIdentity, get page() { return page; }, webApi, listSessions, fetchHistory, screenshotBase64, setImageLimitsProvider };
 }
 
 function abortError() {
