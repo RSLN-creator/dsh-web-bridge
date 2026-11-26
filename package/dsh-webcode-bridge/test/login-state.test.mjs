@@ -352,3 +352,9 @@ test('semantic composer fallback and QR capture stay in the browser driver', () 
   assert.match(SRC, /async function findComposerLocator/);
   assert.match(SRC, /async function readLoginQr/);
 });
+
+test('login QR candidate selection rejects an account avatar without QR evidence', () => {
+  assert.equal(selectLoginQrCandidate([
+    { index: 0, tag: 'img', width: 220, height: 220, visible: true, meta: 'user avatar profile' },
+  ]), null);
+});
