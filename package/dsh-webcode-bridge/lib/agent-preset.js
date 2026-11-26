@@ -594,7 +594,7 @@ export function buildPreset(options = {}) {
  *     我们保留 `/名字` 手势入口（手势由 `dsh-tool-skill` 独立按用户消息扫描，不经目录），
  *     只是不再把它们的名字塞进首轮。省略事实**写在目录里**（绝不静默丢内容，本仓库纪律）。
  *   · 非 deepseek 站点与不传 `skillCatalog` 时**逐字不动**（`mode:'auto'` ⇒ 只有
- *     siteId==='deepseek' 走 slim），因此既有 `ZERO_DRIFT_BASELINE` 与全部官方站点
+ *     声明 skillCatalogMode 为 slim 的站点走 slim），因此既有 `ZERO_DRIFT_BASELINE` 与全部官方站点
  *     变体不受影响。
  */
 const SKILL_CATALOG_RE = /<system-reminder>\s*\n?A skill is a reusable set of task-specific instructions[\s\S]*?<\/system-reminder>/;
