@@ -1428,6 +1428,11 @@ export function createWebControl(deps = {}) {
       if (r && r.ok) return { ok: true, file, storeDir };
       return { ok: false, code: 'OPEN_FAILED', file, storeDir, error: String(r?.error || 'open failed').slice(0, 200) };
     },
+    'POST login-qr': async (body) => {
+      const reader = relay?.config?.loginQrReader;
+      if (typeof reader !== 'function') return { ok: true, available: false };
+      return reader(accountKeyOf(body, { fallback: '' }));
+    },
     'POST login': async (body) => {
       const accountKey = accountKeyOf(body, { fallback: '' });
       const wait = body?.wait !== false;     // 默认等待；显式 {wait:false} 才是旧的即开即回
