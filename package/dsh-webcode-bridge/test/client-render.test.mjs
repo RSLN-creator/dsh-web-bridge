@@ -2495,3 +2495,17 @@ test('★ #85 unsupported host and browser locales conservatively render Chinese
     'unsupported locales must preserve the Chinese explanatory tooltip');
 });
 
+test('★ runtime build fingerprint is exposed in the native version badge tooltip', async () => {
+  const rendered = await renderPane({
+    payloads: [emptyWindows],
+    which: 'settings',
+    sites: SITE_ROWS,
+  });
+  assert.deepEqual(rendered.errors, [], 'settings page with build fingerprint failed to render');
+  const titles = treeAttrs(rendered.tree, ['title']);
+  const versionTitle = titles.find(value => value.includes('当前进程构建标识'));
+  assert.ok(versionTitle, 'the version badge tooltip must identify the running process build');
+  assert.ok(versionTitle.includes('x'), 'the tooltip must expose the exact /status build.hash value');
+  assert.ok(treeText(rendered.tree).includes('vtest'), 'the visible version must remain unchanged');
+});
+
