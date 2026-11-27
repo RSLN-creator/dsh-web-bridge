@@ -8,6 +8,8 @@ this file is the package-facing release history.
 ## Unreleased（2026-11-26：全站点适配层重构、Web 合约补齐与 QR 登录桥接）
 
 ### 框架 / 网站适配
+- 将 DeepSeek 搜索开关匹配、请求元数据键和严格模型核验声明移入 adapter `contract`；
+  `lib/contract.js` 对全部站点统一投影，并在注册阶段校验元数据形状，移除 DeepSeek ID 分支。
 - 移除仅含 DeepSeek 的客户端 `MODEL_NAMES` 兜底表，模型名称回落到 adapter 的 canonical `siteName`。
 - 将账户列表排序优先级移入 site adapter 并通过 `/status → driver.sites` 投影；
   删除未使用的客户端站点 origin 副本，避免重复维护域名清单。
