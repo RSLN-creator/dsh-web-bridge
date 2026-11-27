@@ -162,8 +162,9 @@ function withFixtureGeneration(driver, { expectedFresh, gotoCalls }) {
       pageFailure = error;
     }
 
-    assert.ok(pageFailure,
-      'the offline page has no composer action; the real browser driver must not fabricate a live reply');
+    assert.equal(pageFailure?.message,
+      'No visible editable composer matched the site contract or semantic fallback',
+      'the fixture must stop only at the deliberate missing-composer boundary; unexpected driver failures must fail the test');
     assert.equal(options.fresh === true, expectedFresh,
       'the browser driver must receive the expected fresh/resume mode');
 
