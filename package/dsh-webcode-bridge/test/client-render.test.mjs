@@ -50,7 +50,7 @@ const SITE_ROWS = SITES.map((site) => ({
 }));
 
 /** 在当前进程里加载 client.cjs 并跑若干渲染周期，返回每次渲染捕获的异常。 */
-async function renderPane({ payloads, which = 'pane', sites = [], roster = null, primitiveOmit = [], waitStats = null, openMenu = false, tabParams = undefined, noTabActions = false, settingsTab = '', sessionProps = SESSION_PROPS, iconNaming = 'legacy', composerSearch = null } = {}) {
+async function renderPane({ payloads, which = 'pane', sites = [], roster = null, primitiveOmit = [], waitStats = null, openMenu = false, tabParams = undefined, noTabActions = false, settingsTab = '', sessionProps = SESSION_PROPS, iconNaming = 'legacy', composerSearch = null, documentLanguage = 'zh-CN', navigatorLanguage = 'zh-CN' } = {}) {
   // 0.16.38：设置页按作用域切成「全局页 / 站点页」。站点的账户、模型、提示词三张卡
   // 只在站点页渲染，护栏必须能直接渲染站点页才谈得上验证它们——否则只能断言
   // 「全局页看不见」，那证明不了站点页是对的。`initialSettingsTab` 是给这个用的
@@ -261,8 +261,8 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
   };
 
   try {
-    global.window = { __ModuleLoader__: { load: (def) => { captured = def; } } };
-    global.document = { createElement: () => ({ textContent: '', remove() {} }), head: { appendChild() {} }, body: {}, querySelector: () => null, addEventListener() {}, removeEventListener() {} };
+    global.window = { navigator: { language: navigatorLanguage }, __ModuleLoader__: { load: (def) => { captured = def; } } };
+    global.document = { documentElement: { lang: documentLanguage }, createElement: () => ({ textContent: '', remove() {} }), head: { appendChild() {} }, body: {}, querySelector: () => null, addEventListener() {}, removeEventListener() {} };
     global.MutationObserver = class { observe() {} disconnect() {} };
     // 组件的轮询计时器：不 stub 会拖住事件循环。0.16.24 起还要**记下周期**——
     // 「在途等待时 1 秒一问」是需求的一半（10 秒一问的话数字 10 秒才动一格）。
@@ -2368,3 +2368,46 @@ test('★ 0.19.96 设置页保存载荷：字段名正确、跟随全局=删键�
   assert.match(src, /value: siteModeBySite\[settingsTab\] \|\| ''/,
     'site-mode selection must use the active adapter and default to no website change');
 });
+
+test('★ #85 native-panel login status localizes through one balanced zh/en dictionary', () => {
+  const source = bridgeSrcFrom('client.cjs');
+  const match = source.match(/const MSG = Object\\.freeze\\(\\{[\\s\\S]*?\\n    \\}\\);/);
+  assert.ok(match, 'native client must own one explicit MSG dictionary');
+  const zhKeys = (match[0].match(/(?<![A-Za-z])zh:/g) || []).length;
+  const enKeys = (match[0].match(/(?<![A-Za-z])en:/g) || []).length;
+  assert.equal(zhKeys, enKeys, 'every native-panel message needs both zh and en values');
+  assert.ok(zhKeys >= 8, 'status dictionary coverage unexpectedly shrank: ' + zhKeys);
+  assert.match(source, /normalizeUiLanguage\\(document\\.documentElement\\?\\.lang\\)[\\s\\S]*?normalizeUiLanguage\\(window\\.navigator\\?\\.language\\)/,
+    'the host document language must win, with browser language as fallback');
+});
+
+test('★ #85 login status renders in host language and falls back to browser language', async () => {
+  const sites = SITE_ROWS.map((row) => row.siteId === 'deepseek'
+    ? { ...row, loggedIn: false, loginState: 'uncertain', loginVerified: false, loginBasis: 'probe-fallback' }
+    : row);
+  const render = (documentLanguage, navigatorLanguage) => renderPane({
+    payloads: [emptyWindows],
+    which: 'site',
+    tabParams: { siteId: 'deepseek', slot: '' },
+    sites,
+    documentLanguage,
+    navigatorLanguage,
+  });
+
+  const hostChinese = await render('zh-CN', 'en-US');
+  assert.deepEqual(hostChinese.errors, [], 'Chinese host-language render failed');
+  assert.ok(treeText(hostChinese.tree).includes('待确认'), 'Chinese host language must keep the status label in Chinese');
+  assert.ok(treeAttrs(hostChinese.tree, ['title']).some((value) => value.includes('登录特征未命中')),
+    'Chinese host language must keep the explanatory tooltip in Chinese');
+
+  const hostEnglish = await render('en-US', 'zh-CN');
+  assert.deepEqual(hostEnglish.errors, [], 'English host-language render failed');
+  assert.ok(treeText(hostEnglish.tree).includes('Needs verification'), 'host English must translate the visible login status');
+  assert.ok(treeAttrs(hostEnglish.tree, ['title']).some((value) => value.includes('No login marker matched')),
+    'host English must translate the explanatory tooltip');
+
+  const browserFallback = await render('', 'en-GB');
+  assert.deepEqual(browserFallback.errors, [], 'browser-language fallback render failed');
+  assert.ok(treeText(browserFallback.tree).includes('Needs verification'), 'browser English must be used when the host declares no language');
+});
+
