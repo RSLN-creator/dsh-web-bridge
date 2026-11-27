@@ -33,6 +33,8 @@ export const glmSite = {
   // 括号里的译名/厂商名是注解不是名字，一律去掉。**只改展示**：模型 id、分组名
   // （`providerGroupName` 走 shortKey/覆盖表）、短键、选择器契约都不受影响。
   id: 'glm', name: 'GLM', origin: 'https://chatglm.cn',
+  // Measured composer truncation guard: keep long prompts on the attachment path.
+  limits: { attachInlineLimitChars: 8_000 },
   // sdata.chatglm.cn 是埋点上报域：跨域被拒不影响功能，但会在控制台刷
   // 一片 CORS 错误（真机 52 条）。纳入同源转发后干净且仍能上报。
   staticOrigins: ['https://sdata.chatglm.cn', 'https://at.alicdn.com', 'https://o.alicdn.com', 'https://lf3-data.volccdn.com', 'https://res.wx.qq.com'],
