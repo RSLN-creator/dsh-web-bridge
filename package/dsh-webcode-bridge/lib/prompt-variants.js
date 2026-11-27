@@ -109,9 +109,9 @@ export const VARIANT_SPECS = Object.freeze(VARIANT_DEFINITIONS.map((definition) 
 /**
  * 实验变体（**默认不返回**，只有 `buildPromptVariants({ experiments: true })` 才附上）。
  *
- * 为什么与 VARIANT_SPECS 分开：前者是**已生效的生产分支**（站点 → 分支的映射，
- * 由 variantIdForSite 决定，测试钉死只有 glm 例外）；后者是**尚未转正的候选**，
- * 只能被基准实验显式拉出来跑，绝不能悄悄进入真实会话的选路。
+ * 为什么与 VARIANT_SPECS 分开：前者是**已生效的生产分支**（成员由 adapter teaching
+ * profile 派生）；后者是**尚未转正的候选**，其 bench eligibility 单独保留（当前实验
+ * 不覆盖 GLM 的 json-fence 传输立场），只能由基准实验显式拉出，绝不进入真实会话选路。
  * 这个分离本身就是纪律：提示词改动在拿到配对数据之前不进默认路径。
  *
  * 两个候选各自的文献依据见 doc/research/prompt-engineering-evidence-2026-09-14.md：
