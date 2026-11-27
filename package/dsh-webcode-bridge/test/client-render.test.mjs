@@ -2371,14 +2371,18 @@ test('★ 0.19.96 设置页保存载荷：字段名正确、跟随全局=删键�
 
 test('★ #85 native-panel login status localizes through one balanced zh/en dictionary', () => {
   const source = bridgeSrcFrom('client.cjs');
-  const match = source.match(/const MSG = Object\\.freeze\\(\\{[\\s\\S]*?\\n    \\}\\);/);
-  assert.ok(match, 'native client must own one explicit MSG dictionary');
-  const zhKeys = (match[0].match(/(?<![A-Za-z])zh:/g) || []).length;
-  const enKeys = (match[0].match(/(?<![A-Za-z])en:/g) || []).length;
+  const start = source.indexOf('const MSG = Object.freeze({');
+  const end = source.indexOf('\\n    });', start);
+  assert.ok(start >= 0 && end > start, 'native client must own one explicit MSG dictionary');
+  const dictionary = source.slice(start, end);
+  const zhKeys = (dictionary.match(/(?<![A-Za-z])zh:/g) || []).length;
+  const enKeys = (dictionary.match(/(?<![A-Za-z])en:/g) || []).length;
   assert.equal(zhKeys, enKeys, 'every native-panel message needs both zh and en values');
   assert.ok(zhKeys >= 8, 'status dictionary coverage unexpectedly shrank: ' + zhKeys);
-  assert.match(source, /normalizeUiLanguage\\(document\\.documentElement\\?\\.lang\\)[\\s\\S]*?normalizeUiLanguage\\(window\\.navigator\\?\\.language\\)/,
-    'the host document language must win, with browser language as fallback');
+  assert.ok(source.includes('normalizeUiLanguage(document.documentElement?.lang)'),
+    'the host document language must be checked first');
+  assert.ok(source.includes('normalizeUiLanguage(window.navigator?.language)'),
+    'browser language must be the fallback when the host language is unsupported');
 });
 
 test('★ #85 login status renders in host language and falls back to browser language', async () => {
