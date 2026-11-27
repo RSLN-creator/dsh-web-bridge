@@ -15,6 +15,7 @@ import { zaiSite } from './zai.js';
 import { zaiCnSite } from './zai-cn.js';
 import { assertSiteSettingsUi } from './settings-ui-contract.js';
 import { assertSiteWebContract } from './web-contract-metadata.js';
+import { assertSiteLimits } from './limits-contract.js';
 
 export const SITE_MODULES = Object.freeze({
   deepseek: deepseekSite,
@@ -34,6 +35,7 @@ export const SITE_MODULES = Object.freeze({
 for (const site of Object.values(SITE_MODULES)) {
   assertSiteSettingsUi(site);
   assertSiteWebContract(site);
+  assertSiteLimits(site);
 }
 
 /** Return the registered site IDs for a provider-surface completeness check. */
