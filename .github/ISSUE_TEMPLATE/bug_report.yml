@@ -1,0 +1,110 @@
+name: Bug report / diagnostics
+description: Report a reproducible product defect with the runtime version and exact message.
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please provide exact text rather than a cropped screenshot wherever possible.
+
+        **Privacy and safety:** Do not upload browser profiles, cookies, authorization headers, account identifiers, or full session logs. Session logs can contain private prompts and replies. Share only a short, redacted excerpt needed to explain the failure.
+
+        Installing a new package does not update the code already loaded in a running `dsh web` process. Report whether you restarted after the install.
+  - type: input
+    id: dsh_version
+    attributes:
+      label: DSH version
+      description: The host version shown by DSH or `dsh --version`.
+      placeholder: "0.x.y"
+    validations:
+      required: true
+  - type: input
+    id: plugin_version
+    attributes:
+      label: Plugin version
+      description: The version visible in Settings → Web Bridge.
+      placeholder: "0.22.3"
+    validations:
+      required: true
+  - type: input
+    id: runtime_build_hash
+    attributes:
+      label: Running process build identifier
+      description: Hover the native-panel version badge and copy the value after “当前进程构建标识”. Use “not available” if it is missing.
+      placeholder: "12-character build identifier"
+    validations:
+      required: true
+  - type: dropdown
+    id: restarted_after_install
+    attributes:
+      label: Was `dsh web` restarted after the last plugin installation?
+      options:
+        - "Yes"
+        - "No"
+        - "Not sure"
+        - "Not applicable"
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected area
+      options:
+        - Model catalog / model picker
+        - Login / account state
+        - Sending / reply delivery
+        - Session continuity / history
+        - Native panel / settings UI
+        - Installation / update
+        - Other / unknown
+    validations:
+      required: true
+  - type: input
+    id: site_and_model
+    attributes:
+      label: Site and model
+      description: Include the provider/site and exact model ID if known. Do not include an account name.
+      placeholder: "DeepSeek / deepseek:deepseek"
+    validations:
+      required: false
+  - type: textarea
+    id: exact_error
+    attributes:
+      label: Exact error text
+      description: Paste the complete error text, including codes and diagnostic fields. Redact private content.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: exact_banner
+    attributes:
+      label: Exact banner / warning text
+      description: For orange or other provider banners, paste the full text including the group/provider name and message.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: List the smallest safe sequence that reproduces the issue. Do not repeat requests against a site that has rate-limited or restricted the account.
+      placeholder: |
+        1. Open ...
+        2. Select ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected_and_actual
+    attributes:
+      label: Expected and actual behavior
+      description: Include approximate time and whether the page visibly generated a reply.
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed credentials, cookies, tokens, account identifiers and private conversation content from this report.
+          required: true
