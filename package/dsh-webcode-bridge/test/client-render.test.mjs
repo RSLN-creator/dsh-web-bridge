@@ -2372,7 +2372,7 @@ test('★ 0.19.96 设置页保存载荷：字段名正确、跟随全局=删键�
 test('★ #85 native-panel login status localizes through one balanced zh/en dictionary', () => {
   const source = bridgeSrcFrom('client.cjs');
   const start = source.indexOf('const MSG = Object.freeze({');
-  const end = source.indexOf('\\n    });', start);
+  const end = source.indexOf('\n    });', start);
   assert.ok(start >= 0 && end > start, 'native client must own one explicit MSG dictionary');
   const dictionary = source.slice(start, end);
   const zhKeys = (dictionary.match(/(?<![A-Za-z])zh:/g) || []).length;
