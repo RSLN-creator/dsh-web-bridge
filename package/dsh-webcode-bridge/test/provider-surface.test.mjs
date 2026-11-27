@@ -197,7 +197,7 @@ test('判据 9：所有站点设置声明符合严格的 adapter-to-UI contract'
   for (const settingsUi of invalidDeclarations) {
     assert.throws(
       () => assertSiteSettingsUi({ id: 'invalid-fixture', settingsUi }),
-      /\\[site-adapter-settings-ui\\] invalid-fixture:/,
+      /\[site-adapter-settings-ui\] invalid-fixture:/,
       'malformed or unsupported UI metadata must fail before it reaches the browser',
     );
   }
