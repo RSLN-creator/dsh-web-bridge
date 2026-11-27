@@ -167,9 +167,11 @@ function withFixtureGeneration(driver, { expectedFresh, gotoCalls }) {
     assert.equal(options.fresh === true, expectedFresh,
       'the browser driver must receive the expected fresh/resume mode');
 
-    const conversation = driver.conversationFor(key);
-    assert.equal(conversation?.webSessionId, DEEPSEEK_REMOTE_ID,
-      'the actual browser driver must own the persisted remote conversation identity');
+    const slot = driver.sessionSlot(key);
+    assert.equal(slot?.webSessionId, DEEPSEEK_REMOTE_ID,
+      'the actual browser driver must own the account-scoped persisted remote conversation identity');
+    assert.equal(slot?.source, 'store',
+      'the restarted DSH bridge must observe the record from the browser profile, not infer it from the current URL');
     if (!expectedFresh) {
       assert.ok(gotoCalls.includes(DEEPSEEK_REMOTE_URL),
         'a restarted browser must navigate back to the exact persisted remote conversation: '
@@ -289,7 +291,7 @@ test('⑥ DSH restart composes the persisted cursor with the same browser profil
     assert.equal(firstCalls[0].fresh, true);
     assert.ok(firstCalls[0].messageChars >= BIG_CHARS,
       'the first DSH turn must be the full transcript');
-    assert.equal(driverA.conversationFor(firstCalls[0].key)?.webSessionId, DEEPSEEK_REMOTE_ID);
+    assert.equal(driverA.sessionSlot(firstCalls[0].key)?.webSessionId, DEEPSEEK_REMOTE_ID);
   } finally {
     await bridgeA.close();
   }
@@ -333,7 +335,7 @@ test('⑥ DSH restart composes the persisted cursor with the same browser profil
       'the persisted DSH cursor must prevent a full fresh turn after restart');
     assert.ok(secondCalls[0].messageChars < BIG_CHARS,
       'the restarted DSH session must send only an incremental transcript');
-    assert.equal(driverB.conversationFor(secondCalls[0].key)?.webSessionId, DEEPSEEK_REMOTE_ID,
+    assert.equal(driverB.sessionSlot(secondCalls[0].key)?.webSessionId, DEEPSEEK_REMOTE_ID,
       'the new browser driver must recover the same remote conversation ID from the profile');
     assert.ok(secondPage.gotoCalls.includes(DEEPSEEK_REMOTE_URL),
       'the new browser page must navigate to the same remote chat, not open another one');
