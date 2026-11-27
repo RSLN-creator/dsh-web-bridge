@@ -125,28 +125,38 @@ function deepseekRestartPage({ firstProcess = false } = {}) {
   const noTextMatch = {
     first() { return this; },
     last() { return this; },
+    nth() { return this; },
     filter() { return this; },
+    locator() { return this; },
     count: async () => 0,
     isVisible: async () => false,
     click: async () => {},
+    getAttribute: async () => null,
   };
+  const expertModeMatch = { ...noTextMatch, count: async () => 1 };
   const page = {
     isClosed: () => false,
     url: () => url,
-    getByText: () => noTextMatch,
+    // DeepSeek's model-selection step runs before composer lookup. The fixture models
+    // its known expert-mode pill as present; all unrelated text queries remain absent.
+    getByText: (text) => text === '专家模式' ? expertModeMatch : noTextMatch,
+    keyboard: { press: async () => {} },
     async goto(target) {
       const next = String(target);
       gotoCalls.push(next);
       url = next;
     },
     async waitForSelector() { return null; },
-    async evaluate() {
+    async evaluate(fn) {
       if (firstProcess) url = DEEPSEEK_REMOTE_URL;
+      // The injected page has no unified aria-pressed toggle, so select the classic
+      // model-pill path and continue to the deliberately absent composer.
+      if (String(fn).includes("querySelectorAll('[aria-pressed]')")) return false;
       return 1;
     },
     on() {}, off() {},
     async close() {},
-    locator: () => ({ first: () => ({ count: async () => 0, isVisible: async () => false }) }),
+    locator: () => noTextMatch,
   };
   page.context = () => ({ on() {}, newPage: async () => page, close: async () => {} });
   return { page, gotoCalls };
