@@ -2263,10 +2263,8 @@ window.__ModuleLoader__.load({
       // 界面不再有任何入口，因此这里也不再需要那份读数。
       const metrics = relay?.metrics;
       const currentModelName = m => models?.find(x => x.id === m)?.name || MODEL_NAMES[m] || m;
-      // 「深度思考」三态开关仅对 DeepSeek 站点有意义——判据是**当前看的是哪个站点
-      // tab**（0.16.38：模型管理搬到站点页之后，这里配的对象就是那个站点；旧判据
-      //「默认模型落在哪个站点」是模型管理还在全局页时的写法，已随之退役）。其余
-      // 站点的 pill 契约未真机校准，不硬造开关。
+      // Local site settings are adapter capabilities. Only declared `settingsUi` controls
+      // are rendered; the shared client must not infer support from a website ID.
       /**
        * 站点级三色健康度（0.19.37）。
        *

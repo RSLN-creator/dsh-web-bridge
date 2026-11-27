@@ -150,7 +150,7 @@ test('判据 7：站点显示名 = adapter 的 canonical name', () => {
     '每个 adapter 的 name 必须逐字等于对外网站原名');
 });
 
-test('判据 8：站点设置控件只由已校准的 adapter 声明', () => {
+test('站点设置控件只由已校准的 adapter 声明', () => {
   const declared = Object.fromEntries(SITES.filter((site) => site.settingsUi)
     .map((site) => [site.id, site.settingsUi]));
   assert.deepEqual(declared, {

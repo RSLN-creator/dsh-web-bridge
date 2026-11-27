@@ -2316,10 +2316,7 @@ test('★ #60 登录三态：uncertain 必须渲染「待确认」而不是「�
  *      （写成一个值就是一条真实覆盖，与用户选择不符）。
  */
 test('★ 0.19.96 glm 站点 tab 有任务模式下拉（选项逐字来自真机盘点）+ 深度思考本站覆盖', async () => {
-  const sites = [
-    { siteId: 'glm', siteName: 'GLM', accountKey: 'glm', displayName: 'GLM', initialized: true, loggedIn: true },
-    { siteId: 'deepseek', siteName: 'DeepSeek', accountKey: 'deepseek', displayName: 'DeepSeek', initialized: true, loggedIn: true },
-  ];
+  const sites = SITE_ROWS.filter((row) => ['glm', 'deepseek'].includes(row.siteId));
   // ① glm 站点 tab：任务模式下拉必须渲染出来，选项文本逐字。
   const glm = await renderPane({ payloads: [emptyWindows], which: 'settings', settingsTab: 'glm', sites });
   assert.deepEqual(glm.errors, [], 'glm 站点页渲染抛错：' + glm.errors.map(e => e.message).join('; '));
@@ -2357,15 +2354,16 @@ test('★ 0.19.96 设置页保存载荷：字段名正确、跟随全局=删键�
     '本站覆盖下拉的「未配置」态必须显示「跟随全局」');
   assert.match(src, /onChange: e => saveThinkModeBySite\(settingsTab, e\.target\.value\)/,
     '本站覆盖三态必须接线到 saveThinkModeBySite');
-  assert.match(src, /onChange: e => saveSiteMode\('glm', e\.target\.value\)/,
-    'GLM 任务模式下拉必须接线到 saveSiteMode(glm, …)');
-  // ⑤ 选项文本逐字（真机盘点）：写错一个字就不符合真机控件名称。
-  for (const mode of ['任务', '研究报告', 'PPT制作', '数据分析']) {
-    assert.match(src, new RegExp("h\\('option', \\{ value: '" + mode + "' \\}, '" + mode + "'\\)"),
-      '任务模式选项文本必须逐字为「' + mode + '」（来自 mode-inventory.md 真机读数）');
-  }
+  assert.match(src, /onChange: e => saveSiteMode\(settingsTab, e\.target\.value\)/,
+    'site-mode controls must save against the active adapter rather than a hard-coded site');
+  assert.match(src, /siteSettings\.siteMode\.options/,
+    'site-mode options must be read from the active adapter declaration');
+  const glmModes = SITES.find((site) => site.id === 'glm')?.settingsUi?.siteMode?.options;
+  assert.deepEqual(glmModes, ['任务', '研究报告', 'PPT制作', '数据分析'],
+    'the GLM adapter owns the verified website-native task-mode labels');
+  // ⑤ 任务模式选项逐字来自 GLM adapter（不在公共客户端复制一份）。
   assert.match(src, /h\('option', \{ value: 'follow'[^}]*\}, '跟随全局'\)/,
     '本站覆盖必须提供「跟随全局」选项');
-  assert.match(src, /value: siteModeBySite\.glm \|\| ''/,
-    'GLM 任务模式下拉默认值必须是空串（默认不改变网页）');
+  assert.match(src, /value: siteModeBySite\[settingsTab\] \|\| ''/,
+    'site-mode selection must use the active adapter and default to no website change');
 });

@@ -30,6 +30,7 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const CLIENT = path.resolve(here, '../lib/client.cjs');
 const SERVER = path.resolve(here, '../lib/web-control.js');
+const SITE_INDEX = path.resolve(here, '../lib/index.js');
 const MANIFEST = path.resolve(here, '../package.json');
 const PACKAGE_README = path.resolve(here, '../README.md');
 const ROOT_README = path.resolve(here, '../../../README.md');
@@ -37,6 +38,7 @@ const ROOT_README = path.resolve(here, '../../../README.md');
 const manifest = JSON.parse(readFileSync(MANIFEST, 'utf8'));
 const clientSrc = readFileSync(CLIENT, 'utf8');
 const serverSrc = readFileSync(SERVER, 'utf8');
+const siteIndexSrc = readFileSync(SITE_INDEX, 'utf8');
 const packageReadmeSrc = readFileSync(PACKAGE_README, 'utf8');
 const rootReadmeSrc = readFileSync(ROOT_README, 'utf8');
 
@@ -181,7 +183,7 @@ test('Web UI site labels and choices come from the live server adapter directory
   }
   assert.doesNotMatch(clientSrc, /settingsTab\s*===\s*['"](?:deepseek|glm)['"]/,
     'site settings visibility must not contain website IDs in the shared client renderer');
-  assert.equal((serverSrc.match(/settingsUi: st\.settingsUi \|\| null/g) || []).length, 2,
+  assert.equal((siteIndexSrc.match(/settingsUi: st\.settingsUi \|\| null/g) || []).length, 2,
     'both initialized and lazy site rows must project the adapter settings declaration');
   assert.match(clientSrc, /siteIdsFromRows\(rows\)/,
     'the website catalog must derive its choices from server rows');
