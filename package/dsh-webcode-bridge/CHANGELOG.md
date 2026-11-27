@@ -7,6 +7,10 @@ this file is the package-facing release history.
 
 ## Unreleased（2026-11-26：全站点适配层重构、Web 合约补齐与 QR 登录桥接）
 
+### DSH Web / 原生面板
+- 原生面板登录状态标签与解释性 tooltip 新增 zh/en 双语；优先遵循宿主 `document.documentElement.lang`，
+  无受支持的宿主语言时回落到浏览器 `navigator.language`。本切片不翻译错误码或协议教学文本。
+
 ### 框架 / 网站适配
 - 设置页提示词变体成员改由 adapter `teaching` profile（调用格式 + 技能目录模式）派生；
   不再在公共变体表重复维护 DeepSeek / GLM 站点 ID，逐站点预览按自己的 adapter 与 site prompt 现算。
