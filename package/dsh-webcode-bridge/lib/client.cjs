@@ -3607,19 +3607,6 @@ window.__ModuleLoader__.load({
           })));
     }
 
-    /**
-     * 「下一个新开的分屏应该落在哪个站点」（0.16.22）。
-     *
-     * 旧实现里 Ctrl/⌘+点击站点只是 `setSiteId(sid)` 之后再 `onSplit()`——而分屏出来的
-     * 新 pane 是**另一个 Conversation 实例**，它的 `useState('deepseek')` 恒等于默认站点。
-     * 于是「Ctrl+点击 Kimi 想在旁边再开一个 Kimi」得到的是一左一右两个 DeepSeek，
-     * 用户看到的是一句「多开不同网址」的承诺没有兑现。
-     *
-     * 这里用一个模块级的一次性交接：请求方把目标站点放进来，新实例初始化时取走并清空。
-     * 之所以不做成 Context/服务，是因为它只跨一次**新实例初始化**，而且必须在新实例
-     * 挂载前就已确定（挂载后再 setState 会让新 pane 先闪一下 DeepSeek）。
-     */
-    let pendingPaneSite = null;
 
     /**
      * 站点探活的**会话级**缓存（0.19.52，用户报障「每次打开右侧都要停顿加载」的
@@ -3635,11 +3622,7 @@ window.__ModuleLoader__.load({
     const siteProbeCache = new Map(); // siteId → { reachable, status, reason, ms, at }
 
     function Conversation({ browserSrc, onSplit, onFloat, siteId: controlledSite, slot: controlledSlot }) {
-      const [siteId, setSiteId] = React.useState(() => {
-        const handed = pendingPaneSite;
-        pendingPaneSite = null;
-        return controlledSite || handed || 'deepseek';
-      });
+      const [siteId, setSiteId] = React.useState(() => controlledSite || 'deepseek');
       // 受控站点（0.16.35）：站点标签把 `{ siteId }` 放在自己的 navigation.params 里
       // （见 apply 里的 WebcodeBody 与 lib 侧 openTab 调用），于是"这个标签是谁"由标签
       // 自己决定，面板不再需要靠猜。params 变化时跟着走——例如在同一标签里被重新导航到
@@ -3867,15 +3850,6 @@ window.__ModuleLoader__.load({
       // 0.14.4 挂的滚轮横向滚动、以及 tablist 的左右方向键漫游，都只服务于面板内
       // 那条横向站点条。用户 0.16.36 要求去掉那一行后，它们没有宿主元素了。
       // 「一行并列」现在由 DSH 官方右侧栏自己的标签条承担，键盘切换归它管。
-      /** 在新分屏里打开某个站点（多开不同网页）。宿主不支持时安静略过。 */
-      const openSiteInPane = (sid) => {
-        setSiteId(sid);
-        if (typeof onSplit !== 'function') return;
-        // 交接给即将挂载的新 pane：它自己 useState 的初值恒为默认站点，不交接的话
-        // 「分屏看另一个站点」实际得到两个相同的站点（见 pendingPaneSite 注释）。
-        pendingPaneSite = sid;
-        try { onSplit(sid); } catch { pendingPaneSite = null; }
-      };
       // ---- `pickAccount`：**已删除**（0.16.35）--------------------------------
       //
       // 0.16.33–0.16.34 里它承担「在二级菜单里选中某站点的某个账户」：记下槽 → 切站点 →
@@ -3943,8 +3917,8 @@ window.__ModuleLoader__.load({
               onClick: toggleWindow,
             }, h(IconGlobe, { size: 15 })),
             onSplit && h('button', {
-              className: 'hwb-act-btn', title: '在新面板中打开（可同时看两个不同站点）',
-              'aria-label': '在新面板中打开', onClick: onSplit,
+              className: 'hwb-act-btn', title: '在新面板中打开当前网站和账户',
+              'aria-label': '在新面板中打开当前网站', onClick: () => onSplit(siteId, accountSlot),
             }, h(IconFullscreenOutline16, { size: 15 })),
             onFloat && h('button', {
               className: 'hwb-act-btn', title: '打开为浮动面板（可拖拽、可同时开多个）',
@@ -4963,10 +4937,14 @@ window.__ModuleLoader__.load({
        * 宿主没提供该能力时（旧版本）按钮不渲染，而不是点了报错。
        */
       const splitPanel = (typeof ctx.sidebarRight?.split === 'function')
-        ? (sid) => {
+        ? (sid, slot = '') => {
+          if (!sid || !SITE_NAMES[sid]) return;
           try {
             const paneId = ctx.sidebarRight.split();
-            if (paneId) ctx.sidebarRight.openTab(TAB_KIND, { paneId });
+            if (!paneId) return;
+            ctx.sidebarRight.openTab(SITE_KIND, {
+              paneId, params: { siteId: sid, slot: slot || '' },
+            });
           } catch (e) { warn('sidebarRight.split', e); }
         }
         : null;
