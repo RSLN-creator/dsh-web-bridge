@@ -34,6 +34,11 @@ export const kimiSite = {
   // 2026-09-11 实测：kimi.moonshot.cn 已只剩 302 → https://www.kimi.com/，
   // 镜像按旧域名取页会拿到空跳转壳，右侧栏打不开。改用真实站点。
   id: 'kimi', name: 'Kimi', origin: 'https://www.kimi.com',
+  // Measured Kimi composer ceilings: prefer attachments above 8k; inline is unsafe above 200k.
+  limits: {
+    attachInlineLimitChars: 8_000,
+    composerHardLimitChars: 200_000,
+  },
   staticOrigins: ['https://statics.moonshot.cn'],
   // 真实流端点带动态会话 id：/api/chat/{id}/completion/stream（Kimi-Free-API 同构），子串匹配。
   // 2026-09-21 真机 CDP 确证：kimi 网页已从旧 SSE **全面迁移到 Connect-RPC**——
