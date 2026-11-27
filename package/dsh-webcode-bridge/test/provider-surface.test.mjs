@@ -24,9 +24,6 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import {
   SITES, providerIdsForRegistration, providerIdForSite, siteIdForProvider,
@@ -79,14 +76,8 @@ const EXPECTED_GROUP_NAMES = {
 };
 
 /**
- * 每站点的**显示名**（2026-10-03 用户指令：「全部统一成网站原名」，例：豆包 → Doubao）。
- *
- * 这一样为什么算「对外面」：它就是用户在**右栏标签页标题 / 工具条 / 站点目录卡片 /
- * 设置页站点 tab / 账户行**上读到的字。它此前散成两份且互不相同——
- *   · `lib/providers.js` 的 `name`：`DeepSeek 网页版` / `智谱清言 (GLM)` / `通义千问 (Qwen)` / `豆包`
- *   · `lib/client.cjs` 的 `SITE_NAMES`：`DeepSeek` / `智谱清言` / `通义千问` / `豆包`
- * 于是**同一个站点在两处是两个名字**，用户报的「右侧网页界面单个账户（豆包）不显示
- * 原来网站名称」正是这一处。改判据前请停下来问一句：这是有意的对外变更吗？
+ * Adapter display names are canonical and consumed by both server and client UI.
+ * The CJS UI reads driver.sites[].siteName instead of maintaining a duplicate table.
  */
 const EXPECTED_SITE_NAMES = {
   deepseek: 'DeepSeek', glm: 'GLM', chatgpt: 'ChatGPT',
@@ -152,56 +143,13 @@ test('判据 6：模型目录的形状快照（防「少了一行」这类静默
     '兼容别名 `deepseek-web` 必须仍在目录里——历史设置值与 OpenAI 前端依赖它解析');
 });
 
-/**
- * 从 `lib/client.cjs` 的源码里抽出 `SITE_NAMES` 字面量。
- *
- * 为什么要抽源码而不是渲染后读文本：客户端半边是单文件 bundle（`window.__ModuleLoader__`
- * 注册、只能 `require`，**不能 import lib/**），因此服务端拿不到它、它也拿不到服务端；
- * 两边唯一的对齐方式就是**静态比对**。渲染后比对只能覆盖「渲染过的那些站点」，
- * 而漂移恰恰可以先出现在没人渲染的那一个上。
- */
-function clientSiteNames() {
-  const src = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../lib/client.cjs'), 'utf8');
-  const m = src.match(/const SITE_NAMES = \{([\s\S]*?)\};/);
-  assert.ok(m, 'client.cjs 里找不到 `const SITE_NAMES = {…};` 字面量——先修本测试的解析');
-  const out = {};
-  // 0.21.0：站点键可能带连字符（如 'zai-cn'），必须允许引号键，否则解析器会静默漏行。
-  for (const kv of m[1].matchAll(/(?:'([a-z][a-z0-9.-]*)'|([a-z][a-z0-9.]*))\s*:\s*'([^']*)'/g)) out[kv[1] || kv[2]] = kv[3];
-  return out;
-}
-
-test('判据 7：站点显示名 = 网站原名，且客户端 `SITE_NAMES` 与服务端 `name` 逐字一致', () => {
+test('判据 7：站点显示名 = adapter 的 canonical name', () => {
   const server = {};
   for (const s of SITES) server[s.id] = s.name;
   assert.deepEqual(server, EXPECTED_SITE_NAMES,
-    'providers.js 的站点显示名必须逐字等于网站原名（豆包 → Doubao，不是中文译名、不带括号注解）');
-  const client = clientSiteNames();
-  assert.deepEqual(client, EXPECTED_SITE_NAMES,
-    'client.cjs 的 SITE_NAMES 与 providers.js 的 name 漂移了——同一个站点会在右栏与设置页显示成两个名字，'
-    + '而任何只渲染一侧的单测都不会红（这正是用户报过的症状）');
+    '每个 adapter 的 name 必须逐字等于对外网站原名');
 });
 
-// ── 判据 8（0.19.86）：目录条目与 resolveWebModel 的**带图能力**必须同值 ──────────
-//
-// ## 本条防的是哪一次真缺陷（2026-10-16 实测）
-//
-// 同一个模型有**两条取数路径**，而它们对「能不能带图」给出了**相反**的答案：
-//   · **目录路径**：`listAllModels()` 的条目 → 被 `web-control.js` 的
-//     `GET models`（`:968`）与 `GET context-windows`（`:999`）**原样返回**；
-//   · **解析路径**：`resolveWebModel(id)` → `index.js:1270` 的
-//     `inputModalities`（**护栏**：宿主只在它不含 'image' 时把图片换成文字占位）。
-//
-// 冲突实例：兼容别名 `deepseek-web`（**且它就是 `DEFAULT_MODEL_ID`**）的目录条目
-// **漏了 `acceptsImages` 字段**（显式为 undefined ⇒ 假），而
-// `resolveWebModel('deepseek-web')` 解析到**同一个** DeepSeek 模型是 `true`。
-//
-// 为什么它危险（不是「差一个字段」）：`index.js:1263-1266` 的注释写得很清楚——
-// `inputModalities` 声明错方向时，**harness 截图会在到达桥之前就被剥离**，
-// 症状是「网页端说没图」，而**桥这边看不到任何异常**。⇒ 一个漏掉的字段
-// 会让那条护栏在**默认模型**上静默失效。
-//
-// ⚠ 本判据只查「两条路径同值」，不查「该值是否符合真机事实」——后者要真机读数
-//   （见 `.tmp/image-verify/IMAGE-VERIFY-RESULTS.md` 的四态）。
 test('判据 8：每个目录条目的 acceptsImages 必须等于 resolveWebModel 的解析值', () => {
   const items = listAllModels();
   const bad = [];

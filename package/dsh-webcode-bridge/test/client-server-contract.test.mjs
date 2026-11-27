@@ -120,6 +120,22 @@ test('Web client manifest declares the real module dependencies and lazy browser
     'the browser bundle must register the package id with the DSH lazy module loader');
 });
 
+test('Web bundle imports only modules supplied by the official Web platform', () => {
+  // Verified against deepseek-harness packages/client/web/src/platform.ts (0.2.3-alpha.2).
+  // Platform modules are preloaded by DSH; feature packages belong in dsh.client.inject.
+  const platformModules = new Set([
+    'react',
+    'react-dom',
+    'react-dom/client',
+    '@deepseek-ai/dsh-client-ui-primitives',
+  ]);
+  const required = [...new Set([...clientSrc.matchAll(/\brequire\(\s*(['"])([^'"]+)\1\s*\)/g)]
+    .map((match) => match[2]))].sort();
+  const unsupported = required.filter((name) => !platformModules.has(name));
+  assert.deepEqual(unsupported, [],
+    'client.cjs requests modules not preloaded by the Web platform; declare a real external or inject its package');
+});
+
 test('documented minimum DSH version matches package engine requirement', () => {
   const required = manifest.engines?.dsh;
   assert.equal(typeof required, 'string', 'package.json must declare the minimum DSH version');
@@ -148,8 +164,26 @@ test('right-sidebar split opens the current site and account in the new official
     'the old module-level handoff must not compete with official tab navigation params');
 });
 
-test('Web account login polls the login-qr action while login is pending', () => {
+test('Web UI site labels and choices come from the live server adapter directory', () => {
+  assert.match(clientSrc, /const SITE_DIRECTORY = new Map\(\)/,
+    'the bundle must keep only a runtime cache, not a copied site-name table');
+  assert.match(clientSrc, /rememberSiteDirectory\(r\.data\?\.driver\?\.sites\)/,
+    'GET status must hydrate the directory from the canonical adapter projection');
+  assert.match(clientSrc, /const siteName = sid => SITE_DIRECTORY\.get/);
+  assert.match(clientSrc, /siteIdsFromRows\(rows\)/,
+    'the website catalog must derive its choices from server rows');
+  assert.match(clientSrc, /siteIdsFromRows\(sites\)/,
+    'the settings tabs must derive their choices from server rows');
+  assert.match(clientSrc, /if \(sid && !SITE_DIRECTORY\.has\(sid\)\)[\s\S]{0,220}api\('status'\)/,
+    'restored site-tab titles must hydrate their label when opened before the catalog');
+  assert.doesNotMatch(clientSrc, /const SITE_NAMES\s*=\s*\{/,
+    'site names and supported-site lists must not be duplicated in the browser bundle');
+});
+
+test('Web account login relays the selected account PNG QR into its own UI row', () => {
   assert.match(clientSrc, /apiSoft\('login-qr',\s*\{\s*\.\.\.siteSlot\(sid\)\s*\}/);
-  assert.match(clientSrc, /loginQrByAccount\[s\.accountKey\]/);
-  assert.match(serverSrc, /'POST login-qr'/);
+  assert.match(clientSrc, /response\.data\?\.available === true \? response\.data\.image : null/);
+  assert.match(clientSrc, /src: loginQrByAccount\[s\.accountKey\]/);
+  assert.match(serverSrc, /'POST login-qr': async \(body\) =>/);
+  assert.match(serverSrc, /return reader\(accountKeyOf\(body, \{ fallback: '' \}\)\)/);
 });

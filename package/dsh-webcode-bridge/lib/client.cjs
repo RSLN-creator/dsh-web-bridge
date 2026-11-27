@@ -238,6 +238,7 @@ window.__ModuleLoader__.load({
       const r = await request(action, body, timeoutMs);
       if (r.failure) throw new Error(r.failure);
       if (r.data === null) throw new Error('HTTP ' + r.response.status + '：响应不是 JSON（' + r.ctype + '）');
+      if (action === 'status') rememberSiteDirectory(r.data?.driver?.sites);
       return r.data;
     }
 
@@ -296,18 +297,31 @@ window.__ModuleLoader__.load({
     }
 
     const MODEL_NAMES = { deepseek: 'DeepSeek' };
-    // 站点显示名 + 多站点模型目录（打开时从 /__webcode/models 拉取）
-    //
-    // **值必须逐字等于 `lib/providers.js` 各站点声明的 `name`**（2026-10-03 用户指令：
-    // 「全部统一成网站原名」——例：豆包 → Doubao）。此前这里是中文译名（`豆包` /
-    // `智谱清言` / `通义千问`），而服务端那份带括号注解（`DeepSeek 网页版` /
-    // `智谱清言 (GLM)`），于是**同一个站点在右栏与设置页是两个名字**；用户报的
-    // 「右侧网页界面单个账户（豆包）不显示原来网站名称」正是这一处。
-    //
-    // 这是**展示层**的表：它只决定标签页标题、工具条、目录卡片与设置页 tab 的
-    // 文字。站点 id（`doubao`）、模型 id（`doubao:chat`）、分组名（`z.ai`）一律不动。
-    const SITE_NAMES = { deepseek: 'DeepSeek', glm: 'GLM', chatgpt: 'ChatGPT', kimi: 'Kimi', qwen: 'Qwen', doubao: 'Doubao', grok: 'Grok', claude: 'Claude', gemini: 'Gemini', zai: 'Z.ai', 'zai-cn': 'Z.ai 中国站' };
-    const siteName = sid => SITE_NAMES[sid] || sid;
+    // Site identity and display names come from the server's adapter registry.
+    // The browser bundle keeps no second site list: adding a site only changes the adapter registry.
+    const SITE_DIRECTORY = new Map();
+    const siteName = sid => SITE_DIRECTORY.get(String(sid || '')) || String(sid || '');
+    function rememberSiteDirectory(rows) {
+      if (!Array.isArray(rows)) return;
+      const next = new Map();
+      for (const row of rows) {
+        const id = typeof row?.siteId === 'string' ? row.siteId.trim() : '';
+        const name = typeof row?.siteName === 'string' ? row.siteName.trim() : '';
+        if (id && name && !next.has(id)) next.set(id, name);
+      }
+      if (!next.size) return;
+      SITE_DIRECTORY.clear();
+      for (const [id, name] of next) SITE_DIRECTORY.set(id, name);
+    }
+    function siteIdsFromRows(rows) {
+      const ids = [];
+      const seen = new Set();
+      for (const row of Array.isArray(rows) ? rows : []) {
+        const id = typeof row?.siteId === 'string' ? row.siteId.trim() : '';
+        if (id && !seen.has(id)) { seen.add(id); ids.push(id); }
+      }
+      return ids;
+    }
     /**
      * 毫秒时间戳 → `<input type="datetime-local">` 要的**本地时间**字符串。
      *
@@ -1792,8 +1806,7 @@ window.__ModuleLoader__.load({
       //（test/client-render.test.mjs）是一个最小 React 桩，它把初值原样存下、不调用
       // 函数——函数式初值在桩里会变成「state 是一个函数对象」，于是全局页被当成
       // 站点页渲染，一串用例集体红。求值只需 props 一个表达式，用普通初值即可。
-      const [settingsTab, setSettingsTab] = React.useState(
-        SITE_NAMES[String(props?.initialSettingsTab || '')] ? String(props.initialSettingsTab) : '');
+      const [settingsTab, setSettingsTab] = React.useState(String(props?.initialSettingsTab || ''));
       // 站点级字典（0.16.38）：`defaultModelBySite` / `extraPromptBySite`。
       // 两者都是「站点 id → 值」，与后端 POST settings 的归一化同名同形。
       const [modelBySite, setModelBySite] = React.useState({});
@@ -2236,6 +2249,11 @@ window.__ModuleLoader__.load({
       const driver = status?.driver;
       const build = status?.build;
       const sites = driver?.sites;
+      const siteIds = siteIdsFromRows(sites);
+      React.useEffect(() => {
+        if (settingsTab && Array.isArray(sites) && sites.length
+          && !sites.some((row) => row && row.siteId === settingsTab)) setSettingsTab('');
+      }, [settingsTab, sites]);
       // 0.19.59：`consent`（网页自动化启用态）的本地读取随「连接」整卡删除。
       // 开关本身已经**恒开**（服务端 relay 恒返回 true，见 lib/relay.js），
       // 界面不再有任何入口，因此这里也不再需要那份读数。
@@ -2351,7 +2369,7 @@ window.__ModuleLoader__.load({
             className: 'hwb-settings-tab' + (settingsTab === '' ? ' on' : ''),
             onClick: () => setSettingsTab(''),
           }, '全局'),
-          Object.keys(SITE_NAMES).map(sid => {
+          siteIds.map(sid => {
             const n = (sites || []).filter(r => r && r.siteId === sid).length;
             return h('button', {
               key: sid, type: 'button', role: 'tab',
@@ -3264,7 +3282,7 @@ window.__ModuleLoader__.load({
         const timer = setInterval(load, 8000);
         return () => { alive = false; clearInterval(timer); };
       }, []);
-      const ids = Object.keys(SITE_NAMES);
+      const ids = siteIdsFromRows(rows);
       const accountsOf = sid => (rows || []).filter(r => r && r.siteId === sid);
       const open = (sid, slot) => { if (typeof onOpenSite === 'function') onOpenSite(sid, slot || ''); };
 
@@ -3632,7 +3650,7 @@ window.__ModuleLoader__.load({
       // 的用法（分屏 pane 的初始站点、首屏网格选站点），它们靠内部 state 切换。两者共存
       // 的代价就是这一行同步。
       React.useEffect(() => {
-        if (controlledSite && SITE_NAMES[controlledSite]) setSiteId(controlledSite);
+        if (controlledSite) setSiteId(controlledSite);
       }, [controlledSite]);
       const [siteStatuses, setSiteStatuses] = React.useState({});
       // 账户行（0.16.33）：`/status` 的 `driver.sites` 是**按槽**的（`glm` 与 `glm#2`
@@ -4938,7 +4956,7 @@ window.__ModuleLoader__.load({
        */
       const splitPanel = (typeof ctx.sidebarRight?.split === 'function')
         ? (sid, slot = '') => {
-          if (!sid || !SITE_NAMES[sid]) return;
+          if (!sid) return;
           try {
             const paneId = ctx.sidebarRight.split();
             if (!paneId) return;
@@ -4968,7 +4986,7 @@ window.__ModuleLoader__.load({
        * 行为对 page type 恒为去重），这也是用户要的「选择不一样的能跳回去」。
        */
       const openSiteTab = (sid, slot) => {
-        if (!sid || !SITE_NAMES[sid]) return;
+        if (!sid) return;
         try {
           ctx.sidebarRight.openTab(SITE_KIND, { params: { siteId: sid, slot: slot || '' } });
         } catch (e) { warn('sidebarRight.openTab (site)', e); }
@@ -5010,7 +5028,7 @@ window.__ModuleLoader__.load({
       const CatalogBody = (props) => {
         const info = safeTabInfo(props);
         const openInPlace = (sid, slot) => {
-          if (!sid || !SITE_NAMES[sid]) return;
+          if (!sid) return;
           const params = { siteId: sid, slot: slot || '' };
           const actions = info && info.tab ? info.tab.actions : null;
           if (actions && typeof actions.openTab === 'function') {
@@ -5043,7 +5061,9 @@ window.__ModuleLoader__.load({
       const siteTabParams = (props) => {
         const info = safeTabInfo(props);
         const p = info && info.tab && info.tab.navigation ? info.tab.navigation.params : null;
-        if (p && SITE_NAMES[p.siteId]) return { siteId: p.siteId, slot: p.slot || '' };
+        if (p && typeof p.siteId === 'string' && p.siteId.trim()) {
+          return { siteId: p.siteId.trim(), slot: p.slot || '' };
+        }
         return { siteId: '', slot: '' };
       };
       const SiteTabBody = (props) => {
@@ -5068,7 +5088,17 @@ window.__ModuleLoader__.load({
        */
       const SiteTabTitle = (props) => {
         const sid = siteTabParams(props).siteId;
-        const label = sid ? siteName(sid) : 'Web 站点';
+        const [label, setLabel] = React.useState(sid ? siteName(sid) : 'Web 站点');
+        React.useEffect(() => {
+          let alive = true;
+          setLabel(sid ? siteName(sid) : 'Web 站点');
+          if (sid && !SITE_DIRECTORY.has(sid)) {
+            api('status').then(() => {
+              if (alive) setLabel(siteName(sid));
+            }).catch(() => {});
+          }
+          return () => { alive = false; };
+        }, [sid]);
         return h('span', { className: 'hwb-tab-title' },
           h('span', { className: 'hwb-tab-title-glyph', 'aria-hidden': 'true' }, h(DwbMark, { size: 13 })),
           h('span', { className: 'hwb-tab-title-text' }, label));

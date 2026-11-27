@@ -363,9 +363,10 @@ test('QR selector ignores CAPTCHA and slider canvases but keeps explicit login Q
   ]), { index: 2, width: 220, height: 220 });
 });
 
-test('login QR capture is bounded to the pending login page and returns an element screenshot', () => {
+test('login QR capture is bounded to the pending login page and returns a PNG data URL', () => {
   assert.match(SRC, /async function readLoginQr\(\)/);
   assert.match(SRC, /loginPhase !== 'waiting-for-login'/);
   assert.match(SRC, /page\.frames\(\)\.slice\(0, 12\)/);
   assert.match(SRC, /\.screenshot\(\{ type: 'png', timeout: 3000 \}\)/);
+  assert.match(SRC, /available: true,[\s\S]{0,120}image: 'data:image\/png;base64,' \+ image\.toString\('base64'\)/);
 });

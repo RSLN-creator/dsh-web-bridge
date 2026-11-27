@@ -169,6 +169,19 @@ test('表里每个 action 都能被真实 HTTP 请求命中（不是 404/405）'
   assert.deepEqual(failures, [], '这些 action 在挂载清单里却不可达：\n' + failures.join('\n'));
 });
 
+test('POST login-qr forwards a PNG data URL for the requested account slot', async () => {
+  const control = stubControl();
+  const r = await call(control, 'POST', '/__webcode/login-qr', { siteId: 'glm', slot: '2' });
+  assert.equal(r.status, 200);
+  const body = JSON.parse(r.text);
+  assert.equal(body.ok, true);
+  assert.equal(body.available, true);
+  assert.equal(body.accountKey, 'glm#2');
+  assert.match(body.image, /^data:image\/png;base64,/);
+  assert.equal(body.width, 220);
+  assert.equal(body.height, 220);
+});
+
 // B-3（0.14.1）：窗口声明必须可核对。此前「桥声明的上下文窗口」只存在于代码里，
 // 用户在 GUI 上看到的占用百分比是相对一个看不见的数，越界报错也说不清比的是哪个值。
 test('GET context-windows 列出每个站点的声明窗口与来源（B-3）', async () => {
