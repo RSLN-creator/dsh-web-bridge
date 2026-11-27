@@ -1096,7 +1096,7 @@ test('可见 composer 判定必须遍历**全部**候选选择器（GLM 的 comp
   // 只认 SEL.input 的第一个候选（textarea#chat-input）会漏掉它 → 正常页被判未登录。
   assert.ok(/split\(','\)/.test(body), '必须切分候选选择器列表');
   assert.ok(!/split\(','\)\[0\]/.test(body), '不得只取第一个候选（会漏掉 GLM 的裸 textarea）');
-  assert.match(body, /querySelectorAll\(c\)/, '逐个候选查元素');
+  assert.match(body, /querySelectorAll\(selector\)/, '逐个候选查元素');
   assert.match(body, /seen\.has\(e\)/, '跨候选去重，避免同一元素被计两次');
 });
 

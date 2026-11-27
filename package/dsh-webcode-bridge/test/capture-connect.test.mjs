@@ -38,7 +38,7 @@ import vm from 'node:vm';
 
 const pkg = path.resolve(import.meta.dirname, '..');
 const DRIVER = path.join(pkg, 'lib', 'browser-driver.js');
-const PROVIDERS = path.join(pkg, 'lib', 'providers.js');
+const KIMI_SITE = path.join(pkg, 'lib', 'sites', 'kimi.js');
 const src = fs.readFileSync(DRIVER, 'utf8');
 
 /**
@@ -129,8 +129,8 @@ const CHUNKS = (calls) => calls.filter((c) => c.phase === 'chunk').map((c) => c.
 // ---------- ① 源码契约：站点声明 → 调用点 → 脚本常量 ----------
 
 test('接线：kimi 声明 connect，调用点把它传进 captureInit，脚本里落到 CONNECT 常量', () => {
-  const prov = fs.readFileSync(PROVIDERS, 'utf8');
-  assert.match(prov, /streamTransport:\s*'connect'/, 'providers.js 里 kimi 不再声明 streamTransport');
+  const kimi = fs.readFileSync(KIMI_SITE, 'utf8');
+  assert.match(kimi, /streamTransport:\s*'connect'/, 'sites/kimi.js 必须声明 Connect-RPC transport');
   assert.match(src, /captureInit\(paths,\s*\{\s*transport:\s*site\.streamTransport\s*\|\|\s*null\s*\}\)/,
     'captureInit 的调用点没把站点 transport 传下去：声明与实现之间会静默断开');
   assert.match(src, /const CONNECT = \$\{connect\};/, '脚本里没有 CONNECT 常量占位符');

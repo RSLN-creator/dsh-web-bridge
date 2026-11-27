@@ -112,8 +112,8 @@ test('Web client manifest declares the real module dependencies and lazy browser
     '@deepseek-ai/dsh-client-ui-sidebar-right',
   ]);
   assert.equal(manifest.exports?.['./client'], './lib/client.cjs');
-  assert.match(clientSrc.slice(0, 500), /window\.__ModuleLoader__\.load\(/);
-  assert.match(clientSrc.slice(0, 500), /id:\s*'dsh-webcode-bridge'/);
+  assert.match(clientSrc, /window\.__ModuleLoader__\.load\(\{\s*id:\s*'dsh-webcode-bridge'/,
+    'the browser bundle must register the package id with the DSH lazy module loader');
 });
 
 test('Web account login polls the login-qr action while login is pending', () => {

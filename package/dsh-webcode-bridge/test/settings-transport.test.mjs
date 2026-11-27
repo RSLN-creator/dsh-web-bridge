@@ -802,7 +802,7 @@ test('task-8 B planSiteMode：fresh + 显式模式 ⇒ apply（回读确认在�
 test('task-8 接线（源码级）：executor 用 thinkModeOf 且 siteId 先于解析；驱动 fresh-only + 回读 + 契约来自真机读数', () => {
   const indexSrc = fs.readFileSync(path.join(LIB, 'index.js'), 'utf8');
   const drvSrc = fs.readFileSync(path.join(LIB, 'browser-driver.js'), 'utf8');
-  const provSrc = fs.readFileSync(path.join(LIB, 'providers.js'), 'utf8');
+  const glmSrc = fs.readFileSync(path.join(LIB, 'sites', 'glm.js'), 'utf8');
   const wcSrc = fs.readFileSync(path.join(LIB, 'web-control.js'), 'utf8');
   // A：唯一解析点 + TDZ 顺序（siteId 声明必须在 thinkModeOf 调用之前）
   assert.match(indexSrc, /const thinkMode = thinkModeOf\(configManager\.get\(\), siteId\)/,
@@ -818,11 +818,11 @@ test('task-8 接线（源码级）：executor 用 thinkModeOf 且 siteId 先于�
   assert.match(wcSrc, /if \('thinkModeBySite' in updated\)/, 'POST settings 必须归一化 thinkModeBySite');
   assert.match(wcSrc, /if \('siteModeBySite' in updated\)/, 'POST settings 必须归一化 siteModeBySite');
   // B：契约来自**真机校准**读数（glm-mode-calibration.md：chip 才是展开 trigger）
-  assert.match(provSrc, /modePicker: \{[\s\S]{0,260}trigger: '\.selected-model-info'/,
+  assert.match(glmSrc, /modePicker: \{[\s\S]{0,260}trigger: '\.selected-model-info'/,
     'GLM modePicker.trigger 必须是真机读到的 chip `.selected-model-info`（点它展开工具行）');
-  assert.match(provSrc, /modePicker: \{[\s\S]{0,320}selectedInfo: '\.selected-model-info'/,
+  assert.match(glmSrc, /modePicker: \{[\s\S]{0,320}selectedInfo: '\.selected-model-info'/,
     'GLM modePicker 必须声明 selectedInfo（回读证据②=可见 chip 文本）');
-  assert.match(provSrc, /modePicker: \{[\s\S]{0,420}option: '\.model-select-item'/,
+  assert.match(glmSrc, /modePicker: \{[\s\S]{0,420}option: '\.model-select-item'/,
     'GLM modePicker.option 必须是 `.model-select-item`（真机 class 逐字）');
   // B：驱动侧 fresh-only + 回读 + 可读错误码
   assert.match(drvSrc, /planSiteMode\(\{ siteMode, fresh: navigate === 'fresh' \}\)/, '驱动必须用 planSiteMode 判 fresh-only');

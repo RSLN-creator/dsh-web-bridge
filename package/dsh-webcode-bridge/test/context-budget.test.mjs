@@ -143,11 +143,18 @@ test('接线：窗口取值只有一个来源（contextWindowFor），声明与�
     '窗口兜底只应存在于 contextWindowFor 内');
 });
 
-test('GLM/Z.ai 的窗口声明有真机依据：常量被引用且注释记录了探针', () => {
-  const src = readLib('sites/glm.js');
-  assert.ok(/const GLM_CONTEXT_WINDOW = 1_000_000;/.test(src), '应有实测下界常量');
-  const refs = (src.match(/GLM_CONTEXT_WINDOW/g) || []).length;
-  assert.ok(refs >= 7, `glm(3)+zai(4) 条目都该引用它（含定义至少 8 处，实际 ${refs}）`);
-  assert.ok(/real-probe-23/.test(src) && /real-probe-24/.test(src), '注释必须记下探针出处');
-  assert.ok(/不是模型注意力窗口的规格/.test(src), '必须说清它不是什么（避免被读成规格）');
-});
+test('GLM/Z.ai 的窗口声明有真机依据：共享常量唯一，两个站点都引用它', () => {
+  const shared = readLib('sites/constants.js');
+  const glm = readLib('sites/glm.js');
+  const zai = readLib('sites/zai.js');
+  assert.match(shared, /export const GLM_CONTEXT_WINDOW = 1_000_000;/, '应有唯一共享实测下界常量');
+  for (const [siteId, source] of [['glm', glm], ['zai', zai]]) {
+    assert.match(source, /import \{ GLM_CONTEXT_WINDOW \} from '\.\/constants\.js';/,
+      siteId + ' must import the shared GLM-family context window');
+  }
+  const modelRows = [glm, zai].flatMap((source) =>
+    [...source.matchAll(/context: GLM_CONTEXT_WINDOW, budget: GLM_CONTEXT_WINDOW/g)]);
+  assert.equal(modelRows.length, 5, 'GLM (2) + Z.ai (3) model rows must all use the same measured limit');
+  assert.ok(/real-probe-23/.test(glm) && /real-probe-24/.test(glm), '注释必须记下探针出处');
+  assert.ok(/不是模型注意力窗口的规格/.test(glm), '必须说清它不是什么（避免被读成规格）');
+});;
