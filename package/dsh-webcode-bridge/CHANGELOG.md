@@ -8,6 +8,8 @@ this file is the package-facing release history.
 ## Unreleased（2026-11-26：全站点适配层重构、Web 合约补齐与 QR 登录桥接）
 
 ### 框架 / 网站适配
+- 在站点注册时校验 adapter `settingsUi` 声明；未知控件、畸形选项和重复项在启动阶段失败，
+  防止本地 Web UI 接收到无法渲染或持久化的第三方设置元数据。
 - 将 DeepSeek / GLM 的本地设置控件与 GLM 任务模式选项移入 adapter `settingsUi`；
   `/status → driver.sites` 传递声明，公共 Web UI 只渲染已验证能力，不再按站点 ID 分支。
 
