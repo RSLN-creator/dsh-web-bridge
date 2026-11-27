@@ -10,7 +10,9 @@
 //   · **每站点一份**（prompts/<site>.md）：该站点真实在教的教学/协议全文
 //     （preset + 传输协议段），逐轮覆盖——排障与「再教」附件的直接来源；
 //   · **每会话一份**（sessions/<sessionKey>.md）：该会话最近一次首轮/整段重建
-//     的完整文本——网页会话丢失时「把上下文通过文件发送」的直接来源。
+//     的完整文本快照。增量轮刻意不重写，因此第二轮之后它可能落后于当前 transcript；
+//     WEB_SESSION_LOST 恢复必须从本次 DSH messages 重新构建完整上下文（见 index.js），
+//     不得把这个快照当成当前轮次的权威重放来源。
 //
 // 模式对照 dsh-drop-caret（reference 外的已装插件）：它把上传文件按会话隔离
 // 落盘（`.dsh-drop/session-<id>/`），文件名消毒 + 会话 id 约束到安全字母表；
@@ -106,11 +108,12 @@ export function writePromptFile(file, text, meta = {}) {
 /**
  * 读回一份提示词文件（0.16.29）。任何失败返回 null，绝不抛出。
  *
- * 存在的理由：用户要求「把上下文通过文件发送」——文件不能只是**副本**，
- * 必须是**投递源**。整段重建（WEB_SESSION_LOST / 新开会话）时优先读它：
- * 磁盘上那一份就是上一轮真实发出去的正本，读回即重放，落盘与投递从此同源。
- * 读不到（首次运行 / 写入曾静默失败 / 'off'）时调用方回落内存序列化——
- * 两条路都保住上下文，没有静默丢弃。
+ * 存在的理由：把首轮 / 整段重建的完整文本持久化，供排障、人工回看与快照恢复边界使用。
+ * 这份文件**只在首轮与整段重建时更新**；正常增量轮不重写，所以它不一定包含最新消息。
+ * 因此 WEB_SESSION_LOST 的当前恢复路径必须用本次请求的完整 DSH transcript
+ *（index.js 的 m.rebuild()），不能把这里读出的旧快照当成最新上下文。
+ * 读不到（首次运行 / 写入曾静默失败 / 'off'）时，本快照自然不存在；实时恢复仍由
+ * m.rebuild() 提供完整上下文，不依赖此文件。
  *
  * @param {string|null} file 目标路径
  * @returns {string|null} 去掉头部元信息块之后的正文，读不到返回 null
@@ -160,8 +163,8 @@ export function readPromptFile(file) {
  *
  * @param {{dir?: string, siteId: string, sessionKey?: string|null, siteText?: string|null, sessionText?: string|null}} args
  *   `siteText` 是该站点的稳定教学全文（preset + 传输协议段，fresh 首轮传）；
- *   `sessionText` 是本轮的首轮/整段重建全文（增量轮不传——上下文没变，落盘
- *   只会制造 IO 噪音；整段重建点也只传它，教学部分与首轮相同无需重写）。
+ *   `sessionText` 是本轮的首轮/整段重建全文（增量轮不传以避免重复写入大文件；
+ *   因此它代表最近一次完整快照，不保证包含此后的增量消息）。
  * @returns {{siteFile: string|null, sessionFile: string|null}}
  */
 export function writePromptFiles(args) {

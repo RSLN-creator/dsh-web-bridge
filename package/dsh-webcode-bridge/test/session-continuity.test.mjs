@@ -740,57 +740,75 @@ test('⑨ 落盘点必须在 runTurn 之内、且网页会话 id 来自地址栏
     + '那正是旧实现的形状——整轮跑完才写盘，失败的那一轮什么也不留');
 });
 
-// ── ⑩ 0.16.29：落盘文件必须是**投递源**（不只是副本）────────────────────────────
+// ── ⑩ 会话文件是最近一次完整快照，不是增量后的实时 transcript ──────────────
 //
-// 用户指令：「如果新开会话-web 端，就一样把这个当上下文通过文件发送」。
-// 判据：整段重建时发出去的那段文本，**逐字等于磁盘上那份会话文件**——
-// 也就是说，文件不是事后抄写的副本，而是重建时真正被读回来的正本。
-test('⑩ 整段重建必须从落盘文件读回（文件是投递源，不是副本）', async () => {
-  // 判据用**哨兵串**而不是字符数：把哨兵写进磁盘上的会话文件，再逼出一次整段重建；
-  // 只要发出去的文本里出现哨兵，就证明它是从文件读回来的（内存序列化里没有这个串）。
-  // 字符数比对会纠缠头部/换行/末尾空行，那种断言会随排版改动假红——哨兵不会。
-  const storeDir = tmpDir('webcode-file-delivery-');
-  const SENTINEL = 'FILE_DELIVERY_SENTINEL_7f3a';
-  const sessionId = 'sess-file-delivery';
+// 0.16.29 起会话提示词文件保留首轮 / 整段重建的完整内容；增量轮刻意不反复写入。
+// 因此 WEB_SESSION_LOST 必须从当前 DSH messages 重建，不能把旧快照当作权威恢复源。
+// 本测试还验证恢复后的完整文本会刷新该快照，供排障与回看。
+test('⑩ 磁盘会话文件是完整快照；WEB_SESSION_LOST 从当前 DSH transcript 重建', async () => {
+  const previousStore = process.env.WEBCODE_PROMPT_STORE_DIR;
+  const storeDir = tmpDir('webcode-session-snapshot-');
+  const STALE_SENTINEL = 'STALE_DISK_SNAPSHOT_SENTINEL_7f3a';
+  const sessionId = 'sess-file-snapshot';
   const driver = scriptedDriver({
     script: [
-      { text: '首轮答复', webSessionId: 'web-1' },   // 首轮正常 → 落盘
+      { text: '首轮答复', webSessionId: 'web-1' },   // 首轮正常 → 落盘快照
       { throw: 'WEB_SESSION_LOST' },                 // 第二轮原发丢失 → 触发整段重建
-      { text: '重建答复', webSessionId: 'web-2' },   // 重建成功
+      { text: '重建答复', webSessionId: 'web-2' },   // 当前 transcript 重建成功
     ],
   });
   process.env.WEBCODE_PROMPT_STORE_DIR = storeDir;
-  const bridge = await openBridge({ driver, profileDir: tmpDir() });
+  const profileDir = tmpDir('webcode-session-snapshot-profile-');
+  let bridge = null;
   try {
-    // 先跑一轮把文件写出来（fresh 首轮会落盘）。
+    bridge = await openBridge({ driver, profileDir });
+    // 首轮写入快照。
     const first = await bridge.stream({ sessionId, messages: messagesAt(1) });
     assert.equal(first.ok, true, '首轮应当正常落盘：' + String(first.error?.message || '').slice(0, 200));
-    // 会话文件名 **0.19.4 起带账号段**（`<sessionId>__<accountKey>.md`）：会话键里含
-    // accountKey 是「一个对话对应唯一账号」的结构性保证（见 index.js 的 keyPath 注释）。
-    // 因此这里按**前缀**找文件（判据关心的是「有没有落盘、重建是不是从它读回」，
-    // 不是文件名拼接），并额外钉住账号段确实在名字里。
+
+    // 会话文件名 0.19.4 起带账号段（<sessionId>__<accountKey>.md），这里按前缀定位。
     const sessionsDir = path.join(storeDir, 'sessions');
     const names = fs.existsSync(sessionsDir) ? fs.readdirSync(sessionsDir) : [];
     const hit = names.find((n) => n.startsWith(sessionId + '__') && n.endsWith('.md'));
-    assert.ok(hit, '首轮没有落下会话文件，文件投递无从谈起：' + JSON.stringify(names));
+    assert.ok(hit, '首轮没有落下会话快照：' + JSON.stringify(names));
     assert.match(hit, /__[A-Za-z0-9_-]+\.md$/, '会话文件名必须带账号段（一个对话一个账号）');
     const sessionFile = path.join(sessionsDir, hit);
 
-    // 把哨兵塞进磁盘上的正本 —— 下一次重建若真从文件读，就会把它带走。
-    fs.appendFileSync(sessionFile, '\n' + SENTINEL + '\n');
+    // 人工把旧哨兵写进文件，代表「磁盘快照仍是上一轮内容」。
+    fs.appendFileSync(sessionFile, '\n' + STALE_SENTINEL + '\n');
 
-    // 触发整段重建：丢掉会话槽 + 让下一次 sendTurn 抛 WEB_SESSION_LOST。
+    // 当前请求已经包含第二轮 user 增量。恢复时必须以这份 DSH transcript 为准。
     const before = driver.calls.length;
-    await bridge.stream({ sessionId, messages: messagesAt(2) });
+    const currentMessages = messagesAt(2);
+    const second = await bridge.stream({ sessionId, messages: currentMessages });
+    assert.equal(second.ok, true, '磁盘快照过期时仍应从当前 transcript 成功重建：'
+      + String(second.error?.message || '').slice(0, 240));
     const sent = driver.calls.slice(before);
     const rebuilt = sent.filter((c) => c.fresh).pop();
-    assert.ok(rebuilt, '整段重建没有发生（剧本没跑到）：' + JSON.stringify(sent));
-    assert.ok(rebuilt.message.includes(SENTINEL),
-      '重建发送的文本里没有磁盘上的哨兵 —— 说明它是内存序列化出来的，文件只是副本，'
-      + '「把上下文通过文件发送」没有真正实现');
+    assert.ok(rebuilt, '整段重建没有发生：' + JSON.stringify(sent));
+    assert.ok(rebuilt.message.includes('A'.repeat(BIG_CHARS)),
+      '重建必须保留首轮的大段上下文');
+    assert.ok(rebuilt.message.includes('第 1 轮答复'),
+      '重建必须保留首轮之后的 assistant transcript');
+    assert.ok(rebuilt.message.includes('第 2 轮的问题'),
+      '重建必须包含本次请求的后续 user 增量');
+    assert.ok(!rebuilt.message.includes(STALE_SENTINEL),
+      '过期的磁盘快照哨兵不得进入恢复 prompt');
+
+    // 当前完整重建成功后，会话文件应被刷新为最新的完整快照。
+    const refreshed = fs.readFileSync(sessionFile, 'utf8');
+    assert.ok(refreshed.includes('第 2 轮的问题'),
+      '恢复后写回的会话快照必须包含本轮 user 增量');
+    assert.ok(!refreshed.includes(STALE_SENTINEL),
+      '恢复后快照不得继续残留旧磁盘哨兵');
   } finally {
-    delete process.env.WEBCODE_PROMPT_STORE_DIR;
-    await bridge.close();
+    if (previousStore === undefined) delete process.env.WEBCODE_PROMPT_STORE_DIR;
+    else process.env.WEBCODE_PROMPT_STORE_DIR = previousStore;
+    try { await bridge?.close(); }
+    finally {
+      fs.rmSync(storeDir, { recursive: true, force: true });
+      fs.rmSync(profileDir, { recursive: true, force: true });
+    }
   }
 });
 

@@ -49,7 +49,7 @@
 | 35 | **并列三列的「列级沙箱」是约定而非拦截**（2026-09-29 新登记）——provider 通路会真改文件、控制面通路只回文本；两列今天对工作区没有文件效果，且本插件**结构上**不拥有权限层 | 中 | 否 | `lib/column-context.js`、`lib/column-fs.js`、`doc/research/2026-09-26-column-sandbox-round1-thinking.md` |
 | 36 | **`ref-index` 既有红**（2026-09-29 复核：**已解决**）——登记的是「曾被记为欠账、实测已不在」这次更正本身 | 低 | 否 | `reference/README.md`、`scripts/gen-reference-index.mjs` |
 | 37 | **两条既有常红是同一条行为：网页会话丢失 → 整段重放**（2026-09-30 复核归因：**已修——根因是测试隔离缺陷，不是重放分支**；2026-09-30 晚登记）——`regression` 53/1 与 `aux-delta-compact` 4/1 的 60s 压线来自裸测试读到真实 profile 的发送间隔与基准 | 高 | 否 | `lib/index.js`（profile 落盘守卫）、`test/profile-isolation.test.mjs`、`doc/progress.md`（2026-09-30 段） |
-| 38 | **`NODE_TEST_CONTEXT` 守卫在裸跑形态的残余洞：prompt store 读写通道**（2026-10-02 登记；regression 用例本轮已补隔离；**生产缺陷候选·红线 2 形状·未修**）——同族于 #37 的第二条通道；且由此暴露**生产缺陷候选：真实轮重放读回首轮正本会丢后续增量（红线二形状）**，见正文 §38 | 高 | 否 | `lib/index.js`（`readSessionPrompt`、executor 重建分支）、`lib/prompt-store.js`、`test/regression.test.mjs` |
+| 38 | **`NODE_TEST_CONTEXT` 守卫在裸跑形态的残余洞：prompt store 读写通道**（2026-10-02 登记；regression 用例本轮已补隔离；**测试隔离与红线 2 重放源缺增量已修（2026-11-27）**）——同族于 #37 的第二条通道；此前还暴露过真实轮重放读取首轮正本会丢后续增量（红线二形状）；该缺陷现已修复，详情见正文 §38 | 高 | 否 | `lib/index.js`（`WEB_SESSION_LOST` 当前 transcript 重建）、`lib/prompt-store.js`、`test/regression.test.mjs` |
 | 39 | 错误码在 harness 边界全部退化成 UNKNOWN（2026-10-02 登记；同轮，0.19.54） —— 本插件给普通 Error 挂 .code，而官方 normalizeLlmFailure 只认 inst… | 高 | 否 | `lib/error-codes.js`（新增，错误码真源）、`lib/index.js`、`lib/browser-driver.js`、`lib/think-effort.js`、`lib/upstream.js`、`lib/zero-progress.js`、`test/error-codes.test.mjs`、`scripts/scan-error-codes.mjs`、`doc/research/2026-10-02-dsh-official-error-and-repair.md` |
 | 40 | 并发会话的「一组一行」：三轮结论反转，终局 = 不自建工作区（2026-10-03 登记；10-06 反转一次「为每组建 git worktree」；2026-10-08 再反转并删除该机制） —— 10-06 的「反转… | 低 | 否 | `lib/client.cjs`、`lib/web-control.js`、`test/team-compare.test.mjs`、`doc/progress.md`（2026-10-08 轮 §二/§三） |
 | 41 | CI 在 main 上长期恒红（2026-09-26 起）（2026-10-03 登记，同轮） —— 每条都是判据/环境问题、与产品行为无关：① site-prompt-transport.test.mjs 把 prof… | 中 | 否 | `test/site-prompt-transport.test.mjs`、`test/column-fs.test.mjs`、`test/pre-deliver-window.test.mjs`、`test/site-mount.test.mjs`、`doc/progress.md`（2026-10-03） |
@@ -2477,7 +2477,7 @@ git stash pop                # 恢复
 
 ---
 
-## 38. **`NODE_TEST_CONTEXT` 守卫在裸跑形态的残余洞：prompt store 读写通道**（2026-10-02 登记；测试隔离已补；**生产缺陷候选（重放源不含增量）·未修**）
+## 38. **`NODE_TEST_CONTEXT` 守卫在裸跑形态的残余洞：prompt store 读写通道**（2026-10-02 登记；测试隔离已补；**红线 2 的磁盘重放源缺增量缺陷已修（2026-11-27）**）
 
 ### 现象（0.19.53 提交前抽查实测）
 
@@ -2503,29 +2503,28 @@ git stash pop                # 恢复
   断言目标就是**内存 rebuild 路径**，落盘读回是另一条（生产）行为，本文件不需要它。
 - 删除真实目录里的测试残留 `lost__deepseek.md`。
 
-### ⚠ 生产缺陷候选（更重要，本轮**不修**）
+### 修复（2026-11-27；红线 2）
 
-`lib/index.js:3457`：
+- **生产根因**：会话文件只在 fresh 首轮 / 整段重建时更新，增量轮刻意不写。旧恢复路径却优先
+  读取该文件；因此第 2 轮及以后发生 `WEB_SESSION_LOST` 时，可能把只含首轮的旧快照发进新网页会话，
+  丢掉后来增加的 user / tool 上下文，且后续游标可能继续前移。
+- **代码修复**：`lib/index.js` 的 `WEB_SESSION_LOST` 分支现在统一使用本轮的 `m.rebuild()`。
+  该闭包由当前请求的完整 DSH `messages` 数组构建首轮全文，包含截至本次请求的新增上下文；
+  正常真实轮和 `purpose` 辅助轮都走同一权威来源。重建文本仍会写回会话文件，作为最新一次
+  完整快照供排障与回看；快照不再被误当成增量后的实时 transcript。
+- **测试修复**：新增 `test/regression.test.mjs` 磁盘回放集成用例，显式设置独立临时
+  `WEBCODE_PROMPT_STORE_DIR`，先写入真实首轮快照，再提交第二条 user 增量并模拟
+  `WEB_SESSION_LOST`；断言新的网页会话重放同时包含第一句、第二句和工具协议。
+  旧 `off` 用例仍保留，继续覆盖纯内存 fallback。
+- **文档口径**：`prompt-store.js` 明确会话文件是「最近一次完整快照」，增量后可能过期；
+  当前恢复真源是本次请求的 `m.rebuild()`，不再称落盘快照为 WEB_SESSION_LOST 的首选投递源。
 
-```js
-const rebuildText = (m?.purpose ? null : readSessionPrompt(m.sessionKey)) ?? m.rebuild();
-```
+### 剩余验收边界
 
-- 落盘正本 = 最近一次首轮/整段重建全文，**增量不落盘** ⇒ 真实会话在第 2 轮以后
-  丢会话（`WEB_SESSION_LOST`）时，重放读回的是**不含后续增量**的首轮文本；
-  而 `commit()` 把游标推到全部消息 ⇒ **增量在网页侧永久缺失**——
-  这正是红线二（绝不静默丢上下文）要防的形状。
-- 0.19.14 的注释**自己写明了这个失败形态**（对 purpose 轮）：「读回来重放会丢掉
-  指令本身（摘要对着错误上文产出），必须走本轮自己的 rebuild()」。purpose 轮已
-  绕开读回，**真实轮的同一形状没有绕**。
-- 测试为何没抓住：`NODE_TEST_CONTEXT` 守卫让测试环境里 `readSessionPrompt` 恒 null
-  ⇒ 护栏永远只测 fallback 分支，**生产首选分支零覆盖**。裸跑撞红反而是它第一次
-  被真实执行。
-- 修法方向（需要设计轮，未做）：重放源必须含增量——要么恒走 `m.rebuild()`，
-  要么读回后拼接 `serializeDelta` 增量段，要么增量轮也落盘。三个候选都要与
-  0.16.29「文件投递字节保真」的初衷对表（读回存在的理由就是「发出去什么与重建
-  用什么恒为同一份字节」），并配真机验证。同型断言参考
-  `test/aux-delta-compact.test.mjs`（purpose 轮不许用落盘正本代替）。
+- 本轮用真实文件系统的临时目录覆盖了原先未进入的磁盘分支，并由 PR 的完整离线 CI / CodeQL
+  验证；这证明的是状态与重放逻辑，不等于在真实网站上人工制造了一次 `WEB_SESSION_LOST`。
+- 真实 DSH / 站点会话仍需按 `doc/verify.md` 的节制规则做端到端验收；不得把离线 fixture 写成真机通过。
+
 
 ## 39. **错误码在 harness 边界全部退化成 `UNKNOWN`**（2026-10-02 登记，**同轮已修 0.19.54**）
 

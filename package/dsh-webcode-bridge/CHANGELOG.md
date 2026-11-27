@@ -11,6 +11,12 @@ this file is the package-facing release history.
 - 原生面板登录状态标签与解释性 tooltip 新增 zh/en 双语；优先遵循宿主 `document.documentElement.lang`，
   无受支持的宿主语言时回落到浏览器 `navigator.language`。本切片不翻译错误码或协议教学文本。
 
+### 会话恢复 / 上下文完整性
+- 修复 `WEB_SESSION_LOST` 在第二轮及以后可能读取过期首轮磁盘快照、漏掉后续 user / tool 增量的问题；
+  恢复文本统一由当前请求的完整 DSH transcript 经 `m.rebuild()` 生成。
+- 会话文件仍保存最近一次首轮 / 整段重建快照用于排障与回看，但不再作为增量后的实时恢复来源；
+  新增真实临时文件系统的磁盘回放回归测试。
+
 ### 框架 / 网站适配
 - 设置页提示词变体成员改由 adapter `teaching` profile（调用格式 + 技能目录模式）派生；
   不再在公共变体表重复维护 DeepSeek / GLM 站点 ID，逐站点预览按自己的 adapter 与 site prompt 现算。
