@@ -72,8 +72,8 @@ test('按网站逐行：每行的 text 必须是**该站点**实际会用的那�
   for (const row of sites) {
     const expected = byId.get(row.variantId);
     assert.ok(expected, row.siteId + ' 的 variantId 不在协议清单里：' + row.variantId);
-    // 关键：行的 text 必须与「该协议自己的 text」逐字相同，而不是复制别人的。
-    assert.equal(row.text, expected.text, row.siteId + ' 行渲染的不是它自己那一支的模板');
+    // variantId 必须指向现有协议预览；逐站点全文允许因 site prompt / adapter 而不同。
+    assert.ok(expected.text.length > 0, row.siteId + ' 对应的协议预览不得为空');
     // 且必须以该站点自己的 adapter + site prompt 现算，不能复制变体代表站点的文本。
     assert.equal(row.text, serializeFirstTurn({
       messages: [], tools: TOOLS, siteId: row.siteId, sitePrompt: sitePromptOf(row.siteId),
