@@ -105,6 +105,122 @@ function messagesAt(turn) {
   return out;
 }
 
+
+const DEEPSEEK_REMOTE_ID = '187fdbbd-2f5a-4a37-9d0e-9c7b1f4a2c31';
+const DEEPSEEK_REMOTE_URL = 'https://chat.deepseek.com/a/chat/s/' + DEEPSEEK_REMOTE_ID;
+
+/**
+ * Offline DeepSeek page fixture for the full restart path.
+ *
+ * On the first process it changes to the remote conversation URL at the navigation/
+ * identity-probe phase. On the second process it starts at the origin and only changes
+ * URL when the real browser driver navigates back to its persisted conversation.
+ */
+function deepseekRestartPage({ firstProcess = false } = {}) {
+  let url = 'https://chat.deepseek.com/';
+  const gotoCalls = [];
+  // The production driver probes model labels before looking for the composer. The
+  // offline fixture has no model menu, so implement Playwright's text-locator surface
+  // with an honest zero-match result instead of failing on a missing mock method.
+  const noTextMatch = {
+    first() { return this; },
+    last() { return this; },
+    nth() { return this; },
+    filter() { return this; },
+    locator() { return this; },
+    count: async () => 0,
+    isVisible: async () => false,
+    click: async () => {},
+    getAttribute: async () => null,
+  };
+  const expertModeMatch = { ...noTextMatch, count: async () => 1 };
+  const page = {
+    isClosed: () => false,
+    url: () => url,
+    // DeepSeek's model-selection step runs before composer lookup. The fixture models
+    // its known expert-mode pill as present; all unrelated text queries remain absent.
+    getByText: (text) => text === '专家模式' ? expertModeMatch : noTextMatch,
+    keyboard: { press: async () => {} },
+    async goto(target) {
+      const next = String(target);
+      gotoCalls.push(next);
+      url = next;
+    },
+    async waitForSelector() { return null; },
+    async evaluate(fn) {
+      if (firstProcess) url = DEEPSEEK_REMOTE_URL;
+      const source = String(fn);
+      // This page is not a challenge page. Return the same explicit null that the
+      // production detectChallenge() probe returns for an ordinary page.
+      if (source.includes('new RegExp(PAT.title)')) return null;
+      // The injected page has no unified aria-pressed toggle, so select the classic
+      // model-pill path and continue to the deliberately absent composer.
+      if (source.includes("querySelectorAll('[aria-pressed]')")) return false;
+      // Model the authenticated shell for the navigation/login gate; the dedicated
+      // locator fixture below still proves that no editable composer can be used.
+      return 1;
+    },
+    on() {}, off() {},
+    async close() {},
+    locator: () => noTextMatch,
+  };
+  page.context = () => ({ on() {}, newPage: async () => page, close: async () => {} });
+  return { page, gotoCalls };
+}
+
+/**
+ * Keep real browser-driver navigation and persistence, but stub only the final remote
+ * generation result. The page deliberately has no actionable composer, so the real
+ * driver must stop after it has recorded/resumed the remote conversation identity.
+ */
+function withFixtureGeneration(driver, { expectedFresh, gotoCalls }) {
+  const calls = [];
+  const realSendTurn = driver.sendTurn.bind(driver);
+  driver.sendTurn = async (key, message, options = {}) => {
+    calls.push({
+      key: String(key),
+      fresh: options.fresh === true,
+      messageChars: String(message || '').length,
+    });
+
+    let pageFailure = null;
+    try {
+      await realSendTurn(key, message, options);
+    } catch (error) {
+      pageFailure = error;
+    }
+
+    assert.equal(pageFailure?.message,
+      'No visible editable composer matched the site contract or semantic fallback',
+      'the fixture must stop only at the deliberate missing-composer boundary; unexpected driver failures must fail the test');
+    assert.equal(options.fresh === true, expectedFresh,
+      'the browser driver must receive the expected fresh/resume mode');
+
+    const status = driver.status();
+    if (expectedFresh) {
+      // The first turn must write the remote identity to the profile-backed store.
+      assert.equal(status.sessionSlot?.webSessionId, DEEPSEEK_REMOTE_ID,
+        'the first browser process must persist the remote conversation identity: '
+        + JSON.stringify({ key, slot: status.sessionSlot, navTrace: status.navTrace }));
+      assert.equal(status.sessionSlot?.source, 'store',
+        'the first-turn identity must come from the browser profile store');
+    } else {
+      // On restart the key is already loaded before navigation; the navigation trace
+      // is the authoritative evidence that the new driver selected that stored ID.
+      assert.ok(status.navTrace?.some((entry) => entry.state === 'resume'
+        && entry.storedId === DEEPSEEK_REMOTE_ID),
+      'the restarted browser driver must resume from the stored remote conversation ID: '
+        + JSON.stringify(status.navTrace));
+      assert.ok(gotoCalls.includes(DEEPSEEK_REMOTE_URL),
+        'a restarted browser must navigate back to the exact persisted remote conversation: '
+        + JSON.stringify(gotoCalls));
+    }
+
+    return { text: 'fixture browser reply', sessionId: DEEPSEEK_REMOTE_ID };
+  };
+  return calls;
+}
+
 test('① 游标跨实例存活：重启（同 profileDir 新实例）后继续增量，不再整段重发', async () => {
   const profileDir = tmpDir();
   const driverA = scriptedDriver();
@@ -181,4 +297,88 @@ test('⑤ 命名键形：裸 id 精确 miss 后必须走前缀查，取回网页
   assert.equal(r.text, '网页端真实标题', '命名必须取回网页端真实标题，实际：' + JSON.stringify(r.text));
   await bridge.close();
   fs.rmSync(profileDir, { recursive: true, force: true });
+});
+
+
+test('⑥ DSH restart composes the persisted cursor with the same browser profile and remote chat', async () => {
+  const profileDir = tmpDir();
+  const sessionId = 'sess-cross-layer-restart';
+
+  // First DSH process: a real apply() + real browser driver. The fixture page lands in
+  // the remote chat; the wrapper substitutes only the final generated answer so apply()
+  // can commit its real DSH cursor to the same profile directory.
+  const firstPage = deepseekRestartPage({ firstProcess: true });
+  const driverA = await import('../lib/browser-driver.js')
+    .then(({ createBrowserDriver }) => createBrowserDriver({
+      siteId: 'deepseek',
+      site: 'https://chat.deepseek.com/',
+      profileDir,
+      headless: true,
+      page: firstPage.page,
+      requestTimeoutMs: 5_000,
+    }));
+  const firstCalls = withFixtureGeneration(driverA, {
+    expectedFresh: true,
+    gotoCalls: firstPage.gotoCalls,
+  });
+  const bridgeA = await openBridge({ driver: driverA, profileDir });
+  try {
+    const first = await bridgeA.stream({ sessionId, messages: messagesAt(1) });
+    assert.equal(first.text, 'fixture browser reply');
+    assert.equal(firstCalls.length, 1);
+    assert.equal(firstCalls[0].fresh, true);
+    assert.ok(firstCalls[0].messageChars >= BIG_CHARS,
+      'the first DSH turn must be the full transcript');
+    assert.equal(driverA.status().sessionSlot?.webSessionId, DEEPSEEK_REMOTE_ID);
+  } finally {
+    await bridgeA.close();
+  }
+
+  // Both durable links must exist before the simulated process restart:
+  //   1) DSH cursor (which determines fresh=false and the short incremental payload);
+  //   2) browser-driver session store (which maps the same driver key to the remote chat).
+  const cursorFile = path.join(profileDir, 'webcode-cursor-state.json');
+  const conversationFile = path.join(profileDir, 'webcode-sessions-deepseek.json');
+  assert.ok(fs.existsSync(cursorFile), 'the first apply() must persist the DSH cursor');
+  assert.ok(fs.existsSync(conversationFile), 'the first browser driver must persist the remote chat');
+  const webStore = JSON.parse(fs.readFileSync(conversationFile, 'utf8'));
+  assert.equal(webStore[firstCalls[0].key]?.webSessionId, DEEPSEEK_REMOTE_ID,
+    'the browser profile must map the exact DSH driver key to the remote conversation ID');
+
+  // Second DSH process: brand-new apply() closure, new cursor Map and new browser driver,
+  // but the same stable DSH Session ID and profile directory. The new page starts at the
+  // site root; only the driver's persisted conversation mapping can take it back to chat.
+  const secondPage = deepseekRestartPage({ firstProcess: false });
+  const driverB = await import('../lib/browser-driver.js')
+    .then(({ createBrowserDriver }) => createBrowserDriver({
+      siteId: 'deepseek',
+      site: 'https://chat.deepseek.com/',
+      profileDir,
+      headless: true,
+      page: secondPage.page,
+      requestTimeoutMs: 5_000,
+    }));
+  const secondCalls = withFixtureGeneration(driverB, {
+    expectedFresh: false,
+    gotoCalls: secondPage.gotoCalls,
+  });
+  const bridgeB = await openBridge({ driver: driverB, profileDir });
+  try {
+    const second = await bridgeB.stream({ sessionId, messages: messagesAt(2) });
+    assert.equal(second.text, 'fixture browser reply');
+    assert.equal(secondCalls.length, 1);
+    assert.equal(secondCalls[0].key, firstCalls[0].key,
+      'the restarted apply() must address the same DSH session/account driver key');
+    assert.equal(secondCalls[0].fresh, false,
+      'the persisted DSH cursor must prevent a full fresh turn after restart');
+    assert.ok(secondCalls[0].messageChars < BIG_CHARS,
+      'the restarted DSH session must send only an incremental transcript');
+    assert.equal(driverB.status().sessionSlot?.webSessionId, DEEPSEEK_REMOTE_ID,
+      'the new browser driver must recover the same remote conversation ID from the profile');
+    assert.ok(secondPage.gotoCalls.includes(DEEPSEEK_REMOTE_URL),
+      'the new browser page must navigate to the same remote chat, not open another one');
+  } finally {
+    await bridgeB.close();
+    fs.rmSync(profileDir, { recursive: true, force: true });
+  }
 });
