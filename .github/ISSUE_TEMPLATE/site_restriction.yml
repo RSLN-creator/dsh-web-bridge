@@ -1,0 +1,76 @@
+name: Site restriction / rate-limit report
+description: Report an account restriction or site-side rate limit without attempting to reproduce it.
+title: "[Site risk] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This form records site-side restrictions and risk signals; it does not assume a plugin defect.
+
+        **Do not retry, increase traffic, create replacement accounts to test, or attempt to bypass a site restriction for this report.** Pause use on the affected site and follow that site's official recovery or appeal process.
+
+        Do not post account email addresses, account IDs, cookies, browser profiles, session files, credentials or private conversation text.
+  - type: dropdown
+    id: site
+    attributes:
+      label: Affected site
+      options:
+        - DeepSeek
+        - GLM / Z.ai
+        - Kimi
+        - Qwen
+        - Doubao
+        - Other / unknown
+    validations:
+      required: true
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: What happened?
+      options:
+        - Account restricted / banned
+        - Temporary rate limit
+        - CAPTCHA / verification challenge
+        - Warning banner only
+        - Other / unknown
+    validations:
+      required: true
+  - type: input
+    id: approximate_time
+    attributes:
+      label: Approximate date and time (include timezone)
+      placeholder: "2026-11-27 10:30 America/New_York"
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: DSH and plugin versions
+      description: Include the running process build identifier from the version badge tooltip when available.
+      placeholder: "DSH x.y.z; plugin 0.22.3; build 1a2b3c4d5e6f"
+    validations:
+      required: true
+  - type: textarea
+    id: usage_settings
+    attributes:
+      label: Settings and usage pattern before the event
+      description: Optional approximate send gap, whether local tool calling was enabled, whether requests were serial or concurrent, and approximate turns. Do not include account names or exact private prompts.
+    validations:
+      required: false
+  - type: textarea
+    id: site_message
+    attributes:
+      label: Exact site message
+      description: Paste the site's visible warning or error text. Redact personal or account-specific information.
+      render: text
+    validations:
+      required: false
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I have stopped automated requests to the affected site and will not increase traffic to reproduce this event.
+          required: true
+        - label: I have not included account identifiers, credentials, cookies, browser profiles or private session logs.
+          required: true
