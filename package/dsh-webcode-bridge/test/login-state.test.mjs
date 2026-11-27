@@ -354,6 +354,15 @@ test('QR selector does not guess when only unrelated elements are visible', asyn
   ]), null);
 });
 
+test('QR selector ignores CAPTCHA and slider canvases but keeps explicit login QR labels', async () => {
+  const { selectLoginQrCandidate } = await import('../lib/browser-driver.js');
+  assert.deepEqual(selectLoginQrCandidate([
+    { index: 0, tag: 'canvas', width: 260, height: 260, visible: true, meta: 'aliyunCaptcha slider challenge' },
+    { index: 1, tag: 'img', width: 220, height: 220, visible: true, meta: 'hcaptcha puzzle' },
+    { index: 2, tag: 'canvas', width: 220, height: 220, visible: true, meta: 'login verification QR code' },
+  ]), { index: 2, width: 220, height: 220 });
+});
+
 test('login QR capture is bounded to the pending login page and returns an element screenshot', () => {
   assert.match(SRC, /async function readLoginQr\(\)/);
   assert.match(SRC, /loginPhase !== 'waiting-for-login'/);
