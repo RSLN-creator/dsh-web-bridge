@@ -2337,13 +2337,19 @@ window.__ModuleLoader__.load({
                 // 0.19.56 已把更新源换成 Releases，而这三句 title 仍写着 registry——
                 // 用户在排障时被这三句话引到错的源上（本项目对「显示与实现不一致」
                 // 记过多次：说 A 做 B 比不说更难查）。状态枚举本身没变。
-                title: updateInfo.status === 'outdated'
+                title: (updateInfo.status === 'outdated'
                   ? '当前 v' + updateInfo.current + '，GitHub Releases 上是 v' + updateInfo.latest
                   : updateInfo.status === 'current'
                     ? 'GitHub Releases 上也是 v' + (updateInfo.latest || updateInfo.current)
-                    : '检查失败：' + (updateInfo.reason || '未知原因'),
+                    : '检查失败：' + (updateInfo.reason || '未知原因'))
+                  + (build?.hash ? ' · 当前进程构建标识：' + build.hash : ' · 当前进程构建标识：暂无读数'),
               }, 'v' + updateInfo.current + (updateInfo.status === 'outdated' ? ' → v' + updateInfo.latest : ''))
-              : (build?.version ? h('span', { className: 'hwb-version' }, 'v' + build.version) : null),
+              : (build?.version ? h('span', {
+                className: 'hwb-version',
+                title: build.hash
+                  ? '当前进程版本 v' + build.version + ' · 构建标识：' + build.hash
+                  : '当前进程版本 v' + build.version + ' · 构建标识暂无读数',
+              }, 'v' + build.version) : null),
             h('button', {
               type: 'button', className: 'hwb-update-btn' + (updateInfo?.status === 'outdated' ? ' primary' : ''),
               disabled: updating || updateCheckedLoading,
