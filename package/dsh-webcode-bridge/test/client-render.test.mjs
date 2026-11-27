@@ -301,6 +301,9 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
             tasksSource: roster.tasksSource ?? null,
           } : {}) };
       }
+      else if (u.includes('/__webcode/update-status')) body = {
+        ok: true, current: 'test', latest: 'test', status: 'current', profile: 'web',
+      };
       else if (u.includes('/__webcode/settings')) body = { ok: true, extraPrompt: '', sendGapMs: 10000, thinkMode: 'auto', subAgentMode: 'own', subAgentSite: 'follow' };
       else if (u.includes('/__webcode/prompt-variants')) {
         // 0.14.0：设置页默认显示首轮提示词。变体必须真的带 text，否则「默认显示」
