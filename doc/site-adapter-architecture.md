@@ -27,6 +27,7 @@ declarations into the public provider/model view. It is not a second site regist
 | Decoder family and completion path | Site adapter; common decoder implementation |
 | Verified conversation URL parsing/building | Site adapter navigation capability |
 | Tool-call format and prompt teaching choice | Site adapter teaching capability |
+| Measured attachment inline ceilings and composer hard ceilings | Site adapter `limits`; shared driver derives compatibility snapshots |
 The read-only prompt variant catalogue in `lib/prompt-variants.js` derives membership from
 the adapter's `teaching.toolCallFormat` and `teaching.skillCatalogMode`; it does not maintain a
 second site-ID allow/exclude list. If an adapter declares a new teaching profile, the shared
@@ -42,6 +43,35 @@ does not copy another site's local instructions into its preview.
 
 Do not duplicate the browser driver, decoder, prompt serializer or permission system per website.
 Do not infer a site capability from its frontend framework or an unverified DOM guess.
+
+### Measured message-delivery limits
+
+Message-length ceilings are site facts, not shared browser-driver routing knowledge. They live in each
+adapter's optional `limits` object and are validated at registry load:
+
+- DeepSeek, GLM and Kimi declare `attachInlineLimitChars: 8000`. These are measured safety ceilings
+  that tighten a positive user-configured inline threshold; they do not enable attachments.
+- Kimi additionally declares `composerHardLimitChars: 200000`. This is a hard fallback ceiling:
+  even an explicit inline preference must use attachment delivery above it because inline text was
+  observed to truncate. It is distinct from the 8,000-character preference threshold.
+
+Evidence retained from the original driver comments and probe records:
+
+- DeepSeek: `test-mock/real-attach-adjudicate.mjs` and
+  `test-mock/real-attach-ingest.mjs`; typical first-turn messages measured 48,937 and 53,797
+  characters while the site accepted attachment payloads.
+- Kimi: `test-mock/real-attach-ingest-kimi.mjs`; a 38,807-character inline turn was silently
+  shortened to approximately 20,158 characters. The later one-shot `keyboard.insertText` probe
+  read back 50,000, 100,000 and 200,000 characters exactly, so 200,000 is the evidenced hard
+  ceiling rather than an extrapolated larger value.
+- GLM: the 2026-09-27 12,911-character incident read back only 12,870 characters and raised
+  `PROMPT_TRUNCATED`; see `doc/research/2026-09-27-glm-native-tool-call.md`. The 8,000-character
+  ceiling moves this long prompt to the already-validated attachment path.
+
+`browser-driver.js` keeps `SITE_ATTACH_INLINE_LIMIT` and
+`SITE_COMPOSER_HARD_LIMIT` as compatibility snapshots derived from adapter data. The effective
+threshold still returns zero for a user-configured zero/invalid value, preserving the existing
+"attachments disabled" contract. Sites without measured limits continue using shared defaults.
 
 ### Site request contract metadata
 
