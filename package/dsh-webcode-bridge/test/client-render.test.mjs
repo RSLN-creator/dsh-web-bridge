@@ -2271,16 +2271,16 @@ test('★ #60 登录三态：uncertain 必须渲染「待确认」而不是「�
   assert.ok(messageStart > 0 && translatorStart > messageStart, 'native MSG dictionary and translator must exist');
   const messageSource = src.slice(messageStart, translatorStart);
   // eslint-disable-next-line no-new-func
-  const messages = new Function(messageSource + '\\nreturn MSG;')();
+  const messages = new Function(messageSource + '\nreturn MSG;')();
   const chineseMessage = key => messages[key]?.zh || key;
 
   /** 从 client.cjs 源码里取出一个 `const <name> = row => { ... };` 的函数体原样求值。 */
   function extractRowFn(name) {
     const start = src.indexOf(`const ${name} = row => {`);
     assert.ok(start > 0, `client.cjs 里必须有 ${name}（登录态渲染的三个入口之一）`);
-    const fnEnd = src.indexOf('\\n      };', start);
+    const fnEnd = src.indexOf('\n      };', start);
     assert.ok(fnEnd > start, `${name} 的函数体必须能定位到结尾`);
-    const body = src.slice(src.indexOf('{', start), fnEnd + '\\n      };'.length - 1);
+    const body = src.slice(src.indexOf('{', start), fnEnd + '\n      };'.length - 1);
     // eslint-disable-next-line no-new-func
     const evaluate = new Function('row', 'M', body);
     return row => evaluate(row, chineseMessage);
