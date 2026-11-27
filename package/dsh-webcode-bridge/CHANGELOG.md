@@ -8,6 +8,8 @@ this file is the package-facing release history.
 ## Unreleased（2026-11-26：全站点适配层重构、Web 合约补齐与 QR 登录桥接）
 
 ### 框架 / 网站适配
+- 将 DeepSeek / GLM / Kimi 的附件 inline 阈值与 Kimi 纯文本硬上限移入 adapter `limits`；
+  注册时验证正整数声明，共享驱动的兼容导出表由 adapter 数据派生，`0 = 关闭附件` 语义不变。
 - 设置页提示词变体成员改由 adapter `teaching` profile（调用格式 + 技能目录模式）派生；
   不再在公共变体表重复维护 DeepSeek / GLM 站点 ID，逐站点预览按自己的 adapter 与 site prompt 现算。
 - 新增跨层重启护栏：两个真实 `apply()` / browser-driver 实例复用同一 profile，验证 DSH 游标、
