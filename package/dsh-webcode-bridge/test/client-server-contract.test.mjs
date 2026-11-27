@@ -137,13 +137,14 @@ test('right-sidebar split opens the current site and account in the new official
   const end = clientSrc.indexOf('const floatPanel =', start);
   assert.ok(start >= 0 && end > start, 'splitPanel must be registered before the float action');
   const split = clientSrc.slice(start, end);
-  assert.match(split, /ctx\\.sidebarRight\\.split\\(\\)/, 'must use the official sidebar split operation');
-  assert.match(split, /if \\(!paneId\\) return;/, 'must not open a tab when DSH cannot split the pane');
-  assert.match(split, /ctx\\.sidebarRight\\.openTab\\(SITE_KIND,\\s*\\{\\s*paneId, params: \\{ siteId: sid, slot: slot \\|\\| '' \\} \\}\\)/,
+  assert.ok(split.includes('ctx.sidebarRight.split()'), 'must use the official sidebar split operation');
+  assert.ok(split.includes('if (!paneId) return;'), 'must not open a tab when DSH cannot split the pane');
+  assert.ok(split.includes('ctx.sidebarRight.openTab(SITE_KIND, {')
+    && split.includes("paneId, params: { siteId: sid, slot: slot || '' }"),
     'the new pane must open the site tab with its site and account parameters');
-  assert.match(clientSrc, /onClick: \\(\\) => onSplit\\(siteId, accountSlot\\)/,
+  assert.ok(clientSrc.includes('onClick: () => onSplit(siteId, accountSlot)'),
     'the button must pass the current site and selected account rather than the click event');
-  assert.doesNotMatch(clientSrc, /pendingPaneSite|openSiteInPane/,
+  assert.ok(!clientSrc.includes('pendingPaneSite') && !clientSrc.includes('openSiteInPane'),
     'the old module-level handoff must not compete with official tab navigation params');
 });
 
