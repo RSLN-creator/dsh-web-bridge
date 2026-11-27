@@ -30,6 +30,8 @@ export const deepseekSite = {
   // 用户看到的就是这一处（`displayName` 也由它派生，于是账户行会显示
   // 「DeepSeek 网页版 (账户2)」）。**只改展示，模型 id / 分组名 / 短键一律不动**。
   id: 'deepseek', name: 'DeepSeek', origin: 'https://chat.deepseek.com',
+  // Measured message delivery ceiling: long conversations are safely read from attachments.
+  limits: { attachInlineLimitChars: 8_000 },
   // Keep the primary web account first; other adapters use the default alphabetical order.
   accountSortOrder: -1,
   // **必须挂在中继根上，不能用自己的子域**（真机 2026-09-13）：DeepSeek 前端
