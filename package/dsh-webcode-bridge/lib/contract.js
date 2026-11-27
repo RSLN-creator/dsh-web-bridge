@@ -1,69 +1,25 @@
-// contract.js — 各内容服务的网页契约集中维护。
+// contract.js — stable runtime contract projection for all website adapters.
 //
-// DOM 选择器、模型目录、SSE 端点、解码器种类、请求元数据键等升级点全部收口到这里。
-// 网页改版时只需更新 providers.js / 本文件，并在发版前运行 `pnpm doctor`。
-// DeepSeek 契约：strictModelType 仍为真，核验口径按 UI 代际取值——旧三 pill UI 看
-// model_type，2026-09-10 新版统一 UI 看 thinking_enabled（见 expectedRequestMetadata）；
-// 其余站点为通用契约（标签点击选模型 + 通用解码器），实验性站点标记 experimental。
+// Each adapter owns verified website-specific facts. This module maps those facts into the
+// shared driver contract while preserving the historical shape of every site's public record.
+// Site changes belong in lib/sites/<siteId>.js; shared algorithms stay here and in the driver.
 import { DEEPSEEK, SITES, resolveWebModel, getSite, conversationIdFromUrl, conversationUrlFor } from './providers.js';
 import { expectedModelType, expectedRequestMetadata } from './metrics.js';
 
+
 /**
- * DeepSeek 的网页契约。
+ * Project one adapter into the stable browser-driver contract.
  *
- * ## 0.22.2（DeepSeek 试点第一步）：这里只写「独有知识」，不再手抄第二份选择器
+ * Adapters own verified site-specific facts such as search controls and strict request-metadata
+ * verification. This module supplies shared defaults and compatibility behavior only; it must
+ * never branch on a website ID.
  *
- * 本对象此前是 **14 个键手写一遍**，其中 **9 个是 `DEEPSEEK.*` 的逐字照抄**
- * （`siteOrigin←origin` / `completionPath←completionPaths[0]` / `inputSelector←input` /
- *  `sendButtonSelector←sendButton` / `stopButtonSelector←stopButton` /
- *  `attachSelector` / `attachPreviewSelector←attachPreview` / `completionPaths` / `decoder`）。
+ * Generic adapters retain the historic optional keys (answerSelector and experimental) even
+ * when their values are null/false. An adapter may set contract.alwaysOptionals=false only when
+ * its established contract intentionally omitted those keys; this preserves DeepSeek's old shape.
  *
- * 那不是「集中维护」，那是**同一份信息写两遍**——`doc/CODE-STRUCTURE.md` 里记的
- * 「修一处忘两处」正是这一类；`browser-driver.js` 里曾有三份逐字相同的
- * `ANSWER_SELECTOR` 字面量，代价是判据用的节点与兜底交出去的节点不是同一个。
- *
- * 现在改成：**`providers.js` 的站点声明是唯一真源**，本对象只保留
- * 「站点声明里没有、又确实只有 DeepSeek 有」的 5 类知识：
- *
- * | 键 | 为什么必须留在这里（不能从 site 派生） |
- * | --- | --- |
- * | `searchTogglePattern` | 网页控件**文本**的匹配式（`智能搜索/联网搜索/Search`），不是选择器 |
- * | `requestMetadataKeys` | 发送后要核验的请求体元数据键，属于「怎么验」而非「站点长什么样」 |
- * | `strictModelType` | 本仓库红线 1 的开关：站点元数据与所选模式不符必须报错 |
- * | `expectedModelType` / `expectedRequestMetadata` | 两个判据函数，按 UI 代际取期望值 |
- *
- * 判据（改这里的唯一标准）：**凡是能从 `DEEPSEEK` 读到的，就不要在这里再写一份**。
- * 派生关系见下方 `deriveContractFromSite`，它对 10 个站点一视同仁。
- */
-/**
- * 从站点声明派生契约里那 9 个「形状」字段——**单一取法，各站点共用**。
- *
- * 这是 0.22.2 试点要验的那件事：站点之间的差异应该只有**数据**（声明里有什么），
- * 而不是**又一段代码**（再手写一遍同名字段）。派生是纯字段改名，没有逻辑分支，
- * 因此 `provider-surface.test.mjs` 钉住的对外面逐字不变。
- *
- * ## 一条必须守住的等价性（本轮踩到的真问题，写下来免得下一个人重踩）
- *
- * 「键存在但值为 undefined」与「键根本不存在」**在 `Object.keys()` 上不同**；
- * 更麻烦的是：**同一个派生函数不能同时服务两种历史形状**。
- *
- * 实测（0.22.2 第一版）：把「可选字段只在声明时出现」这条规则套到**所有站点**上，
- * DeepSeek 完全等价，但**其余 8 站不等价** —— 通用契约历来**无条件**带
- * `answerSelector` 与 `experimental`（哪怕值是 null/false），收窄它们等于改变了
- * 对外面。`provider-surface.test.mjs` 存在的意义正是钉住这个面。
- *
- * 因此本函数带一个开关：
- *   · `alwaysOptionals: true`（通用契约，即历史行为）→ 可选键**恒在**；
- *   · `alwaysOptionals: false`（DeepSeek）→ 可选键**只在声明里有时才出现**
- *     （DeepSeek 契约历史上就没有这两键，多出来就是漂移）。
- *
- * 这就是「只动 DeepSeek」这条试点纪律在代码里的落点：**没有顺手动别人的形状**。
- *
- * @param {object} st 站点声明（`providers.js` 的 SITE 或 `lib/sites/<id>.js` 的导出）
- * @param {object} [extra] 该站点独有的其余契约字段（DeepSeek 用 DEEPSEEK_ONLY）
- * @param {object} [opts]
- * @param {boolean} [opts.alwaysOptionals=false] 可选键是否恒在（默认否，按声明）
- * @returns {object} 冻结后的契约
+ * @param {object} st Site adapter declaration
+ * @returns {object} Frozen browser-driver contract
  */
 function deriveContractFromSite(st) {
   const siteContract = st.contract || {};
