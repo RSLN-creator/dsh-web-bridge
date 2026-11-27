@@ -296,7 +296,6 @@ window.__ModuleLoader__.load({
       return null;
     }
 
-    const MODEL_NAMES = { deepseek: 'DeepSeek' };
     // Site identity and display names come from the server's adapter registry.
     // The browser bundle keeps no second site list: adding a site only changes the adapter registry.
     const SITE_DIRECTORY = new Map();
@@ -2249,7 +2248,7 @@ window.__ModuleLoader__.load({
       // 开关本身已经**恒开**（服务端 relay 恒返回 true，见 lib/relay.js），
       // 界面不再有任何入口，因此这里也不再需要那份读数。
       const metrics = relay?.metrics;
-      const currentModelName = m => models?.find(x => x.id === m)?.name || MODEL_NAMES[m] || m;
+      const currentModelName = m => models?.find(x => x.id === m)?.name || siteName(m) || m;
       // Local site settings are adapter capabilities. Only declared `settingsUi` controls
       // are rendered; the shared client must not infer support from a website ID.
       /**

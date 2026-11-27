@@ -8,6 +8,7 @@ this file is the package-facing release history.
 ## Unreleased（2026-11-26：全站点适配层重构、Web 合约补齐与 QR 登录桥接）
 
 ### 框架 / 网站适配
+- 移除仅含 DeepSeek 的客户端 `MODEL_NAMES` 兜底表，模型名称回落到 adapter 的 canonical `siteName`。
 - 将账户列表排序优先级移入 site adapter 并通过 `/status → driver.sites` 投影；
   删除未使用的客户端站点 origin 副本，避免重复维护域名清单。
 - 在站点注册时校验 adapter `settingsUi` 声明；未知控件、畸形选项和重复项在启动阶段失败，

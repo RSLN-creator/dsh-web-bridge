@@ -166,6 +166,12 @@ test('right-sidebar split opens the current site and account in the new official
     'the old module-level handoff must not compete with official tab navigation params');
 });
 
+test('model display fallback uses the canonical adapter site name', () => {
+  assert.match(clientSrc, /const currentModelName = m => models\?\.find\(x => x\.id === m\)\?\.name \|\| siteName\(m\) \|\| m/);
+  assert.doesNotMatch(clientSrc, /const MODEL_NAMES\s*=/,
+    'model display names must not be duplicated in a one-site browser map');
+});
+
 test('Web UI site labels and choices come from the live server adapter directory', () => {
   assert.match(clientSrc, /const SITE_DIRECTORY = new Map\(\)/,
     'the bundle must keep only a runtime cache, not a copied site-name table');
