@@ -14,6 +14,7 @@ import { geminiSite } from './gemini.js';
 import { zaiSite } from './zai.js';
 import { zaiCnSite } from './zai-cn.js';
 import { assertSiteSettingsUi } from './settings-ui-contract.js';
+import { assertSiteWebContract } from './web-contract-metadata.js';
 
 export const SITE_MODULES = Object.freeze({
   deepseek: deepseekSite,
@@ -30,7 +31,10 @@ export const SITE_MODULES = Object.freeze({
 });
 
 // Fail at startup if an adapter declares a setting the shared Web UI cannot safely render.
-for (const site of Object.values(SITE_MODULES)) assertSiteSettingsUi(site);
+for (const site of Object.values(SITE_MODULES)) {
+  assertSiteSettingsUi(site);
+  assertSiteWebContract(site);
+}
 
 /** Return the registered site IDs for a provider-surface completeness check. */
 export function migratedSiteIds() {
