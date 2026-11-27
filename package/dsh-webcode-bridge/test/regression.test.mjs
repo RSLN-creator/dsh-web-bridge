@@ -1097,7 +1097,8 @@ test('可见 composer 判定必须遍历**全部**候选选择器（GLM 的 comp
   assert.ok(/split\(','\)/.test(body), '必须切分候选选择器列表');
   assert.ok(!/split\(','\)\[0\]/.test(body), '不得只取第一个候选（会漏掉 GLM 的裸 textarea）');
   assert.match(body, /querySelectorAll\(selector\)/, '逐个候选查元素');
-  assert.match(body, /seen\.has\(e\)/, '跨候选去重，避免同一元素被计两次');
+  assert.match(body, /seen\.has\(el\)/, '跨候选去重，避免同一元素被计两次');
+  assert.match(body, /seen\.add\(el\)/, '命中元素必须在下一个选择器前加入去重集合');
 });
 
 test('风控/验证页必须在判定登录态之前识别，并如实报成 challenge-page', () => {
