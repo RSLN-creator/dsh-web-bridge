@@ -168,13 +168,21 @@ function withFixtureGeneration(driver, { expectedFresh, gotoCalls }) {
     assert.equal(options.fresh === true, expectedFresh,
       'the browser driver must receive the expected fresh/resume mode');
 
-    const slot = driver.status().sessionSlot;
-    assert.equal(slot?.webSessionId, DEEPSEEK_REMOTE_ID,
-      'the browser driver status projection must expose the persisted remote conversation identity: '
-      + JSON.stringify({ key, slot, navTrace: driver.status().navTrace }));
-    assert.equal(slot?.source, 'store',
-      'the restarted DSH bridge must observe the record from the browser profile, not infer it from the current URL');
-    if (!expectedFresh) {
+    const status = driver.status();
+    if (expectedFresh) {
+      // The first turn must write the remote identity to the profile-backed store.
+      assert.equal(status.sessionSlot?.webSessionId, DEEPSEEK_REMOTE_ID,
+        'the first browser process must persist the remote conversation identity: '
+        + JSON.stringify({ key, slot: status.sessionSlot, navTrace: status.navTrace }));
+      assert.equal(status.sessionSlot?.source, 'store',
+        'the first-turn identity must come from the browser profile store');
+    } else {
+      // On restart the key is already loaded before navigation; the navigation trace
+      // is the authoritative evidence that the new driver selected that stored ID.
+      assert.ok(status.navTrace?.some((entry) => entry.state === 'resume'
+        && entry.storedId === DEEPSEEK_REMOTE_ID),
+      'the restarted browser driver must resume from the stored remote conversation ID: '
+        + JSON.stringify(status.navTrace));
       assert.ok(gotoCalls.includes(DEEPSEEK_REMOTE_URL),
         'a restarted browser must navigate back to the exact persisted remote conversation: '
         + JSON.stringify(gotoCalls));
