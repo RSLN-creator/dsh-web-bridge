@@ -35,16 +35,6 @@ import { expectedModelType, expectedRequestMetadata } from './metrics.js';
  * 判据（改这里的唯一标准）：**凡是能从 `DEEPSEEK` 读到的，就不要在这里再写一份**。
  * 派生关系见下方 `deriveContractFromSite`，它对 10 个站点一视同仁。
  */
-const DEEPSEEK_ONLY = Object.freeze({
-  searchTogglePattern: /^(智能搜索|联网搜索|Search)$/,
-  requestMetadataKeys: ['model_type', 'thinking_enabled', 'search_enabled'],
-  strictModelType: true,
-  expectedModelType: (modelId, ui = 'classic') => expectedModelType(resolveWebModel(modelId).id, ui),
-  // 发送后核验「网页真的用了所选模式」：classic 看 model_type（default/expert/vision），
-  // unified 看 thinking_enabled（model_type 恒为 default，probe-19/20 实测）。
-  expectedRequestMetadata: (modelId, opts) => expectedRequestMetadata(resolveWebModel(modelId).id, opts),
-});
-
 /**
  * 从站点声明派生契约里那 9 个「形状」字段——**单一取法，各站点共用**。
  *
@@ -75,7 +65,10 @@ const DEEPSEEK_ONLY = Object.freeze({
  * @param {boolean} [opts.alwaysOptionals=false] 可选键是否恒在（默认否，按声明）
  * @returns {object} 冻结后的契约
  */
-function deriveContractFromSite(st, extra = {}, { alwaysOptionals = false } = {}) {
+function deriveContractFromSite(st) {
+  const siteContract = st.contract || {};
+  // Generic adapters preserve the established optional-key shape by default.
+  const alwaysOptionals = siteContract.alwaysOptionals !== false;
   // 必填字段：每个站点都有（providers.js 的 SITE 形状保证了这一点）。
   const base = {
     siteOrigin: st.origin,
@@ -91,11 +84,16 @@ function deriveContractFromSite(st, extra = {}, { alwaysOptionals = false } = {}
     // 的链路：桥以为传完了，网页端其实一个附件都没有）。
     attachPreviewSelector: st.attachPreview ?? null,
     decoder: st.decoder,
-    // 默认值：通用契约的基线；DeepSeek 这类站点在 extra 里覆盖。
-    searchTogglePattern: null,
-    requestMetadataKeys: [],
-    strictModelType: false,
-    expectedModelType: () => null,
+    // Verified site-specific request behavior is data on the adapter, not an ID branch.
+    searchTogglePattern: siteContract.searchTogglePattern ?? null,
+    requestMetadataKeys: siteContract.requestMetadataKeys ?? [],
+    strictModelType: siteContract.strictModelType === true,
+    expectedModelType: siteContract.strictModelType === true
+      ? (modelId, ui = 'classic') => expectedModelType(resolveWebModel(modelId).id, ui)
+      : () => null,
+    ...(siteContract.strictModelType === true ? {
+      expectedRequestMetadata: (modelId, opts) => expectedRequestMetadata(resolveWebModel(modelId).id, opts),
+    } : {}),
   };
 
   // 可选字段（0.19.19 的 answerSelector / 站点 experimental 标记）。
@@ -107,25 +105,14 @@ function deriveContractFromSite(st, extra = {}, { alwaysOptionals = false } = {}
     base.experimental = Boolean(st.experimental);
   }
 
-  // 站点独有知识（最后铺开，允许覆盖上面的默认值）。
-  return Object.freeze({ ...base, ...extra });
+  return Object.freeze(base);
 }
 
-/** DeepSeek 契约：9 项形状字段派生自 `DEEPSEEK`，5 项独有知识在这里声明。 */
-export const DEEPSEEK_WEB_CONTRACT = deriveContractFromSite(DEEPSEEK, DEEPSEEK_ONLY);
-
-/**
- * 通用契约：**保持历史形状**（可选键恒在）。
- *
- * 0.22.2 没有改动任何一个非 DeepSeek 站点的对外形状——这是「只动 DeepSeek」
- * 这条试点纪律的直接后果，也是 `provider-surface.test.mjs` 能继续绿的原因。
- */
-function genericContract(st) {
-  return deriveContractFromSite(st, {}, { alwaysOptionals: true });
-}
+/** Retain the named DeepSeek export for existing imports; its facts now live on the adapter. */
+export const DEEPSEEK_WEB_CONTRACT = deriveContractFromSite(DEEPSEEK);
 
 export const SITE_CONTRACTS = Object.freeze(
-  Object.fromEntries(SITES.map((s) => [s.id, s.id === 'deepseek' ? DEEPSEEK_WEB_CONTRACT : genericContract(s)])),
+  Object.fromEntries(SITES.map((site) => [site.id, deriveContractFromSite(site)])),
 );
 
 /**
