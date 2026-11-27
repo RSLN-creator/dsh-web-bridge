@@ -96,6 +96,13 @@ For this bridge, terminal resume therefore needs all three links to remain valid
 the plugin's persistent browser profile, and the remote site's conversation ID/session cursor. The
 DSH Session ID alone does not recreate the other two.
 
+The automated composition check is `package/dsh-webcode-bridge/test/cursor-persistence.test.mjs`
+(⑥). It starts two real `apply()` instances and two real browser-driver instances against one
+profile directory. It verifies that the same DSH Session ID restores an incremental cursor while
+the new driver returns to the exact stored remote conversation URL and ID. The fixture replaces
+only the final generated answer; browser navigation, driver-session persistence and DSH cursor
+persistence are exercised through production code.
+
 
 ## Evaluation cycles
 
@@ -135,4 +142,3 @@ adapter update. No client-side bridge can guarantee zero maintenance against tho
 
 - The QR selector now filters known CAPTCHA/slider/puzzle metadata (fixture-guarded in test/login-state.test.mjs); still run a real DSH Web QR scan on each reachable QR-login site and verify login completion plus cookie persistence after driver restart.
 - Move remaining evidenced site-only behavior branches into adapter capabilities where doing so preserves existing behavior.
-- Add a fixture-backed browser restart/resume test that proves the DSH Session ID, browser profile and remote conversation ID reconnect to the same website chat.
