@@ -5,11 +5,12 @@
 // 低于阈值 ⇒ under-limit ⇒ 全文逐字灌进输入框。用户原话：「明明在附件投递模式下，
 // 看的还是完整上下文」。越典型的会话越走 inline，这就是病根。
 //
-// 修法只做两件事：给 deepseek 一个更低的站点上限；**只收紧不开启**。
+// 修法：将实测上限放在 deepseek / kimi / glm 各自 adapter 的 limits 声明中；**只收紧不开启**。
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { effectiveAttachInlineLimit, SITE_ATTACH_INLINE_LIMIT } from '../lib/browser-driver.js';
+import { effectiveAttachInlineLimit, SITE_ATTACH_INLINE_LIMIT, SITE_COMPOSER_HARD_LIMIT, composerHardLimitFor } from '../lib/browser-driver.js';
+import { SITES } from '../lib/providers.js';
 
 test('deepseek 的站点上限低于全站默认 60,000（否则典型首轮仍走 inline）', () => {
   const limit = effectiveAttachInlineLimit('deepseek', 60_000);
@@ -51,4 +52,25 @@ test('未列出的站点逐字维持旧行为（能力边界：只改 deepseek /
 test('站点上限只做上限：配置值更小时取配置值（用户显式收紧优先）', () => {
   assert.equal(effectiveAttachInlineLimit('deepseek', 2_000), 2_000);
   assert.equal(effectiveAttachInlineLimit('deepseek', 60_000), SITE_ATTACH_INLINE_LIMIT.deepseek);
+});
+
+test('兼容导出表严格派生自 adapter limits（不得维护第二张站点 ID 表）', () => {
+  const expectedInline = Object.fromEntries(SITES
+    .filter((site) => Number.isSafeInteger(site.limits?.attachInlineLimitChars))
+    .map((site) => [site.id, site.limits.attachInlineLimitChars]));
+  const expectedHard = Object.fromEntries(SITES
+    .filter((site) => Number.isSafeInteger(site.limits?.composerHardLimitChars))
+    .map((site) => [site.id, site.limits.composerHardLimitChars]));
+
+  assert.deepEqual(expectedInline, { deepseek: 8_000, glm: 8_000, kimi: 8_000 });
+  assert.deepEqual(expectedHard, { kimi: 200_000 });
+  assert.deepEqual(SITE_ATTACH_INLINE_LIMIT, expectedInline);
+  assert.deepEqual(SITE_COMPOSER_HARD_LIMIT, expectedHard);
+});
+
+test('Kimi 纯文本硬上限来自 adapter；其它站点维持无底线', () => {
+  assert.equal(composerHardLimitFor('kimi'), 200_000);
+  assert.equal(composerHardLimitFor('deepseek'), null);
+  assert.equal(composerHardLimitFor('glm'), null);
+  assert.equal(composerHardLimitFor('qwen'), null);
 });
