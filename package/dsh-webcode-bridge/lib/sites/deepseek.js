@@ -113,6 +113,11 @@ export const deepseekSite = {
     // 从不执行——它是防御性声明，不是活路径。
     fallbackContext: 1_000_000,
   },
+  settingsUi: {
+    globalThinkMode: true,
+    searchMode: true,
+    siteThinkMode: true,
+  },
   teaching: {
     toolCallFormat: 'deepseek-native',
     skillCatalogMode: 'slim',

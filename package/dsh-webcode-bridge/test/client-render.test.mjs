@@ -39,6 +39,7 @@ const SESSION_PROPS = { sessionId: 'session-render-test' };
 const SITE_ROWS = SITES.map((site) => ({
   siteId: site.id,
   siteName: site.name,
+  settingsUi: site.settingsUi || null,
   accountKey: site.id,
   displayName: site.name,
   initialized: true,
@@ -669,6 +670,9 @@ test('★ 0.16.38 设置页作用域：全局页与站点页各只有自己那�
   assert.ok(st.includes('DeepSeek 的账户与登录'), '站点页缺少该站点的账户卡');
   assert.ok(st.includes('DeepSeek 的首轮提示词'), '站点页缺少该站点的提示词卡');
   assert.ok(st.includes('DeepSeek 的模型'), '站点页缺少该站点的模型卡');
+  assert.ok(st.includes('联网搜索'), 'DeepSeek adapter-declared search control is missing');
+  assert.ok(st.includes('深度思考（本站覆盖）'), 'DeepSeek adapter-declared site thinking control is missing');
+  assert.ok(st.includes('深度思考'), 'DeepSeek adapter-declared global thinking control is missing');
   for (const gone of ['正在运行（子代理 / Team）', '提示词投递', '会话与子代理', '全局指令', '发送间隔（全局）']) {
     assert.ok(!st.includes(gone), '站点页不该出现全局卡片：' + gone);
   }
@@ -688,6 +692,25 @@ test('★ 0.16.38 设置页作用域：全局页与站点页各只有自己那�
   // 「这个站点没有模型」，而真相是「还没读到」）。此处目录已加载，故只钉
   //「该站点那一支必须在」这一半。
   assert.ok(st.includes('本网站默认模型'), '站点页缺少本网站默认模型行');
+  const glm = await renderPane({
+    payloads: [emptyWindows], which: 'settings', settingsTab: 'glm',
+    sites: [SITE_ROWS.find((row) => row.siteId === 'glm')],
+  });
+  assert.deepEqual(glm.errors, [], 'GLM adapter settings render failed: ' + glm.errors.map(e => e.message).join('; '));
+  const glmText = treeText(glm.tree);
+  for (const item of ['深度思考（本站覆盖）', '任务模式', '任务', '研究报告', 'PPT制作', '数据分析']) {
+    assert.ok(glmText.includes(item), 'GLM adapter-declared setting is missing: ' + item);
+  }
+  assert.ok(!glmText.includes('联网搜索'), 'GLM must not inherit DeepSeek-only search settings');
+  const qwen = await renderPane({
+    payloads: [emptyWindows], which: 'settings', settingsTab: 'qwen',
+    sites: [SITE_ROWS.find((row) => row.siteId === 'qwen')],
+  });
+  assert.deepEqual(qwen.errors, [], 'Qwen site settings render failed: ' + qwen.errors.map(e => e.message).join('; '));
+  const qwenText = treeText(qwen.tree);
+  for (const item of ['深度思考（本站覆盖）', '联网搜索', '任务模式']) {
+    assert.ok(!qwenText.includes(item), 'unverified settings must remain hidden for Qwen: ' + item);
+  }
 });
 
 test('★ 0.19.x 设置页文案：解释性长句与开发者自用读数不得回潮', async () => {

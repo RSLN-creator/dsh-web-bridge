@@ -8,6 +8,8 @@ this file is the package-facing release history.
 ## Unreleased（2026-11-26：全站点适配层重构、Web 合约补齐与 QR 登录桥接）
 
 ### 框架 / 网站适配
+- 将 DeepSeek / GLM 的本地设置控件与 GLM 任务模式选项移入 adapter `settingsUi`；
+  `/status → driver.sites` 传递声明，公共 Web UI 只渲染已验证能力，不再按站点 ID 分支。
 
 - 将 `mountAtRelayRoot` 从站点 adapter 经 `/status → driver.sites` 投影到 Web client；
   iframe 根挂载形态不再由客户端维护 DeepSeek 特例表。

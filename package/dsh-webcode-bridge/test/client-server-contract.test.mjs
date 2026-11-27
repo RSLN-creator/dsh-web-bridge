@@ -173,6 +173,16 @@ test('Web UI site labels and choices come from the live server adapter directory
   assert.match(clientSrc, /const siteName = sid => siteRecord\(sid\)\?\.name/);
   assert.match(clientSrc, /siteRecord\(sid\)\?\.mountAtRelayRoot === true/,
     'relay-root routing must be adapter metadata, not a client-side site-name exception');
+  assert.match(clientSrc, /const siteSettings = sites\?\.find\(\(row\) => row\?\.siteId === settingsTab\)\?\.settingsUi \|\| \{\}/,
+    'the local settings surface must be selected from the active adapter record');
+  for (const capability of ['globalThinkMode', 'searchMode', 'siteThinkMode', 'siteMode']) {
+    assert.match(clientSrc, new RegExp('siteSettings\\.' + capability),
+      'the client should render only adapter-declared ' + capability + ' controls');
+  }
+  assert.doesNotMatch(clientSrc, /settingsTab\s*===\s*['"](?:deepseek|glm)['"]/,
+    'site settings visibility must not contain website IDs in the shared client renderer');
+  assert.equal((serverSrc.match(/settingsUi: st\.settingsUi \|\| null/g) || []).length, 2,
+    'both initialized and lazy site rows must project the adapter settings declaration');
   assert.match(clientSrc, /siteIdsFromRows\(rows\)/,
     'the website catalog must derive its choices from server rows');
   assert.match(clientSrc, /siteIdsFromRows\(sites\)/,

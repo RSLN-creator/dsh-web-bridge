@@ -150,6 +150,22 @@ test('判据 7：站点显示名 = adapter 的 canonical name', () => {
     '每个 adapter 的 name 必须逐字等于对外网站原名');
 });
 
+test('判据 8：站点设置控件只由已校准的 adapter 声明', () => {
+  const declared = Object.fromEntries(SITES.filter((site) => site.settingsUi)
+    .map((site) => [site.id, site.settingsUi]));
+  assert.deepEqual(declared, {
+    deepseek: { globalThinkMode: true, searchMode: true, siteThinkMode: true },
+    glm: {
+      siteThinkMode: true,
+      siteMode: {
+        label: '任务模式',
+        title: 'GLM 工具选择器的任务模式（真机读数：任务/研究报告/PPT制作/数据分析）；默认不改变网页',
+        options: ['任务', '研究报告', 'PPT制作', '数据分析'],
+      },
+    },
+  }, '未取证站点不得意外暴露专用设置；选项文案与真实网页菜单保持一致');
+});
+
 test('判据 8：每个目录条目的 acceptsImages 必须等于 resolveWebModel 的解析值', () => {
   const items = listAllModels();
   const bad = [];

@@ -2253,6 +2253,7 @@ window.__ModuleLoader__.load({
       const build = status?.build;
       const sites = driver?.sites;
       const siteIds = siteIdsFromRows(sites);
+      const siteSettings = sites?.find((row) => row?.siteId === settingsTab)?.settingsUi || {};
       React.useEffect(() => {
         if (settingsTab && Array.isArray(sites) && sites.length
           && !sites.some((row) => row && row.siteId === settingsTab)) setSettingsTab('');
@@ -2550,10 +2551,8 @@ window.__ModuleLoader__.load({
                   });
                 },
               }, '用本站点作为主线默认'))),
-          // 深度思考：三态开关**只对 deepseek** 有意义（其余站点的 pill 契约未真机
-          // 校准，不硬造开关）。判据从「默认模型落在哪个站点」改成「当前看的是哪个
-          // 站点 tab」——模型管理搬到站点页之后，后者才是用户此刻在配的对象。
-          settingsTab === 'deepseek' && h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '深度思考'),
+          siteSettings.globalThinkMode && h('div', { className: 'hwb-row' },
+            h('span', { className: 'hwb-row-label' }, '深度思考'),
             h('div', { className: 'hwb-row-main' },
               h('select', { className: 'hwb-model-select', value: thinkMode, disabled: pending, onChange: e => setThinkMode(e.target.value) },
                 h('option', { value: 'auto', title: '按所选模型的默认思考行为' }, '自动'),
@@ -2561,10 +2560,8 @@ window.__ModuleLoader__.load({
                 h('option', { value: 'off', title: '追求速度' }, '始终关闭')),
               h('button', { disabled: pending || thinkMode === thinkSaved, onClick: () => saveSetting('thinkMode', thinkMode, r => { const v = ['on', 'off', 'auto'].includes(r.thinkMode) ? r.thinkMode : thinkMode; setThinkMode(v); setThinkSaved(v); setThinkNotice('已保存。下次生成起生效。'); }) }, '保存'),
               thinkNotice && h('span', { className: 'hwb-hint' }, thinkNotice))),
-          // 联网搜索（0.19.94）：三态开关**只有 deepseek 站点显示**——搜索控件的真机校准
-          // 只在 deepseek 做过（aria-pressed 文本 = 智能搜索/联网搜索）。其余站点不暴露
-          // 未取证的开关，避免「设置了、网页那边根本没有这个控件」的假承诺。
-          settingsTab === 'deepseek' && h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '联网搜索'),
+          siteSettings.searchMode && h('div', { className: 'hwb-row' },
+            h('span', { className: 'hwb-row-label' }, '联网搜索'),
             h('div', { className: 'hwb-row-main' },
               h('select', { className: 'hwb-model-select', value: searchMode, disabled: pending, onChange: e => setSearchMode(e.target.value) },
                 h('option', { value: 'auto', title: '不碰网页的搜索开关（零位移，默认）' }, '自动'),
@@ -2572,11 +2569,7 @@ window.__ModuleLoader__.load({
                 h('option', { value: 'off', title: '旧行为：搜索被按开就点掉' }, '始终关闭')),
               h('button', { disabled: pending || searchMode === searchModeSaved, onClick: () => saveSetting('searchMode', searchMode, r => { const v = ['on', 'off', 'auto'].includes(r.searchMode) ? r.searchMode : searchMode; setSearchMode(v); setSearchModeSaved(v); setSearchNotice('已保存。下次生成起生效。'); }) }, '保存'),
               searchNotice && h('span', { className: 'hwb-hint' }, searchNotice))),
-          // 深度思考**站点级覆盖**（0.19.96，task-8/12）：deepseek / glm 各一份站点档。
-          // 与上方**全局**「深度思考」并存、互不覆盖：站点档优先，未选 = 跟随全局
-          //（保存时删键）。两站都放，是因为全局档只对 deepseek 有真机校准，而站点档的
-          // 语义是「这一站要不要覆盖全局」——glm 的站点档正是本轮要的用户可见入口。
-          (settingsTab === 'deepseek' || settingsTab === 'glm') && h('div', { className: 'hwb-row' },
+          siteSettings.siteThinkMode && h('div', { className: 'hwb-row' },
             h('span', { className: 'hwb-row-label' }, '深度思考（本站覆盖）'),
             h('div', { className: 'hwb-row-main' },
               h('select', {
@@ -2590,23 +2583,19 @@ window.__ModuleLoader__.load({
                 h('option', { value: 'on', title: '本站强制打开（覆盖全局；未真机校准的站点不点，见驱动）' }, '开'),
                 h('option', { value: 'off', title: '本站强制关闭（覆盖全局）' }, '关')),
               h('span', { className: 'hwb-hint' }, '本站档优先；与上方全局设置是两条独立配置'))),
-          // GLM 任务模式（0.19.96）：写入 siteModeBySite.glm；空 = 删键 = 不动网页。
-          // 选项文本逐字来自真机盘点（mode-inventory.md §1：任务/研究报告/PPT制作/数据分析）。
-          settingsTab === 'glm' && h('div', { className: 'hwb-row' },
-            h('span', { className: 'hwb-row-label' }, '任务模式'),
+          siteSettings.siteMode && h('div', { className: 'hwb-row' },
+            h('span', { className: 'hwb-row-label' }, siteSettings.siteMode.label || '站点模式'),
             h('div', { className: 'hwb-row-main' },
               h('select', {
                 className: 'hwb-model-select',
-                value: siteModeBySite.glm || '',
+                value: siteModeBySite[settingsTab] || '',
                 disabled: pending,
-                title: 'GLM 工具选择器的任务模式（真机读数：任务/研究报告/PPT制作/数据分析）；默认不改变网页',
-                onChange: e => saveSiteMode('glm', e.target.value),
+                title: siteSettings.siteMode.title || '',
+                onChange: e => saveSiteMode(settingsTab, e.target.value),
               },
                 h('option', { value: '', title: '默认：不点网页任何模式控件（零位移）' }, '默认（不改变网页）'),
-                h('option', { value: '任务' }, '任务'),
-                h('option', { value: '研究报告' }, '研究报告'),
-                h('option', { value: 'PPT制作' }, 'PPT制作'),
-                h('option', { value: '数据分析' }, '数据分析')),
+                ...(Array.isArray(siteSettings.siteMode.options) ? siteSettings.siteMode.options : [])
+                  .map(option => h('option', { value: option }, option))),
               siteModeNotice && h('span', { className: 'hwb-hint' }, siteModeNotice))),
           h('p', { className: 'hwb-hint indent' }, '当前网页模型：' + (driver?.selectedModel ? currentModelName(driver.selectedModel) : '未选择（按默认模型）'))),
 

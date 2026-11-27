@@ -191,6 +191,14 @@ export const glmSite = {
     // 它——从**模型表**里删掉（下拉不再出现）与「旧值仍解析得开」必须同时成立，
     // 与兼容空壳 `webcode` 是同一条纪律。
   ],
+  settingsUi: {
+    siteThinkMode: true,
+    siteMode: {
+      label: '任务模式',
+      title: 'GLM 工具选择器的任务模式（真机读数：任务/研究报告/PPT制作/数据分析）；默认不改变网页',
+      options: ['任务', '研究报告', 'PPT制作', '数据分析'],
+    },
+  },
   teaching: {
     toolCallFormat: 'json-fence',
     skillCatalogMode: 'full',
