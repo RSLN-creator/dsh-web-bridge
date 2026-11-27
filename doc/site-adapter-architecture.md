@@ -27,6 +27,7 @@ declarations into the public provider/model view. It is not a second site regist
 | Decoder family and completion path | Site adapter; common decoder implementation |
 | Verified conversation URL parsing/building | Site adapter navigation capability |
 | Tool-call format and prompt teaching choice | Site adapter teaching capability |
+| Search-toggle and strict request-metadata verification | Site adapter contract metadata; shared projection |
 | Browser lifecycle, Playwright actions, pacing and retry | Shared browser driver |
 | SSE framing and decoder implementations | Shared decoder engine |
 | Tool protocol normalization and permission execution | Shared protocol + native DSH execution |
@@ -34,6 +35,19 @@ declarations into the public provider/model view. It is not a second site regist
 
 Do not duplicate the browser driver, decoder, prompt serializer or permission system per website.
 Do not infer a site capability from its frontend framework or an unverified DOM guess.
+
+### Site request contract metadata
+
+Verified website-specific request facts belong in the adapter's `contract` descriptor. The shared
+`lib/contract.js` projection derives every site's runtime contract through the same function; it
+does not branch on site IDs. Current DeepSeek metadata owns its search-toggle matcher, request
+metadata keys and strict model-type verification. Sites without those live-evidenced capabilities
+retain the conservative shared defaults.
+
+The registry validates descriptor types and key lists at module load. The `alwaysOptionals` field
+is a compatibility switch for historical contract-object key presence; it is not a new browser
+capability. The projection defaults it to the existing generic shape and adapters may opt out only
+when their established public contract omitted those optional keys.
 
 ### Local settings UI contract
 
