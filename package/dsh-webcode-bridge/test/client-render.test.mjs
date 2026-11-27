@@ -14,6 +14,7 @@ import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { SITES } from '../lib/providers.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const CLIENT = path.resolve(here, '../lib/client.cjs');
@@ -33,6 +34,18 @@ const bridgeSrcFrom = (rel) => readFileSync(path.resolve(here, '../lib/', rel), 
  * 「读不到时必须给原因」的用例专门覆盖它。
  */
 const SESSION_PROPS = { sessionId: 'session-render-test' };
+
+// A faithful /status fixture: the server adapter registry owns site identity and labels.
+const SITE_ROWS = SITES.map((site) => ({
+  siteId: site.id,
+  siteName: site.name,
+  accountKey: site.id,
+  displayName: site.name,
+  initialized: true,
+  loggedIn: true,
+  loginState: 'verified-in',
+  loginVerified: true,
+}));
 
 /** 在当前进程里加载 client.cjs 并跑若干渲染周期，返回每次渲染捕获的异常。 */
 async function renderPane({ payloads, which = 'pane', sites = [], roster = null, primitiveOmit = [], waitStats = null, openMenu = false, tabParams = undefined, noTabActions = false, settingsTab = '', sessionProps = SESSION_PROPS, iconNaming = 'legacy', composerSearch = null } = {}) {
@@ -647,9 +660,10 @@ test('★ 0.16.38 设置页作用域：全局页与站点页各只有自己那�
   for (const gone of ['中继已连接', '启用网页自动化', '去配置 ']) {
     assert.ok(!gt.includes(gone), '「连接」卡又回来了（出现：' + gone + '）');
   }
-  const site = await renderPane({ payloads: [emptyWindows], which: 'settings', settingsTab: 'deepseek', sites: [
-    { siteId: 'deepseek', siteName: 'DeepSeek 网页版', accountKey: 'deepseek', displayName: 'DeepSeek 网页版', initialized: true, loggedIn: true },
-  ] });
+  const site = await renderPane({
+    payloads: [emptyWindows], which: 'settings', settingsTab: 'deepseek',
+    sites: [SITE_ROWS.find((row) => row.siteId === 'deepseek')],
+  });
   assert.deepEqual(site.errors, [], '站点页渲染抛错：' + site.errors.map(e => e.message).join('; '));
   const st = treeText(site.tree);
   assert.ok(st.includes('DeepSeek 的账户与登录'), '站点页缺少该站点的账户卡');
@@ -879,7 +893,7 @@ test('★ 0.16.35 站点目录：从上往下列出全部站点，且不显示�
     { siteId: 'gemini', siteName: 'Gemini', initialized: false, loggedIn: null },
     { siteId: 'zai', siteName: 'Z.ai', initialized: false, loggedIn: true, loggedInCached: true },
   ];
-  const empty = await renderPane({ payloads: [emptyWindows], which: 'catalog' });
+  const empty = await renderPane({ payloads: [emptyWindows], which: 'catalog', sites: SITE_ROWS });
   assert.deepEqual(empty.errors, [], '空站点表渲染抛错：' + empty.errors.map(e => e.message).join('; '));
   const full = await renderPane({ payloads: [emptyWindows], sites: ten, which: 'catalog' });
   assert.deepEqual(full.errors, [], '十站点表渲染抛错：' + full.errors.map(e => e.message).join('; '));
@@ -916,7 +930,7 @@ test('★ 0.16.35 站点目录：从上往下列出全部站点，且不显示�
 test('★ 0.16.35 站点目录：点一行会为该站点开标签，并带上 siteId', async () => {
   // 0.16.39 收尾：解构必须带上 inPlaceOpenCalls——下方断言从 openTabCalls 改到它，
   // 少了这一列会 ReferenceError（gate 只在夹具里收下 inPlaceOpenCalls 却没在断言侧解构）。
-  const { errors, tree, openTabCalls, inPlaceOpenCalls, tabDefinitions } = await renderPane({ payloads: [emptyWindows], which: 'catalog' });
+  const { errors, tree, openTabCalls, inPlaceOpenCalls, tabDefinitions } = await renderPane({ payloads: [emptyWindows], which: 'catalog', sites: SITE_ROWS });
   assert.deepEqual(errors, [], '站点目录渲染抛错：' + errors.map(e => e.message).join('; '));
   const def = tabDefinitions.get('webcode-site');
   assert.ok(def, '未注册站点网页标签类型 webcode-site');
@@ -963,7 +977,7 @@ test('★ 0.16.39 站点目录：拿不到本标签动作时降级为 ctx.sideba
   // 这里刻意**不**走 catalog 的默认桩（which:'catalog' 会给 actions），改从 pane
   // 座位取目录组件——pane 座位的 useTabInfo 桩没有 actions 字段。
   const { errors, tree, openTabCalls, inPlaceOpenCalls } = await renderPane({
-    payloads: [emptyWindows], which: 'catalog', noTabActions: true,
+    payloads: [emptyWindows], which: 'catalog', noTabActions: true, sites: SITE_ROWS,
   });
   assert.deepEqual(errors, [], '降级路径渲染抛错：' + errors.map(e => e.message).join('; '));
   const buttons = [];
@@ -991,7 +1005,7 @@ test('★ 0.16.39 站点目录：拿不到本标签动作时降级为 ctx.sideba
  */
 test('★ 0.16.35 站点标签：正文与标题都从本标签的 navigation.params 取 siteId', async () => {
   const { errors, tree } = await renderPane({
-    payloads: [emptyWindows], which: 'site', tabParams: { siteId: 'kimi', slot: '' },
+    payloads: [emptyWindows], which: 'site', tabParams: { siteId: 'kimi', slot: '' }, sites: SITE_ROWS,
   });
   assert.deepEqual(errors, [], '站点标签正文渲染抛错：' + errors.map(e => e.message).join('; '));
   const text = treeText(tree);
@@ -1152,10 +1166,8 @@ test('★ 0.22.2 品牌图标：自绘悬索桥（用户授权重绘）+ 沿用�
 // ------------------------------------------------------------------ 0.14.8
 
 test('★ 站点图标与一级选择框（0.16.23 接手网页会话半成品）：图标/档位说明/首屏选择框都要渲染出来', async () => {
-  const ten = [
-    { siteId: 'deepseek', siteName: 'DeepSeek 网页版', initialized: true, loggedIn: true },
-    { siteId: 'glm', siteName: '智谱清言 (GLM)', initialized: false, loggedIn: true },
-  ];
+  const ten = SITE_ROWS.filter((row) =>
+    ['deepseek', 'glm', 'zai', 'doubao', 'chatgpt'].includes(row.siteId));
   const full = await renderPane({ payloads: [emptyWindows], sites: ten });
   assert.deepEqual(full.errors, [], '站点图标渲染抛错：' + full.errors.map(e => e.message).join('; '));
   // 档位表语义：DeepSeek 是官方鲸鱼矢量（official 档），GLM 如实标注「未找到」——
@@ -2201,8 +2213,10 @@ test('★ 0.19.0 站点标签：站点不得被「有独立窗口就切过去」
   assert.ok(!/winState\(\)\.then\(w => \{ const open = Object\.keys/.test(src),
     '不得恢复无条件的「切到第一个开窗站点」——那正是「点开智谱清言却出了 DeepSeek」的成因');
   // ③ 受控同步仍然要在（站点标签必须跟着自己的 params 走，修 A 不能把 B 拆掉）。
-  assert.match(src, /if \(controlledSite && SITE_NAMES\[controlledSite\]\) setSiteId\(controlledSite\);/,
+  assert.match(src, /if \(controlledSite\) setSiteId\(controlledSite\);/,
     '受控站点同步必须保留——修掉自动采纳 ≠ 不再认标签自己的站点');
+  assert.doesNotMatch(src, /SITE_NAMES/,
+    '客户端不得恢复第二份站点白名单；站点存在性由实时 adapter directory 决定');
 });
 
 /**
