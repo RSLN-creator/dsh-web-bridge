@@ -2263,15 +2263,27 @@ test('★ 0.19.0 站点标签：站点不得被「有独立窗口就切过去」
  */
 test('★ #60 登录三态：uncertain 必须渲染「待确认」而不是「未登录」', () => {
   const src = bridgeSrcFrom('client.cjs');
+  // The extracted status functions now call the shared presentation translator.
+  // Evaluate the real MSG object and pass its Chinese lookup into the extracted functions;
+  // these assertions remain about status semantics, not host locale selection.
+  const messageStart = src.indexOf('const MSG = Object.freeze({');
+  const translatorStart = src.indexOf('    const M = (key) =>', messageStart);
+  assert.ok(messageStart > 0 && translatorStart > messageStart, 'native MSG dictionary and translator must exist');
+  const messageSource = src.slice(messageStart, translatorStart);
+  // eslint-disable-next-line no-new-func
+  const messages = new Function(messageSource + '\\nreturn MSG;')();
+  const chineseMessage = key => messages[key]?.zh || key;
+
   /** 从 client.cjs 源码里取出一个 `const <name> = row => { ... };` 的函数体原样求值。 */
   function extractRowFn(name) {
     const start = src.indexOf(`const ${name} = row => {`);
     assert.ok(start > 0, `client.cjs 里必须有 ${name}（登录态渲染的三个入口之一）`);
-    const end = src.indexOf('\n      };', start);
-    assert.ok(end > start, `${name} 的函数体必须能定位到结尾`);
-    const body = src.slice(src.indexOf('{', start), end + '\n      };'.length - 1);
+    const fnEnd = src.indexOf('\\n      };', start);
+    assert.ok(fnEnd > start, `${name} 的函数体必须能定位到结尾`);
+    const body = src.slice(src.indexOf('{', start), fnEnd + '\\n      };'.length - 1);
     // eslint-disable-next-line no-new-func
-    return new Function('row', body);
+    const evaluate = new Function('row', 'M', body);
+    return row => evaluate(row, chineseMessage);
   }
   const statusLabel = extractRowFn('statusLabel');
   const statusClass = extractRowFn('statusClass');
