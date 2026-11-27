@@ -55,7 +55,7 @@ import { webcodeError, withWebcodeCode, WEBCODE_RETRY_POLICY } from './error-cod
 // **协议解析的唯一去处仍是 `agent-preset.js`**（红线 3）。
 import { appendReplyLog } from './reply-log.js';
 import { contractFingerprintOf, reanchorSent, messageHash, ANCHOR_LEN } from './session-anchor.js';
-import { writePromptFiles, sitePromptPath, DEFAULT_PROMPT_STORE_DIR } from './prompt-store.js';
+import { writePromptFiles, DEFAULT_PROMPT_STORE_DIR } from './prompt-store.js';
 
 /**
  * 提示词落盘的根目录（与 prompt-store.writePromptFiles 同一套解析）。
