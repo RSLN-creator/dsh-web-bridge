@@ -31,10 +31,14 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const CLIENT = path.resolve(here, '../lib/client.cjs');
 const SERVER = path.resolve(here, '../lib/web-control.js');
 const MANIFEST = path.resolve(here, '../package.json');
+const PACKAGE_README = path.resolve(here, '../README.md');
+const ROOT_README = path.resolve(here, '../../../README.md');
 
 const manifest = JSON.parse(readFileSync(MANIFEST, 'utf8'));
 const clientSrc = readFileSync(CLIENT, 'utf8');
 const serverSrc = readFileSync(SERVER, 'utf8');
+const packageReadmeSrc = readFileSync(PACKAGE_README, 'utf8');
+const rootReadmeSrc = readFileSync(ROOT_README, 'utf8');
 
 /**
  * 服务端动作表里注册的 `METHOD action` 组合。
@@ -114,6 +118,18 @@ test('Web client manifest declares the real module dependencies and lazy browser
   assert.equal(manifest.exports?.['./client'], './lib/client.cjs');
   assert.match(clientSrc, /window\.__ModuleLoader__\.load\(\{\s*id:\s*'dsh-webcode-bridge'/,
     'the browser bundle must register the package id with the DSH lazy module loader');
+});
+
+test('documented minimum DSH version matches package engine requirement', () => {
+  const required = manifest.engines?.dsh;
+  assert.equal(typeof required, 'string', 'package.json must declare the minimum DSH version');
+  for (const [name, source] of [
+    ['package README', packageReadmeSrc],
+    ['repository README', rootReadmeSrc],
+  ]) {
+    assert.ok(source.includes('| DeepSeek Harness | ' + required + ' |'),
+      name + ' must document the same DSH minimum as package.json engines.dsh (' + required + ')');
+  }
 });
 
 test('Web account login polls the login-qr action while login is pending', () => {

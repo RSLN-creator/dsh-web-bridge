@@ -153,4 +153,29 @@ The following official sources were checked:
 - [Official live-client fixture manifest](https://github.com/deepseek-ai/deepseek-harness/blob/master/apps/web/tests/fixtures/plugins/fixture-live-client/package.json)
 - [Right-sidebar package reference](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/ui-sidebar-right/README.md)
 - [Official plugin template](https://github.com/kun2-5code/dsh-plugin-template)
+## 10. 2026-11-27 consistency pass — manifest, slots and published minimum
 
+This section is checked against the current upstream DSH source, not the historical 0.16.38
+snapshot above. The dsh.client.inject row in §1 is historical and is superseded by §9.
+
+- The current DshClientManifest.inject field declares package-name dependencies. It is not the
+  Cordis service-injection list. The manifest parser validates it separately from external.
+- dsh.client.external is for exact module-table requests beyond the Web platform's implicit
+  baseline. This plugin does not declare it because its browser bundle uses host-provided React,
+  React DOM and UI primitives.
+- The three package dependencies remain aligned with the contributed slot owners:
+  dsh-client-ui-chat owns conversation.composer.dock,
+  dsh-client-ui-settings-general owns settings.section, and
+  dsh-client-ui-sidebar-right owns the right-sidebar tab body/title and tab-menu item seats.
+- Runtime Cordis services are injected separately by the client factory. The right-sidebar
+  registrations follow the official two-stage tab pattern: register the tab kind, then register
+  its keyed body/title seats. sidebar.right.tab.menu.item is a tab-specific list seat; each
+  contribution has its own required id. Do not replace it with a root-level menu item.
+- The package install gate is engines.dsh = >=0.1.6-alpha.2. Both the repository README and
+  published package README now show that same lower bound; the client/server contract test checks
+  this equality so the docs cannot quietly promise an older host.
+
+Automated checks cover manifest shape, lazy loader registration, client/server route methods,
+slot rendering tests and the documented engine minimum. They do not prove a running DSH Web host
+mounted the plugin in a real profile. A live Web UI smoke test and a real remote QR scan are
+still release acceptance steps.

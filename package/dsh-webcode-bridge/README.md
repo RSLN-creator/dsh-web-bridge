@@ -98,7 +98,7 @@ profile or the remote website chat. Those remain the bridge's responsibilities.
 | | |
 | --- | --- |
 | Node.js | 22.13 or newer |
-| DeepSeek Harness | 0.1.0-rc.6 or newer |
+| DeepSeek Harness | >=0.1.6-alpha.2 |
 | Browser | None to install — the plugin ships its own Chromium (Playwright). A system browser is used only as a fallback. |
 
 ## Install

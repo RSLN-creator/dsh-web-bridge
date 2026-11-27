@@ -104,6 +104,6 @@ adapter update. No client-side bridge can guarantee zero maintenance against tho
 
 ## Pending work
 
-- Run a real DSH Web QR scan acceptance check on each reachable QR-login site; verify login completion and cookie persistence after driver restart.
+- The QR selector now filters known CAPTCHA/slider/puzzle metadata (fixture-guarded in test/login-state.test.mjs); still run a real DSH Web QR scan on each reachable QR-login site and verify login completion plus cookie persistence after driver restart.
 - Move remaining evidenced site-only behavior branches into adapter capabilities where doing so preserves existing behavior.
 - Add a fixture-backed browser restart/resume test that proves the DSH Session ID, browser profile and remote conversation ID reconnect to the same website chat.
