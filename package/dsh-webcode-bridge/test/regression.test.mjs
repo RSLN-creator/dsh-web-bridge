@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { readFileSync, mkdtempSync } from 'node:fs';
+import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { apply } from '../lib/index.js';
@@ -209,6 +209,68 @@ test('网页会话丢失时用整段首轮提示词重放，而不是把增量�
     assert.ok(turns[2].prompt.includes('# 可用本地工具'), '重放带回工具协议');
   } finally { await dispose(); }
 });
+test('磁盘首轮快照不得替代包含后续增量的当前会话重放', async () => {
+  const previousStore = process.env.WEBCODE_PROMPT_STORE_DIR;
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'webcode-replay-current-'));
+  process.env.WEBCODE_PROMPT_STORE_DIR = dir;
+
+  let adapter;
+  const turns = [];
+  const lost = Object.assign(new Error('WEB_SESSION_LOST: disk-backed replay fixture'), { code: 'WEB_SESSION_LOST' });
+  const driver = {
+    status: () => ({ running: true }), close: async () => {}, resetConversation: async () => {},
+    sendTurn: async (key, prompt, opts) => {
+      turns.push({ key, prompt, fresh: opts.fresh === true });
+      if (turns.length === 2) throw lost;
+      opts.onDelta?.('答');
+      return { text: '答' };
+    },
+    sendPrompt: async (prompt) => { turns.push({ key: null, prompt, fresh: true }); return { text: '答' }; },
+  };
+  const dispose = apply(
+    { llm: { registerAdapter: (_, value) => { adapter = value; } }, get: () => null,
+      settings: { get: () => ({ toolsEnabled: true }), set: () => {} } },
+    { port: 0, requireConsent: false, driver },
+  );
+  const user = text => ({ role: 'user', content: [{ type: 'text', text }] });
+  const collect = async options => { const out = []; for await (const chunk of adapter.stream(options)) out.push(chunk); return out; };
+  const base = {
+    sessionId: 'disk-replay-current',
+    model: 'flash',
+    tools: [{ name: 'read', description: '读文件', parameters: { type: 'object' } }],
+    messages: [user('磁盘回放第一句')],
+  };
+  try {
+    await collect(base);
+    assert.equal(turns[0].fresh, true);
+    assert.ok(turns[0].prompt.includes('磁盘回放第一句'));
+
+    const messages = [
+      ...base.messages,
+      { role: 'assistant', content: [{ type: 'text', text: '首轮回答' }] },
+      user('磁盘回放第二句必须保留'),
+    ];
+    const chunks = await collect({ ...base, messages });
+    assert.equal(chunks.at(-1).type, 'finish');
+    assert.equal(turns.length, 3, 'initial send + failed incremental + full replay');
+    assert.equal(turns[1].fresh, false);
+    assert.ok(turns[1].prompt.includes('磁盘回放第二句必须保留'));
+    assert.equal(turns[2].fresh, true, 'replay must open a new web conversation');
+    assert.ok(turns[2].prompt.includes('磁盘回放第一句'));
+    assert.ok(turns[2].prompt.includes('首轮回答'));
+    assert.ok(turns[2].prompt.includes('磁盘回放第二句必须保留'),
+      'disk-backed recovery must replay the current DSH transcript, not the stale first-turn snapshot');
+    assert.ok(turns[2].prompt.includes('# 可用本地工具'), 'replay must preserve the tool protocol');
+  } finally {
+    try { await dispose(); }
+    finally {
+      if (previousStore === undefined) delete process.env.WEBCODE_PROMPT_STORE_DIR;
+      else process.env.WEBCODE_PROMPT_STORE_DIR = previousStore;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 test('会话标题辅助调用只认 purpose=session-title，不误伤真实轮次', async () => {
   let adapter; const calls = [];
   const driver = {
