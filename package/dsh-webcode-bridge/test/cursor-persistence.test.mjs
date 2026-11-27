@@ -119,9 +119,21 @@ const DEEPSEEK_REMOTE_URL = 'https://chat.deepseek.com/a/chat/s/' + DEEPSEEK_REM
 function deepseekRestartPage({ firstProcess = false } = {}) {
   let url = 'https://chat.deepseek.com/';
   const gotoCalls = [];
+  // The production driver probes model labels before looking for the composer. The
+  // offline fixture has no model menu, so implement Playwright's text-locator surface
+  // with an honest zero-match result instead of failing on a missing mock method.
+  const noTextMatch = {
+    first() { return this; },
+    last() { return this; },
+    filter() { return this; },
+    count: async () => 0,
+    isVisible: async () => false,
+    click: async () => {},
+  };
   const page = {
     isClosed: () => false,
     url: () => url,
+    getByText: () => noTextMatch,
     async goto(target) {
       const next = String(target);
       gotoCalls.push(next);
