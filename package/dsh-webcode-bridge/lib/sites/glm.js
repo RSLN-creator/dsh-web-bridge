@@ -1,6 +1,8 @@
 // sites/glm.js — GLM site declaration.
 // Keep site facts here; shared browser, transport and decoding behavior belongs to the common engine.
 
+import { GLM_CONTEXT_WINDOW } from './constants.js';
+
 /**
  * GLM 系站点（智谱清言 / Z.ai）向 DSH 声明的上下文窗口（token）。
  *
@@ -24,7 +26,7 @@
  * 长到多大」，配合 B-2 的发送前预算闸（`CONTEXT_WINDOW_EXCEEDED`）使用：越界在
  * **发出之前**就是一条可读的报错，而不是发出去被网页静默截半截。
  */
-const GLM_CONTEXT_WINDOW = 1_000_000;
+
 
 export const glmSite = {
   // 站点显示名 = **网站原名**（2026-10-03 用户指令：「全部统一成网站原名」，例：豆包 → Doubao）。

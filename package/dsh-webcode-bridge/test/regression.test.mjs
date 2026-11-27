@@ -1051,8 +1051,13 @@ test('窗口声明可见性（B-3）：模型目录与状态里能核对自己�
   const prov = bridgeSrc('providers.js');
   // 目录条目带 context（此前 listAllModels 有、但要看得到「真实来源」）
   assert.match(prov, /context: m\.context \|\| null/, 'listAllModels 必须透出 context');
-  const glm = bridgeSrc('sites/glm.js');
-  assert.match(glm, /const GLM_CONTEXT_WINDOW = 1_000_000;/, 'glm/zai 窗口声明应有实名常量');
+  const shared = bridgeSrc('sites/constants.js');
+  assert.match(shared, /export const GLM_CONTEXT_WINDOW = 1_000_000;/, 'glm/zai 窗口应有唯一共享真源');
+  for (const siteId of ['glm', 'zai']) {
+    const source = bridgeSrc(`sites/${siteId}.js`);
+    assert.match(source, /import \{ GLM_CONTEXT_WINDOW \} from '\.\/constants\.js';/,
+      siteId + ' must import the shared GLM-family context window');
+  }
   // 控制面 /models 走的就是 listAllModels，因此面板能读到。
   //
   // 0.19.61 修判据：旧断言钉的是 `listAllModels()` **不传参**的形态，而**那正是缺陷**

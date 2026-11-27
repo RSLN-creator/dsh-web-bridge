@@ -1,6 +1,8 @@
 // sites/zai.js — ZAI site declaration.
 // Keep site facts here; shared browser, transport and decoding behavior belongs to the common engine.
 
+import { GLM_CONTEXT_WINDOW } from './constants.js';
+
 export const zaiSite = {
   // 0.21.1 修：海外站 origin 必须是 chat.z.ai。0.19.99 曾把它改成 zchat，虽然
   // 0.21.0 已把中国站拆成独立站点 ZAI_CN，但这里漏改回来 ⇒ 两站指向同一域名，
