@@ -111,6 +111,40 @@ window.__ModuleLoader__.load({
     const FISH_LOGO_VIEWBOX = primitives.FISH_LOGO_VIEWBOX || { width: 23.16, height: 17.04 };
     const useDismissOnOutsidePointer = primitives.useDismissOnOutsidePointer || (() => {});
     const h = React.createElement;
+    // Native-panel copy is deliberately translated at the presentation edge only:
+    // provider error codes and the agent-preset teaching protocol remain machine/source truth.
+    // Prefer the host document language; use the browser language only when the host does
+    // not declare a supported language. Unsupported locales conservatively render Chinese.
+    const normalizeUiLanguage = (value) => {
+      const language = String(value || '').trim().toLowerCase();
+      if (/^en(?:[-_]|$)/.test(language)) return 'en';
+      if (/^zh(?:[-_]|$)/.test(language)) return 'zh';
+      return null;
+    };
+    const UI_LANGUAGE = normalizeUiLanguage(document.documentElement?.lang)
+      || normalizeUiLanguage(window.navigator?.language)
+      || 'zh';
+    const MSG = Object.freeze({
+      loginUnchecked: Object.freeze({ zh: '待检查', en: 'Not checked' }),
+      loginUncertain: Object.freeze({ zh: '待确认', en: 'Needs verification' }),
+      loginOut: Object.freeze({ zh: '未登录', en: 'Not logged in' }),
+      loginIn: Object.freeze({ zh: '已登录', en: 'Logged in' }),
+      loginInCached: Object.freeze({ zh: '已登录(缓存)', en: 'Logged in (cached)' }),
+      loginInUnverified: Object.freeze({ zh: '已登录(未核验)', en: 'Logged in (not verified)' }),
+      loginUncertainTitle: Object.freeze({
+        zh: '登录特征未命中、无法确认（≠未登录）；可点「检测」按站点特征重新核验',
+        en: 'No login marker matched, so the state is unverified (not the same as logged out). Select “Check” to verify using this site’s markers.',
+      }),
+      loginInputFallbackTitle: Object.freeze({
+        zh: '该站点未声明未登录特征，按输入框存在与否判定——游客页自带输入框时可能误报，请以「检测」为准',
+        en: 'This site has no logged-out marker; login is inferred from the input box. Guest pages may also contain one, so use “Check” to verify.',
+      }),
+      loginStaleTitle: Object.freeze({
+        zh: '此结论来自旧版本判定，已被忽略；点「检测」按站点特征重新核验',
+        en: 'This result came from an older rule and was ignored. Select “Check” to verify with the current site markers.',
+      }),
+    });
+    const M = (key) => MSG[key]?.[UI_LANGUAGE] || MSG[key]?.zh || key;
     /**
      * 统一的降级告警出口（**工厂作用域**，不是 `apply()` 里）。
      *
@@ -3724,14 +3758,14 @@ window.__ModuleLoader__.load({
       // 并提示可点「检测」重新核验。verified-in / verified-out 与旧行为逐字一致
       // （零回归）；没有三态字段的旧接口/测试替身仍走二态分支（行为零位移）。
       const statusLabel = row => {
-        if (!row || row.loggedIn == null) return '待检查';
-        if (row.loginState === 'uncertain') return '待确认';
-        if (row.loginState === 'verified-out') return '未登录';
+        if (!row || row.loggedIn == null) return M('loginUnchecked');
+        if (row.loginState === 'uncertain') return M('loginUncertain');
+        if (row.loginState === 'verified-out') return M('loginOut');
         if (row.loginState === 'verified-in') {
-          return row.loginVerified === false ? '已登录(未核验)' : (row.loggedInCached ? '已登录(缓存)' : '已登录');
+          return row.loginVerified === false ? M('loginInUnverified') : (row.loggedInCached ? M('loginInCached') : M('loginIn'));
         }
-        if (row.loggedIn === true) return row.loggedInCached ? '已登录(缓存)' : '已登录';
-        return '未登录';
+        if (row.loggedIn === true) return row.loggedInCached ? M('loginInCached') : M('loginIn');
+        return M('loginOut');
       };
       const statusClass = row => {
         // 三态优先：uncertain 用灰色 idle（不是红 bad）——「不知道」不应被画成「未登录」。
@@ -3747,9 +3781,9 @@ window.__ModuleLoader__.load({
       // 结论，不能被读成二态里的某一态。
       const statusTitle = row => {
         if (!row) return '';
-        if (row.loginState === 'uncertain') return '登录特征未命中、无法确认（≠未登录）；可点「检测」按站点特征重新核验';
-        if (row.loginBasis === 'input-fallback') return '该站点未声明未登录特征，按输入框存在与否判定——游客页自带输入框时可能误报，请以「检测」为准';
-        if (row.loginBasis === 'stale') return '此结论来自旧版本判定，已被忽略；点「检测」按站点特征重新核验';
+        if (row.loginState === 'uncertain') return M('loginUncertainTitle');
+        if (row.loginBasis === 'input-fallback') return M('loginInputFallbackTitle');
+        if (row.loginBasis === 'stale') return M('loginStaleTitle');
         return '';
       };
       // 0.19.x 边界1：登录态**不再**挡网页。右栏一打开就逐站 connect 拉起浏览器、挂
