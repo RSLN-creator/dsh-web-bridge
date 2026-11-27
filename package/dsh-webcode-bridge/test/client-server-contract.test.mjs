@@ -185,6 +185,15 @@ test('Web UI site labels and choices come from the live server adapter directory
     'site settings visibility must not contain website IDs in the shared client renderer');
   assert.equal((siteIndexSrc.match(/settingsUi: st\.settingsUi \|\| null/g) || []).length, 2,
     'both initialized and lazy site rows must project the adapter settings declaration');
+  assert.equal((siteIndexSrc.match(/accountSortOrder: Number\.isFinite\(st\.accountSortOrder\) \? st\.accountSortOrder : 0/g) || []).length, 2,
+    'both initialized and lazy site rows must publish adapter account ordering');
+  assert.match(clientSrc, /accountSortOrder: Number\.isFinite\(s\.accountSortOrder\) \? s\.accountSortOrder : 0/);
+  assert.match(clientSrc, /const byPriority = a\.accountSortOrder - b\.accountSortOrder/);
+  assert.doesNotMatch(clientSrc, /a\.siteId === ['"]deepseek['"]/,
+    'account order must not be hard-coded to one website');
+  assert.doesNotMatch(clientSrc, /SITE_ORIGINS|siteOrigin/,
+    'the client must not keep the unused duplicate origin registry');
+
   assert.match(clientSrc, /siteIdsFromRows\(rows\)/,
     'the website catalog must derive its choices from server rows');
   assert.match(clientSrc, /siteIdsFromRows\(sites\)/,

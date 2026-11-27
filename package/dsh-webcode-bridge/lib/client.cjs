@@ -358,20 +358,6 @@ window.__ModuleLoader__.load({
       if (!Number.isFinite(n) || n <= 0) return '读不到';
       return new Date(n).toLocaleString();
     }
-    const SITE_ORIGINS = {
-      deepseek: 'https://chat.deepseek.com',
-      glm: 'https://chatglm.cn',
-      chatgpt: 'https://chatgpt.com',
-      kimi: 'https://kimi.com',
-      qwen: 'https://chat.qwen.ai',
-      doubao: 'https://www.doubao.com',
-      grok: 'https://grok.com',
-      claude: 'https://claude.ai',
-      gemini: 'https://gemini.google.com',
-      zai: 'https://chat.z.ai',
-    };
-    const siteOrigin = sid => SITE_ORIGINS[sid] || '';
-
     // ---- 登录判定依据的人话翻译 ----------------------------------------------
     // 后端一直在 status 里给 loginBasis / loginCheckedAt，但 0.12.9 的 UI 把它
     // 丢了，于是「未登录」看起来像凭空断言。这里把它变成可判断的依据说明。
@@ -1314,6 +1300,7 @@ window.__ModuleLoader__.load({
           // 「点了账户2 却在动账户1」。旧后端无该字段时回落 siteId，可跨版本共存。
           accountKey: s.accountKey || s.siteId,
           siteId: s.siteId, slot: s.slot || null,
+          accountSortOrder: Number.isFinite(s.accountSortOrder) ? s.accountSortOrder : 0,
           // displayName 由服务端给（`智谱清言 (GLM) (账户2)`）；缺失时回落站点名。
           displayName: s.displayName || siteName(s.siteId),
           loggedIn: s.loggedIn, initialized: s.initialized, busy: s.busy,
@@ -1336,8 +1323,8 @@ window.__ModuleLoader__.load({
         }))
         .filter(s => !onlySiteId || s.siteId === onlySiteId)
         .sort((a, b) => {
-          if (a.siteId === 'deepseek' && b.siteId !== 'deepseek') return -1;
-          if (b.siteId === 'deepseek' && a.siteId !== 'deepseek') return 1;
+          const byPriority = a.accountSortOrder - b.accountSortOrder;
+          if (byPriority !== 0) return byPriority;
           const bySite = siteName(a.siteId).localeCompare(siteName(b.siteId));
           if (bySite !== 0) return bySite;
           // 同站点内默认槽排前（与后端「默认槽总在第一位」的口径一致）

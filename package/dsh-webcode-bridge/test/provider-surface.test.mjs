@@ -151,6 +151,13 @@ test('判据 7：站点显示名 = adapter 的 canonical name', () => {
     '每个 adapter 的 name 必须逐字等于对外网站原名');
 });
 
+test('站点账户排序优先级由 adapter 声明', () => {
+  const declared = SITES.filter((site) => site.accountSortOrder !== undefined)
+    .map((site) => [site.id, site.accountSortOrder]);
+  assert.deepEqual(declared, [['deepseek', -1]],
+    'only an explicit adapter priority may override alphabetical order; client code must not name a website');
+});
+
 test('站点设置控件只由已校准的 adapter 声明', () => {
   const declared = Object.fromEntries(SITES.filter((site) => site.settingsUi)
     .map((site) => [site.id, site.settingsUi]));

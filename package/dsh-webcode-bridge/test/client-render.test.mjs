@@ -40,6 +40,7 @@ const SITE_ROWS = SITES.map((site) => ({
   siteId: site.id,
   siteName: site.name,
   settingsUi: site.settingsUi || null,
+  accountSortOrder: Number.isFinite(site.accountSortOrder) ? site.accountSortOrder : 0,
   accountKey: site.id,
   displayName: site.name,
   initialized: true,
