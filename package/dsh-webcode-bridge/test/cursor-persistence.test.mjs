@@ -149,9 +149,15 @@ function deepseekRestartPage({ firstProcess = false } = {}) {
     async waitForSelector() { return null; },
     async evaluate(fn) {
       if (firstProcess) url = DEEPSEEK_REMOTE_URL;
+      const source = String(fn);
+      // This page is not a challenge page. Return the same explicit null that the
+      // production detectChallenge() probe returns for an ordinary page.
+      if (source.includes('new RegExp(PAT.title)')) return null;
       // The injected page has no unified aria-pressed toggle, so select the classic
       // model-pill path and continue to the deliberately absent composer.
-      if (String(fn).includes("querySelectorAll('[aria-pressed]')")) return false;
+      if (source.includes("querySelectorAll('[aria-pressed]')")) return false;
+      // Model the authenticated shell for the navigation/login gate; the dedicated
+      // locator fixture below still proves that no editable composer can be used.
       return 1;
     },
     on() {}, off() {},
