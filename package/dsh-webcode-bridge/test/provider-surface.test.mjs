@@ -30,6 +30,7 @@ import {
   providerGroupName, listAllModels, resolveWebModel,
 } from '../lib/providers.js';
 import { migratedSiteIds } from '../lib/sites/index.js';
+import { assertSiteSettingsUi } from '../lib/sites/settings-ui-contract.js';
 
 /** 站点 id 与顺序（顺序即 OpenAI /models 的列表顺序）。 */
 const EXPECTED_SITE_IDS = [
@@ -165,6 +166,43 @@ test('判据 8：站点设置控件只由已校准的 adapter 声明', () => {
     },
   }, '未取证站点不得意外暴露专用设置；选项文案与真实网页菜单保持一致');
 });
+
+test('判据 9：所有站点设置声明符合严格的 adapter-to-UI contract', () => {
+  for (const site of SITES) {
+    assert.equal(assertSiteSettingsUi(site), true, site.id + ' settingsUi contract');
+    assert.doesNotThrow(() => JSON.stringify(site.settingsUi),
+      site.id + ' settingsUi must stay JSON-serializable for /status');
+  }
+
+  assert.equal(assertSiteSettingsUi({ id: 'no-settings' }), true,
+    'an omitted settingsUi means the site exposes no local settings');
+  assert.equal(assertSiteSettingsUi({ id: 'null-settings', settingsUi: null }), true);
+  assert.equal(assertSiteSettingsUi({
+    id: 'valid-site-mode',
+    settingsUi: { siteMode: { label: 'Mode', title: 'Choose a mode', options: ['Fast', 'Deep'] } },
+  }), true, 'the verified site-mode descriptor shape must remain supported');
+
+  const invalidDeclarations = [
+    [],
+    { experimentalToggle: true },
+    { globalThinkMode: false },
+    { siteMode: [] },
+    { siteMode: { label: '  ', options: ['Fast'] } },
+    { siteMode: { label: 'Mode', options: [] } },
+    { siteMode: { label: 'Mode', options: ['Fast', 'Fast'] } },
+    { siteMode: { label: 'Mode', options: ['Fast', 2] } },
+    { siteMode: { label: 'Mode', description: 'not a supported field', options: ['Fast'] } },
+  ];
+
+  for (const settingsUi of invalidDeclarations) {
+    assert.throws(
+      () => assertSiteSettingsUi({ id: 'invalid-fixture', settingsUi }),
+      /\\[site-adapter-settings-ui\\] invalid-fixture:/,
+      'malformed or unsupported UI metadata must fail before it reaches the browser',
+    );
+  }
+});
+
 
 test('判据 8：每个目录条目的 acceptsImages 必须等于 resolveWebModel 的解析值', () => {
   const items = listAllModels();
