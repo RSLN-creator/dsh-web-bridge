@@ -113,6 +113,14 @@ export const deepseekSite = {
     // 从不执行——它是防御性声明，不是活路径。
     fallbackContext: 1_000_000,
   },
+  // The shared contract projection consumes these verified site-specific request/UI facts.
+  // alwaysOptionals=false preserves DeepSeek's established contract object shape.
+  contract: {
+    searchTogglePattern: /^(智能搜索|联网搜索|Search)$/,
+    requestMetadataKeys: ['model_type', 'thinking_enabled', 'search_enabled'],
+    strictModelType: true,
+    alwaysOptionals: false,
+  },
   settingsUi: {
     globalThinkMode: true,
     searchMode: true,
