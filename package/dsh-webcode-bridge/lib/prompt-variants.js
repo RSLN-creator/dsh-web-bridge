@@ -25,33 +25,87 @@ import { SITES } from './providers.js';
  * 加 official 之前这个错误不可见：下拉只有两支，用户不会去比对「deepseek 到底
  * 选没选对」。改成「每行一个网站 + 该网站实际用的协议」之后，它立刻就是错的。
  * 因此这是修正，不是扩展：站点 → 分支的映射现在与 agent-preset 的真实分支一一对应。 */
-export const VARIANT_SPECS = Object.freeze([
+// Prompt preview membership follows the exact adapter teaching profile consumed by
+// agent-preset.js. Keep protocol and skill-catalog behavior together: a site that changes
+// either is not equivalent to the generic prompt, even if its call syntax looks the same.
+const DEFAULT_TEACHING_PROFILE = Object.freeze({
+  toolCallFormat: 'tag',
+  skillCatalogMode: 'full',
+});
+
+function teachingProfileForSite(site) {
+  return {
+    toolCallFormat: site?.teaching?.toolCallFormat || DEFAULT_TEACHING_PROFILE.toolCallFormat,
+    skillCatalogMode: site?.teaching?.skillCatalogMode || DEFAULT_TEACHING_PROFILE.skillCatalogMode,
+  };
+}
+
+function sameTeachingProfile(left, right) {
+  return left.toolCallFormat === right.toolCallFormat
+    && left.skillCatalogMode === right.skillCatalogMode;
+}
+
+function siteIdsForTeachingProfile(profile) {
+  return SITES.filter((site) => sameTeachingProfile(teachingProfileForSite(site), profile))
+    .map((site) => site.id);
+}
+
+const VARIANT_DEFINITIONS = [
   {
     id: 'default',
     label: '标签形状（<tool_call> 标签）',
-    // 除 glm（代码块）与 deepseek（官方模板）外的全部站点都走这一支（含 z.ai——
-    // 它的前端不吃调用标签的问题与 chatglm.cn 不同，仍按标签教学）。
+    profile: DEFAULT_TEACHING_PROFILE,
     siteId: undefined,
-    excludes: ['glm', 'deepseek'],
     note: '以 <tool_call>{…}</tool_call> 发起调用；网页不会拦截该标签。',
   },
   {
     id: 'glm',
     label: 'GLM 代码块（```json 代码块）',
-    siteId: 'glm',
-    only: ['glm'],
-    note: 'chatglm.cn 对正文里的调用标签有原生执行器（只认它内置的 search/open/click/find），'
-      + '标签形状会被它抢走执行并回灌 unknown tool call，因此该站点只教代码块形状。',
+    profile: Object.freeze({ toolCallFormat: 'json-fence', skillCatalogMode: 'full' }),
+    note: '该站点的 adapter 声明 json-fence：网页会拦截正文调用标签，因此模板只教 JSON 代码块形状。',
   },
   {
     id: 'official',
     label: 'DeepSeek 官方模板（原生工具调用格式）',
-    siteId: 'deepseek',
-    only: ['deepseek'],
-    note: 'DeepSeek 网页走官方训练模板（模型被训练时见过的形状）。DSML 已于 0.16.23 退役，'
-      + '不再作为教学或解析形状。',
+    profile: Object.freeze({ toolCallFormat: 'deepseek-native', skillCatalogMode: 'slim' }),
+    note: '该站点的 adapter 声明 deepseek-native：模板使用模型训练时见过的原生调用形状。',
   },
-]);
+];
+
+for (const site of SITES) {
+  const profile = teachingProfileForSite(site);
+  if (!VARIANT_DEFINITIONS.some((definition) => sameTeachingProfile(profile, definition.profile))) {
+    throw new TypeError(
+      '[prompt-variants] ' + site.id + ' declares an unsupported teaching profile: '
+      + JSON.stringify(profile) + '; add a reviewed prompt preview variant before using it.',
+    );
+  }
+}
+
+export const VARIANT_SPECS = Object.freeze(VARIANT_DEFINITIONS.map((definition) => {
+  const siteIds = siteIdsForTeachingProfile(definition.profile);
+  if (!siteIds.length) {
+    throw new TypeError('[prompt-variants] variant ' + definition.id + ' has no matching site adapter');
+  }
+  const isDefault = definition.id === 'default';
+  const membership = isDefault
+    ? {
+      excludes: SITES.filter((site) => !sameTeachingProfile(teachingProfileForSite(site), definition.profile))
+        .map((site) => site.id),
+    }
+    : { only: siteIds };
+
+  return Object.freeze({
+    id: definition.id,
+    label: definition.label,
+    profile: definition.profile,
+    // Non-default previews use an adapter that declares the exact profile. The default
+    // preview deliberately remains site-neutral to preserve the historical zero-drift text.
+    siteId: isDefault ? undefined : siteIds[0],
+    ...membership,
+    note: definition.note,
+  });
+}));
 
 /**
  * 实验变体（**默认不返回**，只有 `buildPromptVariants({ experiments: true })` 才附上）。
@@ -153,11 +207,13 @@ export function buildPromptVariants({ tools, extraPrompt, sitePromptOf, system, 
   return { variants, toolsSource: real ? 'session' : 'placeholder', active };
 }
 
-/** 站点 → 适配分支 id（与 VARIANT_SPECS 的 only/excludes 同源）。 */
+/** Resolve a site's preview branch from the adapter teaching profile (not a site-ID list). */
 export function variantIdForSite(siteId) {
   const sid = String(siteId || '').trim();
-  for (const spec of VARIANT_SPECS) if (spec.only && spec.only.includes(sid)) return spec.id;
-  return 'default';
+  const site = SITES.find((entry) => entry.id === sid);
+  if (!site) return 'default';
+  const profile = teachingProfileForSite(site);
+  return VARIANT_SPECS.find((spec) => sameTeachingProfile(profile, spec.profile))?.id || 'default';
 }
 
 /**
@@ -206,8 +262,12 @@ export function buildSitePromptRows({ tools, extraPrompt, sitePromptOf, system, 
       siteName: st.name || st.id,
       variantId,
       variantLabel: chosen.label,
-      // 该站点真正会发出去的模板（按它自己的 siteId 现算）。
-      text: chosen.text,
+      // 逐行按该站点自己的 adapter 现算。两个站点即使共享调用格式，
+      // 也不能把代表站点的 skill / site prompt 投影复制给另一行。
+      text: serializeFirstTurn({
+        messages: [], tools: toolList, extraPrompt, system, siteId: st.id,
+        sitePrompt: sitePrompt(st.id),
+      }),
       // 该站点自己的那一段指令（0.16.38）：设置页的站点页只编辑它。
       sitePrompt: sitePrompt(st.id),
     };
