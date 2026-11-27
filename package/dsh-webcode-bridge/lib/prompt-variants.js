@@ -3,62 +3,115 @@
 // 为什么需要它：首轮模板由桥按当前会话的**工具清单**现算（agent-preset.js 的
 // serializeFirstTurn），因此它不是一个固定字符串——用户此前只能在设置里看到
 // 「最后一次真实发送过的那一份」（还得先展开 <details>，且全新会话永远是空的）。
-// 本模块把模板按**适配分支**枚举出来：默认（标签形状）与 glm（代码块形状），
-// 每一条都用真函数现算，所以「设置里看到的」与「实际发出去的」永远同源。
+// 本模块按 adapter 的 teaching profile（toolCallFormat + skillCatalogMode）派生
+// 预览分支成员，不另维护站点 ID 映射；每条预览仍由真函数现算。
 //
-// 唯一真相仍是 agent-preset.js：本模块只负责挑参数并调用它，**不得**自己拼
-// 协议文本——两处各写一份协议必然漂移（见 doc/review-guide.md 的不可越界约束）。
+// 唯一真相仍是 adapter teaching + agent-preset.js：本模块只负责挑参数并调用它，
+// **不得**自己拼协议文本——两处各写一份协议必然漂移（见 doc/review-guide.md）。
 //
-// 变体表与 agent-preset.js 的分支一一对应，且由 test/prompt-variants.test.mjs
-// 钉住：glm 变体不得出现 <tool_call>，默认变体必须出现；两者必须互不相同。
+// 生产变体的成员、站点到变体的映射都从 adapter profile 派生；CI 钉住每个站点
+// 恰好进入一个分支，且每行预览使用该站点自己的 siteId / site prompt。
 
 import { serializeFirstTurn, trainNoteFor, trainExtraFor } from './agent-preset.js';
 // 站点清单与显示名从 providers.js 现算（唯一真相），本模块不另维护一份。
 import { SITES } from './providers.js';
 
-/** 适配分支表：id → { label, siteIds, siteId }（siteId 是喂给 serializeFirstTurn 的）
+/**
+ * 生产预览分支表：stable id / label 保持兼容，site membership 从 adapter teaching profile
+ * 动态生成。profile 同时包含调用格式与技能目录模式，避免「协议相同、提示词长度不同」
+ * 的站点被误认为同一份模板。
  *
- * 0.16.25：补上 **official**（DeepSeek 官方训练模板）一支，并纠正 default 的
- * excludes。此前 `variantIdForSite('deepseek')` 返回 'default'，可 deepseek 在
- * serializeFirstTurn 里走的是**官方模板**分支（agent-preset.js 的 siteId === 'deepseek'
- * 那一段）——于是设置页给 deepseek 显示的模板与真正发出去的**不是同一份**。
- * 加 official 之前这个错误不可见：下拉只有两支，用户不会去比对「deepseek 到底
- * 选没选对」。改成「每行一个网站 + 该网站实际用的协议」之后，它立刻就是错的。
- * 因此这是修正，不是扩展：站点 → 分支的映射现在与 agent-preset 的真实分支一一对应。 */
-export const VARIANT_SPECS = Object.freeze([
+ * 非默认分支的代表 siteId 只用于生成该分支的协议预览；按站点显示的真实模板在
+ * buildSitePromptRows 中始终用每个 adapter 自己的 siteId 单独生成。
+ */
+// Prompt preview membership follows the exact adapter teaching profile consumed by
+// agent-preset.js. Keep protocol and skill-catalog behavior together: a site that changes
+// either is not equivalent to the generic prompt, even if its call syntax looks the same.
+const DEFAULT_TEACHING_PROFILE = Object.freeze({
+  toolCallFormat: 'tag',
+  skillCatalogMode: 'full',
+});
+
+function teachingProfileForSite(site) {
+  return {
+    toolCallFormat: site?.teaching?.toolCallFormat || DEFAULT_TEACHING_PROFILE.toolCallFormat,
+    skillCatalogMode: site?.teaching?.skillCatalogMode || DEFAULT_TEACHING_PROFILE.skillCatalogMode,
+  };
+}
+
+function sameTeachingProfile(left, right) {
+  return left.toolCallFormat === right.toolCallFormat
+    && left.skillCatalogMode === right.skillCatalogMode;
+}
+
+function siteIdsForTeachingProfile(profile) {
+  return SITES.filter((site) => sameTeachingProfile(teachingProfileForSite(site), profile))
+    .map((site) => site.id);
+}
+
+const VARIANT_DEFINITIONS = [
   {
     id: 'default',
     label: '标签形状（<tool_call> 标签）',
-    // 除 glm（代码块）与 deepseek（官方模板）外的全部站点都走这一支（含 z.ai——
-    // 它的前端不吃调用标签的问题与 chatglm.cn 不同，仍按标签教学）。
+    profile: DEFAULT_TEACHING_PROFILE,
     siteId: undefined,
-    excludes: ['glm', 'deepseek'],
     note: '以 <tool_call>{…}</tool_call> 发起调用；网页不会拦截该标签。',
   },
   {
     id: 'glm',
     label: 'GLM 代码块（```json 代码块）',
-    siteId: 'glm',
-    only: ['glm'],
-    note: 'chatglm.cn 对正文里的调用标签有原生执行器（只认它内置的 search/open/click/find），'
-      + '标签形状会被它抢走执行并回灌 unknown tool call，因此该站点只教代码块形状。',
+    profile: Object.freeze({ toolCallFormat: 'json-fence', skillCatalogMode: 'full' }),
+    note: '该站点的 adapter 声明 json-fence：网页会拦截正文调用标签，因此模板只教 JSON 代码块形状。',
   },
   {
     id: 'official',
     label: 'DeepSeek 官方模板（原生工具调用格式）',
-    siteId: 'deepseek',
-    only: ['deepseek'],
-    note: 'DeepSeek 网页走官方训练模板（模型被训练时见过的形状）。DSML 已于 0.16.23 退役，'
-      + '不再作为教学或解析形状。',
+    profile: Object.freeze({ toolCallFormat: 'deepseek-native', skillCatalogMode: 'slim' }),
+    note: '该站点的 adapter 声明 deepseek-native：模板使用模型训练时见过的原生调用形状。',
   },
-]);
+];
+
+for (const site of SITES) {
+  const profile = teachingProfileForSite(site);
+  if (!VARIANT_DEFINITIONS.some((definition) => sameTeachingProfile(profile, definition.profile))) {
+    throw new TypeError(
+      '[prompt-variants] ' + site.id + ' declares an unsupported teaching profile: '
+      + JSON.stringify(profile) + '; add a reviewed prompt preview variant before using it.',
+    );
+  }
+}
+
+export const VARIANT_SPECS = Object.freeze(VARIANT_DEFINITIONS.map((definition) => {
+  const siteIds = siteIdsForTeachingProfile(definition.profile);
+  if (!siteIds.length) {
+    throw new TypeError('[prompt-variants] variant ' + definition.id + ' has no matching site adapter');
+  }
+  const isDefault = definition.id === 'default';
+  const membership = isDefault
+    ? {
+      excludes: SITES.filter((site) => !sameTeachingProfile(teachingProfileForSite(site), definition.profile))
+        .map((site) => site.id),
+    }
+    : { only: siteIds };
+
+  return Object.freeze({
+    id: definition.id,
+    label: definition.label,
+    profile: definition.profile,
+    // Non-default previews use an adapter that declares the exact profile. The default
+    // preview deliberately remains site-neutral to preserve the historical zero-drift text.
+    siteId: isDefault ? undefined : siteIds[0],
+    ...membership,
+    note: definition.note,
+  });
+}));
 
 /**
  * 实验变体（**默认不返回**，只有 `buildPromptVariants({ experiments: true })` 才附上）。
  *
- * 为什么与 VARIANT_SPECS 分开：前者是**已生效的生产分支**（站点 → 分支的映射，
- * 由 variantIdForSite 决定，测试钉死只有 glm 例外）；后者是**尚未转正的候选**，
- * 只能被基准实验显式拉出来跑，绝不能悄悄进入真实会话的选路。
+ * 为什么与 VARIANT_SPECS 分开：前者是**已生效的生产分支**（成员由 adapter teaching
+ * profile 派生）；后者是**尚未转正的候选**，其 bench eligibility 单独保留（当前实验
+ * 不覆盖 GLM 的 json-fence 传输立场），只能由基准实验显式拉出，绝不进入真实会话选路。
  * 这个分离本身就是纪律：提示词改动在拿到配对数据之前不进默认路径。
  *
  * 两个候选各自的文献依据见 doc/research/prompt-engineering-evidence-2026-09-14.md：
@@ -113,9 +166,8 @@ const PLACEHOLDER_TOOLS = [
 export function buildPromptVariants({ tools, extraPrompt, sitePromptOf, system, lastPreset, experiments = false } = {}) {
   const real = Array.isArray(tools) && tools.length > 0;
   const toolList = real ? tools : PLACEHOLDER_TOOLS;
-  // 站点专属指令（0.16.38）：按变体**实际服务的站点**取那一段，没有站点归属的
-  // （default，服务除 glm/deepseek 外的全部站点）传空——那一段属于具体站点，
-  // 不属于「除某站之外的全部站点」这一支。
+  // 变体层预览不绑定某一条站点指令；真实的逐站点模板由 buildSitePromptRows
+  // 按 adapter 自己的 siteId / sitePrompt 重新生成，避免把代表站点指令借给同 profile 的其他站点。
   const sitePrompt = (sid) => (typeof sitePromptOf === 'function' ? sitePromptOf(sid) : '');
   const specs = experiments ? [...VARIANT_SPECS, ...EXPERIMENT_SPECS] : VARIANT_SPECS;
   const variants = specs.map((spec) => ({
@@ -153,11 +205,13 @@ export function buildPromptVariants({ tools, extraPrompt, sitePromptOf, system, 
   return { variants, toolsSource: real ? 'session' : 'placeholder', active };
 }
 
-/** 站点 → 适配分支 id（与 VARIANT_SPECS 的 only/excludes 同源）。 */
+/** Resolve a site's preview branch from the adapter teaching profile (not a site-ID list). */
 export function variantIdForSite(siteId) {
   const sid = String(siteId || '').trim();
-  for (const spec of VARIANT_SPECS) if (spec.only && spec.only.includes(sid)) return spec.id;
-  return 'default';
+  const site = SITES.find((entry) => entry.id === sid);
+  if (!site) return 'default';
+  const profile = teachingProfileForSite(site);
+  return VARIANT_SPECS.find((spec) => sameTeachingProfile(profile, spec.profile))?.id || 'default';
 }
 
 /**
@@ -206,8 +260,12 @@ export function buildSitePromptRows({ tools, extraPrompt, sitePromptOf, system, 
       siteName: st.name || st.id,
       variantId,
       variantLabel: chosen.label,
-      // 该站点真正会发出去的模板（按它自己的 siteId 现算）。
-      text: chosen.text,
+      // 逐行按该站点自己的 adapter 现算。两个站点即使共享调用格式，
+      // 也不能把代表站点的 skill / site prompt 投影复制给另一行。
+      text: serializeFirstTurn({
+        messages: [], tools: toolList, extraPrompt, system, siteId: st.id,
+        sitePrompt: sitePrompt(st.id),
+      }),
       // 该站点自己的那一段指令（0.16.38）：设置页的站点页只编辑它。
       sitePrompt: sitePrompt(st.id),
     };

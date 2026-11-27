@@ -25,15 +25,15 @@
 // 形状的映射，作为教学与解析按形状选路时的单一来源，并**委托** agent-preset 拿
 // 真正的协议文本与解析结果，保证调用方新增站点时只需在这张表里加一行即可见形状。
 //
-// 铁律：**deepseek 一律返回 'official' 且不迁移**（DSH 官方模板，见 agent-preset
-// OFFICIAL_BAR / normalizeOfficialToolCalls）；任何形状改动不许触碰它。
+// 铁律：当前 DeepSeek adapter 的 deepseek-native profile 映射到 'official'；
+// 该稳定分支仍委托 DSH / agent-preset，任何形状改动不许触碰官方协议。
 
 import { variantIdForSite } from './prompt-variants.js';
 import { transportNoteFor } from './agent-preset.js';
 
 /** 识别的传输形状。'official' 仅是标记（deepseek），本模块不持有其协议实现。 */
 export const TRANSPORT_SHAPES = Object.freeze({
-  codeblock: 'codeblock',   // ```json 代码块（GLM / z.ai）：chatglm.cn 原生工具层会截胡标签
+  codeblock: 'codeblock',   // ```json 代码块（adapter teaching profile: json-fence）
   tag: 'tag',               // <tool_call>{…}</tool_call> 标签（默认站点）
   official: 'official',     // DeepSeek 官方训练模板（agent-preset 独家，本模块只路由不实现）
 });
@@ -42,9 +42,8 @@ export const TRANSPORT_SHAPES = Object.freeze({
  * 站点 → 传输形状（唯一路由来源）。
  *
  * 与 prompt-variants.variantIdForSite / agent-preset.transportNoteFor 的口径必须
- * 逐字一致：VARIANT_SPECS 的 only=['glm'] 分支就是 codeblock，only=['deepseek']
- * 分支就是 official，其余（default）是 tag。本表以 `variantIdForSite` 为底层，
- * 三层映射同源，不并存第二张表。
+ * 逐字一致：prompt-variants 从 adapter teaching profile 派生 variant membership；
+ * 本模块只把稳定 variant id 转成传输形状，不再以 site ID 重建另一张映射表。
  *
  * @param {string} [siteId]
  * @returns {'codeblock'|'tag'|'official'}

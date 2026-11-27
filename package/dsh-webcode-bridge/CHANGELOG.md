@@ -8,6 +8,8 @@ this file is the package-facing release history.
 ## Unreleased（2026-11-26：全站点适配层重构、Web 合约补齐与 QR 登录桥接）
 
 ### 框架 / 网站适配
+- 设置页提示词变体成员改由 adapter `teaching` profile（调用格式 + 技能目录模式）派生；
+  不再在公共变体表重复维护 DeepSeek / GLM 站点 ID，逐站点预览按自己的 adapter 与 site prompt 现算。
 - 新增跨层重启护栏：两个真实 `apply()` / browser-driver 实例复用同一 profile，验证 DSH 游标、
   网页会话 ID 与远端会话 URL 在重启后仍指向同一条对话。
 - 将 DeepSeek 搜索开关匹配、请求元数据键和严格模型核验声明移入 adapter `contract`；

@@ -27,6 +27,13 @@ declarations into the public provider/model view. It is not a second site regist
 | Decoder family and completion path | Site adapter; common decoder implementation |
 | Verified conversation URL parsing/building | Site adapter navigation capability |
 | Tool-call format and prompt teaching choice | Site adapter teaching capability |
+The read-only prompt variant catalogue in `lib/prompt-variants.js` derives membership from
+the adapter's `teaching.toolCallFormat` and `teaching.skillCatalogMode`; it does not maintain a
+second site-ID allow/exclude list. If an adapter declares a new teaching profile, the shared
+preview requires a reviewed variant definition before that profile can be used. Each site row is
+serialized again with that adapter's own `siteId` and `sitePrompt`, so a shared protocol profile
+does not copy another site's local instructions into its preview.
+
 | Search-toggle and strict request-metadata verification | Site adapter contract metadata; shared projection |
 | Browser lifecycle, Playwright actions, pacing and retry | Shared browser driver |
 | SSE framing and decoder implementations | Shared decoder engine |
