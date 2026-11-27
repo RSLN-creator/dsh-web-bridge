@@ -30,7 +30,8 @@ this file is the package-facing release history.
 ### DSH Web 与登录
 
 - 为 Web client manifest 声明实际拥有 composer、settings、right-sidebar slots 的三个官方 DSH 包。
-- 登录期间扫描主页面和有限数量的 frames，仅截取可见 QR 候选元素；通过 account-scoped、
+- 登录期间扫描主页面和有限数量的 frames；用同一个 Playwright locator 枚举并截取可见 QR 候选，支持 open Shadow DOM；
+  通过 account-scoped、
   same-origin loopback 的 `POST /__webcode/login-qr` 路由返回 PNG data URI。
 - Web account panel 与独立设置页轮询并显示 QR；响应禁用缓存，二维码只保存在运行内存。
 - Linux 无显示环境默认使用 headless 登录浏览器，让远程 Web UI 能接收二维码。

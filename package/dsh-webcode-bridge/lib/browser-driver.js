@@ -5591,8 +5591,13 @@ export function createBrowserDriver(options = {}) {
     const frames = typeof page.frames === 'function' ? page.frames().slice(0, 12) : [];
     for (const frame of frames) {
       let candidates = [];
+      let locator;
       try {
-        candidates = await frame.evaluate((selector) => [...document.querySelectorAll(selector)].map((el, index) => {
+        // Use Playwright's selector engine for inventory and capture. Unlike
+        // document.querySelectorAll, it pierces open Shadow DOM and preserves the
+        // same candidate order used by locator.nth(). Closed roots remain inaccessible.
+        locator = frame.locator(LOGIN_QR_SELECTOR);
+        candidates = await locator.evaluateAll((elements) => elements.map((el, index) => {
           const rect = el.getBoundingClientRect();
           const style = getComputedStyle(el);
           return {
@@ -5609,12 +5614,12 @@ export function createBrowserDriver(options = {}) {
             ].filter(Boolean).join(' ').slice(0, 500),
             backgroundImage: style.backgroundImage !== 'none',
           };
-        }), LOGIN_QR_SELECTOR);
+        }));
       } catch { continue; }
       const candidate = selectLoginQrCandidate(candidates);
       if (!candidate) continue;
       try {
-        const image = await frame.locator(LOGIN_QR_SELECTOR).nth(candidate.index)
+        const image = await locator.nth(candidate.index)
           .screenshot({ type: 'png', timeout: 3000 });
         return {
           ok: true,
