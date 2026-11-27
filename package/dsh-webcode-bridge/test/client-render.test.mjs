@@ -2427,3 +2427,71 @@ test('★ #85 login status renders in host language and falls back to browser la
   assert.ok(treeText(browserFallback.tree).includes('Needs verification'), 'browser English must be used when the host declares no language');
 });
 
+test('★ #85 every native login-state label and tooltip has correct zh/en copy', () => {
+  const source = bridgeSrcFrom('client.cjs');
+  const messageStart = source.indexOf('const MSG = Object.freeze({');
+  const translatorStart = source.indexOf('    const M = (key) =>', messageStart);
+  assert.ok(messageStart >= 0 && translatorStart > messageStart, 'native MSG dictionary and translator must exist');
+  const messageSource = source.slice(messageStart, translatorStart);
+  // eslint-disable-next-line no-new-func
+  const messages = new Function(messageSource + '\nreturn MSG;')();
+
+  const extractRowFn = (name) => {
+    const start = source.indexOf('const ' + name + ' = row => {');
+    assert.ok(start >= 0, 'native ' + name + ' function must exist');
+    const end = source.indexOf('\n      };', start);
+    assert.ok(end > start, 'native ' + name + ' function must have a bounded body');
+    const body = source.slice(source.indexOf('{', start), end + '\n      };'.length - 1);
+    // eslint-disable-next-line no-new-func
+    return new Function('row', 'M', body);
+  };
+  const statusLabel = extractRowFn('statusLabel');
+  const statusTitle = extractRowFn('statusTitle');
+  const translate = (language) => (key) => messages[key]?.[language] || key;
+
+  const labelCases = [
+    [{ loggedIn: null }, '待检查', 'Not checked'],
+    [{ loggedIn: false, loginState: 'uncertain' }, '待确认', 'Needs verification'],
+    [{ loggedIn: false, loginState: 'verified-out' }, '未登录', 'Not logged in'],
+    [{ loggedIn: true, loginState: 'verified-in', loginVerified: true }, '已登录', 'Logged in'],
+    [{ loggedIn: true, loginState: 'verified-in', loginVerified: true, loggedInCached: true }, '已登录(缓存)', 'Logged in (cached)'],
+    [{ loggedIn: true, loginState: 'verified-in', loginVerified: false }, '已登录(未核验)', 'Logged in (not verified)'],
+    [{ loggedIn: true }, '已登录', 'Logged in'],
+  ];
+  for (const [row, zh, en] of labelCases) {
+    assert.equal(statusLabel(row, translate('zh')), zh, 'Chinese status label mismatch for ' + JSON.stringify(row));
+    assert.equal(statusLabel(row, translate('en')), en, 'English status label mismatch for ' + JSON.stringify(row));
+  }
+
+  const titleCases = [
+    [{ loginState: 'uncertain' }, '登录特征未命中、无法确认（≠未登录）；可点「检测」按站点特征重新核验',
+      'No login marker matched, so the state is unverified (not the same as logged out). Select “Check” to verify using this site’s markers.'],
+    [{ loginBasis: 'input-fallback' }, '该站点未声明未登录特征，按输入框存在与否判定——游客页自带输入框时可能误报，请以「检测」为准',
+      'This site has no logged-out marker; login is inferred from the input box. Guest pages may also contain one, so use “Check” to verify.'],
+    [{ loginBasis: 'stale' }, '此结论来自旧版本判定，已被忽略；点「检测」按站点特征重新核验',
+      'This result came from an older rule and was ignored. Select “Check” to verify with the current site markers.'],
+  ];
+  for (const [row, zh, en] of titleCases) {
+    assert.equal(statusTitle(row, translate('zh')), zh, 'Chinese login tooltip mismatch for ' + JSON.stringify(row));
+    assert.equal(statusTitle(row, translate('en')), en, 'English login tooltip mismatch for ' + JSON.stringify(row));
+  }
+});
+
+test('★ #85 unsupported host and browser locales conservatively render Chinese', async () => {
+  const sites = SITE_ROWS.map((row) => row.siteId === 'deepseek'
+    ? { ...row, loggedIn: false, loginState: 'uncertain', loginVerified: false, loginBasis: 'probe-fallback' }
+    : row);
+  const rendered = await renderPane({
+    payloads: [emptyWindows],
+    which: 'site',
+    tabParams: { siteId: 'deepseek', slot: '' },
+    sites,
+    documentLanguage: 'fr-FR',
+    navigatorLanguage: 'fr-FR',
+  });
+  assert.deepEqual(rendered.errors, [], 'unsupported locale fallback render failed');
+  assert.ok(treeText(rendered.tree).includes('待确认'), 'unsupported locales must fall back to Chinese rather than keys or untranslated placeholders');
+  assert.ok(treeAttrs(rendered.tree, ['title']).some((value) => value.includes('登录特征未命中')),
+    'unsupported locales must preserve the Chinese explanatory tooltip');
+});
+
