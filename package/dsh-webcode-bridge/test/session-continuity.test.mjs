@@ -758,8 +758,10 @@ test('⑩ 磁盘会话文件是完整快照；WEB_SESSION_LOST 从当前 DSH tra
     ],
   });
   process.env.WEBCODE_PROMPT_STORE_DIR = storeDir;
-  const bridge = await openBridge({ driver, profileDir: tmpDir() });
+  const profileDir = tmpDir('webcode-session-snapshot-profile-');
+  let bridge = null;
   try {
+    bridge = await openBridge({ driver, profileDir });
     // 首轮写入快照。
     const first = await bridge.stream({ sessionId, messages: messagesAt(1) });
     assert.equal(first.ok, true, '首轮应当正常落盘：' + String(first.error?.message || '').slice(0, 200));
@@ -800,9 +802,13 @@ test('⑩ 磁盘会话文件是完整快照；WEB_SESSION_LOST 从当前 DSH tra
     assert.ok(!refreshed.includes(STALE_SENTINEL),
       '恢复后快照不得继续残留旧磁盘哨兵');
   } finally {
-    delete process.env.WEBCODE_PROMPT_STORE_DIR;
-    try { await bridge.close(); }
-    finally { fs.rmSync(storeDir, { recursive: true, force: true }); }
+    if (previousStore === undefined) delete process.env.WEBCODE_PROMPT_STORE_DIR;
+    else process.env.WEBCODE_PROMPT_STORE_DIR = previousStore;
+    try { await bridge?.close(); }
+    finally {
+      fs.rmSync(storeDir, { recursive: true, force: true });
+      fs.rmSync(profileDir, { recursive: true, force: true });
+    }
   }
 });
 
