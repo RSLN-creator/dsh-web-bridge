@@ -28,6 +28,8 @@
   algorithms.
 - Added guards for registry completeness, provider/model surface compatibility, conversation URL
   round-trips and prompt wording.
+- Added a cross-layer restart fixture: the same DSH Session ID, profile directory and remote chat are
+  restored across two real `apply()` and browser-driver instances (`test/cursor-persistence.test.mjs`).
 
 ### Remaining adapter work
 
