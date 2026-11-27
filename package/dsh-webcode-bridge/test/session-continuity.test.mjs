@@ -294,6 +294,71 @@ test('①c 导航落地即落盘：这一轮随后失败，会话槽也必须已
     '落盘文件里没有这个会话键：' + JSON.stringify(store));
 });
 
+// ── ①d 重启恢复：无 URL 构造能力的站点也必须从 profile 恢复 landedUrl ─────────
+
+const ZAI_LANDED_URL = 'https://chat.z.ai/c/session-after-restart-fixture';
+
+/**
+ * 新进程的离线页面：从站点根开始，记录驱动要求导航到哪里。
+ * 无参数 evaluate 表示捕获链探活成功；带参数的 evaluate 在这个 fixture 中
+ * 返回空值，让后续登录检查按「未核验」安全退出，不模拟网页生成或真实登录。
+ */
+function scriptedRestartPage() {
+  let url = 'https://chat.z.ai/';
+  const gotoCalls = [];
+  const page = {
+    isClosed: () => false,
+    url: () => url,
+    async goto(target) { gotoCalls.push(String(target)); url = String(target); },
+    async waitForSelector() { return null; },
+    async evaluate(_fn, ...args) { return args.length ? null : true; },
+    on() {}, off() {},
+    async close() {},
+    locator: () => ({ first: () => ({ count: async () => 0, isVisible: async () => false }) }),
+  };
+  page.context = () => ({ on() {}, newPage: async () => page, close: async () => {} });
+  return { page, gotoCalls };
+}
+
+test('①d 新驱动重启后从 profile 恢复 Z.ai landedUrl，并导航回同一网页会话', async () => {
+  const { createBrowserDriver } = await import('../lib/browser-driver.js');
+  const profileDir = tmpDir('webcode-zai-restart-');
+  const key = 'sess-zai-restart';
+  const at = 1_760_000_000_000;
+  fs.writeFileSync(path.join(profileDir, 'webcode-sessions-zai.json'), JSON.stringify({
+    [key]: { webSessionId: null, landedUrl: ZAI_LANDED_URL, at, source: 'store' },
+  }), 'utf8');
+
+  const { page, gotoCalls } = scriptedRestartPage();
+  const driver = createBrowserDriver({
+    siteId: 'zai', site: 'https://chat.z.ai/', profileDir, headless: true, page,
+  });
+  try {
+    // Fake 页面不会通过真实登录/生成；这里要验证的是「重启后能不能先回到已落盘的会话」。
+    let failure = null;
+    try { await driver.sendTurn(key, '继续上一轮', { fresh: false }); }
+    catch (error) { failure = error; }
+    assert.ok(failure, '离线页面不应伪装成一次成功的真实网页生成');
+    assert.ok(gotoCalls.includes(ZAI_LANDED_URL),
+      '新驱动没有导航回磁盘里的 landedUrl：' + JSON.stringify(gotoCalls));
+
+    const trace = driver.status().navTrace || [];
+    const stay = trace.find((entry) => entry.phase === 'stay' && entry.key === key);
+    const nav = trace.find((entry) => entry.phase === 'nav' && entry.key === key);
+    assert.ok(stay, '没有记录从 landedUrl 恢复会话的 stay 轨迹：' + JSON.stringify(trace));
+    assert.equal(stay.landedUrl, ZAI_LANDED_URL);
+    assert.equal(stay.pageUrl, ZAI_LANDED_URL);
+    assert.ok(nav, '没有记录恢复后的 nav 轨迹：' + JSON.stringify(trace));
+    assert.equal(nav.state, 'resume', '重启恢复不得退化成 fresh/unsupported');
+    assert.equal(nav.reason, 'landed-url-stay');
+
+    const slot = driver.status().sessionSlot;
+    assert.equal(slot.webSessionId, null);
+    assert.equal(slot.landedUrl, ZAI_LANDED_URL, '恢复过程不应丢掉无形状站点的会话锚');
+    assert.equal(slot.source, 'store');
+  } finally { await driver.close(); }
+});
+
 test('②③ 第二轮必须 fresh=false、命中同一会话键、且 messageChars 掉到几千以内', async () => {
   const driver = scriptedDriver({ script: [{ text: '首轮答复' }, { text: '第二轮答复' }] });
   const sessionId = 'sess-cont-2';
