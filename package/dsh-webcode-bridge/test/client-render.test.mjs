@@ -301,6 +301,9 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
             tasksSource: roster.tasksSource ?? null,
           } : {}) };
       }
+      else if (u.includes('/__webcode/update-status')) body = {
+        ok: true, current: 'test', latest: 'test', status: 'current', profile: 'web',
+      };
       else if (u.includes('/__webcode/settings')) body = { ok: true, extraPrompt: '', sendGapMs: 10000, thinkMode: 'auto', subAgentMode: 'own', subAgentSite: 'follow' };
       else if (u.includes('/__webcode/prompt-variants')) {
         // 0.14.0：设置页默认显示首轮提示词。变体必须真的带 text，否则「默认显示」
@@ -2493,5 +2496,19 @@ test('★ #85 unsupported host and browser locales conservatively render Chinese
   assert.ok(treeText(rendered.tree).includes('待确认'), 'unsupported locales must fall back to Chinese rather than keys or untranslated placeholders');
   assert.ok(treeAttrs(rendered.tree, ['title']).some((value) => value.includes('登录特征未命中')),
     'unsupported locales must preserve the Chinese explanatory tooltip');
+});
+
+test('★ runtime build fingerprint is exposed in the native version badge tooltip', async () => {
+  const rendered = await renderPane({
+    payloads: [emptyWindows],
+    which: 'settings',
+    sites: SITE_ROWS,
+  });
+  assert.deepEqual(rendered.errors, [], 'settings page with build fingerprint failed to render');
+  const titles = treeAttrs(rendered.tree, ['title']);
+  const versionTitle = titles.find(value => value.includes('当前进程构建标识'));
+  assert.ok(versionTitle, 'the version badge tooltip must identify the running process build');
+  assert.ok(versionTitle.includes('x'), 'the tooltip must expose the exact /status build.hash value');
+  assert.ok(treeText(rendered.tree).includes('vtest'), 'the visible version must remain unchanged');
 });
 

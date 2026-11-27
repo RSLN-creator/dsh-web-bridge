@@ -7,6 +7,12 @@ this file is the package-facing release history.
 
 ## Unreleased（2026-11-26：全站点适配层重构、Web 合约补齐与 QR 登录桥接）
 
+### DSH Web / 运行时诊断
+- 原生面板版本徽标 tooltip 追加 `/status` 返回的当前进程构建标识（`build.hash`）；显示的版本号和布局不变。
+  排障时可同时抄录版本与标识，区分「磁盘已更新」和「当前进程实际加载的构建」。此项只增加可见诊断信息，
+  不对用户报告的 `WEB_NO_PROGRESS` 或橙色模型横幅作根因判断。
+
+
 ### DSH Web / 原生面板
 - 原生面板登录状态标签与解释性 tooltip 新增 zh/en 双语；优先遵循宿主 `document.documentElement.lang`，
   无受支持的宿主语言时回落到浏览器 `navigator.language`。本切片不翻译错误码或协议教学文本。
