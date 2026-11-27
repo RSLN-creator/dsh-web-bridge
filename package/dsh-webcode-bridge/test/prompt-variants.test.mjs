@@ -30,6 +30,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildPromptVariants, buildSitePromptRows, variantIdForSite, VARIANT_SPECS, EXPERIMENT_SPECS } from '../lib/prompt-variants.js';
 import { serializeFirstTurn, trainNoteFor, trainExtraFor } from '../lib/agent-preset.js';
+import { SITES } from '../lib/providers.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const read = (p) => fs.readFileSync(path.resolve(here, '..', p), 'utf8');
@@ -55,7 +56,11 @@ test('按网站逐行：每行的 text 必须是**该站点**实际会用的那�
   // 用户原话：「改为以网站为导向列出，每行一个网站，然后后面选择框选择已有协议
   // 中的一个」。这条钉的是「每行显示的是它自己的模板」——若前端拿同一份文本
   // 填所有行（或后端不按 siteId 现算），deepseek 行就会显示标签形状。
-  const { sites, variants, toolsSource } = buildSitePromptRows({ tools: TOOLS });
+  const sitePromptOf = (siteId) => ({
+    glm: 'GLM-ONLY-DIRECTIVE',
+    kimi: 'KIMI-ONLY-DIRECTIVE',
+  }[siteId] || '');
+  const { sites, variants, toolsSource } = buildSitePromptRows({ tools: TOOLS, sitePromptOf });
   assert.equal(toolsSource, 'session');
   // 每个站点一行，站点集合与 providers 的 SITES 同源（不另维护一份清单）。
   assert.ok(sites.length >= 10, '应按站点逐行列出（实得 ' + sites.length + ' 行）');
@@ -69,14 +74,20 @@ test('按网站逐行：每行的 text 必须是**该站点**实际会用的那�
     assert.ok(expected, row.siteId + ' 的 variantId 不在协议清单里：' + row.variantId);
     // 关键：行的 text 必须与「该协议自己的 text」逐字相同，而不是复制别人的。
     assert.equal(row.text, expected.text, row.siteId + ' 行渲染的不是它自己那一支的模板');
-    // 且必须与 serializeFirstTurn 按该站点现算的结果一致。
-    assert.equal(row.text, serializeFirstTurn({ messages: [], tools: TOOLS, siteId: row.variantId === 'official' ? 'deepseek' : (row.variantId === 'glm' ? 'glm' : undefined) }),
-      row.siteId + ' 行的模板与按站点现算的结果不一致');
+    // 且必须以该站点自己的 adapter + site prompt 现算，不能复制变体代表站点的文本。
+    assert.equal(row.text, serializeFirstTurn({
+      messages: [], tools: TOOLS, siteId: row.siteId, sitePrompt: sitePromptOf(row.siteId),
+    }), row.siteId + ' 行的模板与按站点现算的结果不一致');
   }
   // 三个立场各自落在正确的站点上。
   assert.equal(sites.find((s) => s.siteId === 'deepseek').variantId, 'official');
   assert.equal(sites.find((s) => s.siteId === 'glm').variantId, 'glm');
   assert.equal(sites.find((s) => s.siteId === 'kimi').variantId, 'default');
+  assert.ok(sites.find((s) => s.siteId === 'glm').text.includes('GLM-ONLY-DIRECTIVE'));
+  assert.ok(sites.find((s) => s.siteId === 'kimi').text.includes('KIMI-ONLY-DIRECTIVE'),
+    'default-profile sites must still receive their own site-specific prompt in the row preview');
+  assert.ok(!sites.find((s) => s.siteId === 'deepseek').text.includes('GLM-ONLY-DIRECTIVE'));
+  assert.ok(!sites.find((s) => s.siteId === 'deepseek').text.includes('KIMI-ONLY-DIRECTIVE'));
 });
 
 test('协议立场：glm 变体只教代码块并警告标签，默认变体教标签', () => {
@@ -138,20 +149,41 @@ test('未注册 present 时不提 present；注册了才教（与预设同一护
   assert.ok(withPresent.variants.every((v) => v.text.includes('present')), '注册了 present 就必须教');
 });
 
-test('站点 → 变体的映射与 agent-preset 的分支一致（glm 代码块、deepseek 官方模板、其余标签）', () => {
-  assert.equal(variantIdForSite('glm'), 'glm');
-  // 0.16.25：deepseek 走官方模板。此前它被映射到 'default'（标签形状），
-  // 而 agent-preset 的 serializeFirstTurn 里 siteId === 'deepseek' 走的是官方分支
-  // ——设置页于是给 deepseek 显示了一份**它根本不会收到**的模板。
-  assert.equal(variantIdForSite('deepseek'), 'official', 'deepseek 必须映射到官方模板分支');
-  for (const sid of ['zai', 'kimi', 'qwen', 'doubao', 'chatgpt', 'claude', 'gemini', 'grok']) {
-    assert.equal(variantIdForSite(sid), 'default', sid + ' 必须走默认（标签）分支');
+test('站点 → 变体的映射由 adapter teaching profile 派生', () => {
+  const profileForSite = (site) => ({
+    toolCallFormat: site.teaching?.toolCallFormat || 'tag',
+    skillCatalogMode: site.teaching?.skillCatalogMode || 'full',
+  });
+  const sameProfile = (a, b) => a.toolCallFormat === b.toolCallFormat
+    && a.skillCatalogMode === b.skillCatalogMode;
+
+  for (const site of SITES) {
+    const profile = profileForSite(site);
+    const matches = VARIANT_SPECS.filter((spec) => sameProfile(spec.profile, profile));
+    assert.equal(matches.length, 1,
+      site.id + ' 的 adapter teaching profile 必须且只能匹配一个预览分支');
+    assert.equal(variantIdForSite(site.id), matches[0].id,
+      site.id + ' 的变体必须由 adapter teaching profile 决定');
   }
-  // 变体表自身的立场声明不能自相矛盾
+
   for (const spec of VARIANT_SPECS) {
     assert.ok(spec.id && spec.label && spec.note, spec.id + ' 缺少展示字段');
+    const expectedIds = SITES.filter((site) => sameProfile(profileForSite(site), spec.profile))
+      .map((site) => site.id);
+    const declaredIds = spec.only || SITES.filter((site) => !(spec.excludes || []).includes(site.id))
+      .map((site) => site.id);
+    assert.deepEqual(declaredIds, expectedIds,
+      spec.id + ' 的 only/excludes 必须由 adapter teaching profile 动态派生');
     if (spec.only) assert.ok(!spec.excludes, spec.id + ' 不能同时用 only 与 excludes');
   }
+
+  const memberships = VARIANT_SPECS.flatMap((spec) => spec.only
+    || SITES.filter((site) => !(spec.excludes || []).includes(site.id)).map((site) => site.id));
+  assert.equal(new Set(memberships).size, SITES.length,
+    '每个 adapter 必须恰好进入一个生产提示词变体');
+  assert.deepEqual([...memberships].sort(), SITES.map((site) => site.id).sort());
+  assert.equal(variantIdForSite('not-registered'), 'default',
+    '未知站点保持历史安全回落');
 });
 
 test('prompt-variants.js 不得自己再写一份协议文本（工具协议只有一处定义）', () => {
