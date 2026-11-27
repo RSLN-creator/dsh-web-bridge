@@ -17,8 +17,8 @@
 //   > 真机读数：GLM 的输入框装不下长文（用户原话「他在附件可以，输入框过长」），
 //   > 所以它必须留在附件路径上。
 //
-// 但阈值表 `SITE_ATTACH_INLINE_LIMIT` 里只有 `deepseek` 与 `kimi`——**glm 缺席**，
-// 于是那句「必须留在附件路径上」只是注释，没有约束力。本护栏就是把这句话钉成判据。
+// GLM 的 adapter 必须声明 `limits.attachInlineLimitChars = 8_000`；共享驱动只消费该值，
+// 不再另维护 GLM 的站点 ID 映射。本护栏把这项事实及它对真实事故的作用钉成判据。
 //
 // ## 判据（三条，防的是三种不同的回归）
 //
@@ -33,7 +33,7 @@ import {
   promptTransportPlan,
 } from '../lib/browser-driver.js';
 
-test('★ 0.19.41 GLM 必须在站点附件阈值表内（注释里的承诺必须真的有约束力）', () => {
+test('★ 0.19.41 GLM 的 adapter 必须声明实测附件阈值（共享驱动导出表由它派生）', () => {
   assert.ok(
     Number.isFinite(SITE_ATTACH_INLINE_LIMIT.glm) && SITE_ATTACH_INLINE_LIMIT.glm > 0,
     'glm 缺席就是 2026-09-27 PROMPT_TRUNCATED 事故的直接根因',
