@@ -35,6 +35,21 @@ declarations into the public provider/model view. It is not a second site regist
 Do not duplicate the browser driver, decoder, prompt serializer or permission system per website.
 Do not infer a site capability from its frontend framework or an unverified DOM guess.
 
+### Local settings UI contract
+
+Site-local settings are declared by the adapter in `settingsUi` and projected through
+`/status → driver.sites`. The shared CJS renderer must not duplicate website IDs or infer a
+control from a site name. The metadata is a deliberately small contract, not arbitrary UI markup:
+
+- `globalThinkMode`, `searchMode`, and `siteThinkMode` are opt-in boolean capabilities.
+- `siteMode` is a select descriptor with a non-empty `label`, optional `title`, and 1–32 unique
+  non-empty string `options`.
+
+The registry validates every adapter declaration at module load. Unsupported keys, malformed
+descriptors, duplicate options, and non-JSON values fail before the metadata can reach the browser.
+A new control type must first gain a shared renderer and contract tests; adapters must not advertise
+controls the local UI cannot render or persist.
+
 ## Session lifetimes
 
 A DSH agent session, the plugin's browser profile and the website's own conversation are different
