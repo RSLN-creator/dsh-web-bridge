@@ -20,6 +20,7 @@ import { chromium } from 'playwright-core';
 import { findSystemChromium, resolveBrowserExecutable, isBundledChromiumPath, installBundledChromium } from './browser-runtime.js';
 import { toPlaywrightCookie } from './cookies.js';
 import { getSite, getContract, resolveWebModel, conversationNav, conversationIdFromUrl, conversationStay } from './contract.js';
+import { SITES } from './providers.js';
 import { DEFAULT_SLOT, normalizeSlot } from './accounts.js';
 import { selectWebModel, pickerUsable } from './model-picker.js';
 import { deriveLastRate, shouldSettleWip, shouldSettleStalledThinking, answerDomLength, cleanAnswerDomText, shouldRescueStalledCapture, shouldRescueTimeoutScene } from './metrics.js';
@@ -802,121 +803,49 @@ export function promptTransportPlan(o = {}) {
 export const ATTACH_FORBIDDEN_SITES = Object.freeze(new Set());
 
 /**
- * 站点级「多长就走附件」的默认阈值（0.19.11）——只收紧，不开启。
+ * Compatibility snapshots of measured site delivery limits.
  *
- * ## 为什么需要它（真机取证，2026-09-24）
- *
- * 用户报障原话：「明明在附件投递模式下，看的还是完整上下文」（同句现场读数见
- * runTurn 里 0.19.9 那段注释：`userMsgChars=81139`）。查下来不是判据错，是**阈值错**：
- * 全站默认 `attachInlineLimitChars = 60_000`（lib/index.js DEFAULTS），而真机
- * navTrace 里 webcode 路由的**典型首轮**是 `messageChars: 48937` 与 `53797`
- * —— 两个都在 60,000 以下 ⇒ 判定落在 `under-limit` ⇒ **全文逐字灌进输入框**。
- * 也就是说：越典型的会话越走 inline，「附件投递」只在超大轮才生效。
- *
- * ## 阈值取 8,000 的依据（两支真机探针，不是拍脑袋）
- *
- * `test-mock/real-attach-adjudicate.mjs`（3,530 字符 → 完成请求
- * `ref_file_ids:['file-c4332525-…']`、`promptChars:80`、页面用户消息只渲染 80 字符）
- * 与 `test-mock/real-attach-ingest.mjs`（**3,554 与 62,054 两个尺寸都从附件正文里
- * 读出了只在文件里的标记值**，分别 3.4s / 4.3s）证明：附件在 deepseek 上
- * 既能送达也能被读，小到 3.5k 也完全正常。
- * 8,000 的落点：**只留一句「闲聊级」的短轮走 inline**，任何真实会话（首轮含
- * 教学 + 会话历史，实测普遍 ≥ 20k）都走附件、对话框里只留那段指针文本。
- *
- * ## 与「0 = 关闭」的语义关系
- *
- * 这里**只做上限收紧**：配置为 0（用户显式关闭附件）时一律 inline，绝不因为本表
- * 把附件重新打开；配置为 60_000 且站点在本表内时取 `min(60_000, 8_000)`。
- * 未列出的站点逐字维持旧行为（能力边界：本次只改 deepseek）。
- *
- * ## kimi 加入（真机取证，2026-09-25）
- *
- * 与 deepseek 同构的事故形态：kimi 轮 38,807 字符（navTrace `messageChars:38807`）
- * 在全站默认 60,000 之下 ⇒ `under-limit` ⇒ 全文 inline 灌进 contenteditable
- * 输入框（`div.chat-input-editor`，providers.js:277）——而 kimi 输入框实测上限
- * ~20K，超限部分**静默丢失**，模型只见前半，会话上下文被无声截断。
- * `assertContextBudget` 拦不住它：kimi k3 声明 `context: 1_000_000`（providers.js:310），
- * 38.8K 字符 ≈ 38.8K token 远未超限——该闸对比的是**声明窗口**，不是输入框 DOM 上限。
- * kimi 的附件要件齐备（`attachSelector: "input[type='file']"`、Connect-RPC 解码器
- * 已在），与 0.19.11 deepseek 修复逐字同构地取 8,000：真实会话首轮普遍 ≥ 20k，
- * 收紧后全部走附件，输入框里只留指针文本。
- * ## GLM 加入（0.19.41，真机取证）
- *
- * 这一条**本该早就有**：本文件 `ATTACH_FORBIDDEN_SITES` 的注释（0.16.31 写）
- * 与 `providers.js` 的 GLM 声明都已经把结论写死了——
- *
- *   > 真正的站点差异（**GLM 输入框装不下长文**）仍然由各站点的**阈值**表达
- *   > 真机读数：GLM 的输入框装不下长文（用户原话「他在附件可以，输入框过长」），
- *   > 所以它必须留在附件路径上
- *
- * 但阈值表里**只加了 deepseek 与 kimi，glm 一直缺席**——于是那句「必须留在附件
- * 路径上」只是注释，没有约束力。真机后果（2026-09-27，本机 0.19.40）：
- *
- *   一轮 12,911 字符的提示词（全站默认阈值 60,000 ⇒ `under-limit` ⇒ inline）
- *   灌进 chatglm.cn 输入框，回读只有 12,870 字符，本轮直接以
- *   `PROMPT_TRUNCATED: 网页输入框只接收了 12870/12911 字符` 失败——**用户正报的
- *   「chatglm 老是失败」就是这么来的**。
- *
- * 取 8,000 与 deepseek/kimi 同口径（不是新拍的数）：真实会话首轮普遍 ≥ 20k，
- * 收紧后全部走附件，输入框里只留那段指针文本；GLM 的附件要件齐备
- * （`providers.js` 的 `attachSelector: "input[type='file']"`），且用户已在设置里
- * 把该站点显式设为 `promptTransportBySite.glm = "attach"`——本次只让阈值与那份
- * 显式选择**对齐**，没有把任何站点从 inline 拽去附件。
- *
- * 只收紧、不开启：配置为 0（用户显式关闭附件）时仍一律 inline。
+ * The single source of truth is adapter `limits`. These exports remain available
+ * for existing consumers and tests, but are derived at module load rather than
+ * maintaining a second site-ID map in the shared browser driver.
  */
-export const SITE_ATTACH_INLINE_LIMIT = Object.freeze({ deepseek: 8_000, kimi: 8_000, glm: 8_000 });
+function siteLimitSnapshot(field) {
+  return Object.freeze(Object.fromEntries(SITES.flatMap((site) => {
+    const value = site.limits?.[field];
+    return Number.isSafeInteger(value) && value > 0 ? [[site.id, value]] : [];
+  })));
+}
+
+export const SITE_ATTACH_INLINE_LIMIT = siteLimitSnapshot('attachInlineLimitChars');
+export const SITE_COMPOSER_HARD_LIMIT = siteLimitSnapshot('composerHardLimitChars');
 
 /**
- * 站点级「纯文本写入的**硬上限**」（0.19.41）——超过它就不是偏好问题，是必然半截。
+ * Resolve the measured hard ceiling for explicit inline delivery.
  *
- * ## 与 SITE_ATTACH_INLINE_LIMIT 的分工（两者不是同一件事）
- *
- *   · `SITE_ATTACH_INLINE_LIMIT` 是**用户偏好之上的收紧**：用户选了「附件优先」时，
- *     超过 8,000 字符就走附件。用户显式选「纯文本」时它**让位**（transport-inline）。
- *   · 本表是**用户偏好之下的底线**：即便用户选了「纯文本」，超过这个数也改走附件，
- *     因为纯文本这条路在这一长度上**已经被证明发不完整**（内容被网页静默丢弃）。
- *
- * ## 阈值来源（真机读数，不是规格）
- *
- * kimi 取 **200,000**：真机取证（.tmp-probe/kimi/RESULT.md，2026-09-27）用
- * `keyboard.insertText` **单次**写入 50,000 / 100,000 / 200,000 字符（中文+换行）
- * 全部逐字回读（43 / 94 / 167ms）。即 200k 是**实测能用**的那一档，再往上没有读数，
- * 因此不写成更大的数——没有读数的余量就是猜。
- *
- * 为什么 kimi 在**分块**写入时代需要一个小得多的数（旧读数是 38,807 就丢）：
- * 丢内容的原因是分块本身（编辑器只吃第一块），已在 0.19.41 改成一次性写入。
- * 本表是「一次性写入也可能撑不住」时的第二道底线，不与那条修复重复。
- *
- * 真机 2026-09-27 的另一次读数（用户报障原话「一句话就处理失败」）说明这条底线必须
- * 存在：`transport:'inline'` 强制纯文本时，38,807 字符全量灌进输入框、回读 20,158，
- * 模型只看到半截上下文——而同一站点上附件投递实测可用。
- */
-export const SITE_COMPOSER_HARD_LIMIT = Object.freeze({ kimi: 200_000 });
-
-/**
- * 取某站点的纯文本硬上限；未列出的站点返回 `null`（= 不设底线，行为与旧版逐字相同）。
- *
- * @param {string} siteId 站点 id
- * @returns {number|null} 硬上限字符数
+ * @param {string} siteId Site adapter id
+ * @returns {number|null} hard character ceiling, or null when no limit is measured
  */
 export function composerHardLimitFor(siteId) {
-  const v = SITE_COMPOSER_HARD_LIMIT[String(siteId || '')];
-  return Number.isFinite(v) && v > 0 ? Math.floor(v) : null;
+  const value = getSite(String(siteId || ''))?.limits?.composerHardLimitChars;
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
 /**
- * 把「调用方配置的阈值」与「站点上限」合成本次实际使用的阈值（纯函数，可断言）。
+ * Combine the user-configured attachment threshold with a measured site ceiling.
+ * A configured zero/invalid value always disables attachments; adapter metadata
+ * may only tighten a positive setting and can never turn attachments back on.
  *
- * @param {string} siteId 站点 id
- * @param {number} configured 配置阈值（`>0` 才算开启附件；`0`/非法 = 关闭）
- * @returns {number} 实际阈值；`0` 表示附件关闭（调用方据此把 attachEnabled 置假）
+ * @param {string} siteId Site adapter id
+ * @param {number} configured User-configured attachment threshold
+ * @returns {number} effective threshold; zero means attachment delivery is disabled
  */
 export function effectiveAttachInlineLimit(siteId, configured) {
-  const c = Number(configured);
-  if (!Number.isFinite(c) || c <= 0) return 0;
-  const site = SITE_ATTACH_INLINE_LIMIT[String(siteId || '')];
-  return Number.isFinite(site) && site > 0 ? Math.min(c, site) : c;
+  const value = Number(configured);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  const siteLimit = getSite(String(siteId || ''))?.limits?.attachInlineLimitChars;
+  return Number.isSafeInteger(siteLimit) && siteLimit > 0
+    ? Math.min(value, siteLimit)
+    : value;
 }
 
 /**
