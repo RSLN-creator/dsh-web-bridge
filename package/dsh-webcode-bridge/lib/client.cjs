@@ -190,12 +190,12 @@ window.__ModuleLoader__.load({
     // ⚠ 两个槽**必须**是两个不同的 frame / 源。共用会让账户2 的标签页拿到账户1
     // 的 cookies —— 那正是本条用户报障，且属于「同一账号不得同时桥接」那条纪律
     // 想防的同一族事故（两个登录态在同一页面上互相覆盖）。
-    const ROOT_MOUNTED = { deepseek: true };
     const siteBase = (sid, slot) => {
       const s = String(slot || '').trim();
       // 默认槽（空/`default`/`1`）逐字保持旧形状。
       const isDefault = !s || s === 'default' || s === '1';
-      if (isDefault) return ROOT_MOUNTED[sid] ? relayBase + '/' : 'http://' + sid + '.localhost:' + RELAY_PORT + '/';
+      if (isDefault) return siteRecord(sid)?.mountAtRelayRoot === true
+        ? relayBase + '/' : 'http://' + sid + '.localhost:' + RELAY_PORT + '/';
       // 非默认槽：`<slot>--<siteId>`（分隔符 `--` 与服务端解析逐字对应）。
       return 'http://' + s + '--' + sid + '.localhost:' + RELAY_PORT + '/';
     };
@@ -300,18 +300,21 @@ window.__ModuleLoader__.load({
     // Site identity and display names come from the server's adapter registry.
     // The browser bundle keeps no second site list: adding a site only changes the adapter registry.
     const SITE_DIRECTORY = new Map();
-    const siteName = sid => SITE_DIRECTORY.get(String(sid || '')) || String(sid || '');
+    const siteRecord = sid => SITE_DIRECTORY.get(String(sid || '')) || null;
+    const siteName = sid => siteRecord(sid)?.name || String(sid || '');
     function rememberSiteDirectory(rows) {
       if (!Array.isArray(rows)) return;
       const next = new Map();
       for (const row of rows) {
         const id = typeof row?.siteId === 'string' ? row.siteId.trim() : '';
         const name = typeof row?.siteName === 'string' ? row.siteName.trim() : '';
-        if (id && name && !next.has(id)) next.set(id, name);
+        if (id && name && !next.has(id)) {
+          next.set(id, { name, mountAtRelayRoot: row.mountAtRelayRoot === true });
+        }
       }
       if (!next.size) return;
       SITE_DIRECTORY.clear();
-      for (const [id, name] of next) SITE_DIRECTORY.set(id, name);
+      for (const [id, record] of next) SITE_DIRECTORY.set(id, record);
     }
     function siteIdsFromRows(rows) {
       const ids = [];

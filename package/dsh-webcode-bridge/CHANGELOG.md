@@ -9,6 +9,9 @@ this file is the package-facing release history.
 
 ### 框架 / 网站适配
 
+- 将 `mountAtRelayRoot` 从站点 adapter 经 `/status → driver.sites` 投影到 Web client；
+  iframe 根挂载形态不再由客户端维护 DeepSeek 特例表。
+
 - 将 11 个公开站点声明分别收进 `lib/sites/<siteId>.js`，由 `lib/sites/index.js` 单点注册；
   `providers.js` 只投影既有 provider/model 公共面。
 - 将已验证的 DeepSeek、GLM、Kimi 会话 URL 规则移入各自 adapter；DeepSeek / GLM 的工具调用教学格式

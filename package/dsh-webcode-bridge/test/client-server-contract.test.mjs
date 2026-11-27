@@ -169,7 +169,10 @@ test('Web UI site labels and choices come from the live server adapter directory
     'the bundle must keep only a runtime cache, not a copied site-name table');
   assert.match(clientSrc, /rememberSiteDirectory\(r\.data\?\.driver\?\.sites\)/,
     'GET status must hydrate the directory from the canonical adapter projection');
-  assert.match(clientSrc, /const siteName = sid => SITE_DIRECTORY\.get/);
+  assert.match(clientSrc, /const siteRecord = sid => SITE_DIRECTORY\.get/);
+  assert.match(clientSrc, /const siteName = sid => siteRecord\(sid\)\?\.name/);
+  assert.match(clientSrc, /siteRecord\(sid\)\?\.mountAtRelayRoot === true/,
+    'relay-root routing must be adapter metadata, not a client-side site-name exception');
   assert.match(clientSrc, /siteIdsFromRows\(rows\)/,
     'the website catalog must derive its choices from server rows');
   assert.match(clientSrc, /siteIdsFromRows\(sites\)/,

@@ -37,6 +37,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { SITES } from '../lib/providers.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pkg = dirname(here);
@@ -49,11 +50,12 @@ const pkg = dirname(here);
  */
 const RELAY_PORT = 8931;
 const relayBase = 'http://127.0.0.1:' + RELAY_PORT;
-const ROOT_MOUNTED = { deepseek: true };
+const SITE_DIRECTORY = new Map(SITES.map((site) => [site.id, site]));
 function siteBase(sid, slot) {
   const s = String(slot || '').trim();
   const isDefault = !s || s === 'default' || s === '1';
-  if (isDefault) return ROOT_MOUNTED[sid] ? relayBase + '/' : 'http://' + sid + '.localhost:' + RELAY_PORT + '/';
+  if (isDefault) return SITE_DIRECTORY.get(sid)?.mountAtRelayRoot === true
+    ? relayBase + '/' : 'http://' + sid + '.localhost:' + RELAY_PORT + '/';
   return 'http://' + s + '--' + sid + '.localhost:' + RELAY_PORT + '/';
 }
 
@@ -134,9 +136,25 @@ test('⑤ 服务端必须按 accountKey 取驱动，且 mirror 实例按槽分�
     'getToken / profileCookies / writeProfileCookies / userAgent 四处都必须走 drv()');
 });
 
+test('⑦ relay-root mounting is adapter-owned and projected for every account slot', () => {
+  const primary = SITES.filter((site) => site.mountAtRelayRoot === true).map((site) => site.id);
+  assert.deepEqual(primary, ['deepseek'],
+    'DeepSeek is the only adapter whose verified host contract requires the relay root');
+  const server = readFileSync(join(pkg, 'lib', 'index.js'), 'utf8');
+  assert.equal((server.match(/mountAtRelayRoot: st\.mountAtRelayRoot === true/g) || []).length, 2,
+    'driver.sites must expose the adapter capability for both initialized and uninitialized slots');
+  const client = readFileSync(join(pkg, 'lib', 'client.cjs'), 'utf8');
+  assert.match(client, /siteRecord\(sid\)\?\.mountAtRelayRoot === true/,
+    'siteBase must consume the adapter capability');
+  assert.doesNotMatch(client, /const ROOT_MOUNTED\s*=/,
+    'the browser must not maintain a second list of root-mounted websites');
+});
+
 test('⑥ 客户端的 iframe 源必须把槽传进去（不能只按 siteId 拼）', () => {
   const src = readFileSync(join(pkg, 'lib', 'client.cjs'), 'utf8');
   assert.match(src, /const siteBase = \(sid, slot\) =>/, 'siteBase 必须接收槽参数');
+  assert.match(src, /siteRecord\(sid\)\?\.mountAtRelayRoot === true/, 'siteBase 必须从适配器目录读取主机挂载能力');
+  assert.doesNotMatch(src, /const ROOT_MOUNTED\s*=\s*\{/, '不得再维护客户端 root-mounted 白名单');
   assert.match(src, /siteBase\(sid, accountSlot\)/,
     'ensureFrame 必须传**活状态** accountSlot（只传 controlledSlot 会让标签内切号不生效）');
   assert.match(src, /\}, \[browserSrc, accountSlot\]\)/, 'accountSlot 必须进 deps，否则切号不会重建 frame');
