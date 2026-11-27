@@ -55,7 +55,7 @@ import { webcodeError, withWebcodeCode, WEBCODE_RETRY_POLICY } from './error-cod
 // **协议解析的唯一去处仍是 `agent-preset.js`**（红线 3）。
 import { appendReplyLog } from './reply-log.js';
 import { contractFingerprintOf, reanchorSent, messageHash, ANCHOR_LEN } from './session-anchor.js';
-import { writePromptFiles, readPromptFile, sitePromptPath, sessionPromptPath, DEFAULT_PROMPT_STORE_DIR } from './prompt-store.js';
+import { writePromptFiles, sitePromptPath, DEFAULT_PROMPT_STORE_DIR } from './prompt-store.js';
 
 /**
  * 提示词落盘的根目录（与 prompt-store.writePromptFiles 同一套解析）。
@@ -67,20 +67,6 @@ function promptStoreDirFor() {
   return requested || DEFAULT_PROMPT_STORE_DIR;
 }
 
-/**
- * 读回某会话落盘的上下文正本（0.16.29 文件投递）。
- *
- * 测试进程（node --test）在无显式目录时不读真实 ~/.dsh/webcode/——与写入端
- * （prompt-store 的 NODE_TEST_CONTEXT 守卫）严格对称：只写不读或只读不写
- * 都会让「落盘即投递源」这句话在某一条通道上变成空头承诺。
- */
-function readSessionPrompt(sessionKey) {
-  if (!sessionKey) return null;
-  const dir = promptStoreDirFor();
-  if (!dir) return null;
-  if (!process.env.WEBCODE_PROMPT_STORE_DIR && process.env.NODE_TEST_CONTEXT) return null;
-  return readPromptFile(sessionPromptPath(dir, sessionKey));
-}
 import { createMirror } from './mirror.js';
 import { httpFetch } from './upstream.js';
 import { textOfBlocks } from './flatten.js';
@@ -3787,15 +3773,12 @@ function imageMarkdown(images) {
               // 0.16.28：等待过节流窗的话时钟必须刷新——否则节流记录带着等待前的
               // 旧时间戳，下一次撞窗判定会把真实间隔算长（窗口提前失效）。
               //
-              // 0.16.29（用户指令「如果新开会话-web 端，就一样把这个当上下文通过文件
-              // 发送」）：落盘文件从**副本**升格为**投递源**。磁盘上那一份就是上一轮
-              // 真实发出去的正本，这里优先读回它——于是「发出去什么」与「重建时用什么」
-              // 恒为同一份字节。读不到（首次运行 / 曾写入失败 / 配了 'off'）才回落
-              // 内存序列化：两条路都保住上下文，绝不静默丢弃。
-              // 0.19.14：落盘正本只对**真实轮**成立。辅助轮（purpose 非空，如压缩）
-              // 的增量正文 = 本轮末尾那条指令，落盘的主会话首轮里没有它——读回来
-              // 重放会丢掉指令本身（摘要对着错误上文产出），必须走本轮自己的 rebuild()。
-              const rebuildText = (m?.purpose ? null : readSessionPrompt(m.sessionKey)) ?? m.rebuild();
+              // 会话文件是最近一次首轮 / 整段重建的**快照**，而不是实时 transcript：
+              // 增量轮有意不重写它，所以第二轮以后它可能缺少新 user / tool 消息。
+              // WEB_SESSION_LOST 恢复必须使用本次请求的 m.rebuild()：它由 buildTurn
+              // 从当前完整 DSH messages 数组序列化，正常轮与 purpose 辅助轮都包含各自
+              // 最新上下文。绝不能用落后于增量轮的磁盘快照覆盖当前 transcript。
+              const rebuildText = m.rebuild();
               lastSessionRebuildAt.set(m.sessionKey, { at: Date.now(), chars: rebuildText.length });
               while (lastSessionRebuildAt.size > 512) lastSessionRebuildAt.delete(lastSessionRebuildAt.keys().next().value);
               // 整段重建全文同步落盘（0.16.28）：这份文本就是「新开会话时把上下文
