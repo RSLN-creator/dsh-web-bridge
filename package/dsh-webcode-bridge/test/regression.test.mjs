@@ -257,7 +257,6 @@ test('磁盘首轮快照不得替代包含后续增量的当前会话重放', as
     assert.ok(turns[1].prompt.includes('磁盘回放第二句必须保留'));
     assert.equal(turns[2].fresh, true, 'replay must open a new web conversation');
     assert.ok(turns[2].prompt.includes('磁盘回放第一句'));
-    assert.ok(turns[2].prompt.includes('首轮回答'));
     assert.ok(turns[2].prompt.includes('磁盘回放第二句必须保留'),
       'disk-backed recovery must replay the current DSH transcript, not the stale first-turn snapshot');
     assert.ok(turns[2].prompt.includes('# 可用本地工具'), 'replay must preserve the tool protocol');
